@@ -1,0 +1,25 @@
+{
+  "name": "@you-brain/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "you-brain": "./src/index.ts"
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "bun": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@you-brain/core": "workspace:*",
+    "@you-brain/protocol": "workspace:*",
+    "commander": "^15.0.0"
+  }
+}

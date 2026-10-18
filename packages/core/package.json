@@ -1,0 +1,28 @@
+{
+  "name": "@you-brain/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "bun": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
+    "@iarna/toml": "^2.2.5",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@you-brain/protocol": "workspace:*",
+    "fast-glob": "^3.3.3",
+    "googleapis": "^173.0.0",
+    "open": "^11.0.0",
+    "sharp": "0.34.5",
+    "zod": "^4.4.3"
+  }
+}

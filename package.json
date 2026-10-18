@@ -1,0 +1,25 @@
+{
+  "name": "you-brain",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit -p packages/protocol && bunx tsc --noEmit -p packages/core && bunx tsc --noEmit -p packages/cli"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.11",
+    "typescript": "~5.9.3"
+  },
+  "trustedDependencies": [
+    "sharp",
+    "onnxruntime-node",
+    "protobufjs",
+    "@huggingface/transformers",
+    "esbuild"
+  ]
+}
