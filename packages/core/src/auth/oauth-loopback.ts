@@ -101,7 +101,6 @@ export async function startOAuthLoopback(
 }
 
 function printAuthorizationUrl(url: string): void {
-  process.stderr.write(
-    `If the browser does not open, visit this URL to authorize you-brain:\n${url}\n`,
-  );
+  console.log("浏览器如果没有自动打开，请复制此链接完成授权：");
+  console.log(url);
 }

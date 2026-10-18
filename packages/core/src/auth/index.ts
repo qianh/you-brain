@@ -21,7 +21,15 @@ export {
   oauthClientSecretAccount,
   type ConfigSecretStoreOptions,
 } from "./secret-store-factory.js";
-export { BUNDLED_GOOGLE_OAUTH_CLIENT } from "./official-oauth-client.js";
+export {
+  BUNDLED_GOOGLE_OAUTH_CLIENT,
+  MISSING_OFFICIAL_OAUTH_MESSAGE,
+  OFFICIAL_OAUTH_CLIENT_ID_PLACEHOLDER,
+  OFFICIAL_OAUTH_CLIENT_SECRET_PLACEHOLDER,
+  isUsableOfficialOAuthClient,
+  resolveOfficialOAuthClient,
+  type OfficialOAuthClient,
+} from "./official-oauth-client.js";
 export {
   startOAuthLoopback,
   type OAuthLoopbackOptions,

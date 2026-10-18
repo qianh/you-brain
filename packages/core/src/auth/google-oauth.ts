@@ -5,7 +5,12 @@ import { google } from "googleapis";
 
 import type { OauthMode } from "../domain/config.js";
 import { YouBrainError } from "../domain/errors.js";
-import { BUNDLED_GOOGLE_OAUTH_CLIENT } from "./official-oauth-client.js";
+import {
+  BUNDLED_GOOGLE_OAUTH_CLIENT,
+  MISSING_OFFICIAL_OAUTH_MESSAGE,
+  isUsableOfficialOAuthClient,
+  resolveOfficialOAuthClient,
+} from "./official-oauth-client.js";
 import {
   startOAuthLoopback,
   type OAuthLoopbackSession,
@@ -66,6 +71,8 @@ export interface GoogleOAuthOptions {
   clientId?: string;
   clientSecret?: string | null;
   clientSecretStore?: SecretStore;
+  /** Overrides process.env for YOU_BRAIN_GOOGLE_* when resolving the official client. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export function parseOAuthClientConfig(value: unknown): OAuthClientConfig {
@@ -152,19 +159,10 @@ export async function readOAuthClientConfig(
   bundled: OAuthClientConfig = BUNDLED_GOOGLE_OAUTH_CLIENT,
 ): Promise<OAuthClientConfig> {
   if (!path) {
-    if (
-      bundled.clientId.endsWith(".apps.googleusercontent.com") &&
-      !bundled.clientId.startsWith("__") &&
-      bundled.clientSecret.length > 0 &&
-      !bundled.clientSecret.startsWith("__") &&
-      bundled.redirectUris.length > 0
-    ) {
+    if (isUsableOfficialOAuthClient(bundled) && bundled.redirectUris.length > 0) {
       return bundled;
     }
-    throw new YouBrainError(
-      "AUTH_REQUIRED",
-      "Official Google OAuth client is missing from this build; provide your own OAuth client or YOU_BRAIN_GOOGLE_OAUTH_CLIENT_FILE",
-    );
+    throw new YouBrainError("AUTH_REQUIRED", MISSING_OFFICIAL_OAUTH_MESSAGE);
   }
   try {
     return parseOAuthClientConfig(JSON.parse(await readFile(path, "utf8")) as unknown);
@@ -196,7 +194,12 @@ export async function resolveOAuthClientConfig(
       redirectUris: ["http://127.0.0.1"],
     };
   }
-  return readOAuthClientConfig(source.clientFile ?? "");
+  if (source.clientFile) return readOAuthClientConfig(source.clientFile);
+  const resolved = resolveOfficialOAuthClient(source.env ?? process.env);
+  if (!isUsableOfficialOAuthClient(resolved)) {
+    throw new YouBrainError("AUTH_REQUIRED", MISSING_OFFICIAL_OAUTH_MESSAGE);
+  }
+  return resolved;
 }
 
 export async function revokeGoogleCredential(

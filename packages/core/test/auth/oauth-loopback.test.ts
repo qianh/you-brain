@@ -56,4 +56,33 @@ describe("OAuth loopback callback", () => {
       await loopback.close();
     }
   });
+
+  it("prints a copyable authorization URL when the browser is not given a printer", async () => {
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      lines.push(args.map((item) => String(item)).join(" "));
+    };
+    const loopback = await startOAuthLoopback("expected-state", {
+      openUrl: async () => undefined,
+      timeoutMs: 1_000,
+    });
+    try {
+      const pending = capture(
+        loopback.authorize("https://accounts.example/authorize?client_id=abc&scope=drive"),
+      );
+      expect(lines.join("\n")).toContain("浏览器如果没有自动打开，请复制此链接完成授权：");
+      expect(lines.join("\n")).toContain(
+        "https://accounts.example/authorize?client_id=abc&scope=drive",
+      );
+      const cancelled = await fetch(
+        `${loopback.redirectUri}?state=expected-state&error=access_denied`,
+      );
+      expect(cancelled.status).toBe(400);
+      await expect(pending).rejects.toThrow(/cancelled/);
+    } finally {
+      console.log = original;
+      await loopback.close();
+    }
+  });
 });

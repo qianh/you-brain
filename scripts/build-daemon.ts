@@ -1,8 +1,15 @@
-import { readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { chmod, copyFile, cp, mkdir, mkdtemp, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import {
+  officialOAuthDefine,
+  parseReleaseEnv,
+  resolveBuildOAuthCredentials,
+  type OfficialOAuthCredentials,
+} from "./official-oauth.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const bun = process.execPath;
@@ -42,31 +49,27 @@ async function run(args: string[], cwd: string): Promise<void> {
   if (code !== 0) throw new Error(`${args[0] ?? "command"} 退出 ${code}`);
 }
 
+const releaseEnv = await readReleaseEnv();
+const oauth = resolveBuildOAuthCredentials({ env: process.env, releaseEnv });
+if (oauth.warning) {
+  console.error("\n========================================");
+  console.error(`警告：${oauth.warning}`);
+  console.error("========================================\n");
+}
+const define = officialOAuthDefine(oauth.credentials);
+
 const triple = hostTriple();
 const outDir = join(root, "dist", "daemon", triple);
 const outfile = join(outDir, "you-brain");
 await rm(outDir, { recursive: true, force: true });
 await mkdir(outDir, { recursive: true });
 
-await run(
-  [
-    bun,
-    "build",
-    join(root, "packages/cli/src/index.ts"),
-    "--compile",
-    "--target=bun",
-    "--outfile",
-    outfile,
-    "--external",
-    "@huggingface/transformers",
-    "--external",
-    "sharp",
-    "--external",
-    "onnxruntime-node",
-  ],
-  root,
-);
+await compileDaemon(outfile, define);
 await chmod(outfile, 0o755);
+if (oauth.credentials) {
+  await assertOAuthInjected(outfile, oauth.credentials);
+  console.log("已注入官方 OAuth 凭据");
+}
 
 const vendorRoot = await mkdtemp(join(tmpdir(), "you-brain-vendor-"));
 try {
@@ -140,6 +143,51 @@ console.log(
     sidecar,
   }),
 );
+
+async function readReleaseEnv(): Promise<Record<string, string>> {
+  const path = join(homedir(), ".config", "you-brain", "release.env");
+  try {
+    return parseReleaseEnv(await readFile(path, "utf8"));
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return {};
+    throw error;
+  }
+}
+
+async function compileDaemon(
+  outfile: string,
+  define: Record<string, string> | undefined,
+): Promise<void> {
+  console.log(`$ bun build --compile --target=bun --outfile ${outfile}`);
+  const result = await Bun.build({
+    entrypoints: [join(root, "packages/cli/src/index.ts")],
+    root,
+    target: "bun",
+    compile: { outfile },
+    external: ["@huggingface/transformers", "sharp", "onnxruntime-node"],
+    // Do not inline the build machine's environment. Official credentials
+    // enter only through `define`, which rewrites the BUNDLED env reads.
+    env: "disable",
+    ...(define ? { define } : {}),
+  });
+  if (!result.success) {
+    const detail = result.logs.map((log) => log.message).join("\n");
+    throw new Error(`bun build 失败\n${detail}`);
+  }
+}
+
+async function assertOAuthInjected(
+  outfile: string,
+  credentials: OfficialOAuthCredentials,
+): Promise<void> {
+  const text = Buffer.from(await Bun.file(outfile).arrayBuffer()).toString("latin1");
+  if (!text.includes(credentials.clientId)) {
+    throw new Error("编译产物中没有找到官方 OAuth client id");
+  }
+  if (!text.includes(credentials.clientSecret)) {
+    throw new Error("编译产物中没有找到官方 OAuth client secret");
+  }
+}
 
 function hostNative(triple: string): { platform: string; arch: string } {
   if (triple.startsWith("aarch64-") && triple.endsWith("apple-darwin")) {

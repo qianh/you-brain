@@ -19,9 +19,13 @@ import {
   writeLocalConfig,
   type LocalConfig,
   type SessionSource,
+  type YouBrainPaths,
 } from "@you-brain/core";
 import {
+  MISSING_OFFICIAL_OAUTH_MESSAGE,
   createOAuthClientSecretStore,
+  isUsableOfficialOAuthClient,
+  resolveOfficialOAuthClient,
   setLlmApiKey,
 } from "@you-brain/core/auth";
 import { captureSourceFilters, discoverSessions, getAdapter } from "@you-brain/core/adapters";
@@ -30,13 +34,15 @@ import {
   planClientIntegrations,
   type IntegrationPlanItem,
 } from "@you-brain/core/clients";
-import { openGoogleDrive } from "@you-brain/core/daemon";
+import { openGoogleDrive, type OpenGoogleDriveOptions } from "@you-brain/core/daemon";
 import type { DrivePort } from "@you-brain/core/drive";
 import { createLlmBackend } from "@you-brain/core/llm";
 import {
   applyBrainHubDefaults,
   applyBrainHubMigration,
   planBrainHubMigration,
+  type BrainHubMigrationPlan,
+  type MigrateContext,
 } from "@you-brain/core/migrate";
 import {
   FilePortraitConsentStore,
@@ -67,6 +73,38 @@ export interface SetupFlags {
   displayName?: string;
 }
 
+export interface SetupHooks {
+  ask?: (question: string, fallback: string) => Promise<string>;
+  log?: (message: string) => void;
+  isTTY?: boolean;
+  hasOfficialOAuth?: () => boolean;
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
+  paths?: YouBrainPaths;
+  platform?: "darwin" | "linux";
+  openGoogleDrive?: (
+    options: OpenGoogleDriveOptions,
+  ) => ReturnType<typeof openGoogleDrive>;
+  planBrainHubMigration?: (context: MigrateContext) => Promise<BrainHubMigrationPlan>;
+  applyBrainHubMigration?: typeof applyBrainHubMigration;
+}
+
+interface SetupIo {
+  ask: (question: string, fallback: string) => Promise<string>;
+  log: (message: string) => void;
+  isTTY: boolean;
+  hasOfficialOAuth: () => boolean;
+  env: NodeJS.ProcessEnv;
+  homeDir: string;
+  paths: YouBrainPaths;
+  platform: "darwin" | "linux";
+  openGoogleDrive: (
+    options: OpenGoogleDriveOptions,
+  ) => ReturnType<typeof openGoogleDrive>;
+  planBrainHubMigration: (context: MigrateContext) => Promise<BrainHubMigrationPlan>;
+  applyBrainHubMigration: typeof applyBrainHubMigration;
+}
+
 interface SetupProgress {
   version: 1;
   google: boolean;
@@ -89,22 +127,30 @@ const EMPTY_PROGRESS: SetupProgress = {
   backfill: false,
 };
 
-export async function runSetup(flags: SetupFlags): Promise<void> {
-  const platform = supportedPlatform();
-  const paths = runtimePaths();
-  const homeDir = homedir();
+export async function runSetup(flags: SetupFlags, hooks: SetupHooks = {}): Promise<void> {
+  const io = createIo(hooks);
+  const paths = io.paths;
+  const homeDir = io.homeDir;
   await mkdir(paths.dataDir, { recursive: true });
   const progress = await readProgress(join(paths.dataDir, "setup.json"));
-  const migration = await planBrainHubMigration({
+  const context: MigrateContext = {
     homeDir,
-    platform,
-    env: process.env,
-  });
+    platform: io.platform,
+    env: io.env,
+  };
+  const migration = await io.planBrainHubMigration(context);
   let config: LocalConfig;
   let drive: DrivePort | null = null;
+  let createdConfig = false;
+
+  // Ask before login. Disabling BrainHub waits until Google login succeeds.
+  const inherit = progress.brainhub
+    ? false
+    : await decideInherit(flags, migration.detected, false, io);
+  const pendingTakeover = !progress.brainhub && inherit && migration.items.length > 0;
 
   if (!existsSync(paths.configFile)) {
-    const inherit = await decideInherit(flags, migration.detected, progress.brainhub);
+    createdConfig = true;
     const defaults = inherit ? migration.defaults : {};
     config = applyBrainHubDefaults(
       createDefaultLocalConfig({
@@ -123,57 +169,50 @@ export async function runSetup(flags: SetupFlags): Promise<void> {
     if (flags.driveRoot) config = { ...config, driveRoot: flags.driveRoot };
     if (flags.displayName) config = { ...config, displayName: flags.displayName };
     await writeLocalConfig(paths.configFile, config);
-    if (inherit && migration.items.length > 0) {
-      const backupDir = join(paths.dataDir, "migrate", String(Date.now()));
-      const applied = await applyBrainHubMigration({
-        context: { homeDir, platform, env: process.env },
-        plan: migration,
-        selectedIds: migration.items.map((item) => item.id),
-        backupDir,
-      });
-      console.log(`已接管 BrainHub，备份在 ${applied.backupDir}`);
-    }
-    progress.brainhub = true;
   } else {
     config = (
       await loadLocalConfig({
         homeDir,
-        platform,
-        env: process.env,
+        platform: io.platform,
+        env: io.env,
+        configFile: paths.configFile,
       })
     ).config;
-    if (!progress.brainhub || flags.inheritBrainhub || flags.skipBrainhub) {
-      const inherit = await decideInherit(flags, migration.detected, false);
-      if (inherit && migration.items.length > 0) {
-        const backupDir = join(paths.dataDir, "migrate", String(Date.now()));
-        await applyBrainHubMigration({
-          context: { homeDir, platform, env: process.env },
-          plan: migration,
-          selectedIds: migration.items.map((item) => item.id),
-          backupDir,
-        });
-        console.log(`已移除 BrainHub 定时任务与 MCP 条目，备份在 ${backupDir}`);
-      }
-      progress.brainhub = true;
-    }
   }
-  await saveProgress(paths.dataDir, progress);
+  if (!progress.brainhub && !pendingTakeover) {
+    progress.brainhub = true;
+    await saveProgress(paths.dataDir, progress);
+  } else if (pendingTakeover) {
+    io.log("将在 Google 登录成功后接管 BrainHub。");
+  }
 
-  if (!progress.google || flags.oauth || flags.clientId || flags.clientSecret) {
-    config = await configureGoogle(flags, config, paths.configFile, platform);
-    const opened = await openGoogleDrive({
-      local: config,
-      configFile: paths.configFile,
-      platform,
-      interactive: !flags.yes,
-      ...(flags.clientSecret ? { clientSecret: flags.clientSecret } : {}),
-    });
+  let loggedIn = hasGoogleLogin(config);
+  // Takeover waits for a successful login, including when an earlier --yes
+  // marked the Google step done without actually signing in.
+  const retryForTakeover = pendingTakeover && !loggedIn;
+  if (!progress.google || flags.oauth || flags.clientId || flags.clientSecret || retryForTakeover) {
+    config = await configureGoogle(flags, config, paths.configFile, io.platform, io);
+    let opened: Awaited<ReturnType<typeof openGoogleDrive>>;
+    try {
+      opened = await io.openGoogleDrive({
+        local: config,
+        configFile: paths.configFile,
+        platform: io.platform,
+        interactive: !flags.yes,
+        env: io.env,
+        ...(flags.clientSecret ? { clientSecret: flags.clientSecret } : {}),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Google 登录未完成";
+      throw new CliError(message);
+    }
     if (opened) {
       config = opened.config;
       drive = opened.drive;
-      console.log(`已登录 Google Drive${config.account.email ? `（${config.account.email}）` : ""}`);
+      loggedIn = true;
+      io.log(`已登录 Google Drive${config.account.email ? `（${config.account.email}）` : ""}`);
     } else if (flags.yes) {
-      console.log("尚未登录 Google Drive。daemon 仍可启动，登录后会继续同步。");
+      io.log("尚未登录 Google Drive。daemon 仍可启动，登录后会继续同步。");
     } else {
       throw new CliError("Google 登录未完成");
     }
@@ -181,18 +220,39 @@ export async function runSetup(flags: SetupFlags): Promise<void> {
     await saveProgress(paths.dataDir, progress);
   }
 
+  if (pendingTakeover) {
+    if (!loggedIn) {
+      io.log("Google 尚未登录，暂不接管 BrainHub。");
+    } else {
+      const backupDir = join(paths.dataDir, "migrate", String(Date.now()));
+      const applied = await io.applyBrainHubMigration({
+        context,
+        plan: migration,
+        selectedIds: migration.items.map((item) => item.id),
+        backupDir,
+      });
+      io.log(
+        createdConfig
+          ? `已接管 BrainHub，备份在 ${applied.backupDir}`
+          : `已移除 BrainHub 定时任务与 MCP 条目，备份在 ${applied.backupDir}`,
+      );
+      progress.brainhub = true;
+      await saveProgress(paths.dataDir, progress);
+    }
+  }
+
   if (!progress.drive || flags.driveRoot) {
     if (flags.driveRoot) {
       config = { ...config, driveRoot: flags.driveRoot };
       await writeLocalConfig(paths.configFile, config);
-    } else if (!flags.yes && process.stdin.isTTY) {
-      const answer = await ask(`Drive 根目录名称 [${config.driveRoot}]：`, config.driveRoot);
+    } else if (!flags.yes && io.isTTY) {
+      const answer = await io.ask(`Drive 根目录名称 [${config.driveRoot}]：`, config.driveRoot);
       if (answer && answer !== config.driveRoot) {
         config = { ...config, driveRoot: answer };
         await writeLocalConfig(paths.configFile, config);
       }
     }
-    console.log(`Drive 根目录：${config.driveRoot}`);
+    io.log(`Drive 根目录：${config.driveRoot}`);
     progress.drive = true;
     await saveProgress(paths.dataDir, progress);
   }
@@ -203,14 +263,14 @@ export async function runSetup(flags: SetupFlags): Promise<void> {
   }
 
   if (!progress.model || flags.provider || flags.model || flags.apiKey || flags.baseUrl) {
-    shared = await configureModel(flags, shared, platform);
+    shared = await configureModel(flags, shared, io);
     await saveShared(paths.dataDir, shared, drive);
     progress.model = true;
     await saveProgress(paths.dataDir, progress);
   }
 
   if (!progress.sources || flags.sources.length > 0) {
-    shared = await configureSources(flags, shared, homeDir);
+    shared = await configureSources(flags, shared, homeDir, io);
     await saveShared(paths.dataDir, shared, drive);
     progress.sources = true;
     await saveProgress(paths.dataDir, progress);
@@ -223,34 +283,59 @@ export async function runSetup(flags: SetupFlags): Promise<void> {
       join(paths.dataDir, "managed-blocks.json"),
       shared,
       paths.dataDir,
+      io,
     );
     progress.integrations = true;
     await saveProgress(paths.dataDir, progress);
   }
 
   if (!progress.backfill || flags.backfill !== undefined) {
-    await configureBackfill(flags, shared, config.displayName, paths.stateFile);
+    await configureBackfill(flags, shared, config.displayName, paths.stateFile, io);
     progress.backfill = true;
     await saveProgress(paths.dataDir, progress);
   }
 
-  console.log("设置完成。下一步：you-brain daemon");
+  io.log("设置完成。下一步：you-brain daemon");
+}
+
+function createIo(hooks: SetupHooks): SetupIo {
+  const env = hooks.env ?? process.env;
+  return {
+    ask: hooks.ask ?? defaultAsk,
+    log: hooks.log ?? ((message: string) => console.log(message)),
+    isTTY: hooks.isTTY ?? Boolean(process.stdin.isTTY),
+    hasOfficialOAuth:
+      hooks.hasOfficialOAuth ??
+      (() => isUsableOfficialOAuthClient(resolveOfficialOAuthClient(env))),
+    env,
+    homeDir: hooks.homeDir ?? homedir(),
+    paths: hooks.paths ?? runtimePaths(),
+    platform: hooks.platform ?? supportedPlatform(),
+    openGoogleDrive: hooks.openGoogleDrive ?? openGoogleDrive,
+    planBrainHubMigration: hooks.planBrainHubMigration ?? planBrainHubMigration,
+    applyBrainHubMigration: hooks.applyBrainHubMigration ?? applyBrainHubMigration,
+  };
+}
+
+function hasGoogleLogin(config: LocalConfig): boolean {
+  return config.account.email.trim() !== "" || config.driveRootId.trim() !== "";
 }
 
 async function decideInherit(
   flags: SetupFlags,
   detected: boolean,
   alreadyDone: boolean,
+  io: SetupIo,
 ): Promise<boolean> {
   if (flags.skipBrainhub) return false;
   if (flags.inheritBrainhub) return true;
   if (alreadyDone || !detected) return false;
   if (flags.yes) {
-    console.log("检测到 BrainHub。未接管。需要接管时加上 --inherit-brainhub。");
+    io.log("检测到 BrainHub。未接管。需要接管时加上 --inherit-brainhub。");
     return false;
   }
-  requireTty("是否接管 BrainHub");
-  return confirm("检测到 BrainHub。接管配置、定时任务和 MCP 条目？", false);
+  requireTty("是否接管 BrainHub", io);
+  return confirm("检测到 BrainHub。接管配置、定时任务和 MCP 条目？", false, io);
 }
 
 async function configureGoogle(
@@ -258,12 +343,23 @@ async function configureGoogle(
   config: LocalConfig,
   configFile: string,
   platform: "darwin" | "linux",
+  io: SetupIo,
 ): Promise<LocalConfig> {
+  const officialReady = io.hasOfficialOAuth();
   let mode = flags.oauth ?? config.oauth.mode;
   if (!flags.oauth && !flags.yes) {
-    requireTty("Google 登录方式");
-    const answer = await ask("Google 登录方式：1 官方  2 自带凭据 [1]：", "1");
-    mode = answer === "2" ? "custom" : "official";
+    requireTty("Google 登录方式", io);
+    for (;;) {
+      const answer = await io.ask("Google 登录方式：1 官方  2 自带凭据 [1]：", "1");
+      mode = answer === "2" ? "custom" : "official";
+      if (mode === "official" && !officialReady) {
+        io.log(MISSING_OFFICIAL_OAUTH_MESSAGE);
+        continue;
+      }
+      break;
+    }
+  } else if (flags.oauth === "official" && !officialReady) {
+    throw new CliError(MISSING_OFFICIAL_OAUTH_MESSAGE);
   }
   if (mode !== "official" && mode !== "custom") {
     throw new CliError("oauth 只能是 official 或 custom");
@@ -271,14 +367,14 @@ async function configureGoogle(
   let clientId = flags.clientId ?? config.oauth.clientId;
   if (mode === "custom" && !clientId) {
     if (flags.yes) throw new CliError("自带凭据需要 --client-id 和 --client-secret");
-    requireTty("OAuth client id");
-    clientId = await ask("OAuth client id：", "");
+    requireTty("OAuth client id", io);
+    clientId = await io.ask("OAuth client id：", "");
   }
   if (mode === "custom" && flags.clientSecret) {
     await createOAuthClientSecretStore({ platform, configFile }).set(flags.clientSecret);
   } else if (mode === "custom" && !flags.yes) {
-    requireTty("OAuth client secret");
-    const secret = await ask("OAuth client secret：", "");
+    requireTty("OAuth client secret", io);
+    const secret = await io.ask("OAuth client secret：", "");
     if (secret) {
       await createOAuthClientSecretStore({ platform, configFile }).set(secret);
     }
@@ -294,26 +390,26 @@ async function configureGoogle(
 async function configureModel(
   flags: SetupFlags,
   shared: SharedConfig,
-  platform: "darwin" | "linux",
+  io: SetupIo,
 ): Promise<SharedConfig> {
   let provider = flags.provider ?? (flags.yes ? shared.llm.provider : "");
   if (!provider) {
-    requireTty("模型 Provider");
-    provider = await ask(`模型 Provider（${LLM_PROVIDERS.join(" / ")}）[${shared.llm.provider}]：`, shared.llm.provider);
+    requireTty("模型 Provider", io);
+    provider = await io.ask(`模型 Provider（${LLM_PROVIDERS.join(" / ")}）[${shared.llm.provider}]：`, shared.llm.provider);
   }
   if (!isProvider(provider)) {
     throw new CliError(`未知 Provider：${provider}`);
   }
   let model = flags.model ?? (flags.yes ? shared.llm.model : "");
   if (!flags.model && !flags.yes) {
-    requireTty("模型名");
-    model = await ask(`模型名 [${shared.llm.model || "默认"}]：`, shared.llm.model);
+    requireTty("模型名", io);
+    model = await io.ask(`模型名 [${shared.llm.model || "默认"}]：`, shared.llm.model);
   }
   const baseUrl = flags.baseUrl ?? (flags.yes ? shared.llm.baseUrl : shared.llm.baseUrl);
   let apiKey = flags.apiKey ?? "";
   if (!flags.apiKey && !flags.yes && provider !== "ollama") {
-    requireTty("API Key");
-    apiKey = await ask("API Key（存入钥匙串）：", "");
+    requireTty("API Key", io);
+    apiKey = await io.ask("API Key（存入钥匙串）：", "");
     if (!apiKey) throw new CliError("需要 API Key 才能测试模型连接");
   }
   const next = parseSharedConfig({
@@ -324,16 +420,16 @@ async function configureModel(
       baseUrl,
     },
   });
-  if (apiKey) await setLlmApiKey(provider, apiKey, { platform });
+  if (apiKey) await setLlmApiKey(provider, apiKey, { platform: io.platform });
   if (apiKey || provider === "ollama") {
     const backend = await createLlmBackend({
       config: next.llm,
       getApiKey: async () => (apiKey === "" ? null : apiKey),
     });
     await backend.test();
-    console.log("模型连接成功");
+    io.log("模型连接成功");
   } else {
-    console.log("未配置模型 API Key。会话仍会上传，提炼会跳过。");
+    io.log("未配置模型 API Key。会话仍会上传，提炼会跳过。");
   }
   return next;
 }
@@ -342,6 +438,7 @@ async function configureSources(
   flags: SetupFlags,
   shared: SharedConfig,
   homeDir: string,
+  io: SetupIo,
 ): Promise<SharedConfig> {
   const sources = structuredClone(shared.capture.sources);
   if (flags.sources.length > 0) {
@@ -360,15 +457,15 @@ async function configureSources(
       sources[id] = { ...sources[id], enabled: true, paths: roots };
     }
   } else {
-    requireTty("采集来源");
+    requireTty("采集来源", io);
     for (const id of SESSION_SOURCES) {
-      const enabled = await confirm(`采集 ${id}？`, true);
+      const enabled = await confirm(`采集 ${id}？`, true, io);
       if (!enabled) {
         sources[id] = { ...sources[id], enabled: false };
         continue;
       }
       const defaults = (getAdapter(id)?.defaultRoots(homeDir) ?? []).join(",");
-      const answer = await ask(`  路径（逗号分隔，空则 ${defaults || "默认"}）：`, "");
+      const answer = await io.ask(`  路径（逗号分隔，空则 ${defaults || "默认"}）：`, "");
       const paths = answer
         ? answer.split(",").map((item) => item.trim()).filter(Boolean)
         : (getAdapter(id)?.defaultRoots(homeDir) ?? []);
@@ -384,6 +481,7 @@ async function configureIntegrations(
   managedStatePath: string,
   shared: SharedConfig,
   dataDir: string,
+  io: SetupIo,
 ): Promise<void> {
   const clients = flags.integrations === undefined ? undefined : asSources(flags.integrations);
   const plan = await planClientIntegrations({
@@ -392,16 +490,16 @@ async function configureIntegrations(
     ...(clients ? { clients } : {}),
   });
   if (plan.items.length === 0) {
-    console.log("没有检测到可接入的 AI 工具。");
+    io.log("没有检测到可接入的 AI 工具。");
     return;
   }
   const selected: string[] = [];
   for (const item of plan.items) {
-    console.log(describeItem(item));
+    io.log(describeItem(item));
     if (item.action === "unchanged" || item.action === "skipped") continue;
     const accept = flags.yes
       ? true
-      : await confirm(`接入 ${item.id}？`, true);
+      : await confirm(`接入 ${item.id}？`, true, io);
     if (accept) selected.push(item.id);
   }
   const result = await applyClientIntegrations({
@@ -420,7 +518,7 @@ async function configureIntegrations(
       codingPath,
     );
   }
-  console.log(`已接入 ${result.applied.length} 项，跳过 ${result.skipped.length} 项`);
+  io.log(`已接入 ${result.applied.length} 项，跳过 ${result.skipped.length} 项`);
 }
 
 async function configureBackfill(
@@ -428,6 +526,7 @@ async function configureBackfill(
   shared: SharedConfig,
   device: string,
   stateFile: string,
+  io: SetupIo,
 ): Promise<void> {
   const enabled = SESSION_SOURCES.filter((id) => shared.capture.sources[id].enabled);
   const discovered = await discoverSessions({
@@ -450,12 +549,12 @@ async function configureBackfill(
   for (const session of discovered.sessions) {
     counts.set(session.source, (counts.get(session.source) ?? 0) + 1);
   }
-  console.log("各来源可回填的会话：");
-  for (const [id, count] of counts) console.log(`- ${id}：${count}`);
+  io.log("各来源可回填的会话：");
+  for (const [id, count] of counts) io.log(`- ${id}：${count}`);
   const choice = flags.backfill ?? (flags.yes ? true : undefined);
-  const accepted = choice ?? (await confirm("现在标记首次回填？daemon 启动后会上传这些会话。", true));
+  const accepted = choice ?? (await confirm("现在标记首次回填？daemon 启动后会上传这些会话。", true, io));
   if (!accepted) {
-    console.log("已跳过首次回填。");
+    io.log("已跳过首次回填。");
     return;
   }
   const store = new SqliteStore(stateFile);
@@ -464,7 +563,7 @@ async function configureBackfill(
   } finally {
     store.close();
   }
-  console.log("已标记首次回填。");
+  io.log("已标记首次回填。");
 }
 
 function describeItem(item: IntegrationPlanItem): string {
@@ -510,13 +609,15 @@ async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 }
 
-function requireTty(topic: string): void {
-  if (process.stdin.isTTY) return;
+function requireTty(topic: string, io: SetupIo): void {
+  if (io.isTTY) return;
   throw new CliError(`当前不是交互终端，无法询问${topic}。请使用 --yes 或提供对应参数。`);
 }
 
-async function ask(question: string, fallback: string): Promise<string> {
-  requireTty(question);
+async function defaultAsk(question: string, fallback: string): Promise<string> {
+  if (!process.stdin.isTTY) {
+    throw new CliError(`当前不是交互终端，无法询问${question}。请使用 --yes 或提供对应参数。`);
+  }
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
     const answer = (await rl.question(question)).trim();
@@ -526,9 +627,9 @@ async function ask(question: string, fallback: string): Promise<string> {
   }
 }
 
-async function confirm(question: string, fallback: boolean): Promise<boolean> {
-  requireTty(question);
-  const answer = await ask(`${question} ${fallback ? "[Y/n]" : "[y/N]"} `, "");
+async function confirm(question: string, fallback: boolean, io: SetupIo): Promise<boolean> {
+  requireTty(question, io);
+  const answer = await io.ask(`${question} ${fallback ? "[Y/n]" : "[y/N]"} `, "");
   if (answer === "") return fallback;
   return answer === "y" || answer === "Y" || answer === "yes" || answer === "是";
 }
