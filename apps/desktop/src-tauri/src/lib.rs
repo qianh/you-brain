@@ -246,9 +246,7 @@ fn locate_sidecar(app: &tauri::AppHandle) -> Option<daemon::SidecarCandidate> {
     let resource = app.path().resource_dir().ok();
     let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let triple = env!("YOU_BRAIN_TARGET_TRIPLE");
-    daemon::sidecar_search_paths(resource.as_deref(), &exe, manifest, triple)
-        .into_iter()
-        .find_map(|path| daemon::inspect_sidecar(&path, &exe))
+    daemon::resolve_sidecar(resource.as_deref(), &exe, manifest, triple)
 }
 
 fn read_healthy(data_dir: &std::path::Path) -> Option<DaemonEndpoint> {

@@ -155,6 +155,9 @@ pub fn is_native_executable(header: &[u8]) -> bool {
         || header.starts_with(b"\x7FELF")
 }
 
+const SHELL_BINARY: &str = "you-brain-desktop";
+const SIDECAR_BINARY: &str = "you-brain";
+
 pub fn sidecar_search_paths(
     resource_dir: Option<&Path>,
     exe: &Path,
@@ -163,21 +166,36 @@ pub fn sidecar_search_paths(
 ) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Some(dir) = resource_dir {
-        paths.push(dir.join("you-brain"));
-        paths.push(dir.join("binaries").join("you-brain"));
+        paths.push(dir.join(SIDECAR_BINARY));
+        paths.push(dir.join("binaries").join(SIDECAR_BINARY));
     }
     if let Some(parent) = exe.parent() {
-        paths.push(parent.join("you-brain"));
+        paths.push(parent.join(SIDECAR_BINARY));
     }
     paths.push(
         manifest_dir
             .join("binaries")
-            .join(format!("you-brain-{triple}")),
+            .join(format!("{SIDECAR_BINARY}-{triple}")),
     );
     paths
 }
 
+/// First sidecar candidate that is not the menu-bar shell itself.
+pub fn resolve_sidecar(
+    resource_dir: Option<&Path>,
+    exe: &Path,
+    manifest_dir: &Path,
+    triple: &str,
+) -> Option<SidecarCandidate> {
+    sidecar_search_paths(resource_dir, exe, manifest_dir, triple)
+        .into_iter()
+        .find_map(|path| inspect_sidecar(&path, exe))
+}
+
 pub fn inspect_sidecar(path: &Path, current_exe: &Path) -> Option<SidecarCandidate> {
+    if path.file_name().and_then(|name| name.to_str()) == Some(SHELL_BINARY) {
+        return None;
+    }
     if same_file(path, current_exe) {
         return None;
     }
@@ -253,8 +271,12 @@ pub fn launch_environment(
     spec: &LaunchSpec,
     data_dir: &Path,
     resource_dir: Option<&Path>,
+    home_dir: Option<&str>,
 ) -> Vec<(&'static str, PathBuf)> {
     let mut env = vec![("YOU_BRAIN_DATA_DIR", data_dir.to_path_buf())];
+    if let Some(home) = nonempty(home_dir) {
+        env.push(("YOU_BRAIN_HOME", PathBuf::from(home)));
+    }
     if matches!(spec, LaunchSpec::Sidecar(_)) {
         if let Some(dir) = resource_dir {
             env.push(("YOU_BRAIN_WEB_DIR", dir.join("web")));
@@ -281,7 +303,8 @@ pub fn spawn_detached(
             command
         }
     };
-    for (key, value) in launch_environment(spec, data_dir, resource_dir) {
+    let home = std::env::var("YOU_BRAIN_HOME").ok();
+    for (key, value) in launch_environment(spec, data_dir, resource_dir, home.as_deref()) {
         command.env(key, value);
     }
     command
@@ -383,16 +406,46 @@ fn json_pid(value: &serde_json::Value) -> Option<u32> {
 }
 
 fn same_file(left: &Path, right: &Path) -> bool {
+    if same_inode(left, right) {
+        return true;
+    }
     match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
         (Ok(left), Ok(right)) => left == right,
         _ => left == right,
     }
 }
 
+#[cfg(unix)]
+fn same_inode(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(left) = std::fs::metadata(left) else {
+        return false;
+    };
+    let Ok(right) = std::fs::metadata(right) else {
+        return false;
+    };
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_inode(_left: &Path, _right: &Path) -> bool {
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[cfg(unix)]
+    struct TempDir(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn macos_data_dir_uses_application_support() {
@@ -585,7 +638,24 @@ mod tests {
         let resources = Path::new("/App/Contents/Resources");
         let sidecar = LaunchSpec::Sidecar(PathBuf::from("/App/Contents/MacOS/you-brain"));
         assert_eq!(
-            launch_environment(&sidecar, data, Some(resources)),
+            launch_environment(&sidecar, data, Some(resources), None),
+            vec![
+                ("YOU_BRAIN_DATA_DIR", data.to_path_buf()),
+                ("YOU_BRAIN_WEB_DIR", resources.join("web")),
+                ("YOU_BRAIN_VENDOR_DIR", resources.join("vendor")),
+            ]
+        );
+        assert_eq!(
+            launch_environment(&sidecar, data, Some(resources), Some("/tmp/yb-home")),
+            vec![
+                ("YOU_BRAIN_DATA_DIR", data.to_path_buf()),
+                ("YOU_BRAIN_HOME", PathBuf::from("/tmp/yb-home")),
+                ("YOU_BRAIN_WEB_DIR", resources.join("web")),
+                ("YOU_BRAIN_VENDOR_DIR", resources.join("vendor")),
+            ]
+        );
+        assert_eq!(
+            launch_environment(&sidecar, data, Some(resources), Some("  ")),
             vec![
                 ("YOU_BRAIN_DATA_DIR", data.to_path_buf()),
                 ("YOU_BRAIN_WEB_DIR", resources.join("web")),
@@ -597,11 +667,14 @@ mod tests {
             args: vec!["daemon".into()],
         };
         assert_eq!(
-            launch_environment(&dev, data, Some(resources)),
-            vec![("YOU_BRAIN_DATA_DIR", data.to_path_buf())]
+            launch_environment(&dev, data, Some(resources), Some("/tmp/yb-home")),
+            vec![
+                ("YOU_BRAIN_DATA_DIR", data.to_path_buf()),
+                ("YOU_BRAIN_HOME", PathBuf::from("/tmp/yb-home")),
+            ]
         );
         assert_eq!(
-            launch_environment(&sidecar, data, None),
+            launch_environment(&sidecar, data, None, None),
             vec![("YOU_BRAIN_DATA_DIR", data.to_path_buf())]
         );
     }
@@ -625,6 +698,53 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn renamed_shell_finds_macos_sidecar_and_skips_itself() {
+        let root = std::env::temp_dir().join(format!(
+            "you-brain-sidecar-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let _guard = TempDir(root.clone());
+        let macos = root.join("Contents/MacOS");
+        let resources = root.join("Contents/Resources");
+        let manifest = root.join("src-tauri");
+        std::fs::create_dir_all(&macos).unwrap();
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::create_dir_all(&manifest).unwrap();
+        let shell = macos.join("you-brain-desktop");
+        let sidecar = macos.join("you-brain");
+        let macho = [0xCF_u8, 0xFA, 0xED, 0xFE];
+        std::fs::write(&shell, macho).unwrap();
+        std::fs::write(&sidecar, macho).unwrap();
+        let triple = "aarch64-apple-darwin";
+
+        let found = resolve_sidecar(Some(&resources), &shell, &manifest, triple).unwrap();
+        assert_eq!(found.path, sidecar);
+        assert!(found.native);
+
+        assert!(inspect_sidecar(&shell, &shell).is_none());
+        let other = root.join("not-the-shell");
+        std::fs::write(&other, macho).unwrap();
+        assert!(inspect_sidecar(&shell, &other).is_none());
+
+        std::fs::remove_file(&sidecar).unwrap();
+        std::os::unix::fs::symlink(&shell, &sidecar).unwrap();
+        assert!(resolve_sidecar(Some(&resources), &shell, &manifest, triple).is_none());
+
+        std::fs::remove_file(&sidecar).unwrap();
+        std::fs::hard_link(&shell, &sidecar).unwrap();
+        assert!(resolve_sidecar(Some(&resources), &shell, &manifest, triple).is_none());
+
+        std::fs::remove_file(&sidecar).unwrap();
+        std::fs::write(&sidecar, macho).unwrap();
+        assert!(resolve_sidecar(Some(&resources), &sidecar, &manifest, triple).is_none());
     }
 
     #[test]
