@@ -1,5 +1,6 @@
-import type { NormalizedSession, SessionSource } from "../domain/session.js";
 import type { RedactionOptions } from "../capture/redact.js";
+import type { NormalizedSession, SessionSource } from "../domain/session.js";
+import type { CapturePathFilter } from "./filter.js";
 
 export const DEFAULT_TOOL_CALL_MAX_CHARS = 2_000;
 
@@ -85,6 +86,13 @@ export interface DiscoveryOptions {
   };
   modifiedAfter?: Partial<Record<SessionSource, string>>;
   includePaths?: string[];
+  /** Keep tool-call names and arguments. Default false, same as adapter parse. */
+  keepToolCalls?: boolean;
+  toolCallMaxChars?: number;
+  /** Redact after parse. Omitted leaves the adapter text unchanged. */
+  redact?: boolean;
+  redaction?: RedactionOptions;
+  sourceFilters?: Partial<Record<SessionSource, CapturePathFilter>>;
 }
 
 export interface DiscoveryStatus {

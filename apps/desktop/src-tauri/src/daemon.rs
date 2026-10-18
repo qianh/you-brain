@@ -249,7 +249,26 @@ pub fn launch_sequence(
     }
 }
 
-pub fn spawn_detached(spec: &LaunchSpec, data_dir: &Path) -> std::io::Result<()> {
+pub fn launch_environment(
+    spec: &LaunchSpec,
+    data_dir: &Path,
+    resource_dir: Option<&Path>,
+) -> Vec<(&'static str, PathBuf)> {
+    let mut env = vec![("YOU_BRAIN_DATA_DIR", data_dir.to_path_buf())];
+    if matches!(spec, LaunchSpec::Sidecar(_)) {
+        if let Some(dir) = resource_dir {
+            env.push(("YOU_BRAIN_WEB_DIR", dir.join("web")));
+            env.push(("YOU_BRAIN_VENDOR_DIR", dir.join("vendor")));
+        }
+    }
+    env
+}
+
+pub fn spawn_detached(
+    spec: &LaunchSpec,
+    data_dir: &Path,
+    resource_dir: Option<&Path>,
+) -> std::io::Result<()> {
     let mut command = match spec {
         LaunchSpec::Sidecar(path) => {
             let mut command = Command::new(path);
@@ -262,8 +281,10 @@ pub fn spawn_detached(spec: &LaunchSpec, data_dir: &Path) -> std::io::Result<()>
             command
         }
     };
+    for (key, value) in launch_environment(spec, data_dir, resource_dir) {
+        command.env(key, value);
+    }
     command
-        .env("YOU_BRAIN_DATA_DIR", data_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
@@ -556,6 +577,33 @@ mod tests {
         assert!(is_native_executable(b"\x7FELF"));
         assert!(!is_native_executable(b"#!/b"));
         assert!(!is_native_executable(b"abc"));
+    }
+
+    #[test]
+    fn sidecar_launch_points_at_bundled_web_and_vendor() {
+        let data = Path::new("/Library/Application Support/you-brain");
+        let resources = Path::new("/App/Contents/Resources");
+        let sidecar = LaunchSpec::Sidecar(PathBuf::from("/App/Contents/MacOS/you-brain"));
+        assert_eq!(
+            launch_environment(&sidecar, data, Some(resources)),
+            vec![
+                ("YOU_BRAIN_DATA_DIR", data.to_path_buf()),
+                ("YOU_BRAIN_WEB_DIR", resources.join("web")),
+                ("YOU_BRAIN_VENDOR_DIR", resources.join("vendor")),
+            ]
+        );
+        let dev = LaunchSpec::Command {
+            program: "bun".into(),
+            args: vec!["daemon".into()],
+        };
+        assert_eq!(
+            launch_environment(&dev, data, Some(resources)),
+            vec![("YOU_BRAIN_DATA_DIR", data.to_path_buf())]
+        );
+        assert_eq!(
+            launch_environment(&sidecar, data, None),
+            vec![("YOU_BRAIN_DATA_DIR", data.to_path_buf())]
+        );
     }
 
     #[test]

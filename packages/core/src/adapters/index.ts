@@ -1,7 +1,9 @@
 import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type { NormalizedSession } from "../domain/session.js";
+import { applyCaptureRedaction } from "../capture/redact.js";
+import type { NormalizedSession, SessionSource } from "../domain/session.js";
+import { allowCapturePath } from "./filter.js";
 import { parseClaudeSession } from "./claude.js";
 import { parseCodexSession } from "./codex.js";
 import { parseCursorSession } from "./cursor.js";
@@ -30,6 +32,8 @@ export {
   registerAdapter,
   unregisterAdapter,
 } from "./registry.js";
+export { allowCapturePath, captureSourceFilters, globToRegExp } from "./filter.js";
+export type { CapturePathFilter } from "./filter.js";
 export {
   adapterOptions,
   resolveCaptureOptions,
@@ -98,8 +102,17 @@ export async function discoverSessions(
   const parserOptions = {
     device: options.device,
     includeSubagents: options.includeSubagents,
+    ...(options.keepToolCalls !== undefined ? { keepToolCalls: options.keepToolCalls } : {}),
+    ...(options.toolCallMaxChars !== undefined
+      ? { toolCallMaxChars: options.toolCallMaxChars }
+      : {}),
   };
   const includePaths = new Set(options.includePaths ?? []);
+  const visible = (source: SessionSource, paths: string[]): string[] => {
+    const filter = options.sourceFilters?.[source];
+    if (!filter) return paths;
+    return paths.filter((path) => allowCapturePath(path, filter.include, filter.exclude));
+  };
   const work: Array<{
     name: keyof typeof status;
     path: string;
@@ -107,12 +120,15 @@ export async function discoverSessions(
   }> = [];
 
   if (options.sources.includes("claude-code")) {
-    const paths = await incrementalFiles(
-      await globFiles(
-        options.paths.claude.map((root) => join(root, "**", "*.jsonl")),
+    const paths = visible(
+      "claude-code",
+      await incrementalFiles(
+        await globFiles(
+          options.paths.claude.map((root) => join(root, "**", "*.jsonl")),
+        ),
+        options.modifiedAfter?.["claude-code"],
+        includePaths,
       ),
-      options.modifiedAfter?.["claude-code"],
-      includePaths,
     );
     status.claude.discovered = paths.length;
     work.push(
@@ -124,12 +140,15 @@ export async function discoverSessions(
     );
   }
   if (options.sources.includes("codex")) {
-    const paths = await incrementalFiles(
-      await globFiles(
-        options.paths.codex.map((root) => join(root, "**", "rollout-*.jsonl")),
+    const paths = visible(
+      "codex",
+      await incrementalFiles(
+        await globFiles(
+          options.paths.codex.map((root) => join(root, "**", "rollout-*.jsonl")),
+        ),
+        options.modifiedAfter?.codex,
+        includePaths,
       ),
-      options.modifiedAfter?.codex,
-      includePaths,
     );
     status.codex.discovered = paths.length;
     work.push(
@@ -141,15 +160,18 @@ export async function discoverSessions(
     );
   }
   if (options.sources.includes("grok-build")) {
-    const histories = await incrementalFiles(
-      await globFiles(
-        options.paths.grok.map((root) =>
-          join(root, "**", "chat_history.jsonl"),
+    const histories = visible(
+      "grok-build",
+      await incrementalFiles(
+        await globFiles(
+          options.paths.grok.map((root) =>
+            join(root, "**", "chat_history.jsonl"),
+          ),
         ),
+        options.modifiedAfter?.["grok-build"],
+        includePaths,
+        dirname,
       ),
-      options.modifiedAfter?.["grok-build"],
-      includePaths,
-      dirname,
     );
     status.grok.discovered = histories.length;
     work.push(
@@ -161,14 +183,17 @@ export async function discoverSessions(
     );
   }
   if (options.sources.includes("cursor")) {
-    const paths = await incrementalFiles(
-      await globFiles(
-        options.paths.cursor.map((root) =>
-          join(root, "**", "agent-transcripts", "*", "*.jsonl"),
+    const paths = visible(
+      "cursor",
+      await incrementalFiles(
+        await globFiles(
+          options.paths.cursor.map((root) =>
+            join(root, "**", "agent-transcripts", "*", "*.jsonl"),
+          ),
         ),
+        options.modifiedAfter?.cursor,
+        includePaths,
       ),
-      options.modifiedAfter?.cursor,
-      includePaths,
     );
     status.cursor.discovered = paths.length;
     work.push(
@@ -180,14 +205,17 @@ export async function discoverSessions(
     );
   }
   if (options.sources.includes("gemini-cli")) {
-    const paths = await incrementalFiles(
-      await globFiles(
-        (options.paths.gemini ?? []).map((root) =>
-          join(root, "**", "chats", "session-*.json"),
+    const paths = visible(
+      "gemini-cli",
+      await incrementalFiles(
+        await globFiles(
+          (options.paths.gemini ?? []).map((root) =>
+            join(root, "**", "chats", "session-*.json"),
+          ),
         ),
+        options.modifiedAfter?.["gemini-cli"],
+        includePaths,
       ),
-      options.modifiedAfter?.["gemini-cli"],
-      includePaths,
     );
     status.gemini.discovered = paths.length;
     work.push(
@@ -201,7 +229,14 @@ export async function discoverSessions(
 
   for (const item of work) {
     try {
-      const result = await item.parse();
+      let result = await item.parse();
+      if (result.session && options.redact !== undefined) {
+        const redacted = applyCaptureRedaction(result.session, {
+          redact: options.redact,
+          redaction: options.redaction ?? {},
+        });
+        result = { ...result, session: redacted.session };
+      }
       status[item.name].malformed += result.malformedLines;
       output.malformed += result.malformedLines;
       if (result.skippedSubagent) {

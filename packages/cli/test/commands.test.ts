@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,6 +51,67 @@ describe("you-brain commands", () => {
     expect(result.stdout).toContain("今天还没有会话");
     expect(result.stdout).not.toContain("没有在运行");
     expect(result.stderr).not.toContain("没有在运行");
+  });
+
+  it("answers an MCP initialize request on stdio", async () => {
+    const env = await emptyEnv();
+    await mkdir(env.YOU_BRAIN_HOME, { recursive: true });
+    await mkdir(env.YOU_BRAIN_DATA_DIR, { recursive: true });
+    const child = spawn(process.execPath, [cli, "mcp"], {
+      env: {
+        ...env,
+        HOME: env.YOU_BRAIN_HOME,
+        USERPROFILE: env.YOU_BRAIN_HOME,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    const response = new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error(`mcp timed out\n${stdout}\n${stderr}`));
+      }, 20_000);
+      child.stdout.on("data", () => {
+        const line = stdout.split("\n").find((item) => item.includes('"jsonrpc"'));
+        if (!line) return;
+        clearTimeout(timer);
+        resolve(line);
+      });
+      child.on("close", () => {
+        clearTimeout(timer);
+        reject(new Error(`mcp exited before initialize\n${stdout}\n${stderr}`));
+      });
+    });
+    child.stdin.write(
+      `${JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "test", version: "0" },
+        },
+      })}\n`,
+    );
+    const line = await response;
+    child.kill("SIGTERM");
+    const message = JSON.parse(line) as {
+      id?: number;
+      result?: { protocolVersion?: string; serverInfo?: { name?: string } };
+    };
+    expect(message.id).toBe(1);
+    expect(message.result?.protocolVersion).toBe("2024-11-05");
+    expect(message.result?.serverInfo?.name).toBe("you-brain");
   });
 });
 

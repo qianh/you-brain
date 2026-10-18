@@ -259,8 +259,11 @@ export interface StatusResponse {
     lastError: string | null;
   };
   consolidation: {
+    enabled: boolean;
     lastFinishedAt: string | null;
     stale: boolean;
+    /** `disabled` is “未启用”. Stale is only computed when consolidation is enabled. */
+    status: "disabled" | "ok" | "stale";
   };
   warnings: Array<{ code: string; message: string }>;
 }

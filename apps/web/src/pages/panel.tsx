@@ -23,31 +23,32 @@ export function PanelPage() {
         </div>
         <span className={`dot dot-${level}`} title={level === "ok" ? t("healthy") : t("attention")} />
       </header>
-      <div className="panel-scroll">
-        <section className="panel-section">
-        <h2>{t("panelToday")}</h2>
-        {groups.length === 0 ? <Empty>{t("emptyToday")}</Empty> : null}
-        {groups.map((group) => (
-          <div key={group.topicId ?? "none"} className="topic-block">
-            <h3>
-              {group.topicName}
-              <span>{t("groupLabel", { count: group.sessions.length })}</span>
-            </h3>
-            {group.sessions.map((session) => (
-              <SessionCard
-                key={session.sessionKey}
-                session={toSessionCard(session)}
-                devices={devices}
-                timeZone={timeZone}
-                language={language}
-                compact
-              />
-            ))}
-          </div>
-        ))}
-        </section>
-        <section className="panel-section">
-        <h2>{t("reminders")}</h2>
+      <section className="panel-section panel-today" aria-labelledby="panel-today-title">
+        <h2 id="panel-today-title">{t("panelToday")}</h2>
+        <div className="panel-scroll">
+          {groups.length === 0 ? <Empty>{t("emptyToday")}</Empty> : null}
+          {groups.map((group) => (
+            <div key={group.topicId ?? "none"} className="topic-block">
+              <h3>
+                <span className="topic-label">{group.topicName}</span>
+                <span className="topic-count">{t("groupLabel", { count: group.sessions.length })}</span>
+              </h3>
+              {group.sessions.map((session) => (
+                <SessionCard
+                  key={session.sessionKey}
+                  session={toSessionCard(session)}
+                  devices={devices}
+                  timeZone={timeZone}
+                  language={language}
+                  compact
+                />
+              ))}
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="panel-section panel-pinned" aria-labelledby="panel-reminders-title">
+        <h2 id="panel-reminders-title">{t("reminders")}</h2>
         {reminders.length === 0 ? <Empty>{t("emptyReminders")}</Empty> : null}
         {reminders.map((reminder) => (
           <article key={reminder.reminderId} className="reminder">
@@ -57,9 +58,9 @@ export function PanelPage() {
             </small>
           </article>
         ))}
-        </section>
-        <section className="panel-section">
-        <h2>{t("panelStatus")}</h2>
+      </section>
+      <section className="panel-section panel-pinned" aria-labelledby="panel-status-title">
+        <h2 id="panel-status-title">{t("panelStatus")}</h2>
         <p className="sync-line">
           <span>{t("lastSync")}</span>
           <strong>{status?.sync.lastSyncAt ? sync : t("neverSynced")}</strong>
@@ -72,8 +73,7 @@ export function PanelPage() {
             ))}
           </ul>
         ) : null}
-        </section>
-      </div>
+      </section>
       <footer className="panel-footer">
         {openError ? <p className="form-error">{openError}</p> : null}
         <button

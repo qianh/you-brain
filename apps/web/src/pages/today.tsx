@@ -44,8 +44,8 @@ export function TodayPage() {
         ? groups.map((group) => (
             <section key={group.topicId ?? "none"} className="stack">
               <h2 className="group-title">
-                {group.topicName}
-                <span>{t("groupLabel", { count: group.sessions.length })}</span>
+                <span className="topic-label">{group.topicName}</span>
+                <span className="topic-count">{t("groupLabel", { count: group.sessions.length })}</span>
               </h2>
               {group.sessions.map((session) => (
                 <SessionCard

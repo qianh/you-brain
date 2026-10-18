@@ -73,6 +73,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_notification::init())
+        .invoke_handler(tauri::generate_handler![open_main_window])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -200,7 +201,9 @@ fn ensure_daemon(
         .map(|guard| *guard)
         .unwrap_or(0);
     let spec = spec_for_attempt(&sequence, attempt);
-    daemon::spawn_detached(spec, data_dir).map_err(|error| format!("拉起 daemon 失败：{error}"))?;
+    let resources = app.path().resource_dir().ok();
+    daemon::spawn_detached(spec, data_dir, resources.as_deref())
+        .map_err(|error| format!("拉起 daemon 失败：{error}"))?;
     if let Ok(mut guard) = app.state::<ShellState>().launch_attempt.lock() {
         *guard = attempt.saturating_add(1);
     }
@@ -390,6 +393,8 @@ fn sync_now(app: &tauri::AppHandle) {
     });
 }
 
+/// Load the daemon origin from `daemon.json`'s port only. The daemon injects
+/// the loopback token into `index.html`; the shell must not put it in the URL.
 fn publish_daemon_windows(app: &tauri::AppHandle, port: u16) {
     ensure_content(app, PANEL, &format!("http://127.0.0.1:{port}/panel"), true);
     ensure_content(app, MAIN, &format!("http://127.0.0.1:{port}/"), false);
@@ -449,6 +454,14 @@ fn toggle_panel(app: &tauri::AppHandle, anchor: Option<tauri::Rect>, toggle: boo
     }
     let _ = window.show();
     let _ = window.set_focus();
+}
+
+#[tauri::command]
+fn open_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    let handle = app.clone();
+    handle
+        .run_on_main_thread(move || show_main(&app))
+        .map_err(|error| format!("打开完整窗口失败：{error}"))
 }
 
 fn show_main(app: &tauri::AppHandle) {

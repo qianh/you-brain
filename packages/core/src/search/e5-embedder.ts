@@ -1,5 +1,4 @@
-import { pipeline } from "@huggingface/transformers";
-
+import { loadPackage } from "../native/resolver.js";
 import { normalizeVector, type Embedder } from "./embedder.js";
 import { markModelReady } from "./model-cache.js";
 
@@ -11,6 +10,24 @@ type Extractor = (
   texts: string[],
   options: { pooling: "mean"; normalize: true },
 ) => Promise<TensorOutput>;
+
+type Pipeline = (
+  task: "feature-extraction",
+  model: string,
+  options: {
+    revision: string;
+    dtype: "q8";
+    cache_dir: string;
+    progress_callback?: (value: ModelProgress) => void;
+  },
+) => Promise<Extractor>;
+
+function pipelineFrom(loaded: unknown): Pipeline {
+  const record = loaded as { pipeline?: unknown; default?: { pipeline?: unknown } };
+  if (typeof record.pipeline === "function") return record.pipeline as Pipeline;
+  if (typeof record.default?.pipeline === "function") return record.default.pipeline as Pipeline;
+  throw new Error("无法加载 @huggingface/transformers");
+}
 
 interface ModelProgress {
   status?: string;
@@ -41,18 +58,10 @@ export class E5Embedder implements Embedder {
   async #load(
     progress?: (value: { percent?: number; file?: string }) => void,
   ): Promise<Extractor> {
-    this.#extractor ??= (
-      pipeline as unknown as (
-        task: "feature-extraction",
-        model: string,
-        options: {
-          revision: string;
-          dtype: "q8";
-          cache_dir: string;
-          progress_callback?: (value: ModelProgress) => void;
-        },
-      ) => Promise<Extractor>
-    )("feature-extraction", this.model, {
+    this.#extractor ??= loadPackage("@huggingface/transformers", () =>
+      import("@huggingface/transformers"),
+    ).then((loaded) =>
+      pipelineFrom(loaded)("feature-extraction", this.model, {
       revision: this.revision,
       dtype: "q8",
       cache_dir: this.#cacheDir,
@@ -69,7 +78,8 @@ export class E5Embedder implements Embedder {
             },
           }
         : {}),
-    });
+      }),
+    );
     try {
       const extractor = await this.#extractor;
       this.#readyMarker ??= markModelReady(this.#cacheDir, {

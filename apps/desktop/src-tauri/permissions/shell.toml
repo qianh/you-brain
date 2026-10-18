@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-open-main-window"
+description = "Lets the daemon-served Web UI open the full window."
+commands.allow = ["open_main_window"]

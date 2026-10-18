@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import "@you-brain/core/native";
 import { readFileSync, existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -14,7 +15,8 @@ import {
   parseSharedConfig,
 } from "@you-brain/protocol";
 import { YouBrainError, loadLocalConfig } from "@you-brain/core";
-import { openGoogleDrive, startDaemon } from "@you-brain/core/daemon";
+import { openGoogleDrive, resolveWebDir, startDaemon } from "@you-brain/core/daemon";
+import { checkNativeModules } from "@you-brain/core/native";
 import type { DrivePort } from "@you-brain/core/drive";
 import type {
   StatusResponse,
@@ -37,11 +39,21 @@ import {
 import { applyIntegrations, listIntegrations, restoreBrainHub, uninstall } from "./maintenance.js";
 import { runSetup, type SetupFlags } from "./setup.js";
 
-const packageJsonPath = join(dirname(fileURLToPath(import.meta.url)), "../package.json");
-const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version: string };
+function cliVersion(): string {
+  try {
+    const packageJsonPath = join(dirname(fileURLToPath(import.meta.url)), "../package.json");
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as { version?: unknown };
+    if (typeof packageJson.version === "string" && packageJson.version.length > 0) {
+      return packageJson.version;
+    }
+  } catch {
+    // A compiled binary stores this file outside /$bunfs.
+  }
+  return "0.1.0";
+}
 
 const program = new Command();
-program.name("you-brain").description("本地 AI 会话大脑").version(packageJson.version);
+program.name("you-brain").description("本地 AI 会话大脑").version(cliVersion());
 
 program
   .command("daemon")
@@ -49,14 +61,35 @@ program
   .action(async () => {
     try {
       const platform = supportedPlatform();
+      const webDir = await resolveWebDir({
+        env: process.env,
+        execPath: process.execPath,
+        moduleUrl: import.meta.url,
+        cwd: process.cwd(),
+      });
       const daemon = await startDaemon({
         signals: true,
         platform,
         homeDir: homedir(),
         env: process.env,
+        ...(webDir ? { staticDir: webDir } : {}),
       });
       console.log(`you-brain daemon 正在监听 ${daemon.baseUrl}`);
       await daemon.closed;
+    } catch (error) {
+      fail(error);
+    }
+  });
+
+program
+  .command("native-check")
+  .description("检查编译产物里的 sharp 与嵌入模型")
+  .action(async () => {
+    try {
+      const cache = process.env.YOU_BRAIN_MODEL_CACHE ?? runtimePaths().modelCacheDir;
+      const result = await checkNativeModules(cache);
+      console.log(JSON.stringify(result));
+      if (!result.ok) process.exit(1);
     } catch (error) {
       fail(error);
     }
@@ -277,15 +310,6 @@ program
     }
   });
 
-try {
-  await program.parseAsync(process.argv);
-} catch (error) {
-  fail(error);
-}
-// Bun 的 fetch 会保持到 daemon 的连接（服务端 idleTimeout 为 0），
-// 查询命令打完日志后进程不会自己退出。
-process.exit(0);
-
 interface SetupCommandOptions {
   yes?: boolean;
   oauth?: string;
@@ -345,6 +369,13 @@ function printStatus(status: StatusResponse): void {
   console.log(
     `提炼队列：${status.refine.pending}${status.refine.lastError ? `，最近错误：${status.refine.lastError}` : ""}`,
   );
+  const consolidation =
+    status.consolidation.status === "disabled"
+      ? "未启用"
+      : status.consolidation.status === "stale"
+        ? "超过 1 天未沉淀"
+        : (status.consolidation.lastFinishedAt ?? "尚未沉淀");
+  console.log(`沉淀：${consolidation}`);
   for (const warning of status.warnings) console.log(`提示：${warning.message}`);
 }
 
@@ -467,4 +498,34 @@ function unavailableDrive(): DrivePort {
 async function readConfig<T>(path: string, fallback: T, parse: (input: unknown) => T): Promise<T> {
   if (!existsSync(path)) return fallback;
   return parse(JSON.parse(await readFile(path, "utf8")) as unknown);
+}
+
+const TOP_COMMANDS = new Set([
+  "daemon",
+  "native-check",
+  "mcp",
+  "setup",
+  "status",
+  "today",
+  "topics",
+  "integrations",
+  "brainhub",
+  "uninstall",
+]);
+
+/** First real subcommand. A compiled binary's argv includes the bunfs entry path. */
+function invokedCommand(): string | undefined {
+  return process.argv.find((arg) => TOP_COMMANDS.has(arg));
+}
+
+try {
+  await program.parseAsync(process.argv);
+} catch (error) {
+  fail(error);
+}
+// Bun 的 fetch 会保持到 daemon 的连接（服务端 idleTimeout 为 0），
+// 查询命令打完日志后进程不会自己退出。
+// mcp 要一直占住 stdin。这里退出会在 initialize 写出之前把进程杀掉。
+if (invokedCommand() !== "mcp") {
+  process.exit(0);
 }

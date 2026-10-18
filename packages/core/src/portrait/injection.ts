@@ -38,6 +38,11 @@ export function portraitConsentIds(ids: readonly string[]): string[] {
   return unique;
 }
 
+function mergeConsentIds(existing: readonly string[], portraitIds: readonly string[]): string[] {
+  const kept = existing.filter((id) => !id.endsWith(":portrait") && !portraitIds.includes(id));
+  return [...kept, ...portraitIds];
+}
+
 function clientIds(itemIds: readonly string[]): CaptureSourceId[] {
   const ids: CaptureSourceId[] = [];
   for (const itemId of itemIds) {
@@ -66,12 +71,32 @@ export class CodingInjection {
   }
 
   async applyConsented(itemIds: readonly string[]): Promise<InjectionSyncResult> {
+    const current = await this.#consent.load();
     const consented = portraitConsentIds(itemIds);
     const result = await this.#apply(consented);
     await this.#consent.save({
-      itemIds: consented,
+      itemIds: mergeConsentIds(current.itemIds, consented),
       fingerprint: codingInjectionFingerprint(this.#codingPath()),
     });
+    return { updated: true, applied: result.applied, skipped: result.skipped };
+  }
+
+  /**
+   * Rewrite managed blocks for every consented portrait client.
+   * Unlike reconcile(), this runs on daemon start even when the fingerprint
+   * is missing or already matches. A missing client directory is retried next time.
+   */
+  async ensureApplied(): Promise<InjectionSyncResult> {
+    const consent = await this.#consent.load();
+    const consented = portraitConsentIds(consent.itemIds);
+    if (consented.length === 0) return { updated: false, applied: [], skipped: [] };
+    const result = await this.#apply(consented);
+    if (result.missing.length === 0) {
+      await this.#consent.save({
+        itemIds: mergeConsentIds(consent.itemIds, consented),
+        fingerprint: codingInjectionFingerprint(this.#codingPath()),
+      });
+    }
     return { updated: true, applied: result.applied, skipped: result.skipped };
   }
 
@@ -87,7 +112,10 @@ export class CodingInjection {
     }
     const result = await this.#apply(consented);
     if (result.missing.length === 0) {
-      await this.#consent.save({ itemIds: consented, fingerprint });
+      await this.#consent.save({
+        itemIds: mergeConsentIds(consent.itemIds, consented),
+        fingerprint,
+      });
     }
     return { updated: true, applied: result.applied, skipped: result.skipped };
   }

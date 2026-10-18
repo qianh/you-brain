@@ -1,7 +1,9 @@
+export { grantIntegrationConsent, revokeIntegrationConsent } from "./agreed.js";
 export {
   FilePortraitConsentStore,
   MemoryPortraitConsentStore,
   emptyPortraitConsent,
+  portraitConsentPath,
   type PortraitConsent,
   type PortraitConsentStore,
 } from "./consent.js";

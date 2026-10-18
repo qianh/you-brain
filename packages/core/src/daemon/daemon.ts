@@ -19,7 +19,7 @@ import {
   type SharedConfig,
 } from "@you-brain/protocol";
 
-import { discoverSessions, getAdapter } from "../adapters/index.js";
+import { captureSourceFilters, discoverSessions, getAdapter } from "../adapters/index.js";
 import { getLlmApiKey } from "../auth/index.js";
 import { applyCaptureRedaction } from "../capture/redact.js";
 import { renderSessionMarkdown } from "../capture/normalize.js";
@@ -54,6 +54,9 @@ import type {
 } from "../http/types.js";
 import { createLlmBackend, LlmRetryQueue, type LlmBackend } from "../llm/index.js";
 import { OutputService } from "../output/service.js";
+import { installVendorResolver, usesVendorModules } from "../native/resolver.js";
+import { CodingInjection } from "../portrait/injection.js";
+import { FilePortraitConsentStore, portraitConsentPath } from "../portrait/consent.js";
 import { PortraitService } from "../portrait/service.js";
 import {
   createRefineEventFactory,
@@ -134,31 +137,53 @@ class LazyEmbedder implements Embedder {
   readonly model = E5_SMALL.model;
   readonly revision = E5_SMALL.revision;
   readonly dimensions = E5_SMALL.dimensions;
-  #inner: ProcessEmbedder | null = null;
+  #inner: Embedder | null = null;
+  #close: (() => Promise<void>) | null = null;
+  #loading: Promise<Embedder> | null = null;
 
   constructor(private readonly cacheDir: string) {}
 
   embedQuery(text: string): Promise<number[]> {
-    return this.#load().embedQuery(text);
+    return this.#load().then((inner) => inner.embedQuery(text));
   }
 
   embedPassages(texts: string[]): Promise<number[][]> {
-    return this.#load().embedPassages(texts);
+    return this.#load().then((inner) => inner.embedPassages(texts));
   }
 
   close(): Promise<void> {
-    return this.#inner?.close() ?? Promise.resolve();
+    return this.#close?.() ?? Promise.resolve();
   }
 
-  #load(): ProcessEmbedder {
-    this.#inner ??= new ProcessEmbedder({
+  #load(): Promise<Embedder> {
+    if (this.#inner) return Promise.resolve(this.#inner);
+    this.#loading ??= this.#open().then((inner) => {
+      this.#inner = inner;
+      return inner;
+    });
+    return this.#loading;
+  }
+
+  async #open(): Promise<Embedder> {
+    if (usesVendorModules()) {
+      installVendorResolver();
+      const { E5Embedder } = await import("../search/e5-embedder.js");
+      return new E5Embedder({
+        model: this.model,
+        revision: this.revision,
+        dimensions: this.dimensions,
+        cacheDir: this.cacheDir,
+      });
+    }
+    const inner = new ProcessEmbedder({
       model: this.model,
       revision: this.revision,
       dimensions: this.dimensions,
       cacheDir: this.cacheDir,
       command: embedWorkerCommand(),
     });
-    return this.#inner;
+    this.#close = () => inner.close();
+    return inner;
   }
 }
 
@@ -207,6 +232,7 @@ export class YouBrainDaemon {
   #embedderClose: (() => Promise<void>) | null = null;
   #uploader: UploadService | null = null;
   #portrait: PortraitService | null = null;
+  #coding: CodingInjection | null = null;
   #output: OutputService | null = null;
   #llm: LlmBackend | null = null;
   #llmOverride: LlmBackend | null | undefined;
@@ -281,6 +307,14 @@ export class YouBrainDaemon {
     this.#log = new EventLog(this.#store, this.#local.deviceId, {
       now: () => this.#clock.now(),
     });
+    const consent = new FilePortraitConsentStore(portraitConsentPath(this.#paths.dataDir));
+    const managedStatePath = join(this.#paths.dataDir, "managed-blocks.json");
+    this.#coding = new CodingInjection({
+      homeDir: this.#homeDir,
+      managedStatePath,
+      consent,
+      codingPath: () => this.#codingVariantPath(),
+    });
     if (this.#drive) {
       this.#sync = new ProtocolSync({
         drive: this.#drive,
@@ -314,6 +348,9 @@ export class YouBrainDaemon {
           snapshotPattern: this.#shared.portrait.snapshotPattern,
         },
         driveRoot: this.#local.driveRoot,
+        consent,
+        homeDir: this.#homeDir,
+        managedStatePath,
       });
       try {
         await this.#sync.register();
@@ -352,6 +389,7 @@ export class YouBrainDaemon {
       process.on("SIGTERM", this.#onSignal);
     }
     await this.#rewatch();
+    await this.#ensureCoding();
     this.#arm();
     void this.scan();
   }
@@ -619,9 +657,13 @@ export class YouBrainDaemon {
       this.#scannedOnce = true;
       return;
     }
+    const capture = this.#shared.capture;
     const discovered = await discoverSessions({
       device: this.#local.displayName,
-      includeSubagents: extra?.includeSubagents ?? this.#shared.capture.includeSubagents,
+      includeSubagents: extra?.includeSubagents ?? capture.includeSubagents,
+      keepToolCalls: capture.keepToolCalls,
+      redact: capture.redact,
+      sourceFilters: captureSourceFilters(capture.sources),
       sources,
       paths: {
         claude: roots["claude-code"],
@@ -728,6 +770,7 @@ export class YouBrainDaemon {
       });
       if (this.#llmOverride === undefined) this.#llm = await this.#createLlm();
       await this.#rewatch();
+      await this.#ensureCoding();
     }
     if (update.roles) {
       this.#roles = update.roles;
@@ -912,6 +955,7 @@ export class YouBrainDaemon {
     });
     if (this.#llmOverride === undefined) this.#llm = await this.#createLlm();
     await this.#rewatch();
+    await this.#ensureCoding();
     if (this.#sync) await this.#sync.updateShared(config);
     this.changes.publish("status", this.#clock.now().toISOString());
   }
@@ -974,6 +1018,10 @@ export class YouBrainDaemon {
       const status = this.#search.status();
       search = { ready: status.ready, documents: status.documents };
     }
+    const consolidation = await this.#consolidation();
+    if (consolidation.status === "stale") {
+      warnings.push({ code: "CONSOLIDATION_STALE", message: "超过 1 天未沉淀" });
+    }
     return {
       deviceId: this.#local.deviceId,
       drive: {
@@ -989,24 +1037,50 @@ export class YouBrainDaemon {
         pending: pending.length,
         lastError: pending[0]?.reason ?? null,
       },
-      consolidation: await this.#consolidation(),
+      consolidation,
       warnings,
     };
   }
 
   async #consolidation(): Promise<StatusResponse["consolidation"]> {
-    if (!this.#drive) return { lastFinishedAt: null, stale: false };
+    if (!this.#roles.consolidation.enabled) {
+      return { enabled: false, lastFinishedAt: null, stale: false, status: "disabled" };
+    }
+    const idle = {
+      enabled: true,
+      lastFinishedAt: null,
+      stale: false,
+      status: "ok",
+    } as const;
+    if (!this.#drive) return idle;
     try {
       const object = await this.#drive.readPath(DRIVE_PATHS.consolidateLease);
-      if (!object) return { lastFinishedAt: null, stale: false };
+      if (!object) return idle;
       const parsed = JSON.parse(object.bytes.toString("utf8")) as { finishedAt?: unknown };
       const finished = typeof parsed.finishedAt === "string" ? parsed.finishedAt : null;
-      if (!finished) return { lastFinishedAt: null, stale: false };
+      if (!finished) return idle;
       const ms = Date.parse(finished);
       const stale = Number.isNaN(ms) ? false : this.#clock.nowMs() - ms > INTERVALS.portraitMs;
-      return { lastFinishedAt: finished, stale };
+      return {
+        enabled: true,
+        lastFinishedAt: finished,
+        stale,
+        status: stale ? "stale" : "ok",
+      };
     } catch {
-      return { lastFinishedAt: null, stale: false };
+      return idle;
+    }
+  }
+
+  #codingVariantPath(): string {
+    return this.#shared.portrait.variants.find((variant) => variant.id === "coding")?.path ?? "";
+  }
+
+  async #ensureCoding(): Promise<void> {
+    try {
+      await this.#coding?.ensureApplied();
+    } catch {
+      // A corrupt consent file must not stop the daemon.
     }
   }
 

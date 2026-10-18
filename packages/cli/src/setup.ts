@@ -24,7 +24,7 @@ import {
   createOAuthClientSecretStore,
   setLlmApiKey,
 } from "@you-brain/core/auth";
-import { discoverSessions, getAdapter } from "@you-brain/core/adapters";
+import { captureSourceFilters, discoverSessions, getAdapter } from "@you-brain/core/adapters";
 import {
   applyClientIntegrations,
   planClientIntegrations,
@@ -38,6 +38,11 @@ import {
   applyBrainHubMigration,
   planBrainHubMigration,
 } from "@you-brain/core/migrate";
+import {
+  FilePortraitConsentStore,
+  grantIntegrationConsent,
+  portraitConsentPath,
+} from "@you-brain/core/portrait";
 import { SqliteStore } from "@you-brain/core/store";
 import { upsertByPath } from "@you-brain/core/upload";
 
@@ -212,7 +217,13 @@ export async function runSetup(flags: SetupFlags): Promise<void> {
   }
 
   if (!progress.integrations || flags.integrations !== undefined) {
-    await configureIntegrations(flags, homeDir, join(paths.dataDir, "managed-blocks.json"));
+    await configureIntegrations(
+      flags,
+      homeDir,
+      join(paths.dataDir, "managed-blocks.json"),
+      shared,
+      paths.dataDir,
+    );
     progress.integrations = true;
     await saveProgress(paths.dataDir, progress);
   }
@@ -371,6 +382,8 @@ async function configureIntegrations(
   flags: SetupFlags,
   homeDir: string,
   managedStatePath: string,
+  shared: SharedConfig,
+  dataDir: string,
 ): Promise<void> {
   const clients = flags.integrations === undefined ? undefined : asSources(flags.integrations);
   const plan = await planClientIntegrations({
@@ -397,6 +410,16 @@ async function configureIntegrations(
     selectedIds: selected,
     managedStatePath,
   });
+  if (selected.length > 0) {
+    const codingPath =
+      shared.portrait.variants.find((variant) => variant.id === "coding")?.path ??
+      "digital-twin/JOHN-TWIN-coding.md";
+    await grantIntegrationConsent(
+      new FilePortraitConsentStore(portraitConsentPath(dataDir)),
+      selected,
+      codingPath,
+    );
+  }
   console.log(`已接入 ${result.applied.length} 项，跳过 ${result.skipped.length} 项`);
 }
 
@@ -410,6 +433,9 @@ async function configureBackfill(
   const discovered = await discoverSessions({
     device,
     includeSubagents: shared.capture.includeSubagents,
+    keepToolCalls: shared.capture.keepToolCalls,
+    redact: shared.capture.redact,
+    sourceFilters: captureSourceFilters(shared.capture.sources),
     sources: [...enabled],
     paths: {
       claude: shared.capture.sources["claude-code"].paths,

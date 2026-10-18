@@ -1,6 +1,9 @@
 {
   "identifier": "shell",
-  "description": "Menu-bar shell windows. The Web UI is served by the daemon and is not granted IPC.",
+  "description": "Menu-bar shell. The Web UI is loaded from the loopback daemon and may open the full window.",
   "windows": ["panel", "main"],
-  "permissions": []
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*", "http://localhost:*/*"]
+  },
+  "permissions": ["allow-open-main-window"]
 }

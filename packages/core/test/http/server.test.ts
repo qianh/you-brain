@@ -126,7 +126,12 @@ async function withServer(
     sync: { lastSyncAt: null, pendingOutbox: 0 },
     search: { ready: true, documents: 2 },
     refine: { pending: 0, lastError: null },
-    consolidation: { lastFinishedAt: null, stale: false },
+    consolidation: {
+      enabled: false,
+      lastFinishedAt: null,
+      stale: false,
+      status: "disabled",
+    },
     warnings: [],
   };
   const device: DeviceRecord = {
@@ -580,6 +585,22 @@ describe("local HTTP API", () => {
       } finally {
         await live.cancel();
       }
+    });
+  });
+
+  it("explains how to find the web UI when no build directory is configured", async () => {
+    await withServer(async ({ server }) => {
+      const page = await fetch(`${server.baseUrl}/`);
+      expect(page.status).toBe(200);
+      expect(page.headers.get("content-type")).toContain("text/html");
+      const html = await page.text();
+      expect(html).toContain("没有找到 Web 界面");
+      expect(html).toContain("YOU_BRAIN_WEB_DIR");
+      expect(html).toContain("../Resources/web");
+      expect(html).toContain("apps/web/dist");
+      const missing = await fetch(`${server.baseUrl}/missing.js`);
+      expect(missing.status).toBe(404);
+      expect(await missing.json()).toMatchObject({ error: { code: "NOT_FOUND" } });
     });
   });
 

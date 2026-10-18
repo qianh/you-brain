@@ -9,7 +9,8 @@
   ],
   "scripts": {
     "test": "bun test",
-    "typecheck": "bunx tsc --noEmit -p packages/protocol && bunx tsc --noEmit -p packages/core && bunx tsc --noEmit -p packages/cli"
+    "typecheck": "bunx tsc --noEmit -p packages/protocol && bunx tsc --noEmit -p packages/core && bunx tsc --noEmit -p packages/cli",
+    "build:daemon": "bun scripts/build-daemon.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.3.11",

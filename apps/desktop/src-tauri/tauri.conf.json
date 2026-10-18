@@ -10,7 +10,7 @@
     "beforeDevCommand": "sh -c 'if [ -f scripts/ensure-dev-sidecar.sh ]; then exec sh scripts/ensure-dev-sidecar.sh; fi; if [ -f ../scripts/ensure-dev-sidecar.sh ]; then exec sh ../scripts/ensure-dev-sidecar.sh; fi; echo ensure-dev-sidecar.sh not found >&2; exit 1'"
   },
   "app": {
-    "withGlobalTauri": false,
+    "withGlobalTauri": true,
     "security": {
       "csp": null
     },

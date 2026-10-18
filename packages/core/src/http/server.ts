@@ -125,6 +125,11 @@ async function dispatch(
       return await handleApi(request, url, context);
     }
     if (staticDir) return await serveStatic(staticDir, url.pathname, token);
+    if (request.method === "GET" && (url.pathname === "/" || url.pathname === "")) {
+      return new Response(missingWebHtml(), {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
     return apiError(404, "NOT_FOUND", "找不到页面");
   } catch (error) {
     return errorResponse(error);
@@ -233,6 +238,26 @@ async function serveIndex(root: string, token: string): Promise<Response> {
       "cache-control": "no-cache",
     },
   });
+}
+
+function missingWebHtml(): string {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>you-brain</title></head>
+<body>
+<main>
+<h1>you-brain 没有找到 Web 界面</h1>
+<p>按下面的顺序查找了构建目录，都没有可用的目录：</p>
+<ol>
+<li>环境变量 <code>YOU_BRAIN_WEB_DIR</code></li>
+<li>可执行文件同级的 <code>web/</code> 目录</li>
+<li>macOS 应用包内的 <code>../Resources/web</code></li>
+<li>源码运行时的 <code>apps/web/dist</code></li>
+</ol>
+<p>请先构建 <code>apps/web</code>，或把构建目录设到 <code>YOU_BRAIN_WEB_DIR</code>。</p>
+</main>
+</body>
+</html>`;
 }
 
 function isInside(root: string, target: string): boolean {

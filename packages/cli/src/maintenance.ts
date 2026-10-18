@@ -3,6 +3,7 @@ import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { createDefaultSharedConfig, parseSharedConfig, type SharedConfig } from "@you-brain/protocol";
 import { isProcessAlive } from "@you-brain/core/http";
 import {
   applyClientIntegrations,
@@ -11,6 +12,12 @@ import {
   type IntegrationPlanItem,
 } from "@you-brain/core/clients";
 import { restoreBrainHubMigration } from "@you-brain/core/migrate";
+import {
+  FilePortraitConsentStore,
+  grantIntegrationConsent,
+  portraitConsentPath,
+  revokeIntegrationConsent,
+} from "@you-brain/core/portrait";
 import type { SessionSource } from "@you-brain/core";
 import { SESSION_SOURCES } from "@you-brain/core";
 
@@ -62,7 +69,32 @@ export async function applyIntegrations(options: {
     selectedIds: selected,
     managedStatePath: managedStatePathValue,
   });
+  if (selected.length > 0) {
+    const paths = runtimePaths();
+    const store = new FilePortraitConsentStore(portraitConsentPath(paths.dataDir));
+    if (options.intent === "uninstall") {
+      await revokeIntegrationConsent(store, selected);
+    } else {
+      await grantIntegrationConsent(store, selected, codingVariantPath(paths.dataDir));
+    }
+  }
   console.log(`完成 ${result.applied.length} 项，跳过 ${result.skipped.length} 项`);
+}
+
+function codingVariantPath(dataDir: string): string {
+  let shared: SharedConfig = createDefaultSharedConfig();
+  const file = join(dataDir, "shared.json");
+  if (existsSync(file)) {
+    try {
+      shared = parseSharedConfig(JSON.parse(readFileSync(file, "utf8")) as unknown);
+    } catch {
+      shared = createDefaultSharedConfig();
+    }
+  }
+  return (
+    shared.portrait.variants.find((variant) => variant.id === "coding")?.path ??
+    "digital-twin/JOHN-TWIN-coding.md"
+  );
 }
 
 export async function restoreBrainHub(backupDir: string): Promise<void> {

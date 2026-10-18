@@ -1,7 +1,12 @@
 import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import { writeFileAtomic } from "../domain/atomic.js";
 import { YouBrainError } from "../domain/errors.js";
+
+export function portraitConsentPath(dataDir: string): string {
+  return join(dataDir, "portrait-consent.json");
+}
 
 export interface PortraitConsent {
   /** Integration plan item ids the user agreed to, for example `claude-code:portrait`. */
