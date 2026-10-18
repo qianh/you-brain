@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import { useDaemon } from "../daemon-context.js";
 import { Empty, SessionCard, toSessionCard } from "../components/ui.js";
-import { attentionLevel, panelProblems } from "../lib/copy.js";
+import { attentionLevel, consolidationView, panelProblems } from "../lib/copy.js";
 import { formatDateTime, formatDay } from "../lib/format.js";
 import { groupSessionsByTopic } from "../lib/group.js";
 import { browserWindowBridge, openFullWindow } from "../lib/window.js";
@@ -13,6 +13,7 @@ export function PanelPage() {
   const groups = groupSessionsByTopic(today?.sessions ?? [], t("unassigned"));
   const problems = status ? panelProblems(status, language) : [];
   const level = status ? attentionLevel(status, problems) : "ok";
+  const consolidationOff = consolidationView(status?.consolidation) === "disabled";
   const sync = formatDateTime(status?.sync.lastSyncAt ?? null, language, timeZone);
   return (
     <div className="panel-frame">
@@ -65,6 +66,7 @@ export function PanelPage() {
           <span>{t("lastSync")}</span>
           <strong>{status?.sync.lastSyncAt ? sync : t("neverSynced")}</strong>
         </p>
+        {consolidationOff ? <p className="muted">{t("consolidationDisabled")}</p> : null}
         {problems.length === 0 ? <p className="muted">{t("allClear")}</p> : null}
         {problems.length > 0 ? (
           <ul className="problem-list">

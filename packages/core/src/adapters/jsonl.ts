@@ -2,8 +2,11 @@ import { readFile } from "node:fs/promises";
 
 export async function readJsonLines(
   path: string,
+  signal?: AbortSignal,
 ): Promise<{ records: unknown[]; malformedLines: number }> {
-  const input = await readFile(path, "utf8");
+  const input = signal
+    ? await readFile(path, { encoding: "utf8", signal })
+    : await readFile(path, "utf8");
   const records: unknown[] = [];
   let malformedLines = 0;
 

@@ -46,6 +46,8 @@ export interface AdapterOptions {
   includeSubagents: boolean;
   keepToolCalls?: boolean;
   toolCallMaxChars?: number;
+  /** Stop reading the session file when the daemon is shutting down. */
+  signal?: AbortSignal;
 }
 
 export interface AdapterResult {
@@ -93,6 +95,8 @@ export interface DiscoveryOptions {
   redact?: boolean;
   redaction?: RedactionOptions;
   sourceFilters?: Partial<Record<SessionSource, CapturePathFilter>>;
+  /** Aborts directory walks and session reads. Already-aborted returns no sessions. */
+  signal?: AbortSignal;
 }
 
 export interface DiscoveryStatus {

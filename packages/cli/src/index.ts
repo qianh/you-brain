@@ -75,7 +75,17 @@ program
         ...(webDir ? { staticDir: webDir } : {}),
       });
       console.log(`you-brain daemon 正在监听 ${daemon.baseUrl}`);
+      // Scan abort is what makes shutdown prompt. This only covers a flush that never returns.
+      let forceExit: ReturnType<typeof setTimeout> | null = null;
+      const armForceExit = (): void => {
+        forceExit ??= setTimeout(() => {
+          process.exit(0);
+        }, 8_000);
+      };
+      process.on("SIGINT", armForceExit);
+      process.on("SIGTERM", armForceExit);
       await daemon.closed;
+      if (forceExit) clearTimeout(forceExit);
     } catch (error) {
       fail(error);
     }

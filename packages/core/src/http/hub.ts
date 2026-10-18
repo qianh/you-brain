@@ -3,6 +3,7 @@ import type { DaemonChangeKind, DaemonEvent } from "./types.js";
 /** In-process fan-out for SSE. The daemon publishes after background refreshes. */
 export class ChangeHub {
   #listeners = new Set<(event: DaemonEvent) => void>();
+  #shutdown = new Set<() => void>();
   #seq = 0;
 
   publish(kind: DaemonChangeKind, at = new Date().toISOString()): DaemonEvent {
@@ -22,6 +23,27 @@ export class ChangeHub {
     return () => {
       this.#listeners.delete(listener);
     };
+  }
+
+  /** SSE responses register here so shutdown can end the stream without the client. */
+  onShutdown(fn: () => void): () => void {
+    this.#shutdown.add(fn);
+    return () => {
+      this.#shutdown.delete(fn);
+    };
+  }
+
+  shutdown(): void {
+    const closers = [...this.#shutdown];
+    this.#shutdown.clear();
+    this.#listeners.clear();
+    for (const close of closers) {
+      try {
+        close();
+      } catch {
+        // One stuck stream must not block the others.
+      }
+    }
   }
 
   /** SSE clients currently attached. The daemon pulls faster while this is non-zero. */

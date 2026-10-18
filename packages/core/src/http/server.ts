@@ -88,6 +88,7 @@ export async function startDaemonHttp(
     async stop() {
       if (stopped) return;
       stopped = true;
+      hub.shutdown();
       server.stop(true);
       const current = await readDaemonEndpoint(options.dataDir).catch(() => null);
       if (
@@ -149,38 +150,45 @@ function authorized(request: Request, url: URL, token: string): boolean {
 function eventStream(request: Request, hub: ChangeHub): Response {
   const encoder = new TextEncoder();
   let unsubscribe = (): void => undefined;
+  let removeShutdown = (): void => undefined;
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
-      const send = (event: DaemonEvent): void => {
-        try {
-          controller.enqueue(encoder.encode(formatSse(event)));
-        } catch {
-          unsubscribe();
-        }
-      };
-      unsubscribe = hub.subscribe(send);
-      const ready: DaemonEvent = {
-        id: 0,
-        kind: "ready",
-        at: new Date().toISOString(),
-      };
-      send(ready);
-      const abort = (): void => {
+      let closed = false;
+      const finish = (): void => {
+        if (closed) return;
+        closed = true;
         unsubscribe();
+        removeShutdown();
         try {
           controller.close();
         } catch {
           // The client already went away.
         }
       };
+      const send = (event: DaemonEvent): void => {
+        try {
+          controller.enqueue(encoder.encode(formatSse(event)));
+        } catch {
+          finish();
+        }
+      };
+      unsubscribe = hub.subscribe(send);
+      removeShutdown = hub.onShutdown(finish);
+      const ready: DaemonEvent = {
+        id: 0,
+        kind: "ready",
+        at: new Date().toISOString(),
+      };
+      send(ready);
       if (request.signal.aborted) {
-        abort();
+        finish();
         return;
       }
-      request.signal.addEventListener("abort", abort, { once: true });
+      request.signal.addEventListener("abort", finish, { once: true });
     },
     cancel() {
       unsubscribe();
+      removeShutdown();
     },
   });
   return new Response(stream, {

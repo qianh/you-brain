@@ -491,7 +491,7 @@ function statusBody(): unknown {
     sync: { lastSyncAt: "2026-10-18T16:08:00+08:00", pendingOutbox: 1 },
     search: { ready: false, documents: 128 },
     refine: { pending: 2, lastError: "模型返回的 JSON 无法解析，两分钟后重试" },
-    consolidation: { lastFinishedAt: null, stale: true },
+    consolidation: { enabled: false, lastFinishedAt: null, stale: false, status: "disabled" },
     warnings: [{ code: "SEARCH_STALE", message: "搜索索引已超过一天没有更新" }],
     captures: [
       { source: "claude-code", lastCaptureAt: MORNING, error: null },

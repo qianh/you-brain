@@ -5,6 +5,7 @@ import {
   attentionLevel,
   linesToList,
   listToLines,
+  consolidationView,
   panelProblems,
   readCaptures,
   readLogs,
@@ -105,7 +106,7 @@ describe("panel status", () => {
   const calm = {
     drive: { reachable: true as boolean | null },
     refine: { lastError: null as string | null },
-    consolidation: { stale: false },
+    consolidation: { enabled: true, stale: false, status: "ok" as const },
     warnings: [],
   };
 
@@ -113,7 +114,7 @@ describe("panel status", () => {
     const status = {
       drive: { reachable: false as boolean | null },
       refine: { lastError: "模型没有返回 JSON" },
-      consolidation: { stale: true },
+      consolidation: { enabled: true, stale: true, status: "stale" as const },
       warnings: [{ message: "搜索索引过期" }],
     };
     const problems = panelProblems(status, "zh");
@@ -127,10 +128,31 @@ describe("panel status", () => {
     expect(attentionLevel(calm, [])).toBe("ok");
     expect(
       attentionLevel(
-        { ...calm, consolidation: { stale: true }, warnings: [{ message: "慢" }] },
+        { ...calm, consolidation: { enabled: true, stale: true, status: "stale" }, warnings: [{ message: "慢" }] },
         ["慢"],
       ),
     ).toBe("warn");
+  });
+
+  test("treats a disabled consolidation role as off, even if stale is set", () => {
+    const disabled = {
+      drive: { reachable: true as boolean | null },
+      refine: { lastError: null as string | null },
+      consolidation: {
+        enabled: false,
+        stale: true,
+        status: "disabled" as const,
+        lastFinishedAt: null,
+      },
+      warnings: [],
+    };
+    expect(consolidationView(disabled.consolidation)).toBe("disabled");
+    expect(panelProblems(disabled, "zh")).toEqual([]);
+    expect(attentionLevel(disabled, [])).toBe("ok");
+    expect(consolidationView({ enabled: true, status: "ok", lastFinishedAt: null })).toBe("idle");
+    expect(
+      consolidationView({ enabled: true, status: "ok", lastFinishedAt: "2026-10-18T00:00:00.000Z" }),
+    ).toBe("ready");
   });
 });
 

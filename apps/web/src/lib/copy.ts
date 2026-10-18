@@ -84,10 +84,30 @@ export function listToLines(values: readonly string[]): string {
   return values.join("\n");
 }
 
+export interface ConsolidationStatus {
+  enabled?: boolean;
+  stale?: boolean;
+  status?: "disabled" | "ok" | "stale";
+  lastFinishedAt?: string | null;
+}
+
+export type ConsolidationView = "unknown" | "disabled" | "stale" | "idle" | "ready";
+
+/** `disabled` wins over a stale flag. An off switch is not “overdue”. */
+export function consolidationView(
+  consolidation: ConsolidationStatus | null | undefined,
+): ConsolidationView {
+  if (!consolidation) return "unknown";
+  if (consolidation.status === "disabled" || consolidation.enabled === false) return "disabled";
+  if (consolidation.status === "stale" || consolidation.stale === true) return "stale";
+  if (consolidation.lastFinishedAt) return "ready";
+  return "idle";
+}
+
 export interface PanelStatusInput {
   drive: { reachable: boolean | null };
   refine: { lastError: string | null };
-  consolidation: { stale: boolean };
+  consolidation: ConsolidationStatus;
   warnings: readonly { message: string }[];
 }
 
@@ -96,7 +116,9 @@ export type Attention = "ok" | "warn" | "bad";
 export function panelProblems(status: PanelStatusInput, language: Language): string[] {
   const problems: string[] = [];
   if (status.drive.reachable === false) problems.push(translate(language, "driveDown"));
-  if (status.consolidation.stale) problems.push(translate(language, "consolidationStale"));
+  if (consolidationView(status.consolidation) === "stale") {
+    problems.push(translate(language, "consolidationStale"));
+  }
   if (status.refine.lastError) problems.push(status.refine.lastError);
   for (const warning of status.warnings) {
     if (warning.message.trim() !== "") problems.push(warning.message);
@@ -107,7 +129,7 @@ export function panelProblems(status: PanelStatusInput, language: Language): str
 export function attentionLevel(status: PanelStatusInput, problems: readonly string[]): Attention {
   if (status.drive.reachable === false) return "bad";
   if (status.refine.lastError) return "bad";
-  if (problems.length > 0 || status.consolidation.stale) return "warn";
+  if (problems.length > 0 || consolidationView(status.consolidation) === "stale") return "warn";
   return "ok";
 }
 

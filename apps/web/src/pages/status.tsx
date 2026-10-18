@@ -1,5 +1,5 @@
 import { useDaemon } from "../daemon-context.js";
-import { readCaptures, readLogs } from "../lib/copy.js";
+import { consolidationView, readCaptures, readLogs } from "../lib/copy.js";
 import { formatDateTime, sourceLabel } from "../lib/format.js";
 
 export function StatusPage() {
@@ -7,6 +7,7 @@ export function StatusPage() {
   const captures = readCaptures(status);
   const extraLogs = readLogs(status);
   const warnings = status?.warnings ?? [];
+  const consolidation = consolidationView(status?.consolidation);
   const logs = [
     ...extraLogs,
     ...warnings
@@ -45,14 +46,20 @@ export function StatusPage() {
         </article>
         <article className="card">
           <h2>{t("consolidation")}</h2>
-          <p>
-            {status?.consolidation.lastFinishedAt
-              ? formatDateTime(status.consolidation.lastFinishedAt, language, timeZone)
-              : t("consolidationNever")}
-          </p>
-          <p className={status?.consolidation.stale ? "warn-text" : "muted"}>
-            {status?.consolidation.stale ? t("consolidationStale") : t("healthy")}
-          </p>
+          {consolidation === "disabled" ? (
+            <p className="muted">{t("consolidationDisabled")}</p>
+          ) : (
+            <>
+              <p>
+                {status?.consolidation.lastFinishedAt
+                  ? formatDateTime(status.consolidation.lastFinishedAt, language, timeZone)
+                  : t("consolidationNever")}
+              </p>
+              <p className={consolidation === "stale" ? "warn-text" : "muted"}>
+                {consolidation === "stale" ? t("consolidationStale") : t("healthy")}
+              </p>
+            </>
+          )}
         </article>
         <article className="card">
           <h2>{t("searchIndex")}</h2>

@@ -27,7 +27,7 @@ export async function parseCodexSession(
   options: AdapterOptions,
 ): Promise<AdapterResult> {
   const [{ records, malformedLines }, fileStat] = await Promise.all([
-    readJsonLines(path),
+    readJsonLines(path, options.signal),
     stat(path),
   ]);
   const objects = records.map(asRecord).filter((value) => value !== null);

@@ -33,8 +33,10 @@ export async function parseGrokSession(
   const historyPath = join(sessionDir, "chat_history.jsonl");
   const [{ records, malformedLines }, summaryText, fileStat] =
     await Promise.all([
-      readJsonLines(historyPath),
-      readFile(join(sessionDir, "summary.json"), "utf8"),
+      readJsonLines(historyPath, options.signal),
+      options.signal
+        ? readFile(join(sessionDir, "summary.json"), { encoding: "utf8", signal: options.signal })
+        : readFile(join(sessionDir, "summary.json"), "utf8"),
       stat(historyPath),
     ]);
   const summary = asRecord(JSON.parse(summaryText) as unknown);

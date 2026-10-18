@@ -245,6 +245,7 @@ export class YouBrainDaemon {
   #timer: { cancel(): void } | null = null;
   #chain: Promise<void> = Promise.resolve();
   #stopped = false;
+  #abort = new AbortController();
   #started = false;
   #stopPromise: Promise<void> | null = null;
   #resolveClosed: () => void = () => undefined;
@@ -389,12 +390,15 @@ export class YouBrainDaemon {
       process.on("SIGTERM", this.#onSignal);
     }
     await this.#rewatch();
+    if (this.#stopped) return;
     await this.#ensureCoding();
+    if (this.#stopped) return;
     this.#arm();
-    void this.scan();
+    if (!this.#stopped) void this.scan();
   }
 
   scan(extra?: { includeSubagents?: boolean }): Promise<void> {
+    if (this.#stopped) return Promise.resolve();
     return this.#run(async () => {
       await this.#scanBody(extra);
     });
@@ -412,6 +416,7 @@ export class YouBrainDaemon {
 
   async #stopBody(): Promise<void> {
     this.#stopped = true;
+    this.#abort.abort();
     this.#timer?.cancel();
     this.#timer = null;
     if (this.#watchTimer) {
@@ -423,40 +428,47 @@ export class YouBrainDaemon {
       process.off("SIGTERM", this.#onSignal);
       this.#onSignal = null;
     }
-    await this.#run(async () => {
-      for (const watcher of this.#watchers) watcher.close();
-      this.#watchers = [];
-      if (this.#sync) {
-        try {
-          await this.#sync.flush();
-        } catch {
-          // The outbox remains for the next start.
+    try {
+      await this.#run(async () => {
+        this.#closeWatchers();
+        if (this.#sync) {
+          // A stuck Drive call must not keep the process up. The outbox retries next start.
+          await Promise.race([
+            this.#sync.flush().catch(() => undefined),
+            delay(FLUSH_DEADLINE_MS),
+          ]);
         }
+        try {
+          await this.#output?.flush();
+        } catch {
+          // Local markdown is derived and can be rebuilt.
+        }
+        this.#output?.close();
+        this.#output = null;
+        if (this.#embedderClose) {
+          await this.#embedderClose().catch(() => undefined);
+          this.#embedderClose = null;
+        }
+        this.#searchDb?.close();
+        this.#searchDb = null;
+        this.#search = null;
+        this.#store?.close();
+        this.#store = null;
+        await this.#http?.stop();
+        this.#http = null;
+      }, "shutdown");
+    } finally {
+      this.#closeWatchers();
+      if (this.#http) {
+        await this.#http.stop().catch(() => undefined);
+        this.#http = null;
       }
-      try {
-        await this.#output?.flush();
-      } catch {
-        // Local markdown is derived and can be rebuilt.
+      if (this.#lockRelease) {
+        await this.#lockRelease().catch(() => undefined);
+        this.#lockRelease = null;
       }
-      this.#output?.close();
-      this.#output = null;
-      if (this.#embedderClose) {
-        await this.#embedderClose().catch(() => undefined);
-        this.#embedderClose = null;
-      }
-      this.#searchDb?.close();
-      this.#searchDb = null;
-      this.#search = null;
-      this.#store?.close();
-      this.#store = null;
-      await this.#http?.stop();
-      this.#http = null;
-    });
-    if (this.#lockRelease) {
-      await this.#lockRelease().catch(() => undefined);
-      this.#lockRelease = null;
+      this.#resolveClosed();
     }
-    this.#resolveClosed();
   }
 
   #arm(): void {
@@ -479,6 +491,7 @@ export class YouBrainDaemon {
   }
 
   async #runDue(): Promise<void> {
+    if (this.#stopped) return;
     const now = this.#clock.nowMs();
     if (intervalDue(this.#lastFullScan, now, INTERVALS.fullScanMs)) {
       await this.#scanBody();
@@ -551,6 +564,7 @@ export class YouBrainDaemon {
       options?.sources ? options.sources.includes(live.session.source) : true,
     );
     for (const [key, live] of sessions) {
+      if (this.#stopped) return { scanned: sessions.length, uploaded };
       const decision = decideUpload(live.schedule, now, { idleMs, activeIntervalMs });
       if (!decision.due) {
         if (this.#isIdle(live, now, idleMs)) await this.#retryIfDue(key, live, now);
@@ -651,6 +665,10 @@ export class YouBrainDaemon {
   }
 
   async #scanBody(extra?: { includeSubagents?: boolean }): Promise<void> {
+    if (this.#stopped || this.#abort.signal.aborted) {
+      this.#scannedOnce = true;
+      return;
+    }
     const roots = this.#roots();
     const sources = SESSION_SOURCES.filter((id) => roots[id].length > 0);
     if (sources.length === 0) {
@@ -665,6 +683,7 @@ export class YouBrainDaemon {
       redact: capture.redact,
       sourceFilters: captureSourceFilters(capture.sources),
       sources,
+      signal: this.#abort.signal,
       paths: {
         claude: roots["claude-code"],
         codex: roots.codex,
@@ -673,6 +692,10 @@ export class YouBrainDaemon {
         gemini: roots["gemini-cli"],
       },
     });
+    if (this.#stopped || this.#abort.signal.aborted) {
+      this.#scannedOnce = true;
+      return;
+    }
     const seen = new Set<string>();
     const now = this.#clock.nowMs();
     for (const session of discovered.sessions) {
@@ -1232,22 +1255,33 @@ export class YouBrainDaemon {
     return roots;
   }
 
-  async #rewatch(): Promise<void> {
+  #closeWatchers(): void {
     for (const watcher of this.#watchers) watcher.close();
     this.#watchers = [];
-    if (!this.#watchEnabled) return;
+  }
+
+  async #rewatch(): Promise<void> {
+    this.#closeWatchers();
+    if (!this.#watchEnabled || this.#stopped) return;
     for (const dirs of Object.values(this.#roots())) {
+      if (this.#stopped) return;
       for (const dir of dirs) {
+        if (this.#stopped) return;
         try {
           await access(dir);
         } catch {
           continue;
         }
+        if (this.#stopped) return;
         try {
           const watcher = watch(dir, { recursive: true }, () => {
             this.#scheduleWatch();
           });
           watcher.on("error", () => undefined);
+          if (this.#stopped) {
+            watcher.close();
+            return;
+          }
           this.#watchers.push(watcher);
         } catch {
           // The directory can disappear between access and watch.
@@ -1257,6 +1291,7 @@ export class YouBrainDaemon {
   }
 
   #scheduleWatch(): void {
+    if (this.#stopped) return;
     if (this.#watchTimer) clearTimeout(this.#watchTimer);
     this.#watchTimer = setTimeout(() => {
       this.#watchTimer = null;
@@ -1269,14 +1304,26 @@ export class YouBrainDaemon {
     return now - live.schedule.lastActivityAt >= idleMs;
   }
 
-  #run<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.#chain.then(fn, fn);
+  #run<T>(fn: () => Promise<T>, kind: "work" | "shutdown" = "work"): Promise<T> {
+    const invoke = (): Promise<T> | T => {
+      if (this.#stopped && kind !== "shutdown") return undefined as T;
+      return fn();
+    };
+    const run = this.#chain.then(invoke, invoke);
     this.#chain = run.then(
       () => undefined,
       () => undefined,
     );
     return run;
   }
+}
+
+const FLUSH_DEADLINE_MS = 3_000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function sessionHash(session: NormalizedSession): string {

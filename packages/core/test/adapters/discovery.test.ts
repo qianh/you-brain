@@ -113,4 +113,29 @@ describe("session discovery", () => {
     expect(result.sessions).toHaveLength(1);
     expect(result.warnings).toEqual([]);
   });
+
+  it("returns no sessions when the abort signal is already set", async () => {
+    const root = await mkdtemp(join(tmpdir(), "brainhub-discovery-abort-"));
+    const claude = join(root, "project", "session.jsonl");
+    await mkdir(dirname(claude), { recursive: true });
+    await cp(join(fixtures, "claude", "top-level.jsonl"), claude);
+    const signal = AbortSignal.abort();
+    const started = Date.now();
+    const result = await discoverSessions({
+      device: "test",
+      includeSubagents: false,
+      sources: ["claude-code", "codex", "grok-build", "cursor", "gemini-cli"],
+      paths: {
+        claude: [root],
+        codex: [root],
+        grok: [root],
+        cursor: [root],
+        gemini: [root],
+      },
+      signal,
+    });
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(result.sessions).toEqual([]);
+    expect(result.status.claude.discovered).toBe(0);
+  });
 });

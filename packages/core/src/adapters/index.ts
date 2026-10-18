@@ -51,6 +51,10 @@ export type {
   SourceFile,
 } from "./types.js";
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 const emptyStatus = (): DiscoveryStatus => ({
   discovered: 0,
   captured: 0,
@@ -106,7 +110,9 @@ export async function discoverSessions(
     ...(options.toolCallMaxChars !== undefined
       ? { toolCallMaxChars: options.toolCallMaxChars }
       : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
   };
+  const stopped = (): boolean => options.signal?.aborted === true;
   const includePaths = new Set(options.includePaths ?? []);
   const visible = (source: SessionSource, paths: string[]): string[] => {
     const filter = options.sourceFilters?.[source];
@@ -119,12 +125,13 @@ export async function discoverSessions(
     parse: () => Promise<AdapterResult>;
   }> = [];
 
-  if (options.sources.includes("claude-code")) {
+  if (!stopped() && options.sources.includes("claude-code")) {
     const paths = visible(
       "claude-code",
       await incrementalFiles(
         await globFiles(
           options.paths.claude.map((root) => join(root, "**", "*.jsonl")),
+          options.signal,
         ),
         options.modifiedAfter?.["claude-code"],
         includePaths,
@@ -139,12 +146,13 @@ export async function discoverSessions(
       })),
     );
   }
-  if (options.sources.includes("codex")) {
+  if (!stopped() && options.sources.includes("codex")) {
     const paths = visible(
       "codex",
       await incrementalFiles(
         await globFiles(
           options.paths.codex.map((root) => join(root, "**", "rollout-*.jsonl")),
+          options.signal,
         ),
         options.modifiedAfter?.codex,
         includePaths,
@@ -159,7 +167,7 @@ export async function discoverSessions(
       })),
     );
   }
-  if (options.sources.includes("grok-build")) {
+  if (!stopped() && options.sources.includes("grok-build")) {
     const histories = visible(
       "grok-build",
       await incrementalFiles(
@@ -167,6 +175,7 @@ export async function discoverSessions(
           options.paths.grok.map((root) =>
             join(root, "**", "chat_history.jsonl"),
           ),
+          options.signal,
         ),
         options.modifiedAfter?.["grok-build"],
         includePaths,
@@ -182,7 +191,7 @@ export async function discoverSessions(
       })),
     );
   }
-  if (options.sources.includes("cursor")) {
+  if (!stopped() && options.sources.includes("cursor")) {
     const paths = visible(
       "cursor",
       await incrementalFiles(
@@ -190,6 +199,7 @@ export async function discoverSessions(
           options.paths.cursor.map((root) =>
             join(root, "**", "agent-transcripts", "*", "*.jsonl"),
           ),
+          options.signal,
         ),
         options.modifiedAfter?.cursor,
         includePaths,
@@ -204,7 +214,7 @@ export async function discoverSessions(
       })),
     );
   }
-  if (options.sources.includes("gemini-cli")) {
+  if (!stopped() && options.sources.includes("gemini-cli")) {
     const paths = visible(
       "gemini-cli",
       await incrementalFiles(
@@ -212,6 +222,7 @@ export async function discoverSessions(
           (options.paths.gemini ?? []).map((root) =>
             join(root, "**", "chats", "session-*.json"),
           ),
+          options.signal,
         ),
         options.modifiedAfter?.["gemini-cli"],
         includePaths,
@@ -228,6 +239,7 @@ export async function discoverSessions(
   }
 
   for (const item of work) {
+    if (stopped()) break;
     try {
       let result = await item.parse();
       if (result.session && options.redact !== undefined) {
@@ -247,7 +259,8 @@ export async function discoverSessions(
         status[item.name].captured += 1;
         output.sessions.push(result.session);
       }
-    } catch {
+    } catch (error) {
+      if (stopped() || isAbortError(error)) break;
       status[item.name].errors += 1;
       output.warnings.push({
         code: "SOURCE_PARSE_FAILED",

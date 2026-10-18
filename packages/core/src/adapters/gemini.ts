@@ -65,7 +65,9 @@ export async function parseGeminiSession(
   options: AdapterOptions,
 ): Promise<AdapterResult> {
   const [text, fileStat] = await Promise.all([
-    readFile(path, "utf8"),
+    options.signal
+      ? readFile(path, { encoding: "utf8", signal: options.signal })
+      : readFile(path, "utf8"),
     stat(path),
   ]);
   const record = asRecord(JSON.parse(text) as unknown);
