@@ -5,6 +5,7 @@ import {
   driveFileUrl,
   formatDateTime,
   formatDay,
+  LLM_PROVIDER_IDS,
   providerNeedsKey,
   sourceLabel,
   variantName,
@@ -60,6 +61,12 @@ describe("labels", () => {
     expect(weekdayName(9, "en")).toBe("9");
     expect(providerNeedsKey("ollama")).toBe(false);
     expect(providerNeedsKey("deepseek")).toBe(true);
+    expect(providerNeedsKey("grok-cli")).toBe(false);
+    expect(providerNeedsKey("kimi")).toBe(true);
+    expect(LLM_PROVIDER_IDS).toContain("kimi");
+    expect(LLM_PROVIDER_IDS.some((provider) => provider.includes("kimi") && provider !== "kimi")).toBe(
+      false,
+    );
   });
 
   test("builds a stable Drive link", () => {

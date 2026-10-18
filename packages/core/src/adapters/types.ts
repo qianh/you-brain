@@ -15,6 +15,11 @@ export interface CaptureOptions {
   /** Redact credentials before the session is returned. Default true. */
   redact?: boolean;
   redaction?: RedactionOptions;
+  /**
+   * Subscription CLI cwd. Sessions produced there are dropped.
+   * Omitted uses the default `<dataDir>/llm-cli`.
+   */
+  llmCliWorkDir?: string;
 }
 
 export interface ResolvedCaptureOptions {
@@ -48,6 +53,8 @@ export interface AdapterOptions {
   toolCallMaxChars?: number;
   /** Stop reading the session file when the daemon is shutting down. */
   signal?: AbortSignal;
+  /** Subscription CLI cwd. Sessions produced there are dropped. */
+  llmCliWorkDir?: string;
 }
 
 export interface AdapterResult {
@@ -125,6 +132,7 @@ export function adapterOptions(options: CaptureOptions): AdapterOptions {
     includeSubagents: resolved.includeSubagents,
     keepToolCalls: resolved.keepToolCalls,
     toolCallMaxChars: resolved.toolCallMaxChars,
+    ...(options.llmCliWorkDir !== undefined ? { llmCliWorkDir: options.llmCliWorkDir } : {}),
   };
 }
 

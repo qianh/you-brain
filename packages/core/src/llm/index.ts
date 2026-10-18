@@ -13,6 +13,20 @@ export {
   type LlmErrorKind,
 } from "./errors.js";
 export {
+  CLI_PROVIDERS,
+  DEFAULT_CLI_TIMEOUT_MS,
+  cliCommandName,
+  createCliBackend,
+  extractFirstJsonObject,
+  isCliProvider,
+  llmCliWorkDir,
+  locateCliBinary,
+  physicalPath,
+  type CliProvider,
+  type CreateCliBackendOptions,
+  type LocateCliOptions,
+} from "./cli/index.js";
+export {
   createLlmBackend,
   resolveLlmTarget,
   type CreateLlmBackendOptions,
@@ -44,6 +58,13 @@ export {
   type RetryQueueOptions,
 } from "./retry-queue.js";
 export {
+  describeLlmSetupFailure,
+  type LlmSetupWarning,
+} from "./setup-status.js";
+export {
+  CLI_CONNECTION_SCHEMA,
+  looksLikeErrorOutput,
+  runCliConnectionTest,
   runConnectionTest,
   type LlmBackend,
   type LlmBackendDescriptor,

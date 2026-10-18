@@ -1,6 +1,6 @@
 import type { LlmProvider } from "@you-brain/protocol";
 
-export type LlmApiKind = "openai-compatible" | "anthropic";
+export type LlmApiKind = "openai-compatible" | "anthropic" | "cli";
 
 /**
  * json_schema is only used where the vendor documents strict structured
@@ -106,6 +106,51 @@ export const LLM_PRESETS = {
     baseUrl: "",
     defaultModel: "",
     requiresApiKey: true,
+    jsonMode: "json_object",
+  },
+  "grok-cli": {
+    provider: "grok-cli",
+    label: "Grok（本机订阅）",
+    kind: "cli",
+    baseUrl: "",
+    defaultModel: "",
+    requiresApiKey: false,
+    jsonMode: "json_schema",
+  },
+  "claude-cli": {
+    provider: "claude-cli",
+    label: "Claude Code（本机订阅）",
+    kind: "cli",
+    baseUrl: "",
+    defaultModel: "",
+    requiresApiKey: false,
+    jsonMode: "json_schema",
+  },
+  "codex-cli": {
+    provider: "codex-cli",
+    label: "Codex（本机订阅）",
+    kind: "cli",
+    baseUrl: "",
+    defaultModel: "",
+    requiresApiKey: false,
+    jsonMode: "json_schema",
+  },
+  "gemini-cli": {
+    provider: "gemini-cli",
+    label: "Gemini CLI（本机订阅）",
+    kind: "cli",
+    baseUrl: "",
+    defaultModel: "",
+    requiresApiKey: false,
+    jsonMode: "json_object",
+  },
+  "opencode-cli": {
+    provider: "opencode-cli",
+    label: "OpenCode（本机订阅）",
+    kind: "cli",
+    baseUrl: "",
+    defaultModel: "",
+    requiresApiKey: false,
     jsonMode: "json_object",
   },
 } as const satisfies Record<LlmProvider, LlmPreset>;

@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 
 import { applyCaptureRedaction } from "../capture/redact.js";
 import { NormalizedSessionSchema, type Turn } from "../domain/session.js";
+import { isDedicatedCwd, llmCliWorkDir } from "../llm/cli/workdir.js";
 import { rememberContinuation, resolveContinuation } from "./continuation.js";
 import {
   formatToolCall,
@@ -36,6 +37,9 @@ export async function parseCodexSession(
   const isSubagent = asRecord(metaPayload?.source)?.subagent !== undefined;
   if (isSubagent && !options.includeSubagents) {
     return { session: null, skippedSubagent: true, malformedLines };
+  }
+  if (isDedicatedCwd(asString(metaPayload?.cwd), options.llmCliWorkDir ?? llmCliWorkDir())) {
+    return { session: null, skippedSubagent: false, malformedLines };
   }
 
   const turns: Turn[] = [];

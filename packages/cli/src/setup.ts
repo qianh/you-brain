@@ -36,7 +36,13 @@ import {
 } from "@you-brain/core/clients";
 import { openGoogleDrive, type OpenGoogleDriveOptions } from "@you-brain/core/daemon";
 import type { DrivePort } from "@you-brain/core/drive";
-import { createLlmBackend } from "@you-brain/core/llm";
+import {
+  createLlmBackend,
+  LLM_PRESETS,
+  cliCommandName,
+  isCliProvider,
+  locateCliBinary,
+} from "@you-brain/core/llm";
 import {
   applyBrainHubDefaults,
   applyBrainHubMigration,
@@ -387,6 +393,34 @@ async function configureGoogle(
   return next;
 }
 
+const API_PROVIDERS = [
+  "deepseek",
+  "glm",
+  "qwen",
+  "kimi",
+  "openai",
+  "claude",
+  "ollama",
+  "custom",
+] as const;
+
+const CLI_PROVIDER_IDS = [
+  "grok-cli",
+  "claude-cli",
+  "codex-cli",
+  "gemini-cli",
+  "opencode-cli",
+] as const;
+
+function providerQuestion(current: string): string {
+  return [
+    "模型 Provider",
+    `  API：${API_PROVIDERS.join(" / ")}`,
+    `  本机订阅：${CLI_PROVIDER_IDS.join(" / ")}`,
+    `[${current}]：`,
+  ].join("\n");
+}
+
 async function configureModel(
   flags: SetupFlags,
   shared: SharedConfig,
@@ -395,19 +429,39 @@ async function configureModel(
   let provider = flags.provider ?? (flags.yes ? shared.llm.provider : "");
   if (!provider) {
     requireTty("模型 Provider", io);
-    provider = await io.ask(`模型 Provider（${LLM_PROVIDERS.join(" / ")}）[${shared.llm.provider}]：`, shared.llm.provider);
+    provider = await io.ask(providerQuestion(shared.llm.provider), shared.llm.provider);
   }
   if (!isProvider(provider)) {
     throw new CliError(`未知 Provider：${provider}`);
   }
+  const preset = LLM_PRESETS[provider];
+  if (preset.kind === "cli") {
+    if (!isCliProvider(provider)) throw new CliError(`未知 Provider：${provider}`);
+    const bin = locateCliBinary({ provider, env: io.env, homeDir: io.homeDir });
+    if (!bin) {
+      throw new CliError(`未找到 ${cliCommandName(provider)} 命令行，请先安装并登录`);
+    }
+  }
   let model = flags.model ?? (flags.yes ? shared.llm.model : "");
   if (!flags.model && !flags.yes) {
     requireTty("模型名", io);
-    model = await io.ask(`模型名 [${shared.llm.model || "默认"}]：`, shared.llm.model);
+    model =
+      preset.kind === "cli"
+        ? await io.ask(
+            `模型名（留空用 ${cliCommandName(provider)} 自己的默认模型）[${shared.llm.model}]：`,
+            shared.llm.model,
+          )
+        : await io.ask(`模型名 [${shared.llm.model || "默认"}]：`, shared.llm.model);
   }
-  const baseUrl = flags.baseUrl ?? (flags.yes ? shared.llm.baseUrl : shared.llm.baseUrl);
+  const flaggedBase = flags.baseUrl?.trim() ?? "";
+  let baseUrl = flaggedBase !== "" ? flaggedBase : shared.llm.baseUrl;
+  if (provider === "custom" && flaggedBase === "" && shared.llm.baseUrl.trim() === "" && !flags.yes) {
+    requireTty("Base URL", io);
+    baseUrl = await io.ask("Base URL（OpenAI 兼容，如 https://api.x.ai/v1）：", "");
+    if (baseUrl.trim() === "") throw new CliError("需要 Base URL");
+  }
   let apiKey = flags.apiKey ?? "";
-  if (!flags.apiKey && !flags.yes && provider !== "ollama") {
+  if (!flags.apiKey && !flags.yes && preset.requiresApiKey) {
     requireTty("API Key", io);
     apiKey = await io.ask("API Key（存入钥匙串）：", "");
     if (!apiKey) throw new CliError("需要 API Key 才能测试模型连接");
@@ -421,10 +475,13 @@ async function configureModel(
     },
   });
   if (apiKey) await setLlmApiKey(provider, apiKey, { platform: io.platform });
-  if (apiKey || provider === "ollama") {
+  if (apiKey || !preset.requiresApiKey) {
     const backend = await createLlmBackend({
       config: next.llm,
       getApiKey: async () => (apiKey === "" ? null : apiKey),
+      dataDir: io.paths.dataDir,
+      env: io.env,
+      homeDir: io.homeDir,
     });
     await backend.test();
     io.log("模型连接成功");

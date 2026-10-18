@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { applyCaptureRedaction } from "../capture/redact.js";
 import { NormalizedSessionSchema, type Turn } from "../domain/session.js";
+import { claudeProjectKey, isDedicatedCapturePath, llmCliWorkDir } from "../llm/cli/workdir.js";
 import {
   mergeToolText,
   timestampBounds,
@@ -27,6 +28,10 @@ export async function parseClaudeSession(
   path: string,
   options: AdapterOptions,
 ): Promise<AdapterResult> {
+  const workDir = options.llmCliWorkDir ?? llmCliWorkDir();
+  if (isDedicatedCapturePath(path, workDir, claudeProjectKey)) {
+    return { session: null, skippedSubagent: false, malformedLines: 0 };
+  }
   const [{ records, malformedLines }, fileStat] = await Promise.all([
     readJsonLines(path, options.signal),
     stat(path),

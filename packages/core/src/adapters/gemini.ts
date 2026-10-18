@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 
 import { applyCaptureRedaction } from "../capture/redact.js";
 import { NormalizedSessionSchema, type Turn } from "../domain/session.js";
+import { geminiProjectHash, isDedicatedCapturePath, llmCliWorkDir } from "../llm/cli/workdir.js";
 import { resolveContinuation } from "./continuation.js";
 import {
   mergeToolText,
@@ -64,6 +65,10 @@ export async function parseGeminiSession(
   path: string,
   options: AdapterOptions,
 ): Promise<AdapterResult> {
+  const workDir = options.llmCliWorkDir ?? llmCliWorkDir();
+  if (isDedicatedCapturePath(path, workDir, geminiProjectHash)) {
+    return { session: null, skippedSubagent: false, malformedLines: 0 };
+  }
   const [text, fileStat] = await Promise.all([
     options.signal
       ? readFile(path, { encoding: "utf8", signal: options.signal })

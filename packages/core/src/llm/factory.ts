@@ -1,6 +1,7 @@
 import type { LlmProvider, SharedConfig } from "@you-brain/protocol";
 
 import { createAnthropicBackend } from "./anthropic.js";
+import { createCliBackend } from "./cli/backend.js";
 import { LlmRequestError } from "./errors.js";
 import { createOpenAiCompatibleBackend } from "./openai-compatible.js";
 import { LLM_PRESETS, llmKeychainAccount, type LlmPreset } from "./presets.js";
@@ -17,6 +18,14 @@ export interface CreateLlmBackendOptions {
   getApiKey: GetApiKey;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  /** Data directory used to place the subscription CLI cwd at `<dataDir>/llm-cli`. */
+  dataDir?: string;
+  /** Lookup and child environment. PATH is not taken from `process.env` when this is set. */
+  env?: NodeJS.ProcessEnv;
+  homeDir?: string;
+  /** Test injection. Authoritative executable path for a CLI provider. */
+  cliBin?: string;
+  signal?: AbortSignal;
 }
 
 export interface ResolvedLlmTarget {
@@ -27,6 +36,13 @@ export interface ResolvedLlmTarget {
 
 export function resolveLlmTarget(config: LlmSelection): ResolvedLlmTarget {
   const preset = LLM_PRESETS[config.provider];
+  if (preset.kind === "cli") {
+    return {
+      preset,
+      model: config.model.trim(),
+      baseUrl: config.baseUrl.trim().replace(/\/+$/u, ""),
+    };
+  }
   const model = config.model.trim() || preset.defaultModel;
   const baseUrl = (config.baseUrl.trim() || preset.baseUrl).replace(/\/+$/u, "");
   if (model === "") {
@@ -54,6 +70,18 @@ export async function createLlmBackend(
   options: CreateLlmBackendOptions,
 ): Promise<LlmBackend> {
   const target = resolveLlmTarget(options.config);
+  if (target.preset.kind === "cli") {
+    return createCliBackend({
+      provider: target.preset.provider,
+      model: target.model,
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      ...(options.dataDir === undefined ? {} : { dataDir: options.dataDir }),
+      ...(options.env === undefined ? {} : { env: options.env }),
+      ...(options.homeDir === undefined ? {} : { homeDir: options.homeDir }),
+      ...(options.cliBin === undefined ? {} : { cliBin: options.cliBin }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+  }
   const shared = {
     ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),

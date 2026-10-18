@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import {
+  createDefaultSharedConfig,
   parseRoles,
   parseSharedConfig,
   type Roles,
@@ -33,11 +34,22 @@ export function readRolesFile(path: string, fallback: Roles): Promise<Roles> {
   return readJsonFile(path, (value) => parseRoles(value), fallback);
 }
 
+function sameLlm(left: SharedConfig["llm"], right: SharedConfig["llm"]): boolean {
+  return left.provider === right.provider && left.model === right.model && left.baseUrl === right.baseUrl;
+}
+
 /**
- * A local setup may already name a model while Drive still has the empty
- * default. Keep the local model until the remote file actually sets one.
+ * Drive may still hold the factory default while this machine already chose a
+ * provider. CLI providers leave the model blank on purpose, so an empty model
+ * string is not "unconfigured". Keep the local provider until the remote file
+ * actually names one. A remote file that names no model still yields to a
+ * local model string.
  */
 export function preferLocalLlm(remote: SharedConfig, local: SharedConfig): SharedConfig {
+  const fallback = createDefaultSharedConfig().llm;
+  if (sameLlm(remote.llm, fallback) && !sameLlm(local.llm, fallback)) {
+    return { ...remote, llm: { ...local.llm } };
+  }
   if (remote.llm.model.trim() === "" && local.llm.model.trim() !== "") {
     return { ...remote, llm: { ...local.llm } };
   }

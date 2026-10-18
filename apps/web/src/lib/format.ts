@@ -1,3 +1,5 @@
+import { LLM_PROVIDERS } from "@you-brain/protocol";
+
 export type Language = "zh" | "en";
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -90,21 +92,12 @@ export function weekdayName(day: number, language: Language): string {
   return table[day] ?? String(day);
 }
 
-export const LLM_PROVIDER_IDS = [
-  "deepseek",
-  "glm",
-  "qwen",
-  "kimi",
-  "openai",
-  "claude",
-  "ollama",
-  "custom",
-] as const;
+export const LLM_PROVIDER_IDS = LLM_PROVIDERS;
 
-export type LlmProviderId = (typeof LLM_PROVIDER_IDS)[number];
+export type LlmProviderId = (typeof LLM_PROVIDERS)[number];
 
 export function providerNeedsKey(provider: string): boolean {
-  return provider !== "ollama";
+  return provider !== "ollama" && !provider.endsWith("-cli");
 }
 
 export function providerLabel(provider: string, language: Language): string {
@@ -116,5 +109,16 @@ export function providerLabel(provider: string, language: Language): string {
   if (provider === "qwen") return "Qwen";
   if (provider === "kimi") return "Kimi";
   if (provider === "ollama") return "Ollama";
+  if (provider === "grok-cli") return language === "zh" ? "Grok（本机订阅）" : "Grok (local subscription)";
+  if (provider === "claude-cli") {
+    return language === "zh" ? "Claude Code（本机订阅）" : "Claude Code (local subscription)";
+  }
+  if (provider === "codex-cli") return language === "zh" ? "Codex（本机订阅）" : "Codex (local subscription)";
+  if (provider === "gemini-cli") {
+    return language === "zh" ? "Gemini CLI（本机订阅）" : "Gemini CLI (local subscription)";
+  }
+  if (provider === "opencode-cli") {
+    return language === "zh" ? "OpenCode（本机订阅）" : "OpenCode (local subscription)";
+  }
   return provider;
 }

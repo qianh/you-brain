@@ -94,6 +94,38 @@ describe("llm factory", () => {
     }
   });
 
+  it("accepts an empty model and base URL for a subscription CLI", () => {
+    expect(resolveLlmTarget({ provider: "grok-cli", model: "", baseUrl: "" })).toMatchObject({
+      model: "",
+      baseUrl: "",
+      preset: { kind: "cli", requiresApiKey: false, label: "Grok（本机订阅）" },
+    });
+    expect(resolveLlmTarget({ provider: "opencode-cli", model: "  ", baseUrl: "" }).model).toBe("");
+  });
+
+  it("does not read an API key for a CLI provider and fails when the binary is missing", async () => {
+    const calls: string[] = [];
+    const error = await createLlmBackend({
+      config: { provider: "grok-cli", model: "", baseUrl: "" },
+      getApiKey: (provider) => {
+        calls.push(provider);
+        return "sk-should-not-be-read";
+      },
+      env: { PATH: "" },
+      homeDir: "/tmp/you-brain-cli-missing-home",
+    }).then(
+      () => {
+        throw new Error("expected failure");
+      },
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(LlmRequestError);
+    expect((error as LlmRequestError).kind).toBe("client");
+    expect((error as LlmRequestError).retryable).toBe(false);
+    expect((error as LlmRequestError).message).toContain("未找到 grok 命令行，请先安装并登录");
+    expect(calls).toEqual([]);
+  });
+
   it("fails closed when the keychain has no key", async () => {
     const error = await createLlmBackend({
       config: { provider: "qwen", model: "", baseUrl: "" },

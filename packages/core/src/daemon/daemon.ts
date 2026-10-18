@@ -52,7 +52,15 @@ import type {
   UploadActionResult,
   ZoneSettings,
 } from "../http/types.js";
-import { createLlmBackend, LlmRetryQueue, type LlmBackend } from "../llm/index.js";
+import {
+  createLlmBackend,
+  describeLlmSetupFailure,
+  isCliProvider,
+  LlmRequestError,
+  LlmRetryQueue,
+  type LlmBackend,
+  type LlmSetupWarning,
+} from "../llm/index.js";
 import { OutputService } from "../output/service.js";
 import { installVendorResolver, usesVendorModules } from "../native/resolver.js";
 import { CodingInjection } from "../portrait/injection.js";
@@ -235,6 +243,7 @@ export class YouBrainDaemon {
   #coding: CodingInjection | null = null;
   #output: OutputService | null = null;
   #llm: LlmBackend | null = null;
+  #llmWarning: LlmSetupWarning | null = null;
   #llmOverride: LlmBackend | null | undefined;
   #retry: LlmRetryQueue<string>;
   #http: DaemonHttpServer | null = null;
@@ -900,11 +909,17 @@ export class YouBrainDaemon {
 
   async #createLlm(): Promise<LlmBackend | null> {
     try {
-      return await createLlmBackend({
+      const backend = await createLlmBackend({
         config: this.#shared.llm,
         getApiKey: (provider) => getLlmApiKey(provider, { platform: this.#platform }),
+        dataDir: this.#paths.dataDir,
+        env: this.#env,
+        homeDir: this.#homeDir,
       });
-    } catch {
+      this.#llmWarning = null;
+      return backend;
+    } catch (error) {
+      this.#llmWarning = describeLlmSetupFailure(this.#shared.llm.provider, error);
       return null;
     }
   }
@@ -1031,10 +1046,24 @@ export class YouBrainDaemon {
       });
     }
     if (!this.#llm) {
-      warnings.push({
-        code: "LLM_NOT_CONFIGURED",
-        message: "未配置模型，已上传会话但跳过提炼",
-      });
+      warnings.push(
+        this.#llmWarning ?? {
+          code: "LLM_NOT_CONFIGURED",
+          message: "未配置模型，已上传会话但跳过提炼",
+        },
+      );
+    } else if (isCliProvider(this.#shared.llm.provider)) {
+      const denied = this.#retry
+        .pending()
+        .find((job) => job.kind === "auth" || job.reason.includes("未登录"));
+      if (denied) {
+        warnings.push(
+          describeLlmSetupFailure(
+            this.#shared.llm.provider,
+            new LlmRequestError("auth", denied.reason),
+          ),
+        );
+      }
     }
     let search = { ready: false, documents: 0 };
     if (this.#search) {

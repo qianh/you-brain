@@ -102,7 +102,7 @@ export function SettingsPage() {
             replaceRoles(savedRoles);
             setDraft(structuredClone(savedConfig));
             setRolesDraft(structuredClone(savedRoles));
-            if (secret) {
+            if (secret && !savedConfig.llm.provider.endsWith("-cli")) {
               await client.putLlmKey(savedConfig.llm.provider, secret);
               setApiKey("");
             }
@@ -390,11 +390,20 @@ export function SettingsPage() {
               })
             }
           >
-            {LLM_PROVIDER_IDS.map((provider) => (
-              <option key={provider} value={provider}>
-                {providerLabel(provider, language)}
-              </option>
-            ))}
+            <optgroup label="API">
+              {LLM_PROVIDER_IDS.filter((provider) => !provider.endsWith("-cli")).map((provider) => (
+                <option key={provider} value={provider}>
+                  {providerLabel(provider, language)}
+                </option>
+              ))}
+            </optgroup>
+            <optgroup label={language === "zh" ? "本机订阅" : "Local subscription"}>
+              {LLM_PROVIDER_IDS.filter((provider) => provider.endsWith("-cli")).map((provider) => (
+                <option key={provider} value={provider}>
+                  {providerLabel(provider, language)}
+                </option>
+              ))}
+            </optgroup>
           </select>
         </label>
         <label className="field">
@@ -406,32 +415,43 @@ export function SettingsPage() {
               setConfig({ ...draft, llm: { ...draft.llm, model: event.target.value } })
             }
           />
+          {draft.llm.provider.endsWith("-cli") ? (
+            <small>
+              {language === "zh"
+                ? "留空则使用该命令行自己的默认模型"
+                : "Leave blank to use the CLI default model"}
+            </small>
+          ) : null}
         </label>
-        <label className="field">
-          <span>{t("baseUrl")}</span>
-          <input
-            value={draft.llm.baseUrl}
-            spellCheck={false}
-            placeholder="https://"
-            onChange={(event) =>
-              setConfig({ ...draft, llm: { ...draft.llm, baseUrl: event.target.value } })
-            }
-          />
-          <small>{t("baseUrlHint")}</small>
-        </label>
-        <label className="field">
-          <span>{t("apiKey")}</span>
-          <input
-            type="password"
-            value={apiKey}
-            autoComplete="new-password"
-            spellCheck={false}
-            onChange={(event) => setApiKey(event.target.value)}
-          />
-          <small>
-            {providerNeedsKey(draft.llm.provider) ? t("apiKeyHint") : t("leaveBlank")} {t("secretHint")}
-          </small>
-        </label>
+        {draft.llm.provider.endsWith("-cli") ? null : (
+          <>
+            <label className="field">
+              <span>{t("baseUrl")}</span>
+              <input
+                value={draft.llm.baseUrl}
+                spellCheck={false}
+                placeholder="https://"
+                onChange={(event) =>
+                  setConfig({ ...draft, llm: { ...draft.llm, baseUrl: event.target.value } })
+                }
+              />
+              <small>{t("baseUrlHint")}</small>
+            </label>
+            <label className="field">
+              <span>{t("apiKey")}</span>
+              <input
+                type="password"
+                value={apiKey}
+                autoComplete="new-password"
+                spellCheck={false}
+                onChange={(event) => setApiKey(event.target.value)}
+              />
+              <small>
+                {providerNeedsKey(draft.llm.provider) ? t("apiKeyHint") : t("leaveBlank")} {t("secretHint")}
+              </small>
+            </label>
+          </>
+        )}
         <button
           type="button"
           className="btn"

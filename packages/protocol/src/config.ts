@@ -26,6 +26,11 @@ export const LLM_PROVIDERS = [
   "claude",
   "ollama",
   "custom",
+  "grok-cli",
+  "claude-cli",
+  "codex-cli",
+  "gemini-cli",
+  "opencode-cli",
 ] as const;
 
 export const LlmProviderSchema = z.enum(LLM_PROVIDERS);

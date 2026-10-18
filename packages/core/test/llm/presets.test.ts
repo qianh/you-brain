@@ -48,6 +48,21 @@ describe("llm presets", () => {
       requiresApiKey: true,
       jsonMode: "json_object",
     });
+    expect(LLM_PRESETS["grok-cli"]).toMatchObject({
+      label: "Grok（本机订阅）",
+      kind: "cli",
+      baseUrl: "",
+      defaultModel: "",
+      requiresApiKey: false,
+      jsonMode: "json_schema",
+    });
+    expect(LLM_PRESETS["claude-cli"].label).toBe("Claude Code（本机订阅）");
+    expect(LLM_PRESETS["codex-cli"].label).toBe("Codex（本机订阅）");
+    expect(LLM_PRESETS["gemini-cli"].label).toBe("Gemini CLI（本机订阅）");
+    expect(LLM_PRESETS["opencode-cli"].label).toBe("OpenCode（本机订阅）");
+    for (const preset of Object.values(LLM_PRESETS)) {
+      if (preset.kind === "cli") expect(preset.defaultModel).toBe("");
+    }
   });
 
   it("names keychain accounts you-brain/llm/<provider>", () => {

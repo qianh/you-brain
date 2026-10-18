@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 
 import { applyCaptureRedaction } from "../capture/redact.js";
 import { NormalizedSessionSchema, type Turn } from "../domain/session.js";
+import { isDedicatedCapturePath, llmCliWorkDir } from "../llm/cli/workdir.js";
 import { rememberContinuation, resolveContinuation } from "./continuation.js";
 import {
   mergeToolText,
@@ -30,6 +31,11 @@ export async function parseGrokSession(
   const sessionDir = directory.endsWith("chat_history.jsonl")
     ? dirname(directory)
     : directory;
+  if (
+    isDedicatedCapturePath(sessionDir, options.llmCliWorkDir ?? llmCliWorkDir(), encodeURIComponent)
+  ) {
+    return { session: null, skippedSubagent: false, malformedLines: 0 };
+  }
   const historyPath = join(sessionDir, "chat_history.jsonl");
   const [{ records, malformedLines }, summaryText, fileStat] =
     await Promise.all([
