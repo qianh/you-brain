@@ -28,3 +28,7 @@
 - 来源 id：`claude-code | codex | grok-build | cursor | gemini-cli`。事件 sessionKey 为 64 位小写 hex（conversationKey）。只有事件信封 id 是 ULID。
 - LLM provider 枚举：`deepseek | glm | qwen | kimi | openai | claude | ollama | custom`；钥匙串键 `you-brain/llm/<provider>`。
 - 多人并行：`bunx tsc --noEmit -p packages/core` 可能出现别人模块的错误，只需保证你负责的文件无错误。
+
+## 第一波已完成模块（只读引用，先读代码再用）
+core/src 下已完成：adapters、capture（含 redact）、drive（DrivePort、memory-drive、google-drive、upsertByPath、updateJsonWithMerge、changes 游标）、upload（原地更新）、store（SqliteStore，表见 schema.ts）、topics（纯函数事件合并 fold、zones 活跃/历史派生、persist）、llm（后端与工厂、重试队列）、refine（增量提炼 → 事件）、auth（OAuth、钥匙串 secret-store）、clients（客户端检测、MCP 注册、托管段落注入）、migrate（BrainHub 接管）、search（SearchService，与 store 共用同一个 sqlite 文件，cursors 表为 key/value/updated_at）。
+如需修改这些已完成模块，不要改，写进"需要主控处理的事项"。
