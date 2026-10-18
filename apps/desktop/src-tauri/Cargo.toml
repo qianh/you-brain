@@ -1,0 +1,45 @@
+[package]
+name = "you-brain-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "you-brain menu bar shell"
+publish = false
+
+[lib]
+name = "you_brain_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "you-brain-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+# Tauri 2.12+ needs rustc 1.90. This workspace's toolchain is 1.88, so stay on 2.11.
+tauri-build = { version = "=2.6.3", features = [] }
+serde_json = "1"
+
+[dependencies]
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2"
+tauri = { version = "=2.11.6", features = ["tray-icon", "image-png"] }
+tauri-plugin-autostart = "=2.5.1"
+tauri-plugin-global-shortcut = "=2.3.2"
+tauri-plugin-notification = "=2.4.0"
+tauri-plugin-single-instance = "=2.4.5"
+ureq = { version = "2", default-features = false, features = ["tls", "native-tls"] }
+# Tauri 2.12 pulls rustc 1.90. These exact pins keep `cargo check` on the 2.11 line.
+notify-rust = "=4.17.0"
+tauri-codegen = "=2.6.3"
+tauri-macros = "=2.6.3"
+tauri-plugin = "=2.6.3"
+tauri-runtime = "=2.11.3"
+tauri-runtime-wry = "=2.11.4"
+tauri-utils = "=2.9.3"
+uuid = "=1.26.1"
+
+[features]
+default = []
+# Present so release bundling can opt into treating a missing sidecar as a hard error.
+require-sidecar = []

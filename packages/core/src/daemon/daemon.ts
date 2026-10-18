@@ -1,0 +1,1238 @@
+import { createHash } from "node:crypto";
+import { watch, type FSWatcher } from "node:fs";
+import { access } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+import { Database } from "bun:sqlite";
+import {
+  DRIVE_PATHS,
+  DEFAULT_UPLOAD_ACTIVE_INTERVAL_MINUTES,
+  PROTOCOL_VERSION,
+  conversationKey,
+  createDefaultRoles,
+  createDefaultSharedConfig,
+  type Event,
+  type EventOf,
+  type EventType,
+  type Roles,
+  type SharedConfig,
+} from "@you-brain/protocol";
+
+import { discoverSessions, getAdapter } from "../adapters/index.js";
+import { getLlmApiKey } from "../auth/index.js";
+import { applyCaptureRedaction } from "../capture/redact.js";
+import { renderSessionMarkdown } from "../capture/normalize.js";
+import {
+  SESSION_SOURCES,
+  YouBrainError,
+  assertSupportedPlatform,
+  loadLocalConfig,
+  type LocalConfig,
+  type NormalizedSession,
+  type SessionSource,
+  type YouBrainPaths,
+} from "../domain/index.js";
+import type { DriveEntry, DrivePort } from "../drive/drive-port.js";
+import { ChangeHub } from "../http/hub.js";
+import {
+  listPortraitSnapshots,
+  readPortraitFile,
+} from "../http/portrait-files.js";
+import { createStoreReaders } from "../http/queries.js";
+import { startDaemonHttp, type DaemonHttpServer } from "../http/server.js";
+import type {
+  HttpDeps,
+} from "../http/deps.js";
+import type {
+  SearchRequest,
+  StatusResponse,
+  SyncActionResult,
+  UploadActionInput,
+  UploadActionResult,
+  ZoneSettings,
+} from "../http/types.js";
+import { createLlmBackend, LlmRetryQueue, type LlmBackend } from "../llm/index.js";
+import { OutputService } from "../output/service.js";
+import { PortraitService } from "../portrait/service.js";
+import {
+  createRefineEventFactory,
+  defaultRefineIds,
+  refineSession,
+} from "../refine/index.js";
+import type { CandidateTopic, OpenTodo, PreviousRefine } from "../refine/types.js";
+import {
+  E5_SMALL,
+  ProcessEmbedder,
+  SearchService,
+  embedWorkerCommand,
+  type Embedder,
+  type SearchDrive,
+} from "../search/index.js";
+import { SqliteStore } from "../store/sqlite-store.js";
+import { EventLog } from "../sync/event-log.js";
+import { ProtocolSync } from "../sync/service.js";
+import type { DeviceIdentity } from "../sync/types.js";
+import { applyEvents, foldEvents, partitionTopics, persistTopicBook } from "../topics/index.js";
+import {
+  decideUpload,
+  emptySchedule,
+  noteActivity,
+  noteUpload,
+  type ScheduleState,
+} from "../upload/schedule.js";
+import { UploadService } from "../upload/upload-service.js";
+import type { UploadIndex } from "../upload/types.js";
+import {
+  type DaemonClock,
+  systemDaemonClock,
+} from "./clock.js";
+import { allocateCopied, appendCopied } from "./events.js";
+import { openGoogleDrive } from "./google.js";
+import { acquireDaemonLock } from "./lock.js";
+import {
+  preferLocalLlm,
+  readRolesFile,
+  readSharedFile,
+  writeJsonFile,
+} from "./local-state.js";
+import { INTERVALS, intervalDue, pullInterval } from "./schedule.js";
+import type { SecretStore } from "../auth/index.js";
+
+const APP_VERSION = "0.1.0";
+const BACKFILL_CURSOR = "capture.backfill";
+
+export interface DaemonOptions {
+  homeDir?: string;
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  hostname?: string;
+  clock?: DaemonClock;
+  /** `undefined` tries Google Drive. `null` stays unauthorized without touching the keychain. */
+  drive?: DrivePort | null;
+  /** `undefined` builds a backend from config. `null` skips refine. */
+  llm?: LlmBackend | null;
+  embedder?: Embedder;
+  sourceRoots?: Partial<Record<SessionSource, string[]>>;
+  staticDir?: string;
+  /** Listen for SIGINT and SIGTERM. Default false so tests can call stop(). */
+  signals?: boolean;
+  secrets?: SecretStore;
+  appVersion?: string;
+  /** Default true. Tests set false so discovery is driven only by scan() and the 10 minute timer. */
+  watch?: boolean;
+  port?: number;
+}
+
+interface LiveSession {
+  session: NormalizedSession;
+  hash: string;
+  schedule: ScheduleState;
+}
+
+class LazyEmbedder implements Embedder {
+  readonly model = E5_SMALL.model;
+  readonly revision = E5_SMALL.revision;
+  readonly dimensions = E5_SMALL.dimensions;
+  #inner: ProcessEmbedder | null = null;
+
+  constructor(private readonly cacheDir: string) {}
+
+  embedQuery(text: string): Promise<number[]> {
+    return this.#load().embedQuery(text);
+  }
+
+  embedPassages(texts: string[]): Promise<number[][]> {
+    return this.#load().embedPassages(texts);
+  }
+
+  close(): Promise<void> {
+    return this.#inner?.close() ?? Promise.resolve();
+  }
+
+  #load(): ProcessEmbedder {
+    this.#inner ??= new ProcessEmbedder({
+      model: this.model,
+      revision: this.revision,
+      dimensions: this.dimensions,
+      cacheDir: this.cacheDir,
+      command: embedWorkerCommand(),
+    });
+    return this.#inner;
+  }
+}
+
+export async function startDaemon(options: DaemonOptions = {}): Promise<YouBrainDaemon> {
+  const daemon = new YouBrainDaemon(options);
+  try {
+    await daemon.start();
+  } catch (error) {
+    await daemon.stop();
+    throw error;
+  }
+  return daemon;
+}
+
+export class YouBrainDaemon {
+  readonly changes = new ChangeHub();
+  readonly closed: Promise<void>;
+  port = 0;
+  token = "";
+  baseUrl = "";
+
+  readonly #options: DaemonOptions;
+  readonly #clock: DaemonClock;
+  readonly #homeDir: string;
+  readonly #platform: "darwin" | "linux";
+  readonly #env: NodeJS.ProcessEnv;
+  readonly #appVersion: string;
+  readonly #watchEnabled: boolean;
+  #local!: LocalConfig;
+  #paths!: YouBrainPaths;
+  #configFile = "";
+  #shared: SharedConfig = createDefaultSharedConfig();
+  #roles: Roles = createDefaultRoles();
+  #zone: ZoneSettings = {
+    timeZone: createDefaultRoles().timezone,
+    activeLimit: createDefaultSharedConfig().topics.activeLimit,
+    historyDays: createDefaultSharedConfig().topics.historyDays,
+  };
+  #store: SqliteStore | null = null;
+  #drive: DrivePort | null = null;
+  #driveReachable = false;
+  #sync: ProtocolSync | null = null;
+  #log: EventLog | null = null;
+  #search: SearchService | null = null;
+  #searchDb: Database | null = null;
+  #embedderClose: (() => Promise<void>) | null = null;
+  #uploader: UploadService | null = null;
+  #portrait: PortraitService | null = null;
+  #output: OutputService | null = null;
+  #llm: LlmBackend | null = null;
+  #llmOverride: LlmBackend | null | undefined;
+  #retry: LlmRetryQueue<string>;
+  #http: DaemonHttpServer | null = null;
+  #lockRelease: (() => Promise<void>) | null = null;
+  #live = new Map<string, LiveSession>();
+  #watchers: FSWatcher[] = [];
+  #watchTimer: ReturnType<typeof setTimeout> | null = null;
+  #timer: { cancel(): void } | null = null;
+  #chain: Promise<void> = Promise.resolve();
+  #stopped = false;
+  #started = false;
+  #stopPromise: Promise<void> | null = null;
+  #resolveClosed: () => void = () => undefined;
+  #onSignal: (() => void) | null = null;
+  #lastFullScan: number | null = null;
+  #lastFlush: number | null = null;
+  #lastHeartbeat: number | null = null;
+  #lastPull: number | null = null;
+  #lastPortrait: number | null = null;
+  #lastSearch: number | null = null;
+  #lastSyncAt: string | null = null;
+  #searchDirty = false;
+  #portraitSoon = false;
+  #scannedOnce = false;
+
+  constructor(options: DaemonOptions) {
+    this.#options = options;
+    this.#clock = options.clock ?? systemDaemonClock();
+    this.#homeDir = options.homeDir ?? homedir();
+    this.#env = options.env ?? process.env;
+    this.#appVersion = options.appVersion ?? APP_VERSION;
+    this.#watchEnabled = options.watch !== false;
+    this.#llmOverride = options.llm;
+    const platform = options.platform ?? process.platform;
+    assertSupportedPlatform(platform);
+    if (platform !== "darwin" && platform !== "linux") {
+      throw new YouBrainError("PLATFORM_UNSUPPORTED", "you-brain supports macOS and Linux");
+    }
+    this.#platform = platform;
+    this.#zone.now = () => this.#clock.now();
+    this.#retry = new LlmRetryQueue<string>({ clock: { now: () => this.#clock.nowMs() } });
+    this.closed = new Promise<void>((resolve) => {
+      this.#resolveClosed = resolve;
+    });
+  }
+
+  async start(): Promise<void> {
+    const loaded = await loadLocalConfig({
+      homeDir: this.#homeDir,
+      platform: this.#platform,
+      env: this.#env,
+      ...(this.#options.hostname ? { hostname: this.#options.hostname } : {}),
+    });
+    this.#local = loaded.config;
+    this.#paths = loaded.paths;
+    this.#configFile = loaded.configFile;
+    const lock = await acquireDaemonLock(this.#paths.lockFile);
+    this.#lockRelease = lock.release;
+    this.#shared = await readSharedFile(
+      join(this.#paths.dataDir, "shared.json"),
+      createDefaultSharedConfig(),
+    );
+    this.#roles = await readRolesFile(
+      join(this.#paths.dataDir, "roles.json"),
+      createDefaultRoles(),
+    );
+    this.#applyZone();
+    this.#store = new SqliteStore(this.#paths.stateFile);
+    await this.#openDrive();
+    this.#log = new EventLog(this.#store, this.#local.deviceId, {
+      now: () => this.#clock.now(),
+    });
+    if (this.#drive) {
+      this.#sync = new ProtocolSync({
+        drive: this.#drive,
+        store: this.#store,
+        device: this.#identity(),
+        listener: {
+          onTopicsChanged: () => {
+            this.#onTopicsChanged();
+          },
+          onInboxChanged: (files) => this.#indexInbox(files),
+          onDigitalTwinChanged: () => {
+            this.#portraitSoon = true;
+          },
+          onConfigChanged: (update) => this.#onConfigChanged(update),
+        },
+        now: () => this.#clock.now(),
+      });
+      this.#uploader = new UploadService({
+        drive: this.#drive,
+        index: this.#uploadIndex(),
+        deviceId: this.#local.deviceId,
+        clock: { now: () => this.#clock.nowMs() },
+      });
+      this.#mountSearch();
+      this.#portrait = new PortraitService({
+        drive: this.#drive,
+        store: this.#store,
+        paths: this.#paths,
+        config: {
+          variants: this.#shared.portrait.variants,
+          snapshotPattern: this.#shared.portrait.snapshotPattern,
+        },
+        driveRoot: this.#local.driveRoot,
+      });
+      try {
+        await this.#sync.register();
+      } catch {
+        this.#driveReachable = false;
+      }
+    }
+    this.#llm =
+      this.#llmOverride !== undefined ? this.#llmOverride : await this.#createLlm();
+    this.#mountOutput();
+    this.#rememberDevice();
+    const http = await startDaemonHttp({
+      dataDir: this.#paths.dataDir,
+      deps: this.#deps(),
+      hub: this.changes,
+      ...(this.#options.port !== undefined ? { port: this.#options.port } : {}),
+      ...(this.#options.staticDir ? { staticDir: this.#options.staticDir } : {}),
+    });
+    this.#http = http;
+    this.port = http.port;
+    this.token = http.token;
+    this.baseUrl = http.baseUrl;
+    const startedAt = this.#clock.nowMs();
+    this.#lastFullScan = startedAt;
+    this.#lastFlush = startedAt;
+    this.#lastHeartbeat = startedAt;
+    this.#lastPull = startedAt;
+    this.#lastPortrait = startedAt;
+    this.#lastSearch = startedAt;
+    this.#started = true;
+    if (this.#options.signals === true) {
+      this.#onSignal = () => {
+        void this.stop();
+      };
+      process.on("SIGINT", this.#onSignal);
+      process.on("SIGTERM", this.#onSignal);
+    }
+    await this.#rewatch();
+    this.#arm();
+    void this.scan();
+  }
+
+  scan(extra?: { includeSubagents?: boolean }): Promise<void> {
+    return this.#run(async () => {
+      await this.#scanBody(extra);
+    });
+  }
+
+  async settled(): Promise<void> {
+    await this.#chain;
+    await this.#output?.whenIdle();
+  }
+
+  stop(): Promise<void> {
+    this.#stopPromise ??= this.#stopBody();
+    return this.#stopPromise;
+  }
+
+  async #stopBody(): Promise<void> {
+    this.#stopped = true;
+    this.#timer?.cancel();
+    this.#timer = null;
+    if (this.#watchTimer) {
+      clearTimeout(this.#watchTimer);
+      this.#watchTimer = null;
+    }
+    if (this.#onSignal) {
+      process.off("SIGINT", this.#onSignal);
+      process.off("SIGTERM", this.#onSignal);
+      this.#onSignal = null;
+    }
+    await this.#run(async () => {
+      for (const watcher of this.#watchers) watcher.close();
+      this.#watchers = [];
+      if (this.#sync) {
+        try {
+          await this.#sync.flush();
+        } catch {
+          // The outbox remains for the next start.
+        }
+      }
+      try {
+        await this.#output?.flush();
+      } catch {
+        // Local markdown is derived and can be rebuilt.
+      }
+      this.#output?.close();
+      this.#output = null;
+      if (this.#embedderClose) {
+        await this.#embedderClose().catch(() => undefined);
+        this.#embedderClose = null;
+      }
+      this.#searchDb?.close();
+      this.#searchDb = null;
+      this.#search = null;
+      this.#store?.close();
+      this.#store = null;
+      await this.#http?.stop();
+      this.#http = null;
+    });
+    if (this.#lockRelease) {
+      await this.#lockRelease().catch(() => undefined);
+      this.#lockRelease = null;
+    }
+    this.#resolveClosed();
+  }
+
+  #arm(): void {
+    if (this.#stopped) return;
+    this.#timer?.cancel();
+    this.#timer = this.#clock.schedule(INTERVALS.tickMs, () => this.#tick());
+  }
+
+  async #tick(): Promise<void> {
+    if (this.#stopped) return;
+    try {
+      await this.#run(async () => {
+        if (this.#stopped) return;
+        await this.#runDue();
+      });
+    } catch {
+      // One bad tick must not stop the loop.
+    }
+    if (!this.#stopped) this.#arm();
+  }
+
+  async #runDue(): Promise<void> {
+    const now = this.#clock.nowMs();
+    if (intervalDue(this.#lastFullScan, now, INTERVALS.fullScanMs)) {
+      await this.#scanBody();
+      this.#lastFullScan = this.#clock.nowMs();
+    }
+    await this.#processDue();
+    if (this.#sync && intervalDue(this.#lastFlush, now, INTERVALS.flushMs)) {
+      try {
+        await this.#sync.flush();
+        this.#driveReachable = true;
+      } catch {
+        this.#driveReachable = false;
+      }
+      this.#lastFlush = this.#clock.nowMs();
+    }
+    if (intervalDue(this.#lastHeartbeat, now, INTERVALS.heartbeatMs)) {
+      await this.#heartbeat();
+      this.#lastHeartbeat = this.#clock.nowMs();
+    }
+    if (
+      this.#sync &&
+      intervalDue(this.#lastPull, now, pullInterval(this.changes.subscriberCount()))
+    ) {
+      try {
+        await this.#sync.pull();
+        this.#lastSyncAt = this.#clock.now().toISOString();
+        this.#driveReachable = true;
+      } catch {
+        this.#driveReachable = false;
+      }
+      this.#lastPull = this.#clock.nowMs();
+    }
+    if (
+      this.#portrait &&
+      (this.#portraitSoon || intervalDue(this.#lastPortrait, now, INTERVALS.portraitMs))
+    ) {
+      try {
+        await this.#portrait.pull();
+      } catch {
+        // A missing twin file is not fatal.
+      }
+      this.#portraitSoon = false;
+      this.#lastPortrait = this.#clock.nowMs();
+    }
+    if (
+      this.#search &&
+      (this.#searchDirty || intervalDue(this.#lastSearch, now, INTERVALS.searchMs))
+    ) {
+      try {
+        await this.#search.sync();
+      } catch {
+        // Keyword search keeps the last successful index.
+      }
+      this.#searchDirty = false;
+      this.#lastSearch = this.#clock.nowMs();
+    }
+  }
+
+  async #processDue(options?: {
+    forceIdle?: boolean;
+    sources?: readonly string[];
+  }): Promise<{ scanned: number; uploaded: number }> {
+    const now = this.#clock.nowMs();
+    const backfill =
+      options?.forceIdle === true || this.#store?.getCursor(BACKFILL_CURSOR) === "pending";
+    const idleMs = backfill ? 0 : this.#shared.refine.idleMinutes * 60_000;
+    const activeIntervalMs = DEFAULT_UPLOAD_ACTIVE_INTERVAL_MINUTES * 60_000;
+    let uploaded = 0;
+    const sessions = [...this.#live.entries()].filter(([, live]) =>
+      options?.sources ? options.sources.includes(live.session.source) : true,
+    );
+    for (const [key, live] of sessions) {
+      const decision = decideUpload(live.schedule, now, { idleMs, activeIntervalMs });
+      if (!decision.due) {
+        if (this.#isIdle(live, now, idleMs)) await this.#retryIfDue(key, live, now);
+        continue;
+      }
+      try {
+        const did = await this.#uploadOne(key, live, decision.reason === "idle");
+        if (did) uploaded += 1;
+      } catch {
+        // Leave the session dirty so the next tick retries the upload.
+      }
+    }
+    if (this.#store?.getCursor(BACKFILL_CURSOR) === "pending" && this.#scannedOnce) {
+      this.#store.setCursor(BACKFILL_CURSOR, "done");
+    }
+    return { scanned: sessions.length, uploaded };
+  }
+
+  async #uploadOne(key: string, live: LiveSession, refine: boolean): Promise<boolean> {
+    if (!this.#uploader) return false;
+    const before = live.hash;
+    const result = await this.#uploader.upload(this.#uploadable(live));
+    this.#rememberUpload(live, result.fileId, result.key);
+    this.#searchDirty = true;
+    const now = this.#clock.nowMs();
+    const current = this.#live.get(key) ?? live;
+    // An active upload refreshes the bytes but leaves the session dirty so the
+    // later idle pass still refines. Only the idle upload clears that debt.
+    if (refine) {
+      current.schedule =
+        current.hash === before
+          ? noteUpload(current.schedule, now)
+          : noteActivity(noteUpload(current.schedule, now), now);
+      await this.#refine(key, current, result.fileId);
+    } else {
+      current.schedule = {
+        lastActivityAt: current.hash === before ? current.schedule.lastActivityAt : now,
+        lastUploadAt: now,
+        dirtySince: current.hash === before ? (current.schedule.dirtySince ?? now) : now,
+      };
+    }
+    return true;
+  }
+
+  async #refine(key: string, live: LiveSession, fileId: string): Promise<void> {
+    if (!this.#llm || !this.#store || fileId.length === 0) return;
+    const stored = this.#store.getSession(key);
+    const refinedUpTo = stored?.refinedUpTo ?? 0;
+    const messages = live.session.turns.slice(refinedUpTo).map((turn) => ({
+      role: turn.role,
+      text: turn.text,
+    }));
+    if (messages.length === 0) {
+      this.#retry.succeed(key);
+      return;
+    }
+    try {
+      const result = await refineSession(
+        this.#llm,
+        {
+          sessionKey: key,
+          fileId,
+          source: live.session.source,
+          refinedUpTo,
+          messages,
+          previous: this.#previous(key, stored),
+          topics: this.#candidateTopics(),
+          openTodos: this.#openTodos(),
+        },
+        {
+          eventFactory: createRefineEventFactory({
+            device: this.#local.deviceId,
+            ts: () => this.#clock.now().toISOString(),
+            startSeq: 1,
+          }),
+          ids: defaultRefineIds(this.#clock.nowMs()),
+        },
+      );
+      if (result.status === "skipped") {
+        if (result.reason === "no_new_messages") this.#retry.succeed(key);
+        else this.#retry.fail(key, key, new Error(result.detail));
+        return;
+      }
+      for (const event of result.events) await this.#emitCopied(event);
+      this.#retry.succeed(key);
+    } catch (error) {
+      this.#retry.fail(key, key, error);
+      this.changes.publish("status", this.#clock.now().toISOString());
+    }
+  }
+
+  async #retryIfDue(key: string, live: LiveSession, now: number): Promise<void> {
+    const job = this.#retry.get(key);
+    if (!job || job.exhausted || job.nextAttemptAt > now || !this.#llm || !this.#store) return;
+    const fileId = this.#store.getSession(key)?.fileId;
+    if (!fileId) return;
+    await this.#refine(key, live, fileId);
+  }
+
+  async #scanBody(extra?: { includeSubagents?: boolean }): Promise<void> {
+    const roots = this.#roots();
+    const sources = SESSION_SOURCES.filter((id) => roots[id].length > 0);
+    if (sources.length === 0) {
+      this.#scannedOnce = true;
+      return;
+    }
+    const discovered = await discoverSessions({
+      device: this.#local.displayName,
+      includeSubagents: extra?.includeSubagents ?? this.#shared.capture.includeSubagents,
+      sources,
+      paths: {
+        claude: roots["claude-code"],
+        codex: roots.codex,
+        grok: roots["grok-build"],
+        cursor: roots.cursor,
+        gemini: roots["gemini-cli"],
+      },
+    });
+    const seen = new Set<string>();
+    const now = this.#clock.nowMs();
+    for (const session of discovered.sessions) {
+      const key = conversationKey(session.source, session.conversationId);
+      seen.add(key);
+      const hash = sessionHash(session);
+      const previous = this.#live.get(key);
+      if (previous && previous.hash === hash) {
+        previous.session = session;
+        continue;
+      }
+      this.#live.set(key, {
+        session,
+        hash,
+        schedule: noteActivity(previous?.schedule ?? emptySchedule(), now),
+      });
+    }
+    for (const key of this.#live.keys()) {
+      if (!seen.has(key)) this.#live.delete(key);
+    }
+    this.#scannedOnce = true;
+  }
+
+  async #indexInbox(files: readonly DriveEntry[]): Promise<void> {
+    if (!this.#drive || !this.#store) return;
+    for (const file of files) {
+      if (!file.path.startsWith("inbox/") || !file.path.endsWith(".md")) continue;
+      try {
+        const object = await this.#drive.read(file.id);
+        const fields = frontmatter(object.bytes.toString("utf8"));
+        const source = fields.get("source");
+        const conversationId = fields.get("conversation_id");
+        const startedAt = fields.get("started_at");
+        const updatedAt = fields.get("updated_at");
+        if (!source || !conversationId || !startedAt || !updatedAt) continue;
+        const turnCount = Number(fields.get("turn_count") ?? "0");
+        this.#store.upsertSession({
+          sessionKey: conversationKey(source, conversationId),
+          source,
+          device: fields.get("device") || this.#local.displayName,
+          startedAt,
+          updatedAt,
+          fileId: file.id,
+          msgCount: Number.isInteger(turnCount) && turnCount >= 0 ? turnCount : 0,
+        });
+      } catch {
+        // Skip a malformed inbox file and keep pulling.
+      }
+    }
+    this.#output?.schedule();
+    this.changes.publish("today", this.#clock.now().toISOString());
+  }
+
+  async #emitCopied(event: Event): Promise<void> {
+    if (this.#sync) {
+      await appendCopied(this.#sync, event);
+      return;
+    }
+    if (!this.#log || !this.#store) return;
+    const allocated = allocateCopied(this.#log, event);
+    persistTopicBook(this.#store, applyEvents(foldEvents(this.#store.listEvents()), [allocated]));
+    this.#onTopicsChanged();
+  }
+
+  async #emitUser<T extends EventType>(type: T, data: EventOf<T>["data"]): Promise<void> {
+    if (this.#sync) {
+      await this.#sync.append(type, data);
+      return;
+    }
+    if (!this.#log || !this.#store) return;
+    const event = this.#log.allocate(type, data);
+    persistTopicBook(this.#store, applyEvents(foldEvents(this.#store.listEvents()), [event]));
+    this.#onTopicsChanged();
+  }
+
+  #onTopicsChanged(): void {
+    this.#output?.schedule();
+    const at = this.#clock.now().toISOString();
+    this.changes.publish("topics", at);
+    this.changes.publish("today", at);
+  }
+
+  async #onConfigChanged(update: {
+    shared?: SharedConfig;
+    roles?: Roles;
+  }): Promise<void> {
+    if (update.shared) {
+      this.#shared = preferLocalLlm(update.shared, this.#shared);
+      await writeJsonFile(join(this.#paths.dataDir, "shared.json"), this.#shared);
+      this.#applyZone();
+      this.#mountOutput();
+      this.#portrait?.setConfig({
+        variants: this.#shared.portrait.variants,
+        snapshotPattern: this.#shared.portrait.snapshotPattern,
+      });
+      if (this.#llmOverride === undefined) this.#llm = await this.#createLlm();
+      await this.#rewatch();
+    }
+    if (update.roles) {
+      this.#roles = update.roles;
+      await writeJsonFile(join(this.#paths.dataDir, "roles.json"), this.#roles);
+      this.#applyZone();
+      this.#mountOutput();
+    }
+    this.changes.publish("status", this.#clock.now().toISOString());
+  }
+
+  async #heartbeat(): Promise<void> {
+    this.#rememberDevice();
+    if (!this.#sync) return;
+    try {
+      await this.#sync.heartbeat({ active: true });
+      this.#driveReachable = true;
+    } catch {
+      this.#driveReachable = false;
+    }
+  }
+
+  #rememberDevice(): void {
+    if (!this.#store) return;
+    const now = this.#clock.now().toISOString();
+    this.#store.upsertDevice({
+      deviceId: this.#local.deviceId,
+      displayName: this.#local.displayName,
+      kind: "desktop",
+      platform: this.#platform,
+      appVersion: this.#appVersion,
+      protocolVersion: PROTOCOL_VERSION,
+      capabilities: ["capture", "refine"],
+      lastSeenAt: now,
+      lastActiveAt: now,
+    });
+  }
+
+  #identity(): DeviceIdentity {
+    return {
+      deviceId: this.#local.deviceId,
+      displayName: this.#local.displayName,
+      kind: "desktop",
+      platform: this.#platform,
+      appVersion: this.#appVersion,
+      capabilities: ["capture", "refine"],
+    };
+  }
+
+  async #openDrive(): Promise<void> {
+    if (this.#options.drive !== undefined) {
+      this.#drive = this.#options.drive;
+      this.#driveReachable = this.#options.drive !== null;
+      return;
+    }
+    const opened = await openGoogleDrive({
+      local: this.#local,
+      configFile: this.#configFile,
+      platform: this.#platform,
+      interactive: false,
+      ...(this.#options.secrets ? { secrets: this.#options.secrets } : {}),
+    });
+    this.#drive = opened?.drive ?? null;
+    if (opened) this.#local = opened.config;
+    this.#driveReachable = opened !== null;
+  }
+
+  #mountSearch(): void {
+    if (!this.#drive || !this.#paths) return;
+    const database = new Database(this.#paths.stateFile);
+    database.exec("PRAGMA busy_timeout = 5000");
+    const embedder = this.#options.embedder ?? new LazyEmbedder(this.#paths.modelCacheDir);
+    if (!this.#options.embedder) {
+      const lazy = embedder as LazyEmbedder;
+      this.#embedderClose = () => lazy.close();
+    }
+    this.#searchDb = database;
+    this.#search = new SearchService({
+      drive: asSearchDrive(this.#drive),
+      embedder,
+      database,
+    });
+  }
+
+  #mountOutput(): void {
+    if (!this.#store) return;
+    this.#output?.close();
+    this.#output = new OutputService({
+      source: this.#store,
+      paths: this.#paths,
+      language: this.#shared.ui.language,
+      timeZone: this.#roles.timezone,
+      activeLimit: this.#shared.topics.activeLimit,
+      historyDays: this.#shared.topics.historyDays,
+      debounceMs: INTERVALS.outputDebounceMs,
+      clock: this.#clock,
+    });
+  }
+
+  #applyZone(): void {
+    this.#zone.timeZone = this.#roles.timezone;
+    this.#zone.activeLimit = this.#shared.topics.activeLimit;
+    this.#zone.historyDays = this.#shared.topics.historyDays;
+  }
+
+  async #createLlm(): Promise<LlmBackend | null> {
+    try {
+      return await createLlmBackend({
+        config: this.#shared.llm,
+        getApiKey: (provider) => getLlmApiKey(provider, { platform: this.#platform }),
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  #deps(): HttpDeps {
+    const store = this.#store;
+    if (!store) throw new YouBrainError("INVALID_INPUT", "store is not open");
+    const readers = createStoreReaders(store, this.#zone);
+    return {
+      today: () => readers.today(),
+      topics: (query) => readers.topics(query),
+      topic: (id) => readers.topic(id),
+      todo: (todoId) => readers.todo(todoId),
+      portrait: (variant) => readPortraitFile(this.#paths.portraitDir, variant),
+      portraitSnapshots: () =>
+        listPortraitSnapshots(
+          this.#paths.portraitDir,
+          this.#shared.portrait.snapshotPattern,
+        ),
+      search: (query) => this.#searchLocal(query),
+      devices: () => readers.devices(),
+      readRoles: async () => this.#roles,
+      writeRoles: (roles) => this.#writeRoles(roles),
+      readConfig: async () => this.#shared,
+      writeConfig: (config) => this.#writeConfig(config),
+      status: () => this.#status(),
+      sync: () => this.#syncNow(),
+      upload: (input) => this.#uploadNow(input),
+      events: {
+        emit: (type, data) => this.#emitUser(type, data),
+      },
+    };
+  }
+
+  async #searchLocal(query: SearchRequest) {
+    if (!this.#search) {
+      return {
+        query: query.query,
+        indexStatus: "stale" as const,
+        searchMode: "keyword" as const,
+        results: [],
+        warnings: [],
+      };
+    }
+    return this.#search.query({
+      query: query.query,
+      limit: query.limit ?? 10,
+      ...(query.sources ? { sources: query.sources } : {}),
+      ...(query.from ? { since: query.from } : {}),
+      ...(query.to ? { until: query.to } : {}),
+    });
+  }
+
+  async #writeRoles(roles: Roles): Promise<void> {
+    this.#roles = roles;
+    await writeJsonFile(join(this.#paths.dataDir, "roles.json"), roles);
+    this.#applyZone();
+    this.#mountOutput();
+    if (this.#sync) await this.#sync.updateRoles(roles);
+    this.changes.publish("status", this.#clock.now().toISOString());
+  }
+
+  async #writeConfig(config: SharedConfig): Promise<void> {
+    this.#shared = config;
+    await writeJsonFile(join(this.#paths.dataDir, "shared.json"), config);
+    this.#applyZone();
+    this.#mountOutput();
+    this.#portrait?.setConfig({
+      variants: config.portrait.variants,
+      snapshotPattern: config.portrait.snapshotPattern,
+    });
+    if (this.#llmOverride === undefined) this.#llm = await this.#createLlm();
+    await this.#rewatch();
+    if (this.#sync) await this.#sync.updateShared(config);
+    this.changes.publish("status", this.#clock.now().toISOString());
+  }
+
+  async #syncNow(): Promise<SyncActionResult> {
+    const at = this.#clock.now().toISOString();
+    if (!this.#sync) return { started: false, at };
+    await this.#run(async () => {
+      await this.#sync?.pull();
+      this.#lastSyncAt = this.#clock.now().toISOString();
+      this.#lastPull = this.#clock.nowMs();
+    });
+    return { started: true, at: this.#lastSyncAt ?? at };
+  }
+
+  async #uploadNow(input: UploadActionInput): Promise<UploadActionResult> {
+    if (input.backfill && this.#store) this.#store.setCursor(BACKFILL_CURSOR, "pending");
+    await this.scan(
+      input.includeSubagents === undefined
+        ? undefined
+        : { includeSubagents: input.includeSubagents },
+    );
+    if (input.dryRun) {
+      const scanned = [...this.#live.values()].filter((live) =>
+        input.sources ? input.sources.includes(live.session.source) : true,
+      ).length;
+      return { dryRun: true, scanned, uploaded: 0, warnings: [] };
+    }
+    const result = await this.#run(() =>
+      this.#processDue({
+        forceIdle: true,
+        ...(input.sources ? { sources: input.sources } : {}),
+      }),
+    );
+    return {
+      dryRun: false,
+      scanned: result.scanned,
+      uploaded: result.uploaded,
+      warnings: [],
+    };
+  }
+
+  async #status(): Promise<StatusResponse> {
+    const pending = this.#retry.pending();
+    const warnings: StatusResponse["warnings"] = [];
+    if (!this.#drive) {
+      warnings.push({
+        code: "AUTH_REQUIRED",
+        message: "尚未登录 Google Drive，本地 API 可用，上传和同步会在登录后继续",
+      });
+    }
+    if (!this.#llm) {
+      warnings.push({
+        code: "LLM_NOT_CONFIGURED",
+        message: "未配置模型，已上传会话但跳过提炼",
+      });
+    }
+    let search = { ready: false, documents: 0 };
+    if (this.#search) {
+      const status = this.#search.status();
+      search = { ready: status.ready, documents: status.documents };
+    }
+    return {
+      deviceId: this.#local.deviceId,
+      drive: {
+        reachable: this.#drive ? this.#driveReachable : false,
+        accountEmail: this.#local.account.email || null,
+      },
+      sync: {
+        lastSyncAt: this.#lastSyncAt,
+        pendingOutbox: this.#store?.countOutbox() ?? 0,
+      },
+      search,
+      refine: {
+        pending: pending.length,
+        lastError: pending[0]?.reason ?? null,
+      },
+      consolidation: await this.#consolidation(),
+      warnings,
+    };
+  }
+
+  async #consolidation(): Promise<StatusResponse["consolidation"]> {
+    if (!this.#drive) return { lastFinishedAt: null, stale: false };
+    try {
+      const object = await this.#drive.readPath(DRIVE_PATHS.consolidateLease);
+      if (!object) return { lastFinishedAt: null, stale: false };
+      const parsed = JSON.parse(object.bytes.toString("utf8")) as { finishedAt?: unknown };
+      const finished = typeof parsed.finishedAt === "string" ? parsed.finishedAt : null;
+      if (!finished) return { lastFinishedAt: null, stale: false };
+      const ms = Date.parse(finished);
+      const stale = Number.isNaN(ms) ? false : this.#clock.nowMs() - ms > INTERVALS.portraitMs;
+      return { lastFinishedAt: finished, stale };
+    } catch {
+      return { lastFinishedAt: null, stale: false };
+    }
+  }
+
+  #uploadIndex(): UploadIndex {
+    return {
+      fileIdOf: (key) => this.#store?.getSession(key)?.fileId ?? null,
+      record: (key, fileId, meta) => {
+        const live = this.#live.get(key);
+        const existing = this.#store?.getSession(key);
+        const source = existing?.source ?? live?.session.source;
+        const device = existing?.device ?? live?.session.device;
+        if (!source || !device || !this.#store) return;
+        this.#store.upsertSession({
+          sessionKey: key,
+          source,
+          device,
+          startedAt: existing?.startedAt ?? live?.session.startedAt ?? meta.updatedAt,
+          updatedAt: existing?.updatedAt ?? meta.updatedAt,
+          fileId,
+          msgCount: meta.messageCount,
+        });
+      },
+    };
+  }
+
+  #rememberUpload(live: LiveSession, fileId: string, key: string): void {
+    if (!this.#store) return;
+    const existing = this.#store.getSession(key);
+    this.#store.upsertSession({
+      sessionKey: key,
+      source: live.session.source,
+      device: live.session.device,
+      startedAt: existing?.startedAt ?? live.session.startedAt,
+      updatedAt: live.session.updatedAt,
+      fileId,
+      msgCount: live.session.turns.length,
+    });
+  }
+
+  #uploadable(live: LiveSession) {
+    const redacted = applyCaptureRedaction(live.session, {
+      redact: this.#shared.capture.redact,
+      redaction: {},
+    });
+    const rendered = renderSessionMarkdown(redacted.session, {
+      redactionVersion: redacted.version,
+      redactionCount: redacted.count,
+      imageReferences: new Map(),
+    });
+    const stored = this.#store?.getSession(
+      conversationKey(live.session.source, live.session.conversationId),
+    );
+    return {
+      source: live.session.source,
+      conversationId: live.session.conversationId,
+      device: live.session.device,
+      ...(stored?.title ? { title: stored.title } : {}),
+      startedAt: live.session.startedAt,
+      updatedAt: live.session.updatedAt,
+      messageCount: live.session.turns.length,
+      markdown: rendered.markdown,
+      contentSha256: rendered.contentSha256,
+    };
+  }
+
+  #previous(
+    key: string,
+    stored: { title: string; summary: string; refinedUpTo: number } | null,
+  ): PreviousRefine | null {
+    if (!stored || stored.refinedUpTo <= 0 || !this.#store) return null;
+    return {
+      title: stored.title,
+      summary: stored.summary,
+      conclusions: this.#store
+        .listConclusions()
+        .filter((item) => item.sessionKey === key)
+        .map((item) => item.text),
+      todos: this.#store
+        .listTodos()
+        .filter((item) => item.sessionKey === key)
+        .map((item) => ({ id: item.todoId, text: item.text })),
+    };
+  }
+
+  #candidateTopics(): CandidateTopic[] {
+    if (!this.#store) return [];
+    const book = foldEvents(this.#store.listEvents());
+    const activity: Record<string, string> = {};
+    for (const session of this.#store.listSessions()) {
+      if (session.updatedAt) activity[session.sessionKey] = session.updatedAt;
+    }
+    const zones = partitionTopics(book, {
+      now: this.#clock.now().toISOString(),
+      activeLimit: this.#shared.topics.activeLimit,
+      historyDays: this.#shared.topics.historyDays,
+      sessionUpdatedAt: activity,
+    });
+    return [
+      ...zones.active.map((topic) => ({
+        topicId: topic.topicId,
+        name: topic.name,
+        aliases: topic.aliases,
+        summary: topic.summary,
+        zone: "active" as const,
+      })),
+      ...zones.history.map((topic) => ({
+        topicId: topic.topicId,
+        name: topic.name,
+        aliases: topic.aliases,
+        summary: topic.summary,
+        zone: "history" as const,
+        recency: Date.parse(topic.lastActive ?? "") || 0,
+      })),
+    ];
+  }
+
+  #openTodos(): OpenTodo[] {
+    if (!this.#store) return [];
+    return this.#store
+      .listTodos()
+      .filter((todo) => todo.status === "open")
+      .map((todo) => ({
+        todoId: todo.todoId,
+        topicId: todo.topicId,
+        text: todo.text,
+      }));
+  }
+
+  #roots(): Record<SessionSource, string[]> {
+    const roots = {
+      "claude-code": [] as string[],
+      codex: [] as string[],
+      "grok-build": [] as string[],
+      cursor: [] as string[],
+      "gemini-cli": [] as string[],
+    };
+    for (const id of SESSION_SOURCES) {
+      if (this.#options.sourceRoots) {
+        roots[id] = [...(this.#options.sourceRoots[id] ?? [])];
+        continue;
+      }
+      const configured = this.#shared.capture.sources[id];
+      if (!configured.enabled) continue;
+      roots[id] =
+        configured.paths.length > 0
+          ? [...configured.paths]
+          : [...(getAdapter(id)?.defaultRoots(this.#homeDir) ?? [])];
+    }
+    return roots;
+  }
+
+  async #rewatch(): Promise<void> {
+    for (const watcher of this.#watchers) watcher.close();
+    this.#watchers = [];
+    if (!this.#watchEnabled) return;
+    for (const dirs of Object.values(this.#roots())) {
+      for (const dir of dirs) {
+        try {
+          await access(dir);
+        } catch {
+          continue;
+        }
+        try {
+          const watcher = watch(dir, { recursive: true }, () => {
+            this.#scheduleWatch();
+          });
+          watcher.on("error", () => undefined);
+          this.#watchers.push(watcher);
+        } catch {
+          // The directory can disappear between access and watch.
+        }
+      }
+    }
+  }
+
+  #scheduleWatch(): void {
+    if (this.#watchTimer) clearTimeout(this.#watchTimer);
+    this.#watchTimer = setTimeout(() => {
+      this.#watchTimer = null;
+      void this.scan();
+    }, INTERVALS.watchDebounceMs);
+  }
+
+  #isIdle(live: LiveSession, now: number, idleMs: number): boolean {
+    if (live.schedule.lastActivityAt === null) return false;
+    return now - live.schedule.lastActivityAt >= idleMs;
+  }
+
+  #run<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.#chain.then(fn, fn);
+    this.#chain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+}
+
+function sessionHash(session: NormalizedSession): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        updatedAt: session.updatedAt,
+        turns: session.turns.map((turn) => [turn.role, turn.text]),
+      }),
+    )
+    .digest("hex");
+}
+
+function frontmatter(markdown: string): Map<string, string> {
+  const match = /^---\n([\s\S]*?)\n---\n/u.exec(markdown);
+  const fields = new Map<string, string>();
+  for (const line of match?.[1]?.split("\n") ?? []) {
+    const index = line.indexOf(":");
+    if (index <= 0) continue;
+    fields.set(line.slice(0, index).trim(), line.slice(index + 1).trim());
+  }
+  return fields;
+}
+
+function asSearchDrive(drive: DrivePort): SearchDrive {
+  return {
+    changes: (query) => drive.changes(query),
+    async read(id: string) {
+      const object = await drive.read(id);
+      return { bytes: object.bytes };
+    },
+  };
+}

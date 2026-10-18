@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>you-brain</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f3f1ea;
+        --fg: #1d1c19;
+        --muted: #6d685f;
+        --line: #d9d3c5;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #1c1b19;
+          --fg: #f3f1ea;
+          --muted: #b3ab9d;
+          --line: #3a3833;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; height: 100%; }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.5 ui-sans-serif, -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+        display: grid;
+        place-items: center;
+      }
+      main {
+        width: min(280px, calc(100% - 48px));
+        border-top: 1px solid var(--line);
+        padding-top: 18px;
+      }
+      p { margin: 0; }
+      .name { font-weight: 620; letter-spacing: 0.01em; }
+      .hint { margin-top: 6px; color: var(--muted); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p class="name">you-brain</p>
+      <p class="hint">正在连接本机服务…</p>
+    </main>
+  </body>
+</html>

@@ -169,6 +169,9 @@ function readSnapshot(store: SqliteStore, settings: ZoneSettings): Snapshot {
       remember(event.data.sessionKey);
     }
   }
+  // Sessions that exist only as rows (uploaded, not yet referenced by an event)
+  // still belong on topic detail and in the active zone.
+  for (const session of store.listSessions()) add(session);
   return {
     now,
     topics,

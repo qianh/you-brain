@@ -23,6 +23,11 @@ export class ChangeHub {
       this.#listeners.delete(listener);
     };
   }
+
+  /** SSE clients currently attached. The daemon pulls faster while this is non-zero. */
+  subscriberCount(): number {
+    return this.#listeners.size;
+  }
 }
 
 export function formatSse(event: DaemonEvent): string {

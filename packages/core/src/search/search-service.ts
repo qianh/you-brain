@@ -384,6 +384,21 @@ export class SearchService {
     };
   }
 
+  /**
+   * Rank the local index. Does not call Drive. MCP search_sessions and the
+   * HTTP search route use this; the daemon refreshes the index itself.
+   */
+  async query(input: {
+    query: string;
+    limit: number;
+    sources?: string[];
+    since?: string;
+    until?: string;
+  }): Promise<SearchOutput> {
+    const ready = this.status().ready;
+    return this.#rank(input, ready ? "fresh" : "stale", []);
+  }
+
   async search(input: {
     query: string;
     limit: number;
@@ -400,7 +415,20 @@ export class SearchService {
       indexStatus = "stale";
       addWarning(warnings, staleIndex);
     }
+    return this.#rank(input, indexStatus, warnings);
+  }
 
+  async #rank(
+    input: {
+      query: string;
+      limit: number;
+      sources?: string[];
+      since?: string;
+      until?: string;
+    },
+    indexStatus: SearchOutput["indexStatus"],
+    warnings: SearchOutput["warnings"],
+  ): Promise<SearchOutput> {
     ensureSearchSchema(this.#database);
     const rows = this.#database
       .prepare(

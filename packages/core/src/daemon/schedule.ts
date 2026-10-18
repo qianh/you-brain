@@ -1,0 +1,23 @@
+export const INTERVALS = {
+  tickMs: 1_000,
+  flushMs: 30_000,
+  heartbeatMs: 5 * 60_000,
+  pullMs: 60_000,
+  fastPullMs: 5_000,
+  fullScanMs: 10 * 60_000,
+  portraitMs: 24 * 60 * 60_000,
+  searchMs: 60_000,
+  outputDebounceMs: 10_000,
+  watchDebounceMs: 250,
+} as const;
+
+/** `last === null` means the job has never run and is due immediately. */
+export function intervalDue(last: number | null, now: number, everyMs: number): boolean {
+  if (last === null) return true;
+  return now - last >= everyMs;
+}
+
+/** SSE subscribers pull every 5 seconds. Otherwise the poll stays at 60 seconds. */
+export function pullInterval(subscribers: number): number {
+  return subscribers > 0 ? INTERVALS.fastPullMs : INTERVALS.pullMs;
+}

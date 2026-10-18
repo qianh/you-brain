@@ -124,7 +124,7 @@ async function dispatch(
       }
       return await handleApi(request, url, context);
     }
-    if (staticDir) return await serveStatic(staticDir, url.pathname);
+    if (staticDir) return await serveStatic(staticDir, url.pathname, token);
     return apiError(404, "NOT_FOUND", "找不到页面");
   } catch (error) {
     return errorResponse(error);
@@ -188,7 +188,11 @@ function eventStream(request: Request, hub: ChangeHub): Response {
   });
 }
 
-async function serveStatic(staticDir: string, pathname: string): Promise<Response> {
+async function serveStatic(
+  staticDir: string,
+  pathname: string,
+  token: string,
+): Promise<Response> {
   let root: string;
   try {
     root = await realpath(staticDir);
@@ -196,12 +200,12 @@ async function serveStatic(staticDir: string, pathname: string): Promise<Respons
     return apiError(404, "NOT_FOUND", "找不到页面");
   }
   const relative = pathname.replace(/^\/+/u, "");
-  if (relative === "" || relative.endsWith("/")) return serveIndex(root);
+  if (relative === "" || relative.endsWith("/")) return serveIndex(root, token);
   const target = resolve(root, relative);
   if (!isInside(root, target)) return apiError(404, "NOT_FOUND", "找不到页面");
   const linked = await lstat(target).catch(() => null);
   if (!linked) {
-    if (extname(relative) === "") return serveIndex(root);
+    if (extname(relative) === "") return serveIndex(root, token);
     return apiError(404, "NOT_FOUND", "找不到页面");
   }
   if (linked.isSymbolicLink()) {
@@ -210,16 +214,24 @@ async function serveStatic(staticDir: string, pathname: string): Promise<Respons
   }
   const info = await stat(target).catch(() => null);
   if (info?.isFile()) return new Response(Bun.file(target));
-  if (extname(relative) === "") return serveIndex(root);
+  if (extname(relative) === "") return serveIndex(root, token);
   return apiError(404, "NOT_FOUND", "找不到页面");
 }
 
-async function serveIndex(root: string): Promise<Response> {
+async function serveIndex(root: string, token: string): Promise<Response> {
   const index = resolve(root, "index.html");
   const info = await stat(index).catch(() => null);
   if (!info?.isFile()) return apiError(404, "NOT_FOUND", "找不到页面");
-  return new Response(Bun.file(index), {
-    headers: { "cache-control": "no-cache" },
+  const html = await Bun.file(index).text();
+  const script = `<script>window.__YOU_BRAIN__=${JSON.stringify({ token })}</script>`;
+  const body = html.includes("</head>")
+    ? html.replace("</head>", `${script}</head>`)
+    : `${script}${html}`;
+  return new Response(body, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-cache",
+    },
   });
 }
 

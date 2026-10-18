@@ -1,0 +1,1 @@
+{"shell":{"identifier":"shell","description":"Menu-bar shell windows. The Web UI is served by the daemon and is not granted IPC.","local":true,"windows":["panel","main"],"permissions":[]}}

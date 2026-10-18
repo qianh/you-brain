@@ -12,6 +12,7 @@ export type {
   OutboxStatus,
   PortraitRecord,
   ReminderRecord,
+  SessionListQuery,
   SessionRecord,
   SessionUpsert,
   TodayQuery,

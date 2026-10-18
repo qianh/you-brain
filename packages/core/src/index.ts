@@ -1,4 +1,14 @@
 export {
+  DaemonLockError,
+  ManualDaemonClock,
+  acquireDaemonLock,
+  startDaemon,
+  type DaemonClock,
+  type DaemonOptions,
+  type YouBrainDaemon,
+} from "./daemon/index.js";
+
+export {
   ImageRefSchema,
   LEGACY_BACKFILL_SOURCES,
   LocalConfigSchema,

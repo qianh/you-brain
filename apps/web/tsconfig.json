@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "customConditions": ["bun"],
+    "types": ["bun"],
+    "noEmit": true,
+    "useDefineForClassFields": true,
+    "paths": {
+      "@you-brain/core/http/client.js": ["../../packages/core/src/http/client.ts"],
+      "@you-brain/core/http/types.js": ["../../packages/core/src/http/types.ts"],
+      "@you-brain/protocol": ["../../packages/protocol/src/index.ts"]
+    }
+  },
+  "include": ["src", "test", "scripts", "vite.config.ts"]
+}

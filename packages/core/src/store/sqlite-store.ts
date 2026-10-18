@@ -22,6 +22,7 @@ import type {
   OutboxStatus,
   PortraitRecord,
   ReminderRecord,
+  SessionListQuery,
   SessionRecord,
   SessionUpsert,
   TodoRecord,
@@ -395,6 +396,47 @@ export class SqliteStore {
       )
       .all(startMs, endMs);
     return rows.map(mapSession);
+  }
+
+  /** Newest activity first. `limit` and `topicId` narrow the sessions table. */
+  listSessions(query: SessionListQuery = {}): SessionRecord[] {
+    const filters: string[] = [];
+    const params: Array<string | number> = [];
+    if (query.topicId !== undefined) {
+      if (query.topicId.length === 0) {
+        throw new YouBrainError("INVALID_INPUT", "topicId is required");
+      }
+      filters.push("topic_id = ?");
+      params.push(query.topicId);
+    }
+    let sql = "SELECT * FROM sessions";
+    if (filters.length > 0) sql += ` WHERE ${filters.join(" AND ")}`;
+    sql += " ORDER BY updated_at_ms DESC, session_key ASC";
+    if (query.limit !== undefined) {
+      assertNonNegativeInt(query.limit, "limit");
+      sql += " LIMIT ?";
+      params.push(query.limit);
+    }
+    return this.#db
+      .query<SessionRow, Array<string | number>>(sql)
+      .all(...params)
+      .map(mapSession);
+  }
+
+  countOutbox(status?: OutboxStatus): number {
+    const row =
+      status === undefined
+        ? this.#db
+            .query<{ count: number }, []>(
+              "SELECT COUNT(*) AS count FROM outbox WHERE status != 'acked'",
+            )
+            .get()
+        : this.#db
+            .query<{ count: number }, [OutboxStatus]>(
+              "SELECT COUNT(*) AS count FROM outbox WHERE status = ?",
+            )
+            .get(status);
+    return row?.count ?? 0;
   }
 
   getTopic(topicId: string): TopicRecord | null {

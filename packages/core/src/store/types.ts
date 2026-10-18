@@ -39,6 +39,12 @@ export interface TodayQuery {
   now?: string | Date;
 }
 
+export interface SessionListQuery {
+  /** Newest `updatedAt` first. Omit to return every row. */
+  limit?: number;
+  topicId?: string;
+}
+
 export interface TopicRecord {
   topicId: string;
   name: string;

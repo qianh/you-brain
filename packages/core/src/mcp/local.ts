@@ -21,14 +21,21 @@ import type {
 import { callDaemon, DaemonCallError } from "./daemon-api.js";
 import type { McpServices, SessionContent, UpdateTopicInput } from "./server.js";
 
+export interface LocalSearchInput {
+  query: string;
+  limit: number;
+  sources?: string[];
+  since?: string;
+  until?: string;
+}
+
 export interface LocalSearch {
-  search(input: {
-    query: string;
-    limit: number;
-    sources?: string[];
-    since?: string;
-    until?: string;
-  }): Promise<SearchResponse>;
+  search(input: LocalSearchInput): Promise<SearchResponse>;
+  /**
+   * Read the local index only. search_sessions prefers this so a tool call
+   * does not start a Drive sync (技术方案 13.1).
+   */
+  query?(input: LocalSearchInput): Promise<SearchResponse>;
   status?():
     | { ready: boolean; documents: number }
     | Promise<{ ready: boolean; documents: number }>;
@@ -64,7 +71,8 @@ export function createLocalMcpServices(options: LocalMcpOptions): McpServices {
 
   return {
     searchSessions(input: SearchRequest) {
-      return options.search.search({
+      const run = options.search.query ?? options.search.search;
+      return run.call(options.search, {
         query: input.query,
         limit: input.limit ?? 10,
         ...(input.sources ? { sources: input.sources } : {}),
