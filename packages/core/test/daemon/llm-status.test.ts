@@ -35,7 +35,7 @@ async function prepare(prefix: string): Promise<DaemonDirs> {
   return dirs;
 }
 
-async function writeProvider(dirs: DaemonDirs, provider: "codex-cli"): Promise<void> {
+async function writeProvider(dirs: DaemonDirs, provider: "codex-cli" | "gemini-cli"): Promise<void> {
   const shared = parseSharedConfig({ llm: { provider, model: "", baseUrl: "" } });
   await writeFile(join(dirs.dataDir, "shared.json"), `${JSON.stringify(shared)}\n`);
 }
@@ -187,4 +187,79 @@ process.stdin.on("end", () => {
     const callsText = await readFile(calls, "utf8");
     expect(callsText.trim().split("\n").filter(Boolean)).toHaveLength(1);
   });
+
+  it("stops retrying after two silent CLI timeouts and names the login command", async () => {
+    const dirs = await prepare("you-brain-cli-silent-");
+    await writeProvider(dirs, "gemini-cli");
+    const bin = join(dirs.root, "fake-gemini");
+    const calls = join(dirs.root, "calls.log");
+    await writeFile(
+      bin,
+      `#!${process.execPath}
+import { appendFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+appendFileSync(process.env.FAKE_CALLS, "call\\n");
+spawn("sleep", ["30"], { stdio: "ignore" });
+setInterval(() => {}, 1_000_000);
+`,
+      { mode: 0o755 },
+    );
+    const clock = testClock();
+    const drive = new MemoryDrive({ now: () => clock.now() });
+    const daemon = track(
+      await startDaemon({
+        homeDir: dirs.homeDir,
+        platform: "darwin",
+        env: { ...dirs.env, YOU_BRAIN_GEMINI_BIN: bin, FAKE_CALLS: calls },
+        hostname: "device-a",
+        clock,
+        drive,
+        embedder: throwingEmbedder,
+        sourceRoots: { "claude-code": [dirs.sourceDir] },
+        watch: false,
+        signals: false,
+        llmTimeoutMs: 800,
+      }),
+    );
+    await daemon.settled();
+    await clock.advance(5 * 60_000);
+    await daemon.settled();
+    const once = await readStatus(daemon);
+    expect(once.warnings.some((warning) => warning.code === "LLM_CLI_UNRESPONSIVE")).toBe(false);
+    expect(once.refine.pending).toBe(1);
+    expect((await drive.list({ prefix: "inbox/" })).length).toBeGreaterThan(0);
+
+    await clock.advance(5 * 60_000);
+    await daemon.settled();
+    const stalled = await readStatus(daemon);
+    expect(stalled.warnings).toContainEqual({
+      code: "LLM_CLI_UNRESPONSIVE",
+      message: "gemini 没有响应，已上传会话但跳过提炼。请运行 gemini（交互里完成登录） 检查登录",
+    });
+    expect(stalled.refine.pending).toBe(1);
+
+    await clock.advance(5 * 60_000);
+    await daemon.settled();
+    const callsAfterStop = (await readFile(calls, "utf8")).trim().split("\n").filter(Boolean);
+    expect(callsAfterStop).toHaveLength(2);
+
+    const put = await fetch(`${daemon.baseUrl}/api/config`, {
+      method: "PUT",
+      headers: {
+        authorization: `Bearer ${daemon.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ llm: { model: "retry-after-config" } }),
+    });
+    expect(put.ok).toBe(true);
+    const resumed = await readStatus(daemon);
+    expect(resumed.warnings.some((warning) => warning.code === "LLM_CLI_UNRESPONSIVE")).toBe(false);
+
+    await clock.advance(1_500);
+    await daemon.settled();
+    const callsAfterConfig = (await readFile(calls, "utf8")).trim().split("\n").filter(Boolean);
+    expect(callsAfterConfig).toHaveLength(3);
+    const afterOne = await readStatus(daemon);
+    expect(afterOne.warnings.some((warning) => warning.code === "LLM_CLI_UNRESPONSIVE")).toBe(false);
+  }, 15_000);
 });

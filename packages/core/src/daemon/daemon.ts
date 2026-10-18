@@ -52,6 +52,7 @@ import type {
   UploadActionResult,
   ZoneSettings,
 } from "../http/types.js";
+import { isCliNoOutputTimeout } from "../llm/cli/exec.js";
 import {
   createLlmBackend,
   describeLlmSetupFailure,
@@ -61,6 +62,7 @@ import {
   type LlmBackend,
   type LlmSetupWarning,
 } from "../llm/index.js";
+import { cliUnresponsiveWarning } from "../llm/setup-status.js";
 import { OutputService } from "../output/service.js";
 import { installVendorResolver, usesVendorModules } from "../native/resolver.js";
 import { CodingInjection } from "../portrait/injection.js";
@@ -128,6 +130,8 @@ export interface DaemonOptions {
   staticDir?: string;
   /** Listen for SIGINT and SIGTERM. Default false so tests can call stop(). */
   signals?: boolean;
+  /** Test injection. Shortens subscription CLI calls so a silent hang fails quickly. */
+  llmTimeoutMs?: number;
   secrets?: SecretStore;
   appVersion?: string;
   /** Default true. Tests set false so discovery is driven only by scan() and the 10 minute timer. */
@@ -245,6 +249,10 @@ export class YouBrainDaemon {
   #llm: LlmBackend | null = null;
   #llmWarning: LlmSetupWarning | null = null;
   #llmOverride: LlmBackend | null | undefined;
+  /** Consecutive timeouts that produced no stdout and no stderr. */
+  #cliSilentStreak = 0;
+  /** Set after two silent timeouts. Cleared on config change or process restart. */
+  #cliUnresponsive = false;
   #retry: LlmRetryQueue<string>;
   #http: DaemonHttpServer | null = null;
   #lockRelease: (() => Promise<void>) | null = null;
@@ -630,6 +638,7 @@ export class YouBrainDaemon {
       this.#retry.succeed(key);
       return;
     }
+    if (this.#cliUnresponsive) return;
     try {
       const result = await refineSession(
         this.#llm,
@@ -653,19 +662,25 @@ export class YouBrainDaemon {
         },
       );
       if (result.status === "skipped") {
+        this.#cliSilentStreak = 0;
         if (result.reason === "no_new_messages") this.#retry.succeed(key);
         else this.#retry.fail(key, key, new Error(result.detail));
         return;
       }
       for (const event of result.events) await this.#emitCopied(event);
+      this.#cliSilentStreak = 0;
       this.#retry.succeed(key);
     } catch (error) {
+      if (isCliNoOutputTimeout(error)) this.#cliSilentStreak += 1;
+      else this.#cliSilentStreak = 0;
+      if (this.#cliSilentStreak >= 2) this.#cliUnresponsive = true;
       this.#retry.fail(key, key, error);
       this.changes.publish("status", this.#clock.now().toISOString());
     }
   }
 
   async #retryIfDue(key: string, live: LiveSession, now: number): Promise<void> {
+    if (this.#cliUnresponsive) return;
     const job = this.#retry.get(key);
     if (!job || job.exhausted || job.nextAttemptAt > now || !this.#llm || !this.#store) return;
     const fileId = this.#store.getSession(key)?.fileId;
@@ -793,6 +808,7 @@ export class YouBrainDaemon {
   }): Promise<void> {
     if (update.shared) {
       this.#shared = preferLocalLlm(update.shared, this.#shared);
+      this.#clearCliStall();
       await writeJsonFile(join(this.#paths.dataDir, "shared.json"), this.#shared);
       this.#applyZone();
       this.#mountOutput();
@@ -915,6 +931,9 @@ export class YouBrainDaemon {
         dataDir: this.#paths.dataDir,
         env: this.#env,
         homeDir: this.#homeDir,
+        ...(this.#options.llmTimeoutMs === undefined
+          ? {}
+          : { timeoutMs: this.#options.llmTimeoutMs }),
       });
       this.#llmWarning = null;
       return backend;
@@ -982,8 +1001,14 @@ export class YouBrainDaemon {
     this.changes.publish("status", this.#clock.now().toISOString());
   }
 
+  #clearCliStall(): void {
+    this.#cliSilentStreak = 0;
+    this.#cliUnresponsive = false;
+  }
+
   async #writeConfig(config: SharedConfig): Promise<void> {
     this.#shared = config;
+    this.#clearCliStall();
     await writeJsonFile(join(this.#paths.dataDir, "shared.json"), config);
     this.#applyZone();
     this.#mountOutput();
@@ -1053,16 +1078,21 @@ export class YouBrainDaemon {
         },
       );
     } else if (isCliProvider(this.#shared.llm.provider)) {
-      const denied = this.#retry
-        .pending()
-        .find((job) => job.kind === "auth" || job.reason.includes("未登录"));
-      if (denied) {
-        warnings.push(
-          describeLlmSetupFailure(
-            this.#shared.llm.provider,
-            new LlmRequestError("auth", denied.reason),
-          ),
-        );
+      if (this.#cliUnresponsive) {
+        const stalled = cliUnresponsiveWarning(this.#shared.llm.provider);
+        if (stalled) warnings.push(stalled);
+      } else {
+        const denied = this.#retry
+          .pending()
+          .find((job) => job.kind === "auth" || job.reason.includes("未登录"));
+        if (denied) {
+          warnings.push(
+            describeLlmSetupFailure(
+              this.#shared.llm.provider,
+              new LlmRequestError("auth", denied.reason),
+            ),
+          );
+        }
       }
     }
     let search = { ready: false, documents: 0 };

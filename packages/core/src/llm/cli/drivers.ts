@@ -9,7 +9,7 @@ import {
   recordErrorMessage,
 } from "./failure.js";
 import { extractFirstJsonObject, jsonText } from "./json.js";
-import type { CliProvider } from "./locate.js";
+import { cliLoginCommand, type CliProvider } from "./locate.js";
 
 export interface CliBuildContext {
   cwd: string;
@@ -162,7 +162,7 @@ const grokDriver: CliDriver = {
   provider: "grok-cli",
   command: "grok",
   nativeSchema: true,
-  loginMessage: "未登录 grok。请运行 grok login",
+  loginMessage: `未登录 grok。请运行 ${cliLoginCommand("grok-cli")}`,
   promptFile: true,
   schemaFile: false,
   lastMessageFile: false,
@@ -211,7 +211,7 @@ const claudeDriver: CliDriver = {
   provider: "claude-cli",
   command: "claude",
   nativeSchema: true,
-  loginMessage: "未登录 claude。请运行 claude auth login",
+  loginMessage: `未登录 claude。请运行 ${cliLoginCommand("claude-cli")}`,
   promptFile: false,
   schemaFile: false,
   lastMessageFile: false,
@@ -259,7 +259,7 @@ const codexDriver: CliDriver = {
   provider: "codex-cli",
   command: "codex",
   nativeSchema: true,
-  loginMessage: "未登录 codex。请运行 codex login",
+  loginMessage: `未登录 codex。请运行 ${cliLoginCommand("codex-cli")}`,
   promptFile: false,
   schemaFile: true,
   lastMessageFile: true,
@@ -305,7 +305,7 @@ const geminiDriver: CliDriver = {
   provider: "gemini-cli",
   command: "gemini",
   nativeSchema: false,
-  loginMessage: "未登录 gemini。请先运行 gemini 并执行 /auth 登录",
+  loginMessage: `未登录 gemini。请运行 ${cliLoginCommand("gemini-cli")}`,
   promptFile: false,
   schemaFile: false,
   lastMessageFile: false,
@@ -347,7 +347,7 @@ const opencodeDriver: CliDriver = {
   provider: "opencode-cli",
   command: "opencode",
   nativeSchema: false,
-  loginMessage: "未登录 opencode。请运行 opencode auth login",
+  loginMessage: `未登录 opencode。请运行 ${cliLoginCommand("opencode-cli")}`,
   promptFile: false,
   schemaFile: false,
   lastMessageFile: false,

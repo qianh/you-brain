@@ -4,12 +4,17 @@ export {
   CLI_PROVIDERS,
   cliCommandName,
   cliEnvVar,
+  cliLoginCommand,
   isCliProvider,
   locateCliBinary,
   type CliProvider,
   type LocateCliOptions,
 } from "./locate.js";
-export { DEFAULT_CLI_TIMEOUT_MS, withCliSlot } from "./exec.js";
+export {
+  DEFAULT_CLI_TIMEOUT_MS,
+  isCliNoOutputTimeout,
+  withCliSlot,
+} from "./exec.js";
 export {
   claudeProjectKey,
   ensureCliWorkDir,

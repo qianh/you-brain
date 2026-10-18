@@ -26,11 +26,12 @@ const COMMANDS: Record<CliProvider, string> = {
   "opencode-cli": "opencode",
 };
 
+/** Shell command the user runs to sign in. Checked against each CLI's --help. */
 const LOGIN_COMMANDS: Record<CliProvider, string> = {
   "grok-cli": "grok login",
-  "claude-cli": "claude auth login",
+  "claude-cli": "claude（交互里 /login）",
   "codex-cli": "codex login",
-  "gemini-cli": "gemini 并执行 /auth",
+  "gemini-cli": "gemini（交互里完成登录）",
   "opencode-cli": "opencode auth login",
 };
 

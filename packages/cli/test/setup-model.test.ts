@@ -12,6 +12,15 @@ import { runSetup, type SetupFlags, type SetupHooks } from "../src/setup.js";
 
 const roots: string[] = [];
 
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
@@ -155,6 +164,58 @@ describe("setup model step", () => {
     };
     expect(shared.llm.provider).toBe("grok-cli");
     expect(shared.llm.model).toBe("");
+    expect(logs).toContain("正在调用 grok 测试连接（最多 90 秒）…");
+  });
+
+  test("aborts a silent CLI connection test within the injected timeout and keeps earlier steps", async () => {
+    const base = await prepared();
+    const hang = join(base.homeDir, "hang-cli");
+    const marker = join(base.homeDir, "hang.pid");
+    await writeFile(
+      hang,
+      `#!${process.execPath}
+import { writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+const child = spawn("sleep", ["30"], { stdio: "ignore" });
+writeFileSync(process.env.FAKE_MARKER, process.pid + "\\n" + child.pid + "\\n");
+setInterval(() => {}, 1_000_000);
+`,
+      { mode: 0o755 },
+    );
+    base.env.YOU_BRAIN_GROK_BIN = hang;
+    base.env.FAKE_MARKER = marker;
+    const logs: string[] = [];
+    const started = Date.now();
+    const error = await runSetup(
+      flags(),
+      { ...hooks(base, ["grok-cli", ""], logs), cliTimeoutMs: 800 },
+    ).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(error).toBeInstanceOf(CliError);
+    expect((error as CliError).message).toBe(
+      "grok 在 90 秒内没有响应，可能需要重新登录：请在终端运行 grok login 后重试",
+    );
+    expect(logs).toContain("正在调用 grok 测试连接（最多 90 秒）…");
+    expect(logs).not.toContain("模型连接成功");
+    const progress = JSON.parse(await readFile(join(base.paths.dataDir, "setup.json"), "utf8")) as {
+      google: boolean;
+      model: boolean;
+      sources: boolean;
+    };
+    expect(progress.google).toBe(true);
+    expect(progress.model).toBe(false);
+    expect(progress.sources).toBe(true);
+    const sharedPath = join(base.paths.dataDir, "shared.json");
+    expect(await readFile(sharedPath, "utf8").then(() => true, () => false)).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    const [parent, child] = (await readFile(marker, "utf8")).trim().split("\n").map((value) => Number(value));
+    expect(parent).toBeGreaterThan(0);
+    expect(child).toBeGreaterThan(0);
+    expect(alive(parent ?? 0)).toBe(false);
+    expect(alive(child ?? 0)).toBe(false);
   });
 
   test("asks for a custom base URL and rejects an empty answer", async () => {

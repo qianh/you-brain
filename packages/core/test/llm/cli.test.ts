@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 
 import { createLlmBackend } from "../../src/llm/factory.js";
 import { LlmRequestError } from "../../src/llm/errors.js";
+import { isCliNoOutputTimeout } from "../../src/llm/cli/exec.js";
 import { extractFirstJsonObject } from "../../src/llm/cli/json.js";
 import type { CliProvider } from "../../src/llm/cli/locate.js";
 import { llmCliWorkDir, physicalPath } from "../../src/llm/cli/workdir.js";
@@ -29,7 +30,7 @@ async function tempDir(): Promise<string> {
 }
 
 const FAKE_SCRIPT = `#!${process.execPath}
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync, writeSync } from "node:fs";
 import { spawn } from "node:child_process";
 
 const mode = process.env.FAKE_MODE ?? "ok";
@@ -62,7 +63,8 @@ if (log) {
   );
 }
 
-if (mode === "timeout") {
+if (mode === "timeout" || mode === "timeout-output") {
+  if (mode === "timeout-output") writeSync(2, "still working\\n");
   const child = spawn("sleep", ["30"], { stdio: "ignore" });
   if (marker) writeFileSync(marker, process.pid + "\\n" + child.pid + "\\n");
   await new Promise(() => {});
@@ -229,7 +231,7 @@ const DRIVERS: DriverCase[] = [
   {
     provider: "claude-cli",
     driver: "claude",
-    login: "claude auth login",
+    login: "claude（交互里 /login）",
     unsafe: ["bypassPermissions", "--dangerously-skip-permissions"],
     required: [
       ["-p"],
@@ -250,7 +252,7 @@ const DRIVERS: DriverCase[] = [
   {
     provider: "gemini-cli",
     driver: "gemini",
-    login: "/auth",
+    login: "gemini（交互里完成登录）",
     unsafe: ["--yolo", "-y", "auto_edit"],
     required: [["-o", "json"], ["--approval-mode", "default"]],
   },
@@ -450,8 +452,12 @@ describe("subscription cli backends", () => {
         (caught: unknown) => caught,
       );
       expect(timeout).toBeInstanceOf(LlmRequestError);
+      expect(isCliNoOutputTimeout(timeout)).toBe(true);
       expect((timeout as LlmRequestError).kind).toBe("network");
-      expect((timeout as LlmRequestError).message).toContain("请求超时");
+      expect((timeout as LlmRequestError).retryable).toBe(true);
+      expect((timeout as LlmRequestError).message).toContain("没有任何输出");
+      expect((timeout as LlmRequestError).message).toContain("可能需要重新登录");
+      expect((timeout as LlmRequestError).message).toContain(item.login);
       await new Promise((resolve) => setTimeout(resolve, 800));
       const [parent, child] = readFileSync(marker, "utf8")
         .trim()
@@ -463,6 +469,26 @@ describe("subscription cli backends", () => {
       expect(alive(child ?? 0)).toBe(false);
     }, 15_000);
   }
+
+  test("a timeout that already printed output stays a retryable network error", async () => {
+    const root = await tempDir();
+    const bin = await installFake(root);
+    const grok = DRIVERS.find((item) => item.provider === "grok-cli");
+    if (!grok) throw new Error("missing grok driver");
+    const timed = await backendFor(root, bin, grok, { mode: "timeout-output", timeoutMs: 700 });
+    const timeout = await timed.backend.complete({ system: "system", user: "ok" }).then(
+      () => {
+        throw new Error("expected timeout");
+      },
+      (caught: unknown) => caught,
+    );
+    expect(timeout).toBeInstanceOf(LlmRequestError);
+    expect(isCliNoOutputTimeout(timeout)).toBe(false);
+    expect((timeout as LlmRequestError).kind).toBe("network");
+    expect((timeout as LlmRequestError).retryable).toBe(true);
+    expect((timeout as LlmRequestError).message).toContain("请求超时");
+    expect((timeout as LlmRequestError).message).toContain("still working");
+  });
 
   test("codex treats an empty last-message file as a failed call", async () => {
     const root = await tempDir();

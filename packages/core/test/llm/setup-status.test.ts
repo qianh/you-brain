@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import { LlmRequestError } from "../../src/llm/errors.js";
-import { describeLlmSetupFailure } from "../../src/llm/setup-status.js";
+import { cliUnresponsiveWarning, describeLlmSetupFailure } from "../../src/llm/setup-status.js";
 
 describe("llm setup status", () => {
   it("keeps the missing-key warning and names a missing or logged-out CLI", () => {
@@ -26,18 +26,23 @@ describe("llm setup status", () => {
     expect(
       describeLlmSetupFailure(
         "claude-cli",
-        new LlmRequestError("auth", "未登录 claude。请运行 claude auth login"),
+        new LlmRequestError("auth", "未登录 claude。请运行 claude（交互里 /login）"),
       ),
     ).toEqual({
       code: "LLM_CLI_UNAUTHENTICATED",
-      message: "claude 未登录，已上传会话但跳过提炼。请运行 claude auth login",
+      message: "claude 未登录，已上传会话但跳过提炼。请运行 claude（交互里 /login）",
     });
     expect(
-      describeLlmSetupFailure("gemini-cli", new Error("未登录 gemini。请先运行 gemini 并执行 /auth 登录")),
+      describeLlmSetupFailure("gemini-cli", new Error("未登录 gemini。请运行 gemini（交互里完成登录）")),
     ).toEqual({
       code: "LLM_CLI_UNAUTHENTICATED",
-      message: "gemini 未登录，已上传会话但跳过提炼。请运行 gemini 并执行 /auth",
+      message: "gemini 未登录，已上传会话但跳过提炼。请运行 gemini（交互里完成登录）",
     });
+    expect(cliUnresponsiveWarning("gemini-cli")).toEqual({
+      code: "LLM_CLI_UNRESPONSIVE",
+      message: "gemini 没有响应，已上传会话但跳过提炼。请运行 gemini（交互里完成登录） 检查登录",
+    });
+    expect(cliUnresponsiveWarning("deepseek")).toBeNull();
     expect(describeLlmSetupFailure("custom", new LlmRequestError("client", "未配置模型地址"))).toEqual({
       code: "LLM_UNAVAILABLE",
       message: "未配置模型地址",

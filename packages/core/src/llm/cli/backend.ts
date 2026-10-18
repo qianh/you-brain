@@ -11,7 +11,7 @@ import { runCliConnectionTest } from "../types.js";
 import { cliDriver, looksUnauthenticated, type CliBuildContext, type CliDriver } from "./drivers.js";
 import { cliFailure, DEFAULT_CLI_TIMEOUT_MS, runCliProcess, withCliSlot } from "./exec.js";
 import { appendSchemaInstruction } from "./json.js";
-import { isCliProvider, locateCliBinary, type CliProvider } from "./locate.js";
+import { cliLoginCommand, isCliProvider, locateCliBinary, type CliProvider } from "./locate.js";
 import { ensureCliWorkDir } from "./workdir.js";
 
 export interface CreateCliBackendOptions {
@@ -81,6 +81,7 @@ async function execute(
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.env ? { env: options.env } : {}),
       secrets,
+      noOutputTimeoutMessage: `${driver.command} 没有任何输出，可能需要重新登录。请运行 ${cliLoginCommand(driver.provider)}`,
     });
     if (looksUnauthenticated(result)) {
       throw cliFailure("auth", driver.loginMessage, result.stderr, secrets);

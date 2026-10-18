@@ -22,6 +22,8 @@ export interface CliRunOptions {
   signal?: AbortSignal;
   env?: NodeJS.ProcessEnv;
   secrets: readonly string[];
+  /** Used when the process times out without writing stdout or stderr. */
+  noOutputTimeoutMessage?: string;
 }
 
 let tail: Promise<void> = Promise.resolve();
@@ -54,6 +56,17 @@ export function cliFailure(
   const detail = redactSecrets(stderr, secrets).slice(-500).trim();
   const text = detail === "" ? message : `${message}\n${detail}`;
   return new LlmRequestError(kind, text);
+}
+
+/** Timeout with an empty stdout and stderr. Kind stays `network` so the first one can retry. */
+export function cliNoOutputTimeout(message: string): LlmRequestError {
+  const error = new LlmRequestError("network", message, { retryable: true });
+  error.name = "CliNoOutputTimeout";
+  return error;
+}
+
+export function isCliNoOutputTimeout(error: unknown): error is LlmRequestError {
+  return error instanceof LlmRequestError && error.name === "CliNoOutputTimeout";
 }
 
 function appendCapped(current: string, chunk: string, cap: number): string {
@@ -140,6 +153,13 @@ export function runCliProcess(options: CliRunOptions): Promise<CliRunResult> {
     child.stdin?.end(options.stdin ?? "");
 
     const timer = setTimeout(() => {
+      const silent = stdout.trim() === "" && stderr.trim() === "";
+      if (silent) {
+        const message =
+          options.noOutputTimeoutMessage ?? "命令超时且没有任何输出，可能需要重新登录";
+        fail(cliNoOutputTimeout(message));
+        return;
+      }
       fail(cliFailure("network", "请求超时", stderr, options.secrets));
     }, options.timeoutMs);
 

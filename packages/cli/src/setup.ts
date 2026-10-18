@@ -40,7 +40,10 @@ import {
   createLlmBackend,
   LLM_PRESETS,
   cliCommandName,
+  cliLoginCommand,
+  isCliNoOutputTimeout,
   isCliProvider,
+  isLlmRequestError,
   locateCliBinary,
 } from "@you-brain/core/llm";
 import {
@@ -93,6 +96,8 @@ export interface SetupHooks {
   ) => ReturnType<typeof openGoogleDrive>;
   planBrainHubMigration?: (context: MigrateContext) => Promise<BrainHubMigrationPlan>;
   applyBrainHubMigration?: typeof applyBrainHubMigration;
+  /** Test injection. CLI connection tests otherwise wait 90 seconds. */
+  cliTimeoutMs?: number;
 }
 
 interface SetupIo {
@@ -109,6 +114,14 @@ interface SetupIo {
   ) => ReturnType<typeof openGoogleDrive>;
   planBrainHubMigration: (context: MigrateContext) => Promise<BrainHubMigrationPlan>;
   applyBrainHubMigration: typeof applyBrainHubMigration;
+  cliTimeoutMs?: number;
+}
+
+const CLI_SETUP_TIMEOUT_MS = 90_000;
+
+function isCliConnectionTimeout(error: unknown): boolean {
+  if (isCliNoOutputTimeout(error)) return true;
+  return isLlmRequestError(error) && error.kind === "network" && error.message.includes("请求超时");
 }
 
 interface SetupProgress {
@@ -320,6 +333,7 @@ function createIo(hooks: SetupHooks): SetupIo {
     openGoogleDrive: hooks.openGoogleDrive ?? openGoogleDrive,
     planBrainHubMigration: hooks.planBrainHubMigration ?? planBrainHubMigration,
     applyBrainHubMigration: hooks.applyBrainHubMigration ?? applyBrainHubMigration,
+    ...(hooks.cliTimeoutMs === undefined ? {} : { cliTimeoutMs: hooks.cliTimeoutMs }),
   };
 }
 
@@ -476,14 +490,31 @@ async function configureModel(
   });
   if (apiKey) await setLlmApiKey(provider, apiKey, { platform: io.platform });
   if (apiKey || !preset.requiresApiKey) {
+    if (preset.kind === "cli" && isCliProvider(provider)) {
+      io.log(`正在调用 ${cliCommandName(provider)} 测试连接（最多 90 秒）…`);
+    }
     const backend = await createLlmBackend({
       config: next.llm,
       getApiKey: async () => (apiKey === "" ? null : apiKey),
       dataDir: io.paths.dataDir,
       env: io.env,
       homeDir: io.homeDir,
+      ...(preset.kind === "cli" ? { timeoutMs: io.cliTimeoutMs ?? CLI_SETUP_TIMEOUT_MS } : {}),
     });
-    await backend.test();
+    try {
+      await backend.test();
+    } catch (error) {
+      if (
+        preset.kind === "cli" &&
+        isCliProvider(provider) &&
+        isCliConnectionTimeout(error)
+      ) {
+        throw new CliError(
+          `${cliCommandName(provider)} 在 90 秒内没有响应，可能需要重新登录：请在终端运行 ${cliLoginCommand(provider)} 后重试`,
+        );
+      }
+      throw error;
+    }
     io.log("模型连接成功");
   } else {
     io.log("未配置模型 API Key。会话仍会上传，提炼会跳过。");
