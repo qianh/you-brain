@@ -1,1 +1,51 @@
-export const llm = {};
+export {
+  ANTHROPIC_JSON_TOOL,
+  ANTHROPIC_VERSION,
+  createAnthropicBackend,
+  type AnthropicBackendOptions,
+} from "./anthropic.js";
+export {
+  LLM_ERROR_KINDS,
+  LlmRequestError,
+  httpStatusError,
+  isLlmRequestError,
+  networkError,
+  type LlmErrorKind,
+} from "./errors.js";
+export {
+  createLlmBackend,
+  resolveLlmTarget,
+  type CreateLlmBackendOptions,
+  type GetApiKey,
+  type LlmSelection,
+  type ResolvedLlmTarget,
+} from "./factory.js";
+export { DEFAULT_LLM_TIMEOUT_MS, joinUrl, postJson } from "./http.js";
+export {
+  createOpenAiCompatibleBackend,
+  type OpenAiCompatibleOptions,
+} from "./openai-compatible.js";
+export {
+  LLM_KEYCHAIN_PREFIX,
+  LLM_PRESETS,
+  llmKeychainAccount,
+  type LlmApiKind,
+  type LlmJsonMode,
+  type LlmPreset,
+} from "./presets.js";
+export {
+  LlmRetryQueue,
+  describeFailure,
+  retryDelayMs,
+  type LlmRetryStatus,
+  type RetryClock,
+  type RetryFailureKind,
+  type RetryJob,
+  type RetryQueueOptions,
+} from "./retry-queue.js";
+export {
+  runConnectionTest,
+  type LlmBackend,
+  type LlmBackendDescriptor,
+  type LlmCompleteRequest,
+} from "./types.js";

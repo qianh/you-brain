@@ -1,0 +1,21 @@
+{
+  "sessionId": "gemini-sub",
+  "projectHash": "abc123",
+  "startTime": "2026-07-18T11:00:00.000Z",
+  "lastUpdated": "2026-07-18T11:01:00.000Z",
+  "kind": "subagent",
+  "messages": [
+    {
+      "id": "s1",
+      "timestamp": "2026-07-18T11:00:00.000Z",
+      "type": "user",
+      "content": "internal task"
+    },
+    {
+      "id": "s2",
+      "timestamp": "2026-07-18T11:01:00.000Z",
+      "type": "gemini",
+      "content": "internal answer"
+    }
+  ]
+}

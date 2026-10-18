@@ -1,0 +1,58 @@
+{
+  "sessionId": "gemini-1",
+  "projectHash": "abc123",
+  "startTime": "2026-07-18T10:00:00.000Z",
+  "lastUpdated": "2026-07-18T10:05:00.000Z",
+  "kind": "main",
+  "messages": [
+    {
+      "id": "m1",
+      "timestamp": "2026-07-18T10:00:00.000Z",
+      "type": "user",
+      "content": "List the files"
+    },
+    {
+      "id": "m2",
+      "timestamp": "2026-07-18T10:01:00.000Z",
+      "type": "gemini",
+      "content": "",
+      "toolCalls": [
+        {
+          "id": "list_directory-1",
+          "name": "list_directory",
+          "args": { "path": "/tmp/project" },
+          "result": [
+            {
+              "functionResponse": {
+                "id": "list_directory-1",
+                "name": "list_directory",
+                "response": { "output": "secret-tool-output" }
+              }
+            }
+          ],
+          "status": "success"
+        }
+      ],
+      "thoughts": [
+        {
+          "subject": "Hidden reasoning",
+          "description": "private thought that must be dropped",
+          "timestamp": "2026-07-18T10:00:30.000Z"
+        }
+      ],
+      "model": "gemini-test"
+    },
+    {
+      "id": "m3",
+      "timestamp": "2026-07-18T10:02:00.000Z",
+      "type": "gemini",
+      "content": "There are two files."
+    },
+    {
+      "id": "m4",
+      "timestamp": "2026-07-18T10:03:00.000Z",
+      "type": "info",
+      "content": "ignored info banner"
+    }
+  ]
+}

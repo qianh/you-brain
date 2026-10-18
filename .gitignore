@@ -4,3 +4,7 @@ dist/
 .DS_Store
 .orchestration/logs/
 apps/desktop/src-tauri/target/
+.orchestration/m0/node_modules/
+.orchestration/m0/vendor/
+.orchestration/m0/cache/
+.orchestration/m0/bin/
