@@ -68,7 +68,7 @@ describe("subscription CLI sessions are not captured", () => {
         '{"timestamp":"2026-07-18T11:03:00.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Pin the release version."}]}}',
         "",
       ].join("\n");
-    await writeFile(normal, session("/Users/john/real-project"));
+    await writeFile(normal, session("/home/user/real-project"));
     await writeFile(skipped, session(physical));
     const kept = await parseCodexSession(normal, options(workDir));
     const dropped = await parseCodexSession(skipped, options(workDir));
