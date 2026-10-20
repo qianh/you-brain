@@ -79,6 +79,8 @@ export interface SetupFlags {
   baseUrl?: string;
   sources: string[];
   integrations?: string;
+  /** `--no-integrations`：一项都不写入，也不记录授权。 */
+  skipIntegrations?: boolean;
   /** Undefined asks, unless --yes which backfills. */
   backfill?: boolean;
   displayName?: string;
@@ -589,15 +591,9 @@ async function configureIntegrations(
     io.log("没有检测到可接入的 AI 工具。");
     return;
   }
-  const selected: string[] = [];
-  for (const item of plan.items) {
-    io.log(describeItem(item));
-    if (item.action === "unchanged" || item.action === "skipped") continue;
-    const accept = flags.yes
-      ? true
-      : await confirm(`接入 ${item.id}？`, true, io);
-    if (accept) selected.push(item.id);
-  }
+  logIntegrationSummary(plan.items, homeDir, io);
+  const choice = await resolveIntegrationChoice(flags, io);
+  const selected = await selectIntegrationItems(plan.items, choice, io);
   const result = await applyClientIntegrations({
     homeDir,
     plan,
@@ -615,6 +611,149 @@ async function configureIntegrations(
     );
   }
   io.log(`已接入 ${result.applied.length} 项，跳过 ${result.skipped.length} 项`);
+}
+
+function logIntegrationSummary(
+  items: readonly IntegrationPlanItem[],
+  homeDir: string,
+  io: SetupIo,
+): void {
+  io.log("将接入以下 AI 工具：");
+  for (const [client, group] of groupIntegrationItems(items)) {
+    io.log(`  ${client.padEnd(12)} ${describeClientChanges(group, homeDir)}`);
+  }
+}
+
+async function resolveIntegrationChoice(
+  flags: SetupFlags,
+  io: SetupIo,
+): Promise<"all" | "none" | "choose"> {
+  if (flags.skipIntegrations) return "none";
+  if (flags.yes) return "all";
+  if (!io.isTTY) {
+    if (flags.integrations !== undefined) return "all";
+    throw new CliError(
+      "当前不是交互终端，无法询问接入。请使用 --yes、--integrations <ids> 或 --no-integrations。",
+    );
+  }
+  return askIntegrationChoice(io);
+}
+
+async function askIntegrationChoice(io: SetupIo): Promise<"all" | "none" | "choose"> {
+  for (;;) {
+    const answer = (await io.ask("接入全部？[Y/n/c] ", "")).trim();
+    if (answer === "" || answer === "y" || answer === "Y" || answer === "yes" || answer === "是") {
+      return "all";
+    }
+    if (answer === "n" || answer === "N" || answer === "no" || answer === "否") return "none";
+    if (answer === "c" || answer === "C") return "choose";
+    io.log("请回答 Y、n 或 c。");
+  }
+}
+
+async function selectIntegrationItems(
+  items: readonly IntegrationPlanItem[],
+  choice: "all" | "none" | "choose",
+  io: SetupIo,
+): Promise<string[]> {
+  if (choice === "none") return [];
+  const groups = groupIntegrationItems(items);
+  if (choice === "all") return groups.flatMap(([, group]) => actionableIds(group));
+  const selected: string[] = [];
+  for (const [client, group] of groups) {
+    const ids = actionableIds(group);
+    if (ids.length === 0) continue;
+    const accept = await confirm(`接入 ${client}（${ids.length} 项）？`, true, io);
+    if (accept) selected.push(...ids);
+  }
+  return selected;
+}
+
+function actionableIds(items: readonly IntegrationPlanItem[]): string[] {
+  return items
+    .filter((item) => item.action !== "unchanged" && item.action !== "skipped")
+    .map((item) => item.id);
+}
+
+function groupIntegrationItems(
+  items: readonly IntegrationPlanItem[],
+): Array<[string, IntegrationPlanItem[]]> {
+  const order: string[] = [];
+  const grouped = new Map<string, IntegrationPlanItem[]>();
+  for (const item of items) {
+    const found = grouped.get(item.client);
+    if (found) {
+      found.push(item);
+      continue;
+    }
+    order.push(item.client);
+    grouped.set(item.client, [item]);
+  }
+  return order.flatMap((client) => {
+    const group = grouped.get(client);
+    return group ? [[client, group] as [string, IntegrationPlanItem[]]] : [];
+  });
+}
+
+function describeClientChanges(items: readonly IntegrationPlanItem[], homeDir: string): string {
+  const updates: string[] = [];
+  const creates: string[] = [];
+  const removes: string[] = [];
+  const copies: string[] = [];
+  const unchanged: string[] = [];
+  const skipped: string[] = [];
+  let mcp: string | undefined;
+  const other: string[] = [];
+  for (const item of items) {
+    const shown = item.path ? displayPath(item.path, homeDir) : "";
+    if (item.action === "unchanged") {
+      if (shown) unchanged.push(shown);
+      else other.push(`已是最新 ${describeItem(item)}`);
+      continue;
+    }
+    if (item.action === "skipped") {
+      if (shown) skipped.push(item.warning ? `${shown}（${item.warning}）` : `${shown} 跳过`);
+      else skipped.push(describeItem(item));
+      continue;
+    }
+    if (item.kind === "mcp" && (item.action === "create" || item.action === "update")) {
+      mcp = shown ? `注册 MCP ${shown}` : "注册 MCP";
+      continue;
+    }
+    if (item.action === "create" && shown) {
+      creates.push(shown);
+      continue;
+    }
+    if (item.action === "update" && shown) {
+      updates.push(shown);
+      continue;
+    }
+    if (item.action === "remove" && shown) {
+      removes.push(shown);
+      continue;
+    }
+    if (item.action === "copy") {
+      copies.push(item.warning ? `画像手动复制（${item.warning}）` : "画像手动复制（不写文件）");
+      continue;
+    }
+    other.push(describeItem(item));
+  }
+  const changes: string[] = [];
+  if (updates.length > 0) changes.push(`修改 ${updates.join("、")}`);
+  if (creates.length > 0) changes.push(`新建 ${creates.join("、")}`);
+  if (removes.length > 0) changes.push(`删除 ${removes.join("、")}`);
+  if (mcp) changes.push(mcp);
+  changes.push(...copies, ...other);
+  if (unchanged.length > 0) changes.push(`已是最新 ${unchanged.join("、")}`);
+  changes.push(...skipped);
+  return changes.join("；");
+}
+
+function displayPath(path: string, homeDir: string): string {
+  const root = homeDir.endsWith("/") ? homeDir.slice(0, -1) : homeDir;
+  const prefix = `${root}/`;
+  if (path === root) return "~";
+  return path.startsWith(prefix) ? `~/${path.slice(prefix.length)}` : path;
 }
 
 async function configureBackfill(

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -67,6 +67,43 @@ describe("you-brain integrations consent", () => {
     };
     expect(after.itemIds.some((id) => id.startsWith("claude-code:"))).toBe(false);
     expect(after.itemIds).toContain("codex:portrait");
+  }, 60_000);
+
+  it("does not write client files when setup is passed --no-integrations", async () => {
+    const root = await mkdtemp(join(tmpdir(), "you-brain-cli-skip-"));
+    roots.push(root);
+    const home = join(root, "home");
+    const data = join(root, "data");
+    await mkdir(join(home, ".claude"), { recursive: true });
+    await mkdir(data, { recursive: true });
+    await writeFile(
+      join(data, "setup.json"),
+      `${JSON.stringify({
+        version: 1,
+        google: true,
+        drive: true,
+        brainhub: true,
+        model: true,
+        sources: true,
+        integrations: false,
+        backfill: true,
+      })}\n`,
+    );
+    const env = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      YOU_BRAIN_HOME: home,
+      YOU_BRAIN_DATA_DIR: data,
+    };
+    const setup = await runCli(["setup", "--no-integrations", "--skip-brainhub"], env);
+    expect(setup.status).toBe(0);
+    expect(setup.stdout).toContain("claude-code");
+    expect(setup.stdout).toContain(".claude/CLAUDE.md");
+    expect(setup.stdout).toContain("已接入 0 项，跳过 0 项");
+    await expect(readFile(join(home, ".claude.json"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(home, ".claude", "CLAUDE.md"), "utf8")).rejects.toThrow();
+    await expect(readFile(join(data, "portrait-consent.json"), "utf8")).rejects.toThrow();
   }, 60_000);
 });
 

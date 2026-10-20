@@ -132,6 +132,7 @@ program
   .option("--base-url <url>", "模型接口地址")
   .option("--source <id=path>", "采集来源，可重复", collect, [])
   .option("--integrations <ids>", "逗号分隔的客户端 id")
+  .option("--no-integrations", "跳过全部接入")
   .option("--backfill", "确认首次回填")
   .option("--no-backfill", "跳过首次回填")
   .option("--display-name <name>", "设备显示名")
@@ -333,7 +334,8 @@ interface SetupCommandOptions {
   apiKey?: string;
   baseUrl?: string;
   source?: string[];
-  integrations?: string;
+  /** 客户端列表；`--no-integrations` 时 commander 会把它设为 false。 */
+  integrations?: string | false;
   backfill?: boolean;
   displayName?: string;
 }
@@ -345,6 +347,8 @@ function setupFlags(opts: SetupCommandOptions): SetupFlags {
     : argv.includes("--backfill")
       ? true
       : undefined;
+  const integrations = typeof opts.integrations === "string" ? opts.integrations : undefined;
+  const skipIntegrations = argv.includes("--no-integrations") || opts.integrations === false;
   return {
     yes: Boolean(opts.yes),
     inheritBrainhub: Boolean(opts.inheritBrainhub),
@@ -358,7 +362,8 @@ function setupFlags(opts: SetupCommandOptions): SetupFlags {
     ...(opts.model ? { model: opts.model } : {}),
     ...(opts.apiKey ? { apiKey: opts.apiKey } : {}),
     ...(opts.baseUrl ? { baseUrl: opts.baseUrl } : {}),
-    ...(opts.integrations !== undefined ? { integrations: opts.integrations } : {}),
+    ...(integrations !== undefined ? { integrations } : {}),
+    ...(skipIntegrations ? { skipIntegrations: true } : {}),
     ...(backfill !== undefined ? { backfill } : {}),
     ...(opts.displayName ? { displayName: opts.displayName } : {}),
   };
