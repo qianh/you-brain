@@ -1,15 +1,8 @@
 import type { ReactNode } from "react";
-import type { TopicSessionLink, TodaySession } from "@you-brain/core/http/types.js";
 
 import { useDaemon } from "../daemon-context.js";
-import { deviceLabel, driveFileUrl, formatDateTime, sourceLabel, type Language } from "../lib/format.js";
-import type { NamedDevice } from "../lib/format.js";
 import { parseInline, parseMarkdown } from "../lib/markdown.js";
 import type { MessageKey } from "../i18n/messages.js";
-
-export function Empty({ children }: { children: ReactNode }) {
-  return <p className="empty">{children}</p>;
-}
 
 export function Banner({
   tone,
@@ -114,70 +107,6 @@ export function MarkdownView({ source }: { source: string }) {
   );
 }
 
-export interface SessionCardModel {
-  sessionKey: string;
-  source: string;
-  device: string;
-  fileId: string | null;
-  title: string;
-  summary: string;
-  updatedAt: string | null;
-  startedAt?: string | null;
-  topicName?: string | null;
-}
-
-export function toSessionCard(session: TodaySession | TopicSessionLink): SessionCardModel {
-  return {
-    sessionKey: session.sessionKey,
-    source: session.source,
-    device: session.device,
-    fileId: session.fileId,
-    title: session.title,
-    summary: session.summary,
-    updatedAt: session.updatedAt,
-    ...("startedAt" in session ? { startedAt: session.startedAt } : {}),
-    ...("topicName" in session ? { topicName: session.topicName } : {}),
-  };
-}
-
-export function SessionCard({
-  session,
-  devices,
-  timeZone,
-  language,
-  compact = false,
-  showTopic = false,
-}: {
-  session: SessionCardModel;
-  devices: readonly NamedDevice[];
-  timeZone: string;
-  language: Language;
-  compact?: boolean;
-  showTopic?: boolean;
-}) {
-  const { t } = useDaemon();
-  const when = formatDateTime(session.updatedAt ?? session.startedAt ?? null, language, timeZone);
-  return (
-    <article className={compact ? "session compact" : "session"}>
-      <div className="session-meta">
-        <span className="pill">{sourceLabel(session.source)}</span>
-        <span>{deviceLabel(session.device, devices)}</span>
-        <time dateTime={session.updatedAt ?? undefined}>{when}</time>
-      </div>
-      {showTopic && session.topicName ? <p className="session-topic">{session.topicName}</p> : null}
-      <h3>{session.title || t("conversation")}</h3>
-      <p className="summary-text">{session.summary || t("noSummary")}</p>
-      {session.fileId ? (
-        <a className="text-link" href={driveFileUrl(session.fileId)} target="_blank" rel="noreferrer">
-          {t("openDrive")}
-        </a>
-      ) : (
-        <span className="muted">{t("noDrive")}</span>
-      )}
-    </article>
-  );
-}
-
 export function Field({
   label,
   hint,
@@ -206,5 +135,11 @@ export function StatusText({ status }: { status: string }) {
         : status === "parked"
           ? "statusParked"
           : "statusActive";
-  return <span className={`status-pill status-${status}`}>{t(key)}</span>;
+  const tone = status === "follow_up" ? "warn" : status === "active" ? "ok" : "muted";
+  return (
+    <span className="status-inline">
+      <i className={`dot dot-${tone}`} />
+      {t(key)}
+    </span>
+  );
 }

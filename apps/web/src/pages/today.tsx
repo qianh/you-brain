@@ -1,7 +1,11 @@
 import { useState } from "react";
 
 import { useDaemon } from "../daemon-context.js";
-import { Empty, SessionCard, toSessionCard } from "../components/ui.js";
+import { Card } from "../components/card.js";
+import { EmptyState } from "../components/empty.js";
+import { Segmented } from "../components/segmented.js";
+import { SessionRow, toSessionCard } from "../components/session-row.js";
+import { ShowMore } from "../components/show-more.js";
 import { formatDay } from "../lib/format.js";
 import { groupSessionsByTopic, sortSessionsByTime } from "../lib/group.js";
 
@@ -18,56 +22,56 @@ export function TodayPage() {
           <h1>{t("today")}</h1>
           <p>{today ? formatDay(today.date, language) : t("todayHint")}</p>
         </div>
-        <div className="segmented" role="tablist" aria-label={t("today")}>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === "topic"}
-            className={mode === "topic" ? "on" : ""}
-            onClick={() => setMode("topic")}
-          >
-            {t("byTopic")}
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === "time"}
-            className={mode === "time" ? "on" : ""}
-            onClick={() => setMode("time")}
-          >
-            {t("byTime")}
-          </button>
-        </div>
+        <Segmented
+          label={t("today")}
+          value={mode}
+          options={[
+            { value: "topic", label: t("byTopic") },
+            { value: "time", label: t("byTime") },
+          ]}
+          onChange={(value) => setMode(value === "time" ? "time" : "topic")}
+        />
       </header>
-      {sessions.length === 0 ? <Empty>{t("emptyToday")}</Empty> : null}
-      {mode === "topic"
+      {sessions.length === 0 ? <EmptyState title={t("emptyToday")} icon="calendar" /> : null}
+      {sessions.length > 0 && mode === "topic"
         ? groups.map((group) => (
             <section key={group.topicId ?? "none"} className="stack">
-              <h2 className="group-title">
-                <span className="topic-label">{group.topicName}</span>
-                <span className="topic-count">{t("groupLabel", { count: group.sessions.length })}</span>
+              <h2 className="group-label">
+                <span>{group.topicName}</span>
+                <span>{t("groupLabel", { count: group.sessions.length })}</span>
               </h2>
-              {group.sessions.map((session) => (
-                <SessionCard
-                  key={session.sessionKey}
-                  session={toSessionCard(session)}
-                  devices={devices}
-                  timeZone={timeZone}
-                  language={language}
-                />
-              ))}
+              <Card>
+                <ShowMore items={group.sessions}>
+                  {(session) => (
+                    <SessionRow
+                      key={session.sessionKey}
+                      session={toSessionCard(session)}
+                      devices={devices}
+                      timeZone={timeZone}
+                      language={language}
+                    />
+                  )}
+                </ShowMore>
+              </Card>
             </section>
           ))
-        : byTime.map((session) => (
-            <SessionCard
-              key={session.sessionKey}
-              session={toSessionCard(session)}
-              devices={devices}
-              timeZone={timeZone}
-              language={language}
-              showTopic
-            />
-          ))}
+        : null}
+      {sessions.length > 0 && mode === "time" ? (
+        <Card>
+          <ShowMore items={byTime}>
+            {(session) => (
+              <SessionRow
+                key={session.sessionKey}
+                session={toSessionCard(session)}
+                devices={devices}
+                timeZone={timeZone}
+                language={language}
+                showTopic
+              />
+            )}
+          </ShowMore>
+        </Card>
+      ) : null}
     </div>
   );
 }

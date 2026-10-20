@@ -22,3 +22,9 @@ export function isNavActive(pathname: string, href: string): boolean {
   if (href === "/topics/history") return pathname === "/topics/history";
   return pathname === href;
 }
+
+/** The shelf tab covers both the active and history routes. */
+export function isPrimaryNavActive(pathname: string, href: string): boolean {
+  if (href === "/topics") return pathname === "/topics" || pathname === "/topics/history";
+  return isNavActive(pathname, href);
+}

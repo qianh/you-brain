@@ -3,7 +3,12 @@ import type { PortraitResponse, PortraitSnapshot } from "@you-brain/core/http/ty
 
 import { useDaemon } from "../daemon-context.js";
 import { BrowserDaemonError } from "../api/client.js";
-import { Empty, MarkdownView } from "../components/ui.js";
+import { MarkdownView } from "../components/ui.js";
+import { Card } from "../components/card.js";
+import { EmptyState } from "../components/empty.js";
+import { Icon } from "../components/icons.js";
+import { Row } from "../components/row.js";
+import { Segmented } from "../components/segmented.js";
 import { formatDateTime, variantName } from "../lib/format.js";
 
 const DEFAULT_VARIANTS = [
@@ -49,48 +54,48 @@ export function PortraitPage() {
           <h1>{t("portrait")}</h1>
           <p>{t("portraitHint")}</p>
         </div>
+        <Segmented
+          label={t("portrait")}
+          value={variant}
+          options={variants.map((item) => ({ value: item.id, label: variantName(item.id, language) }))}
+          onChange={setVariant}
+        />
       </header>
-      <div className="segmented" role="tablist" aria-label={t("portrait")}>
-        {variants.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            role="tab"
-            className={item.id === variant ? "on" : ""}
-            aria-selected={item.id === variant}
-            onClick={() => setVariant(item.id)}
-          >
-            {variantName(item.id, language)}
-          </button>
-        ))}
-      </div>
       {error ? <p className="form-error">{error}</p> : null}
-      <section className="card prose">
+      <Card padded className="prose">
         <p className="muted tiny">{body?.path || variants.find((item) => item.id === variant)?.path}</p>
-        {body?.content ? <MarkdownView source={body.content} /> : <Empty>{t("portraitMissing")}</Empty>}
+        {body?.content ? <MarkdownView source={body.content} /> : <EmptyState title={t("portraitMissing")} icon="user" />}
         {body?.updatedAt ? (
           <p className="muted tiny">
             {t("updated")} {formatDateTime(body.updatedAt, language, timeZone)}
           </p>
         ) : null}
-      </section>
-      <section>
-        <h2>{t("snapshots")}</h2>
+      </Card>
+      <section className="stack">
+        <h2 className="group-label">
+          <span>{t("snapshots")}</span>
+        </h2>
         <p className="muted">{t("correctionLater")}</p>
-        {snapshots.length === 0 ? <Empty>{t("emptySnapshots")}</Empty> : null}
-        <ul className="plain-list">
-          {snapshots.map((snapshot) => (
-            <li key={snapshot.path}>
-              <strong>{snapshot.name}</strong>
-              <small>
-                {snapshot.path}
-                {snapshot.updatedAt
-                  ? ` · ${formatDateTime(snapshot.updatedAt, language, timeZone)}`
-                  : ""}
-              </small>
-            </li>
-          ))}
-        </ul>
+        {snapshots.length === 0 ? <EmptyState title={t("emptySnapshots")} icon="book" /> : null}
+        {snapshots.length > 0 ? (
+          <Card>
+            {snapshots.map((snapshot) => (
+              <Row
+                key={snapshot.path}
+                icon={<Icon name="book" />}
+                title={snapshot.name}
+                subtitle={
+                  <>
+                    <span>{snapshot.path}</span>
+                    {snapshot.updatedAt ? (
+                      <span>{" · "}{formatDateTime(snapshot.updatedAt, language, timeZone)}</span>
+                    ) : null}
+                  </>
+                }
+              />
+            ))}
+          </Card>
+        ) : null}
       </section>
     </div>
   );

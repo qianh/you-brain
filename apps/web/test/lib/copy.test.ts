@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import { translate } from "../../src/i18n/messages.js";
 import {
   attentionLevel,
+  syncDot,
   linesToList,
   listToLines,
   consolidationView,
@@ -153,6 +154,22 @@ describe("panel status", () => {
     expect(
       consolidationView({ enabled: true, status: "ok", lastFinishedAt: "2026-10-18T00:00:00.000Z" }),
     ).toBe("ready");
+  });
+});
+
+describe("sync dot", () => {
+  test("follows the sync record, not the rest of the panel", () => {
+    expect(syncDot(null)).toBe("muted");
+    expect(syncDot({ lastSyncAt: null, pendingOutbox: 3 })).toBe("muted");
+    expect(syncDot({ lastSyncAt: "   " })).toBe("muted");
+    expect(syncDot({ lastSyncAt: "2026-10-18T16:08:00+08:00", pendingOutbox: 1 })).toBe("ok");
+    expect(syncDot({ lastSyncAt: "2026-10-18T16:08:00+08:00", stale: true })).toBe("warn");
+    expect(syncDot({ lastSyncAt: "2026-10-18T16:08:00+08:00", expired: true })).toBe("warn");
+    expect(syncDot({ lastSyncAt: "2026-10-18T16:08:00+08:00", status: "expired" })).toBe("warn");
+    expect(syncDot({ lastSyncAt: "2026-10-18T16:08:00+08:00", lastError: "超时" })).toBe("bad");
+    expect(syncDot({ lastSyncAt: "2026-10-18T16:08:00+08:00", error: "失败" })).toBe("bad");
+    expect(syncDot({ lastSyncAt: null, failed: true })).toBe("bad");
+    expect(syncDot({ lastSyncAt: "2026-10-18T16:08:00+08:00", status: "failed", stale: true })).toBe("bad");
   });
 });
 

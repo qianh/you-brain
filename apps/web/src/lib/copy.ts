@@ -133,6 +133,38 @@ export function attentionLevel(status: PanelStatusInput, problems: readonly stri
   return "ok";
 }
 
+export type DotTone = "ok" | "warn" | "bad" | "muted";
+
+/** Fields the sync row may carry. A backlog is not a failure. */
+export interface SyncDotInput {
+  lastSyncAt?: string | null;
+  pendingOutbox?: number;
+  lastError?: string | null;
+  error?: string | null;
+  stale?: boolean | null;
+  expired?: boolean | null;
+  failed?: boolean | null;
+  status?: string | null;
+}
+
+const SYNC_BAD = new Set(["bad", "failed", "error", "failure"]);
+const SYNC_WARN = new Set(["warn", "stale", "expired"]);
+
+function syncText(value: string | null | undefined): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/** Dot for the sync line only. No timestamp and no fault means “never synced”. */
+export function syncDot(sync: SyncDotInput | null | undefined): DotTone {
+  if (!sync) return "muted";
+  const error = syncText(sync.lastError) || syncText(sync.error);
+  const status = syncText(sync.status).toLowerCase();
+  if (error !== "" || sync.failed === true || SYNC_BAD.has(status)) return "bad";
+  if (sync.stale === true || sync.expired === true || SYNC_WARN.has(status)) return "warn";
+  if (syncText(sync.lastSyncAt) === "") return "muted";
+  return "ok";
+}
+
 export interface CaptureRow {
   source: string;
   lastCaptureAt: string | null;

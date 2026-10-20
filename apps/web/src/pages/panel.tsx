@@ -1,98 +1,126 @@
 import { useState } from "react";
 
 import { useDaemon } from "../daemon-context.js";
-import { Empty, SessionCard, toSessionCard } from "../components/ui.js";
-import { attentionLevel, consolidationView, panelProblems } from "../lib/copy.js";
+import { Card } from "../components/card.js";
+import { EmptyState } from "../components/empty.js";
+import { BrandMark, Icon } from "../components/icons.js";
+import { Row } from "../components/row.js";
+import { ShowMore } from "../components/show-more.js";
+import { attentionLevel, consolidationView, panelProblems, syncDot } from "../lib/copy.js";
 import { formatDateTime, formatDay } from "../lib/format.js";
 import { groupSessionsByTopic } from "../lib/group.js";
-import { browserWindowBridge, openFullWindow } from "../lib/window.js";
+import { browserWindowBridge, openFullWindow, quitShell } from "../lib/window.js";
 
 export function PanelPage() {
-  const { t, language, today, reminders, status, devices, timeZone } = useDaemon();
+  const { t, language, today, reminders, status, timeZone } = useDaemon();
   const [openError, setOpenError] = useState<string | null>(null);
-  const groups = groupSessionsByTopic(today?.sessions ?? [], t("unassigned"));
+  const sessions = today?.sessions ?? [];
+  const groups = groupSessionsByTopic(sessions, t("unassigned"));
   const problems = status ? panelProblems(status, language) : [];
   const level = status ? attentionLevel(status, problems) : "ok";
   const consolidationOff = consolidationView(status?.consolidation) === "disabled";
   const sync = formatDateTime(status?.sync.lastSyncAt ?? null, language, timeZone);
+  const tone = level === "bad" ? "bad" : level === "warn" ? "warn" : "ok";
+  const syncTone = syncDot(status?.sync);
   return (
     <div className="panel-frame">
-      <header className="panel-head">
-        <div>
-          <strong>{t("brand")}</strong>
-          <small>{today ? formatDay(today.date, language) : t("tagline")}</small>
-        </div>
-        <span className={`dot dot-${level}`} title={level === "ok" ? t("healthy") : t("attention")} />
+      <header className="panel-top">
+        <span className="brand">
+          <BrandMark size={20} />
+          <span>{t("brand")}</span>
+        </span>
+        <span className="panel-status">
+          <i className={`dot dot-${tone}`} />
+          <strong>{level === "ok" ? t("healthy") : t("attention")}</strong>
+        </span>
       </header>
-      <section className="panel-section panel-today" aria-labelledby="panel-today-title">
-        <h2 id="panel-today-title">{t("panelToday")}</h2>
-        <div className="panel-scroll">
-          {groups.length === 0 ? <Empty>{t("emptyToday")}</Empty> : null}
-          {groups.map((group) => (
-            <div key={group.topicId ?? "none"} className="topic-block">
-              <h3>
-                <span className="topic-label">{group.topicName}</span>
-                <span className="topic-count">{t("groupLabel", { count: group.sessions.length })}</span>
-              </h3>
-              {group.sessions.map((session) => (
-                <SessionCard
-                  key={session.sessionKey}
-                  session={toSessionCard(session)}
-                  devices={devices}
-                  timeZone={timeZone}
-                  language={language}
-                  compact
-                />
-              ))}
+      <div className="panel-scroll">
+        <Card>
+          <Row
+            icon={<Icon name="calendar" />}
+            title={t("panelToday")}
+            subtitle={today ? formatDay(today.date, language) : t("todayHint")}
+            trailing={<strong>{t("panelSessionCount", { count: sessions.length })}</strong>}
+          />
+          {groups.length === 0 ? <EmptyState title={t("emptyToday")} icon="calendar" /> : null}
+          <ShowMore items={groups} limit={5}>
+            {(group) => (
+              <Row
+                key={group.topicId ?? "none"}
+                icon={<Icon name="book" />}
+                title={group.topicName}
+                subtitle={
+                  <>
+                    <i className="dot dot-ok" />
+                    <span>{group.sessions[0]?.title || t("noSummary")}</span>
+                  </>
+                }
+                trailing={<span>{t("groupLabel", { count: group.sessions.length })}</span>}
+              />
+            )}
+          </ShowMore>
+        </Card>
+        <Card>
+          <Row
+            icon={<Icon name="pulse" />}
+            title={t("panelStatus")}
+            subtitle={
+              <>
+                <i className={`dot dot-${syncTone}`} />
+                <span>{status?.sync.lastSyncAt ? sync : t("neverSynced")}</span>
+              </>
+            }
+            trailing={<span>{t("lastSync")}</span>}
+          />
+          {consolidationOff ? <p className="muted tiny panel-note">{t("consolidationDisabled")}</p> : null}
+          {problems.length === 0 ? <p className="muted tiny panel-note">{t("allClear")}</p> : null}
+          {problems.map((problem) => (
+            <div key={problem} className="banner banner-warn panel-banner">
+              {problem}
             </div>
           ))}
-        </div>
-      </section>
-      <section className="panel-section panel-pinned" aria-labelledby="panel-reminders-title">
-        <h2 id="panel-reminders-title">{t("reminders")}</h2>
-        {reminders.length === 0 ? <Empty>{t("emptyReminders")}</Empty> : null}
-        {reminders.map((reminder) => (
-          <article key={reminder.reminderId} className="reminder">
-            <strong>{reminder.text}</strong>
-            <small>
-              {reminder.kind} · {formatDateTime(reminder.issuedAt, language, timeZone)}
-            </small>
-          </article>
-        ))}
-      </section>
-      <section className="panel-section panel-pinned" aria-labelledby="panel-status-title">
-        <h2 id="panel-status-title">{t("panelStatus")}</h2>
-        <p className="sync-line">
-          <span>{t("lastSync")}</span>
-          <strong>{status?.sync.lastSyncAt ? sync : t("neverSynced")}</strong>
-        </p>
-        {consolidationOff ? <p className="muted">{t("consolidationDisabled")}</p> : null}
-        {problems.length === 0 ? <p className="muted">{t("allClear")}</p> : null}
-        {problems.length > 0 ? (
-          <ul className="problem-list">
-            {problems.map((problem) => (
-              <li key={problem}>{problem}</li>
-            ))}
-          </ul>
-        ) : null}
-      </section>
+          {reminders.length === 0 ? (
+            <Row icon={<Icon name="inbox" />} title={t("reminders")} subtitle={t("emptyReminders")} />
+          ) : (
+            reminders.map((reminder) => (
+              <Row
+                key={reminder.reminderId}
+                icon={<Icon name="alert" />}
+                title={reminder.text}
+                subtitle={`${reminder.kind} · ${formatDateTime(reminder.issuedAt, language, timeZone)}`}
+              />
+            ))
+          )}
+        </Card>
+      </div>
       <footer className="panel-footer">
         {openError ? <p className="form-error">{openError}</p> : null}
-        <button
-          type="button"
-          className="btn primary wide"
-          onClick={() => {
-            setOpenError(null);
-            void openFullWindow(browserWindowBridge())
-              .then((mode) => {
-                if (mode === "blocked") setOpenError(t("popupBlocked"));
-              })
-              .catch(() => setOpenError(t("popupBlocked")));
-          }}
-        >
-          {t("openWindow")}
-        </button>
-        <p className="muted tiny">{t("panelWindowHint")}</p>
+        <p className="panel-hint">{t("panelWindowHint")}</p>
+        <div className="panel-actions">
+          <button
+            type="button"
+            className="btn text"
+            onClick={() => {
+              setOpenError(null);
+              void openFullWindow(browserWindowBridge())
+                .then((mode) => {
+                  if (mode === "blocked") setOpenError(t("popupBlocked"));
+                })
+                .catch(() => setOpenError(t("popupBlocked")));
+            }}
+          >
+            {t("openWindow")}
+          </button>
+          <button
+            type="button"
+            className="btn text"
+            onClick={() => {
+              void quitShell({ ...browserWindowBridge(), close: () => window.close() });
+            }}
+          >
+            {t("quit")}
+          </button>
+        </div>
       </footer>
     </div>
   );

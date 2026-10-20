@@ -2,7 +2,11 @@ import { useState } from "react";
 
 import { useDaemon } from "../daemon-context.js";
 import { BrowserDaemonError } from "../api/client.js";
-import { Empty } from "../components/ui.js";
+import { Card } from "../components/card.js";
+import { EmptyState } from "../components/empty.js";
+import { Icon } from "../components/icons.js";
+import { Pill } from "../components/pill.js";
+import { Row } from "../components/row.js";
 import { capabilityLabel, kindLabel, platformLabel } from "../lib/copy.js";
 import { formatDateTime } from "../lib/format.js";
 
@@ -44,56 +48,71 @@ export function DevicesPage() {
           : t("webFollowsMain")}
       </p>
       {error ? <p className="form-error">{error}</p> : null}
-      {devices.length === 0 ? <Empty>{t("emptyDevices")}</Empty> : null}
-      <ul className="device-list">
-        {devices.map((device) => {
-          const isMain = device.deviceId === mainId;
-          const isWeb = webId === null ? isMain : device.deviceId === webId;
-          return (
-            <li key={device.deviceId} className="card device-card">
-              <div>
-                <h2>
-                  {device.displayName}
-                  {status?.deviceId === device.deviceId ? <span className="pill">{t("thisDevice")}</span> : null}
-                  {isMain ? <span className="pill accent">{t("mainBadge")}</span> : null}
-                  {isWeb ? <span className="pill">{t("webBadge")}</span> : null}
-                </h2>
-                <p className="muted">
-                  {kindLabel(device.kind, language)} · {platformLabel(device.platform, language)}
-                </p>
-                <p>
-                  {t("lastSeen")} {formatDateTime(device.lastSeenAt, language, timeZone)}
-                </p>
-                <p>
-                  {t("lastActive")} {formatDateTime(device.lastActiveAt, language, timeZone)}
-                </p>
-                <p className="muted tiny">
-                  {t("capabilities")}{" "}
-                  {device.capabilities.map((item) => capabilityLabel(item, language)).join(" · ")}
-                </p>
-              </div>
-              <div className="row-actions">
-                <button
-                  type="button"
-                  className="btn"
-                  disabled={busy !== null || isMain}
-                  onClick={() => void save({ mainDevice: device.deviceId }, `main-${device.deviceId}`)}
-                >
-                  {busy === `main-${device.deviceId}` ? t("working") : t("setMain")}
-                </button>
-                <button
-                  type="button"
-                  className="btn"
-                  disabled={busy !== null || (webId !== null && device.deviceId === webId)}
-                  onClick={() => void save({ webProcessor: device.deviceId }, `web-${device.deviceId}`)}
-                >
-                  {busy === `web-${device.deviceId}` ? t("working") : t("setWeb")}
-                </button>
-              </div>
-            </li>
-          );
-        })}
-      </ul>
+      {devices.length === 0 ? <EmptyState title={t("emptyDevices")} icon="laptop" /> : null}
+      {devices.length > 0 ? (
+        <Card>
+          {devices.map((device) => {
+            const isMain = device.deviceId === mainId;
+            const isWeb = webId === null ? isMain : device.deviceId === webId;
+            const here = status?.deviceId === device.deviceId;
+            return (
+              <Row
+                key={device.deviceId}
+                className="stack-narrow"
+                icon={<Icon name={device.kind === "server" ? "server" : "laptop"} />}
+                title={
+                  <span className="pill-row">
+                    <span>{device.displayName}</span>
+                    {here ? <Pill>{t("thisDevice")}</Pill> : null}
+                    {isMain ? <Pill pressed>{t("mainBadge")}</Pill> : null}
+                    {isWeb ? <Pill>{t("webBadge")}</Pill> : null}
+                  </span>
+                }
+                subtitle={
+                  <>
+                    <i className={here ? "dot dot-ok" : "dot dot-muted"} />
+                    <span>
+                      {kindLabel(device.kind, language)} · {platformLabel(device.platform, language)}
+                    </span>
+                    <span>
+                      {" · "}
+                      {t("lastSeen")} {formatDateTime(device.lastSeenAt, language, timeZone)}
+                    </span>
+                    <span>
+                      {" · "}
+                      {t("lastActive")} {formatDateTime(device.lastActiveAt, language, timeZone)}
+                    </span>
+                    <span>
+                      {" · "}
+                      {device.capabilities.map((item) => capabilityLabel(item, language)).join(" · ")}
+                    </span>
+                  </>
+                }
+                trailing={
+                  <>
+                    <button
+                      type="button"
+                      className="btn small"
+                      disabled={busy !== null || isMain}
+                      onClick={() => void save({ mainDevice: device.deviceId }, `main-${device.deviceId}`)}
+                    >
+                      {busy === `main-${device.deviceId}` ? t("working") : t("setMain")}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn small"
+                      disabled={busy !== null || (webId !== null && device.deviceId === webId)}
+                      onClick={() => void save({ webProcessor: device.deviceId }, `web-${device.deviceId}`)}
+                    >
+                      {busy === `web-${device.deviceId}` ? t("working") : t("setWeb")}
+                    </button>
+                  </>
+                }
+              />
+            );
+          })}
+        </Card>
+      ) : null}
       {webId !== null ? (
         <button
           type="button"

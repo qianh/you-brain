@@ -4,7 +4,15 @@ import type { TopicStatus } from "@you-brain/protocol";
 
 import { useDaemon } from "../daemon-context.js";
 import { BrowserDaemonError } from "../api/client.js";
-import { Empty, SessionCard, StatusText, toSessionCard } from "../components/ui.js";
+import { Field, StatusText } from "../components/ui.js";
+import { Card } from "../components/card.js";
+import { EmptyState } from "../components/empty.js";
+import { Icon } from "../components/icons.js";
+import { Row } from "../components/row.js";
+import { Segmented } from "../components/segmented.js";
+import { Select } from "../components/select.js";
+import { SessionRow, toSessionCard } from "../components/session-row.js";
+import { ClampText, ShowMore } from "../components/show-more.js";
 import { formatDateTime } from "../lib/format.js";
 import { filterTopics } from "../lib/group.js";
 import { linesToList } from "../lib/copy.js";
@@ -13,6 +21,13 @@ import { todoStatusKey } from "../i18n/messages.js";
 import { useRoute } from "../router.js";
 
 const STATUSES: readonly TopicStatus[] = ["active", "follow_up", "done", "parked"];
+
+function statusLabelKey(status: TopicStatus): "statusActive" | "statusFollowUp" | "statusDone" | "statusParked" {
+  if (status === "follow_up") return "statusFollowUp";
+  if (status === "done") return "statusDone";
+  if (status === "parked") return "statusParked";
+  return "statusActive";
+}
 
 export function TopicsPage({ zone }: { zone: "active" | "history" }) {
   const daemon = useDaemon();
@@ -55,67 +70,98 @@ export function TopicsPage({ zone }: { zone: "active" | "history" }) {
     <div className="page">
       <header className="page-head">
         <div>
-          <h1>{zone === "history" ? t("navTopicsHistory") : t("navTopicsActive")}</h1>
+          <h1>{t("topicsBook")}</h1>
           <p>{zone === "history" ? t("historyHint") : t("activeHint")}</p>
         </div>
+        <Segmented
+          label={t("topicsBook")}
+          value={zone}
+          options={[
+            { value: "active", label: t("zoneActive") },
+            { value: "history", label: t("zoneHistory") },
+          ]}
+          onChange={(value) => navigate(value === "history" ? "/topics/history" : "/topics")}
+        />
       </header>
-      <div className="split">
-        <section className="list-pane">
-          {zone === "history" ? (
-            <input
-              className="search-input"
-              value={query}
-              placeholder={t("searchTopics")}
-              aria-label={t("searchTopics")}
-              onChange={(event) => setQuery(event.target.value)}
-            />
-          ) : null}
-          {visible.length === 0 ? (
-            <Empty>{zone === "history" ? t("emptyHistory") : t("emptyTopics")}</Empty>
-          ) : null}
-          <ul className="topic-list">
-            {visible.map((topic) => (
-              <li key={topic.topicId}>
-                <a
-                  href={topicHref(zone, topic.topicId)}
-                  aria-current={topic.topicId === selected ? "true" : undefined}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    navigate(topicHref(zone, topic.topicId));
-                  }}
-                >
-                  <span className="topic-name">{topic.name}</span>
-                  <StatusText status={topic.status} />
-                  <small>
-                    {formatDateTime(topic.lastActive, language, timeZone)}
-                    {topic.openTodoCount > 0
-                      ? ` · ${t("openTodoCount", { count: topic.openTodoCount })}`
-                      : ""}
-                  </small>
-                </a>
-              </li>
-            ))}
-          </ul>
-        </section>
-        <section className="detail-pane">
-          {!selected ? <Empty>{t("emptyDetail")}</Empty> : null}
-          {detailError ? <p className="form-error">{detailError}</p> : null}
-          {detail && detail.topicId === selected ? (
-            <TopicEditor
-              detail={detail}
-              topics={topics}
-              devices={devices}
-              onChanged={async (options) => {
-                if (options) {
-                  const nextId = options.id ?? location.id ?? undefined;
-                  navigate(topicHref(options.zone ?? zone, nextId));
+      {zone === "history" ? (
+        <input
+          className="control"
+          value={query}
+          placeholder={t("searchTopics")}
+          aria-label={t("searchTopics")}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      ) : null}
+      {visible.length === 0 ? (
+        <EmptyState title={zone === "history" ? t("emptyHistory") : t("emptyTopics")} icon="book" />
+      ) : (
+        <Card>
+          {visible.map((topic) => {
+            const open = topic.topicId === selected;
+            const sessions = detail && detail.topicId === topic.topicId ? detail.sessions.length : null;
+            return (
+              <Row
+                key={topic.topicId}
+                href={topicHref(zone, topic.topicId)}
+                current={open}
+                onClick={() => navigate(open ? topicHref(zone) : topicHref(zone, topic.topicId))}
+                icon={<Icon name="book" />}
+                title={topic.name}
+                subtitle={
+                  <>
+                    <StatusText status={topic.status} />
+                    <span>{" · "}{formatDateTime(topic.lastActive, language, timeZone)}</span>
+                    {sessions !== null ? <span>{" · "}{t("groupLabel", { count: sessions })}</span> : null}
+                    {topic.openTodoCount > 0 ? (
+                      <span>{" · "}{t("openTodoCount", { count: topic.openTodoCount })}</span>
+                    ) : null}
+                  </>
                 }
-                await reload("topics");
-              }}
-            />
-          ) : null}
-        </section>
-      </div>
+                trailing={<Icon name={open ? "chevronUp" : "chevron"} size={16} />}
+              >
+                {open ? (
+                  <>
+                    {detailError ? <p className="form-error">{detailError}</p> : null}
+                    {detail && detail.topicId === selected ? (
+                      <TopicEditor
+                        detail={detail}
+                        topics={topics}
+                        devices={devices}
+                        onChanged={async (options) => {
+                          if (options) {
+                            const nextId = options.id ?? location.id ?? undefined;
+                            navigate(topicHref(options.zone ?? zone, nextId));
+                          }
+                          await reload("topics");
+                        }}
+                      />
+                    ) : detailError ? null : (
+                      <p className="muted">{t("loading")}</p>
+                    )}
+                  </>
+                ) : null}
+              </Row>
+            );
+          })}
+        </Card>
+      )}
+      {selected && detail && detail.topicId === selected && !visible.some((topic) => topic.topicId === selected) ? (
+        <Card padded>
+          <TopicEditor
+            detail={detail}
+            topics={topics}
+            devices={devices}
+            onChanged={async (options) => {
+              if (options) {
+                const nextId = options.id ?? location.id ?? undefined;
+                navigate(topicHref(options.zone ?? zone, nextId));
+              }
+              await reload("topics");
+            }}
+          />
+        </Card>
+      ) : null}
+      {!selected && visible.length > 0 ? <p className="muted">{t("emptyDetailInline")}</p> : null}
     </div>
   );
 }
@@ -179,11 +225,12 @@ function TopicEditor({
       <header className="detail-head">
         <div>
           <h2>{detail.name}</h2>
-          <p className="session-meta">
+          <p className="meta-line">
             <StatusText status={detail.status} />
-            <span>{detail.statusBy === "user" ? t("byUser") : t("byAuto")}</span>
-            {detail.userLocked ? <span>{t("userLocked")}</span> : null}
-            <span>{formatDateTime(detail.lastActive, language, timeZone)}</span>
+            <span>{" · "}{detail.statusBy === "user" ? t("byUser") : t("byAuto")}</span>
+            {detail.userLocked ? <span>{" · "}{t("userLocked")}</span> : null}
+            <span>{" · "}{formatDateTime(detail.lastActive, language, timeZone)}</span>
+            <span>{" · "}{t("groupLabel", { count: detail.sessions.length })}</span>
           </p>
         </div>
         {detail.zone === "history" ? (
@@ -206,13 +253,13 @@ function TopicEditor({
       {historyNote && detail.zone === "history" ? <p className="note">{t("historyNote")}</p> : null}
       {error ? <p className="form-error">{error}</p> : null}
 
-      <section>
+      <section className="section-block">
         <h3>{t("summary")}</h3>
-        <p>{detail.summary || t("noSummary")}</p>
+        <ClampText text={detail.summary || t("noSummary")} />
       </section>
-      <section>
+      <section className="section-block">
         <h3>{t("nextStep")}</h3>
-        <p>{detail.nextStep || t("noNextStep")}</p>
+        <ClampText text={detail.nextStep || t("noNextStep")} />
       </section>
 
       <section className="action-grid">
@@ -220,6 +267,7 @@ function TopicEditor({
           <h3>{t("rename")}</h3>
           {renameOpen ? (
             <form
+              className="action-form"
               onSubmit={(event) => {
                 event.preventDefault();
                 const nextName = name.trim();
@@ -236,40 +284,41 @@ function TopicEditor({
                 });
               }}
             >
-              <label className="field">
-                <span>{t("topicName")}</span>
-                <input value={name} onChange={(event) => setName(event.target.value)} />
-              </label>
-              <label className="field">
-                <span>{t("aliases")}</span>
-                <textarea
-                  rows={3}
-                  value={aliases}
-                  onChange={(event) => setAliases(event.target.value)}
+              <div className="action-line">
+                <input
+                  className="control"
+                  aria-label={t("topicName")}
+                  value={name}
+                  onChange={(event) => setName(event.target.value)}
                 />
-                <small>{t("aliasesHint")}</small>
-              </label>
-              <div className="row-actions">
                 <button type="submit" className="btn primary" disabled={busy || name.trim() === ""}>
                   {t("saveName")}
                 </button>
+              </div>
+              <Field label={t("aliases")} hint={t("aliasesHint")}>
+                <textarea rows={3} value={aliases} onChange={(event) => setAliases(event.target.value)} />
+              </Field>
+              <div className="row-trail">
                 <button type="button" className="btn quiet" onClick={() => setRenameOpen(false)}>
                   {t("closeForm")}
                 </button>
               </div>
             </form>
           ) : (
-            <button
-              type="button"
-              className="btn"
-              onClick={() => {
-                setName(detail.name);
-                setAliases(detail.aliases.join("\n"));
-                setRenameOpen(true);
-              }}
-            >
-              {t("rename")}
-            </button>
+            <div className="action-line">
+              <span className="action-name">{detail.name}</span>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setName(detail.name);
+                  setAliases(detail.aliases.join("\n"));
+                  setRenameOpen(true);
+                }}
+              >
+                {t("rename")}
+              </button>
+            </div>
           )}
         </div>
         <form
@@ -284,23 +333,19 @@ function TopicEditor({
           }}
         >
           <h3>{t("merge")}</h3>
-          <label className="field">
-            <span>{t("mergeInto")}</span>
-            <select
-              value={mergeTarget}
-              onChange={(event) => setMergeTarget(event.target.value)}
-            >
+          <div className="action-line">
+            <Select label={t("mergeInto")} value={mergeTarget} onChange={setMergeTarget}>
               <option value="">{t("chooseTopic")}</option>
               {others.map((topic) => (
                 <option key={topic.topicId} value={topic.topicId}>
                   {topic.name}
                 </option>
               ))}
-            </select>
-          </label>
-          <button type="submit" className="btn" disabled={busy || mergeTarget === ""}>
-            {mergeName ? t("mergeAction", { name: mergeName }) : t("merge")}
-          </button>
+            </Select>
+            <button type="submit" className="btn" disabled={busy || mergeTarget === ""}>
+              {mergeName ? t("mergeAction", { name: mergeName }) : t("merge")}
+            </button>
+          </div>
         </form>
         <form
           onSubmit={(event) => {
@@ -318,33 +363,32 @@ function TopicEditor({
           }}
         >
           <h3>{t("status")}</h3>
-          <label className="field">
-            <span>{t("status")}</span>
-            <select name="status" defaultValue={detail.status} key={detail.status}>
+          <div className="action-line">
+            <Select label={t("status")} name="status" defaultValue={detail.status} key={detail.status}>
               {STATUSES.map((status) => (
                 <option key={status} value={status}>
-                  {t(status === "active" ? "statusActive" : status === "follow_up" ? "statusFollowUp" : status === "done" ? "statusDone" : "statusParked")}
+                  {t(statusLabelKey(status))}
                 </option>
               ))}
-            </select>
-          </label>
-          <button type="submit" className="btn" disabled={busy}>
-            {t("applyStatus")}
-          </button>
+            </Select>
+            <button type="submit" className="btn" disabled={busy}>
+              {t("applyStatus")}
+            </button>
+          </div>
         </form>
       </section>
 
-      <section>
+      <section className="section-block">
         <h3>{t("conclusions")}</h3>
-        {detail.conclusions.length === 0 ? <Empty>{t("noConclusions")}</Empty> : null}
-        <ul className="plain-list">
-          {detail.conclusions.map((item) => (
-            <li key={item.conclusionId}>
+        {detail.conclusions.length === 0 ? <EmptyState title={t("noConclusions")} icon="inbox" /> : null}
+        <ShowMore items={detail.conclusions} limit={4}>
+          {(item) => (
+            <div key={item.conclusionId} className="todo-row">
               <p>{item.text}</p>
               <small>{formatDateTime(item.ts, language, timeZone)}</small>
-            </li>
-          ))}
-        </ul>
+            </div>
+          )}
+        </ShowMore>
         {detail.sessions.length === 0 ? (
           <p className="muted">{t("conclusionNeedSession")}</p>
         ) : (
@@ -366,28 +410,21 @@ function TopicEditor({
             }}
           >
             <h3>{t("addConclusion")}</h3>
-            <label className="field">
-              <span>{t("sessionForConclusion")}</span>
-              <select
-                value={conclusionSession}
-                onChange={(event) => setConclusionSession(event.target.value)}
-              >
-                {detail.sessions.map((session) => (
-                  <option key={session.sessionKey} value={session.sessionKey}>
-                    {session.title || session.source}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>{t("conclusions")}</span>
+            <Select label={t("sessionForConclusion")} value={conclusionSession} onChange={setConclusionSession}>
+              {detail.sessions.map((session) => (
+                <option key={session.sessionKey} value={session.sessionKey}>
+                  {session.title || session.source}
+                </option>
+              ))}
+            </Select>
+            <Field label={t("conclusions")}>
               <textarea
                 rows={3}
                 value={conclusion}
                 placeholder={t("conclusionPlaceholder")}
                 onChange={(event) => setConclusion(event.target.value)}
               />
-            </label>
+            </Field>
             <button type="submit" className="btn primary" disabled={busy || conclusion.trim() === ""}>
               {t("add")}
             </button>
@@ -395,12 +432,12 @@ function TopicEditor({
         )}
       </section>
 
-      <section>
+      <section className="section-block">
         <h3>{t("todos")}</h3>
-        {detail.todos.length === 0 ? <Empty>{t("noTodos")}</Empty> : null}
-        <ul className="plain-list">
-          {detail.todos.map((todo) => (
-            <li key={todo.todoId} className="todo-row">
+        {detail.todos.length === 0 ? <EmptyState title={t("noTodos")} icon="inbox" /> : null}
+        <ShowMore items={detail.todos} limit={6}>
+          {(todo) => (
+            <div key={todo.todoId} className="todo-row">
               <div>
                 <p>{todo.text}</p>
                 <small>
@@ -409,10 +446,10 @@ function TopicEditor({
                 </small>
               </div>
               {todo.status === "open" ? (
-                <div className="row-actions">
+                <div className="row-trail">
                   <button
                     type="button"
-                    className="btn"
+                    className="btn small"
                     disabled={busy}
                     onClick={() =>
                       void run(async () => {
@@ -425,7 +462,7 @@ function TopicEditor({
                   </button>
                   <button
                     type="button"
-                    className="btn quiet"
+                    className="btn quiet small"
                     disabled={busy}
                     onClick={() =>
                       void run(async () => {
@@ -438,101 +475,91 @@ function TopicEditor({
                   </button>
                 </div>
               ) : null}
-            </li>
-          ))}
-        </ul>
+            </div>
+          )}
+        </ShowMore>
       </section>
 
-      <section>
+      <section className="section-block">
         <h3>{t("relatedSessions")}</h3>
-        {detail.sessions.length === 0 ? <Empty>{t("noSessions")}</Empty> : null}
-        {detail.sessions.map((session) => (
-          <div key={session.sessionKey} className="session-with-action">
-            <SessionCard
-              session={toSessionCard(session)}
-              devices={devices}
-              timeZone={timeZone}
-              language={language}
-              compact
-            />
-            {splitKey === session.sessionKey ? (
-              <form
-                className="inline-form"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void run(async () => {
-                    if (splitMode === "create") {
-                      const nextName = splitName.trim();
-                      if (!nextName) return;
-                      await client.updateTopic(detail.topicId, {
-                        op: "split",
-                        sessionKey: session.sessionKey,
-                        target: { action: "create", name: nextName },
-                      });
-                    } else if (splitTopic) {
-                      await client.updateTopic(detail.topicId, {
-                        op: "split",
-                        sessionKey: session.sessionKey,
-                        target: { action: "assign", topicId: splitTopic },
-                      });
-                    } else {
-                      return;
-                    }
-                    setSplitKey(null);
-                    await onChanged();
-                  });
-                }}
-              >
-                <div className="segmented">
-                  <button
-                    type="button"
-                    className={splitMode === "create" ? "on" : ""}
-                    onClick={() => setSplitMode("create")}
-                  >
-                    {t("newTopic")}
-                  </button>
-                  <button
-                    type="button"
-                    className={splitMode === "assign" ? "on" : ""}
-                    onClick={() => setSplitMode("assign")}
-                  >
-                    {t("existingTopic")}
-                  </button>
-                </div>
-                {splitMode === "create" ? (
-                  <label className="field">
-                    <span>{t("topicName")}</span>
-                    <input value={splitName} onChange={(event) => setSplitName(event.target.value)} />
-                  </label>
-                ) : (
-                  <label className="field">
-                    <span>{t("chooseTopic")}</span>
-                    <select value={splitTopic} onChange={(event) => setSplitTopic(event.target.value)}>
+        {detail.sessions.length === 0 ? <EmptyState title={t("noSessions")} icon="inbox" /> : null}
+        <ShowMore items={detail.sessions} limit={4}>
+          {(session) => (
+            <div key={session.sessionKey} className="stack">
+              <SessionRow
+                session={toSessionCard(session)}
+                devices={devices}
+                timeZone={timeZone}
+                language={language}
+              />
+              {splitKey === session.sessionKey ? (
+                <form
+                  className="inline-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void run(async () => {
+                      if (splitMode === "create") {
+                        const nextName = splitName.trim();
+                        if (!nextName) return;
+                        await client.updateTopic(detail.topicId, {
+                          op: "split",
+                          sessionKey: session.sessionKey,
+                          target: { action: "create", name: nextName },
+                        });
+                      } else if (splitTopic) {
+                        await client.updateTopic(detail.topicId, {
+                          op: "split",
+                          sessionKey: session.sessionKey,
+                          target: { action: "assign", topicId: splitTopic },
+                        });
+                      } else {
+                        return;
+                      }
+                      setSplitKey(null);
+                      await onChanged();
+                    });
+                  }}
+                >
+                  <Segmented
+                    label={t("split")}
+                    value={splitMode}
+                    options={[
+                      { value: "create", label: t("newTopic") },
+                      { value: "assign", label: t("existingTopic") },
+                    ]}
+                    onChange={(value) => setSplitMode(value === "assign" ? "assign" : "create")}
+                  />
+                  {splitMode === "create" ? (
+                    <Field label={t("topicName")}>
+                      <input value={splitName} onChange={(event) => setSplitName(event.target.value)} />
+                    </Field>
+                  ) : (
+                    <Select label={t("chooseTopic")} value={splitTopic} onChange={setSplitTopic}>
                       <option value="">{t("chooseTopic")}</option>
                       {others.map((topic) => (
                         <option key={topic.topicId} value={topic.topicId}>
                           {topic.name}
                         </option>
                       ))}
-                    </select>
-                  </label>
-                )}
-                <div className="row-actions">
-                  <button type="submit" className="btn primary" disabled={busy}>
-                    {t("move")}
-                  </button>
-                  <button type="button" className="btn quiet" onClick={() => setSplitKey(null)}>
-                    {t("closeForm")}
-                  </button>
-                </div>
-              </form>
-            ) : (
-              <button type="button" className="btn quiet" onClick={() => setSplitKey(session.sessionKey)}>
-                {t("split")}
-              </button>
-            )}
-          </div>
-        ))}
+                    </Select>
+                  )}
+                  <div className="row-trail">
+                    <button type="submit" className="btn primary" disabled={busy}>
+                      {t("move")}
+                    </button>
+                    <button type="button" className="btn quiet" onClick={() => setSplitKey(null)}>
+                      {t("closeForm")}
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <button type="button" className="btn quiet" onClick={() => setSplitKey(session.sessionKey)}>
+                  {t("split")}
+                </button>
+              )}
+            </div>
+          )}
+        </ShowMore>
       </section>
     </article>
   );

@@ -5,6 +5,26 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="light dark" />
     <title>you-brain</title>
+    <script>
+      (function () {
+        var key = "you-brain-theme";
+        var query = new URLSearchParams(location.search).get("theme");
+        var choice = query === "light" || query === "dark" || query === "system" ? query : null;
+        try {
+          if (choice) localStorage.setItem(key, choice);
+          else choice = localStorage.getItem(key);
+        } catch (error) {
+          choice = choice || "system";
+        }
+        if (choice !== "light" && choice !== "dark" && choice !== "system") choice = "system";
+        var dark =
+          choice === "dark" ||
+          (choice !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        var theme = dark ? "dark" : "light";
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

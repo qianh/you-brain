@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import { isNavActive, parseAppLocation, topicHref } from "../../src/lib/route.js";
-import { openFullWindow } from "../../src/lib/window.js";
+import { isNavActive, isPrimaryNavActive, parseAppLocation, topicHref } from "../../src/lib/route.js";
+import { openFullWindow, quitShell } from "../../src/lib/window.js";
 
 describe("routes", () => {
   test("reads the topic id and trims a trailing slash", () => {
@@ -18,6 +18,43 @@ describe("routes", () => {
     expect(isNavActive("/topics/history", "/topics")).toBe(false);
     expect(isNavActive("/topics", "/topics")).toBe(true);
     expect(isNavActive("/status", "/status")).toBe(true);
+    expect(isPrimaryNavActive("/topics/history", "/topics")).toBe(true);
+    expect(isPrimaryNavActive("/topics", "/topics")).toBe(true);
+    expect(isPrimaryNavActive("/today", "/topics")).toBe(false);
+    expect(isPrimaryNavActive("/status", "/status")).toBe(true);
+  });
+});
+
+describe("quitShell", () => {
+  test("asks the shell to quit when the command exists", async () => {
+    const calls: string[] = [];
+    const mode = await quitShell({
+      invoke: (command) => {
+        calls.push(command);
+        return Promise.resolve(undefined);
+      },
+      open: () => null,
+      pageUrl: "http://127.0.0.1:4731/panel",
+      close: () => {
+        throw new Error("should not close");
+      },
+    });
+    expect(mode).toBe("invoked");
+    expect(calls).toEqual(["quit"]);
+  });
+
+  test("closes the window when the shell has no quit command", async () => {
+    let closed = false;
+    const mode = await quitShell({
+      invoke: () => Promise.reject(new Error("missing")),
+      open: () => null,
+      pageUrl: "http://127.0.0.1:4731/panel",
+      close: () => {
+        closed = true;
+      },
+    });
+    expect(mode).toBe("closed");
+    expect(closed).toBe(true);
   });
 });
 

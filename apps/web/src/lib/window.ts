@@ -24,3 +24,19 @@ export function browserWindowBridge(): WindowBridge {
     pageUrl: window.location.href,
   };
 }
+
+export async function quitShell(
+  bridge: WindowBridge & { close?: () => void },
+): Promise<"invoked" | "closed"> {
+  if (bridge.invoke) {
+    try {
+      await bridge.invoke("quit");
+      return "invoked";
+    } catch {
+      bridge.close?.();
+      return "closed";
+    }
+  }
+  bridge.close?.();
+  return "closed";
+}

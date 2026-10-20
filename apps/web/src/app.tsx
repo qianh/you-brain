@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 
+import { BrandMark } from "./components/icons.js";
 import { DaemonProvider, useDaemon } from "./daemon-context.js";
 import { PanelPage } from "./pages/panel.js";
 import { TodayPage } from "./pages/today.js";
@@ -11,14 +12,17 @@ import { SettingsPage } from "./pages/settings.js";
 import { StatusPage } from "./pages/status.js";
 import { Router, useRoute } from "./router.js";
 import { Shell } from "./shell.js";
+import { ThemeProvider } from "./theme-context.js";
 
 export function App() {
   return (
-    <DaemonProvider>
-      <Router>
-        <Frame />
-      </Router>
-    </DaemonProvider>
+    <ThemeProvider>
+      <DaemonProvider>
+        <Router>
+          <Frame />
+        </Router>
+      </DaemonProvider>
+    </ThemeProvider>
   );
 }
 
@@ -33,10 +37,8 @@ function Frame() {
     const page =
       location.pathname === "/panel"
         ? t("brand")
-        : location.pathname === "/topics"
-          ? t("navTopicsActive")
-          : location.pathname === "/topics/history"
-            ? t("navTopicsHistory")
+        : location.pathname === "/topics" || location.pathname === "/topics/history"
+          ? t("topicsBook")
             : location.pathname === "/portrait"
               ? t("navPortrait")
               : location.pathname === "/search"
@@ -52,7 +54,12 @@ function Frame() {
   }, [location.pathname, t]);
 
   if (loading && !today && !panel) {
-    return <p className="boot">{t("loading")}</p>;
+    return (
+      <div className="boot">
+        <BrandMark />
+        <p>{t("loading")}</p>
+      </div>
+    );
   }
   if (panel) return <PanelPage />;
 
@@ -73,7 +80,9 @@ function Missing() {
   const { navigate } = useRoute();
   return (
     <div className="page">
-      <h1>{t("notFound")}</h1>
+      <header className="page-head">
+        <h1>{t("notFound")}</h1>
+      </header>
       <button type="button" className="btn" onClick={() => navigate("/today")}>
         {t("backToday")}
       </button>

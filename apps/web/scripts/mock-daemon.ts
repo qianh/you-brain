@@ -156,7 +156,8 @@ const topics: TopicRow[] = [
     aliases: ["记忆中枢", "BrainHub 重写"],
     status: "active",
     statusBy: "user",
-    summary: "把白天的会话收成话题册，原文留在自己的 Drive 里。同步走事件日志，不依赖某一台机器一直开着。",
+    summary:
+      "把白天的会话收成话题册，原文留在自己的 Drive 里。同步走事件日志，不依赖某一台机器一直开着。活跃和历史分册存放，合并只建立映射，拆分则把单条会话挪走。菜单栏只留今日和提醒，设置放在主窗口。",
     nextStep: "定下 Web UI 和菜单栏面板的边界，再接真实 daemon。",
     lastActive: AFTERNOON,
     zone: "active",
@@ -615,7 +616,11 @@ function search(url: URL): Response {
   const query = url.searchParams.get("q")?.trim() ?? "";
   if (query === "") return fail(400, "INVALID_INPUT", "缺少搜索词");
   const needle = query.toLocaleLowerCase();
-  const results = searchHits.filter((hit) => hit.excerpt.toLocaleLowerCase().includes(needle));
+  const sources = url.searchParams.getAll("sources");
+  const results = searchHits.filter((hit) => {
+    if (sources.length > 0 && !sources.includes(hit.source)) return false;
+    return hit.excerpt.toLocaleLowerCase().includes(needle);
+  });
   return json({
     query,
     indexStatus: "stale",
