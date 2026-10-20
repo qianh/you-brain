@@ -9,6 +9,7 @@ import {
   recordErrorMessage,
 } from "./failure.js";
 import { extractFirstJsonObject, jsonText } from "./json.js";
+import { GROK_DENY_RULES, GROK_DISALLOWED_TOOLS } from "./grok-isolation.js";
 import { cliLoginCommand, type CliProvider } from "./locate.js";
 
 export interface CliBuildContext {
@@ -176,15 +177,20 @@ const grokDriver: CliDriver = {
         ctx.system,
         "--output-format",
         "json",
-        "--tools",
-        "",
+        "--permission-mode",
+        "dontAsk",
+        ...GROK_DENY_RULES.flatMap((rule) => ["--deny", rule]),
+        "--sandbox",
+        "read-only",
+        "--disallowed-tools",
+        GROK_DISALLOWED_TOOLS,
         "--no-subagents",
         "--disable-web-search",
         "--max-turns",
         "1",
         "--no-plan",
-        "--permission-mode",
-        "dontAsk",
+        "--no-memory",
+        "--no-auto-update",
         "--verbatim",
         "--cwd",
         ctx.cwd,
@@ -201,7 +207,7 @@ const grokDriver: CliDriver = {
         ctx,
         result.stderr,
         ["structuredOutput", "structured_output"],
-        ["result", "response", "message"],
+        ["result", "response", "message", "text"],
       ),
     );
   },

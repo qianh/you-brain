@@ -40,7 +40,8 @@ describe("llm setup status", () => {
     });
     expect(cliUnresponsiveWarning("gemini-cli")).toEqual({
       code: "LLM_CLI_UNRESPONSIVE",
-      message: "gemini 没有响应，已上传会话但跳过提炼。请运行 gemini（交互里完成登录） 检查登录",
+      message:
+        "gemini 在 300 秒内没有响应。可能是服务暂时不可用，或需要重新登录（请运行 gemini（交互里完成登录））。可稍后重试。已上传会话但跳过提炼。",
     });
     expect(cliUnresponsiveWarning("deepseek")).toBeNull();
     expect(describeLlmSetupFailure("custom", new LlmRequestError("client", "未配置模型地址"))).toEqual({

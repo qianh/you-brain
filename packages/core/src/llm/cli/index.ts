@@ -5,10 +5,16 @@ export {
   cliCommandName,
   cliEnvVar,
   cliLoginCommand,
+  cliNoResponseMessage,
+  cliRunFailureLine,
+  formatUnusableCli,
   isCliProvider,
   locateCliBinary,
+  locateRunnableCli,
+  type CliProbeFailure,
   type CliProvider,
   type LocateCliOptions,
+  type LocatedCli,
 } from "./locate.js";
 export {
   DEFAULT_CLI_TIMEOUT_MS,

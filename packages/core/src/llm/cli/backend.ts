@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { LlmProvider } from "@you-brain/protocol";
@@ -10,8 +11,16 @@ import type { LlmBackend, LlmCompleteRequest } from "../types.js";
 import { runCliConnectionTest } from "../types.js";
 import { cliDriver, looksUnauthenticated, type CliBuildContext, type CliDriver } from "./drivers.js";
 import { cliFailure, DEFAULT_CLI_TIMEOUT_MS, runCliProcess, withCliSlot } from "./exec.js";
+import { GROK_UNSET_ENV, grokIsolationEnv, prepareGrokHome } from "./grok-isolation.js";
 import { appendSchemaInstruction } from "./json.js";
-import { cliLoginCommand, isCliProvider, locateCliBinary, type CliProvider } from "./locate.js";
+import {
+  cliLoginCommand,
+  cliNoResponseMessage,
+  formatUnusableCli,
+  isCliProvider,
+  locateRunnableCli,
+  type CliProvider,
+} from "./locate.js";
 import { ensureCliWorkDir } from "./workdir.js";
 
 export interface CreateCliBackendOptions {
@@ -40,6 +49,14 @@ async function execute(
   const scratch = join(cwd, ".yb-cli");
   await mkdir(scratch, { recursive: true });
   const temps: string[] = [];
+  let grokHome = "";
+  const childEnv: NodeJS.ProcessEnv = { ...options.env };
+  const unset: string[] = [];
+  if (driver.provider === "grok-cli") {
+    grokHome = await prepareGrokHome(scratch, options.homeDir ?? homedir());
+    Object.assign(childEnv, grokIsolationEnv(grokHome));
+    unset.push(...GROK_UNSET_ENV);
+  }
   const ctx: CliBuildContext = {
     cwd,
     model: options.model,
@@ -79,9 +96,14 @@ async function execute(
       ...(built.stdin !== undefined ? { stdin: built.stdin } : {}),
       timeoutMs: options.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS,
       ...(options.signal ? { signal: options.signal } : {}),
-      ...(options.env ? { env: options.env } : {}),
+      env: childEnv,
+      ...(unset.length > 0 ? { unset } : {}),
       secrets,
-      noOutputTimeoutMessage: `${driver.command} 没有任何输出，可能需要重新登录。请运行 ${cliLoginCommand(driver.provider)}`,
+      noOutputTimeoutMessage: cliNoResponseMessage(
+        driver.command,
+        options.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS,
+        cliLoginCommand(driver.provider),
+      ),
     });
     if (looksUnauthenticated(result)) {
       throw cliFailure("auth", driver.loginMessage, result.stderr, secrets);
@@ -96,7 +118,9 @@ async function execute(
     }
     return await driver.parse(result, ctx);
   } finally {
-    await Promise.all(temps.map((path) => rm(path, { force: true })));
+    const cleanup = temps.map((path) => rm(path, { force: true }));
+    if (grokHome !== "") cleanup.push(rm(grokHome, { recursive: true, force: true }));
+    await Promise.all(cleanup);
   }
 }
 
@@ -106,15 +130,21 @@ export async function createCliBackend(options: CreateCliBackendOptions): Promis
   }
   const provider: CliProvider = options.provider;
   const driver = cliDriver(provider);
-  const bin = locateCliBinary({
+  const located = await locateRunnableCli({
     provider,
     ...(options.cliBin !== undefined ? { bin: options.cliBin } : {}),
     ...(options.env !== undefined ? { env: options.env } : {}),
     ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
   });
-  if (!bin) {
-    throw new LlmRequestError("client", `未找到 ${driver.command} 命令行，请先安装并登录`);
+  if (!located.bin) {
+    throw new LlmRequestError(
+      "client",
+      located.unusable.length > 0
+        ? formatUnusableCli(located.unusable)
+        : `未找到 ${driver.command} 命令行，请先安装并登录`,
+    );
   }
+  const bin = located.bin;
   const preset = LLM_PRESETS[provider];
   const backend: LlmBackend = {
     id: provider,

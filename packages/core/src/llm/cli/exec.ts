@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 
 import { LlmRequestError, type LlmErrorKind } from "../errors.js";
+import { cliNoResponseMessage } from "./locate.js";
 
 export const DEFAULT_CLI_TIMEOUT_MS = 300_000;
 
@@ -24,6 +25,8 @@ export interface CliRunOptions {
   secrets: readonly string[];
   /** Used when the process times out without writing stdout or stderr. */
   noOutputTimeoutMessage?: string;
+  /** Removed from the child environment after `env` is applied. */
+  unset?: readonly string[];
 }
 
 let tail: Promise<void> = Promise.resolve();
@@ -122,9 +125,11 @@ export function runCliProcess(options: CliRunOptions): Promise<CliRunResult> {
 
     let child;
     try {
+      const env = { ...process.env, ...options.env };
+      for (const key of options.unset ?? []) delete env[key];
       child = spawn(options.bin, options.args, {
         cwd: options.cwd,
-        env: { ...process.env, ...options.env },
+        env,
         detached: true,
         stdio: ["pipe", "pipe", "pipe"],
       });
@@ -156,7 +161,8 @@ export function runCliProcess(options: CliRunOptions): Promise<CliRunResult> {
       const silent = stdout.trim() === "" && stderr.trim() === "";
       if (silent) {
         const message =
-          options.noOutputTimeoutMessage ?? "命令超时且没有任何输出，可能需要重新登录";
+          options.noOutputTimeoutMessage ??
+          cliNoResponseMessage("命令", options.timeoutMs, "对应的登录命令");
         fail(cliNoOutputTimeout(message));
         return;
       }

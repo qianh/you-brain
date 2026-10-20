@@ -103,6 +103,10 @@ describe("daemon llm status", () => {
       `#!${process.execPath}
 import { appendFileSync, writeFileSync } from "node:fs";
 const argv = process.argv.slice(2);
+if (argv.includes("--version")) {
+  console.log("fake-codex 0");
+  process.exit(0);
+}
 appendFileSync(process.env.FAKE_CALLS, JSON.stringify({ cwd: process.cwd(), argv }) + "\\n");
 const index = argv.indexOf("--output-last-message");
 if (index >= 0 && argv[index + 1]) writeFileSync(argv[index + 1], ${JSON.stringify(REFINE_JSON)});
@@ -148,6 +152,10 @@ process.stdin.on("end", () => process.exit(0));
       bin,
       `#!${process.execPath}
 import { appendFileSync } from "node:fs";
+if (process.argv.includes("--version")) {
+  console.log("fake-codex 0");
+  process.exit(0);
+}
 appendFileSync(process.env.FAKE_CALLS, "call\\n");
 process.stdin.on("data", () => {});
 process.stdin.on("end", () => {
@@ -198,6 +206,10 @@ process.stdin.on("end", () => {
       `#!${process.execPath}
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
+if (process.argv.includes("--version")) {
+  console.log("fake-gemini 0");
+  process.exit(0);
+}
 appendFileSync(process.env.FAKE_CALLS, "call\\n");
 spawn("sleep", ["30"], { stdio: "ignore" });
 setInterval(() => {}, 1_000_000);
@@ -234,7 +246,8 @@ setInterval(() => {}, 1_000_000);
     const stalled = await readStatus(daemon);
     expect(stalled.warnings).toContainEqual({
       code: "LLM_CLI_UNRESPONSIVE",
-      message: "gemini 没有响应，已上传会话但跳过提炼。请运行 gemini（交互里完成登录） 检查登录",
+      message:
+        "gemini 在 300 秒内没有响应。可能是服务暂时不可用，或需要重新登录（请运行 gemini（交互里完成登录））。可稍后重试。已上传会话但跳过提炼。",
     });
     expect(stalled.refine.pending).toBe(1);
 

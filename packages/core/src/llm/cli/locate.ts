@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -88,13 +89,112 @@ export function isExecutable(path: string): boolean {
   }
 }
 
-function searchPath(command: string, pathEnv: string): string | null {
+function searchPathAll(command: string, pathEnv: string): string[] {
+  const found: string[] = [];
   for (const dir of pathEnv.split(":")) {
     if (dir.trim() === "") continue;
     const candidate = join(dir, command);
-    if (isExecutable(candidate)) return candidate;
+    if (isExecutable(candidate) && !found.includes(candidate)) found.push(candidate);
   }
-  return null;
+  return found;
+}
+
+function candidatePaths(options: LocateCliOptions): string[] {
+  if (options.bin !== undefined && options.bin.trim() !== "") {
+    const injected = options.bin.trim();
+    return isExecutable(injected) ? [injected] : [];
+  }
+  const env = options.env ?? process.env;
+  const fromEnv = env[cliEnvVar(options.provider)];
+  if (fromEnv !== undefined && fromEnv.trim() !== "") {
+    const configured = fromEnv.trim();
+    return isExecutable(configured) ? [configured] : [];
+  }
+  const pathEnv = options.env !== undefined ? (options.env.PATH ?? "") : (process.env.PATH ?? "");
+  const found = searchPathAll(COMMANDS[options.provider], pathEnv);
+  const home = options.homeDir ?? homedir();
+  const fallbacks = options.fallbacks ?? cliFallbacks(options.provider, home);
+  for (const candidate of fallbacks) {
+    if (isExecutable(candidate) && !found.includes(candidate)) found.push(candidate);
+  }
+  return found;
+}
+
+function killProcessGroup(pid: number): void {
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      return;
+    }
+  }
+  const timer = setTimeout(() => {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+  }, 500);
+  timer.unref();
+}
+
+function probeEnv(env?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return env ? { ...process.env, ...env } : process.env;
+}
+
+export function probeCliVersion(
+  bin: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<{ ok: boolean; detail: string }> {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (ok: boolean, detail: string): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ok, detail });
+    };
+    let child;
+    try {
+      child = spawn(bin, ["--version"], {
+        env: probeEnv(env),
+        detached: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "无法运行";
+      resolve({ ok: false, detail: message });
+      return;
+    }
+    const timer = setTimeout(() => {
+      if ((child.pid ?? 0) > 0) killProcessGroup(child.pid ?? 0);
+      finish(false, "超时");
+    }, CLI_VERSION_TIMEOUT_MS);
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout = (stdout + chunk).slice(-4096);
+    });
+    child.stderr?.on("data", (chunk: string) => {
+      stderr = (stderr + chunk).slice(-4096);
+    });
+    child.on("error", (error) => {
+      if ((child.pid ?? 0) > 0) killProcessGroup(child.pid ?? 0);
+      finish(false, error.message);
+    });
+    child.on("close", (code) => {
+      if (code === 0) finish(true, "");
+      else finish(false, cliRunFailureLine(stderr, stdout));
+    });
+  });
 }
 
 export interface LocateCliOptions {
@@ -104,6 +204,58 @@ export interface LocateCliOptions {
   /** Lookup environment. When set, PATH is read only from this object. */
   env?: NodeJS.ProcessEnv;
   homeDir?: string;
+  /** Replaces the built-in install locations. Tests pass [] to ignore a real binary. */
+  fallbacks?: readonly string[];
+}
+
+export interface CliProbeFailure {
+  path: string;
+  detail: string;
+}
+
+export interface LocatedCli {
+  bin: string | null;
+  unusable: CliProbeFailure[];
+}
+
+export const CLI_VERSION_TIMEOUT_MS = 5_000;
+
+export function cliNoResponseMessage(command: string, timeoutMs: number, login: string): string {
+  const seconds = Math.max(1, Math.round(timeoutMs / 1000));
+  return `${command} 在 ${seconds} 秒内没有响应。可能是服务暂时不可用，或需要重新登录（请运行 ${login}）。可稍后重试。`;
+}
+
+export function formatUnusableCli(failures: readonly CliProbeFailure[]): string {
+  const paths = failures.map((failure) => failure.path).join("、");
+  const detail = failures[0]?.detail || "无法运行";
+  return `找到了 ${paths}，但无法运行：${detail}`;
+}
+
+/** One line from a failed `--version`, skipping stack frames. */
+export function cliRunFailureLine(stderr: string, stdout: string): string {
+  const lines = stderr
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  const error = lines.find((line) => /^Error:/u.test(line));
+  if (error) return error;
+  const plain = lines.find((line) => !isStackNoise(line));
+  if (plain) return plain;
+  const out = stdout
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find((line) => line !== "");
+  return out ?? "无法运行";
+}
+
+function isStackNoise(line: string): boolean {
+  return (
+    line.startsWith("at ") ||
+    line.startsWith("file://") ||
+    line === "^" ||
+    line.startsWith("throw ") ||
+    /^Node\.js v/u.test(line)
+  );
 }
 
 /**
@@ -111,22 +263,25 @@ export interface LocateCliOptions {
  * A non-empty injected path or env var that is not executable does not fall through.
  */
 export function locateCliBinary(options: LocateCliOptions): string | null {
-  if (options.bin !== undefined && options.bin.trim() !== "") {
-    const injected = options.bin.trim();
-    return isExecutable(injected) ? injected : null;
+  return candidatePaths(options)[0] ?? null;
+}
+
+/** First candidate whose `--version` exits 0 within 5 seconds. Broken ones are skipped. */
+export async function locateRunnableCli(options: LocateCliOptions): Promise<LocatedCli> {
+  const paths = candidatePaths(options);
+  const unusable: CliProbeFailure[] = [];
+  for (const path of paths) {
+    const probe = await probeCliVersion(path, options.env);
+    if (probe.ok) return { bin: path, unusable };
+    unusable.push({ path, detail: probe.detail });
+    const pinned =
+      (options.bin !== undefined && options.bin.trim() !== "") ||
+      (() => {
+        const env = options.env ?? process.env;
+        const fromEnv = env[cliEnvVar(options.provider)];
+        return fromEnv !== undefined && fromEnv.trim() !== "";
+      })();
+    if (pinned) break;
   }
-  const env = options.env ?? process.env;
-  const fromEnv = env[cliEnvVar(options.provider)];
-  if (fromEnv !== undefined && fromEnv.trim() !== "") {
-    const configured = fromEnv.trim();
-    return isExecutable(configured) ? configured : null;
-  }
-  const pathEnv = options.env !== undefined ? (options.env.PATH ?? "") : (process.env.PATH ?? "");
-  const onPath = searchPath(COMMANDS[options.provider], pathEnv);
-  if (onPath) return onPath;
-  const home = options.homeDir ?? homedir();
-  for (const candidate of cliFallbacks(options.provider, home)) {
-    if (isExecutable(candidate)) return candidate;
-  }
-  return null;
+  return { bin: null, unusable };
 }

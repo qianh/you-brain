@@ -41,10 +41,12 @@ import {
   LLM_PRESETS,
   cliCommandName,
   cliLoginCommand,
+  cliNoResponseMessage,
+  formatUnusableCli,
   isCliNoOutputTimeout,
   isCliProvider,
   isLlmRequestError,
-  locateCliBinary,
+  locateRunnableCli,
 } from "@you-brain/core/llm";
 import {
   applyBrainHubDefaults,
@@ -451,9 +453,13 @@ async function configureModel(
   const preset = LLM_PRESETS[provider];
   if (preset.kind === "cli") {
     if (!isCliProvider(provider)) throw new CliError(`未知 Provider：${provider}`);
-    const bin = locateCliBinary({ provider, env: io.env, homeDir: io.homeDir });
-    if (!bin) {
-      throw new CliError(`未找到 ${cliCommandName(provider)} 命令行，请先安装并登录`);
+    const located = await locateRunnableCli({ provider, env: io.env, homeDir: io.homeDir });
+    if (!located.bin) {
+      throw new CliError(
+        located.unusable.length > 0
+          ? formatUnusableCli(located.unusable)
+          : `未找到 ${cliCommandName(provider)} 命令行，请先安装并登录`,
+      );
     }
   }
   let model = flags.model ?? (flags.yes ? shared.llm.model : "");
@@ -490,8 +496,10 @@ async function configureModel(
   });
   if (apiKey) await setLlmApiKey(provider, apiKey, { platform: io.platform });
   if (apiKey || !preset.requiresApiKey) {
+    const cliTimeoutMs = io.cliTimeoutMs ?? CLI_SETUP_TIMEOUT_MS;
     if (preset.kind === "cli" && isCliProvider(provider)) {
-      io.log(`正在调用 ${cliCommandName(provider)} 测试连接（最多 90 秒）…`);
+      const seconds = Math.max(1, Math.round(cliTimeoutMs / 1000));
+      io.log(`正在调用 ${cliCommandName(provider)} 测试连接（最多 ${seconds} 秒）…`);
     }
     const backend = await createLlmBackend({
       config: next.llm,
@@ -499,7 +507,7 @@ async function configureModel(
       dataDir: io.paths.dataDir,
       env: io.env,
       homeDir: io.homeDir,
-      ...(preset.kind === "cli" ? { timeoutMs: io.cliTimeoutMs ?? CLI_SETUP_TIMEOUT_MS } : {}),
+      ...(preset.kind === "cli" ? { timeoutMs: cliTimeoutMs } : {}),
     });
     try {
       await backend.test();
@@ -510,7 +518,7 @@ async function configureModel(
         isCliConnectionTimeout(error)
       ) {
         throw new CliError(
-          `${cliCommandName(provider)} 在 90 秒内没有响应，可能需要重新登录：请在终端运行 ${cliLoginCommand(provider)} 后重试`,
+          cliNoResponseMessage(cliCommandName(provider), cliTimeoutMs, cliLoginCommand(provider)),
         );
       }
       throw error;

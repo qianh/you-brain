@@ -26,6 +26,10 @@ afterEach(async () => {
 });
 
 const FAKE = `#!${process.execPath}
+if (process.argv.includes("--version")) {
+  console.log("fake-cli 0");
+  process.exit(0);
+}
 const chunks = [];
 const schema = process.argv.includes("--json-schema");
 process.stdin.on("data", (chunk) => chunks.push(chunk));
@@ -176,6 +180,10 @@ describe("setup model step", () => {
       `#!${process.execPath}
 import { writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
+if (process.argv.includes("--version")) {
+  console.log("hang 0");
+  process.exit(0);
+}
 const child = spawn("sleep", ["30"], { stdio: "ignore" });
 writeFileSync(process.env.FAKE_MARKER, process.pid + "\\n" + child.pid + "\\n");
 setInterval(() => {}, 1_000_000);
@@ -196,9 +204,9 @@ setInterval(() => {}, 1_000_000);
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(error).toBeInstanceOf(CliError);
     expect((error as CliError).message).toBe(
-      "grok 在 90 秒内没有响应，可能需要重新登录：请在终端运行 grok login 后重试",
+      "grok 在 1 秒内没有响应。可能是服务暂时不可用，或需要重新登录（请运行 grok login）。可稍后重试。",
     );
-    expect(logs).toContain("正在调用 grok 测试连接（最多 90 秒）…");
+    expect(logs).toContain("正在调用 grok 测试连接（最多 1 秒）…");
     expect(logs).not.toContain("模型连接成功");
     const progress = JSON.parse(await readFile(join(base.paths.dataDir, "setup.json"), "utf8")) as {
       google: boolean;

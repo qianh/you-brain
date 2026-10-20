@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -8,8 +8,14 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createLlmBackend } from "../../src/llm/factory.js";
 import { LlmRequestError } from "../../src/llm/errors.js";
 import { isCliNoOutputTimeout } from "../../src/llm/cli/exec.js";
+import { prepareGrokHome } from "../../src/llm/cli/grok-isolation.js";
 import { extractFirstJsonObject } from "../../src/llm/cli/json.js";
-import type { CliProvider } from "../../src/llm/cli/locate.js";
+import {
+  cliRunFailureLine,
+  formatUnusableCli,
+  locateRunnableCli,
+  type CliProvider,
+} from "../../src/llm/cli/locate.js";
 import { llmCliWorkDir, physicalPath } from "../../src/llm/cli/workdir.js";
 
 const roots: string[] = [];
@@ -52,14 +58,46 @@ function argValue(argv, flag) {
   return index >= 0 ? argv[index + 1] : "";
 }
 
-const stdin = await readStdin();
 const argv = process.argv.slice(2);
+if (argv.includes("--version") || argv.includes("-v")) {
+  if (process.env.FAKE_VERSION === "bad") {
+    writeSync(2, "file:///opt/fake/codex.js:107\\n");
+    writeSync(2, "  throw new Error(\\n");
+    writeSync(2, "Error: Missing optional dependency demo\\n");
+    writeSync(2, "    at boom\\n");
+    process.exit(1);
+  }
+  console.log("fake-cli 0.0.0");
+  process.exit(0);
+}
+const stdin = await readStdin();
 const promptFile = argValue(argv, "--prompt-file");
 const prompt = promptFile ? readFileSync(promptFile, "utf8") : "";
+let grokConfig = "";
+const grokHome = process.env.GROK_HOME ?? "";
+if (grokHome) {
+  try {
+    grokConfig = readFileSync(grokHome + "/config.toml", "utf8");
+  } catch {}
+}
 if (log) {
   appendFileSync(
     log,
-    JSON.stringify({ event: "start", argv, cwd: process.cwd(), stdin, prompt, at: Date.now() }) + "\\n",
+    JSON.stringify({
+      event: "start",
+      argv,
+      cwd: process.cwd(),
+      stdin,
+      prompt,
+      at: Date.now(),
+      grokHome,
+      grokAgent: process.env.GROK_AGENT ?? "",
+      grokSession: process.env.GROK_SESSION_ID ?? "",
+      grokConfigOverlay: process.env.GROK_CONFIG ?? "",
+      grokConfigPath: process.env.GROK_CONFIG_PATH ?? "",
+      grokSandbox: process.env.GROK_SANDBOX ?? "",
+      grokConfig,
+    }) + "\\n",
   );
 }
 
@@ -177,7 +215,7 @@ if (driver === "codex") {
   } else if (mode === "bad") {
     console.log(body);
   } else {
-    console.log(JSON.stringify({ result: "ok" }));
+    console.log(JSON.stringify({ text: "ok", stopReason: "end_turn" }));
   }
 } else if (driver === "claude") {
   if (mode === "ok" && argv.includes("--json-schema")) {
@@ -218,13 +256,20 @@ const DRIVERS: DriverCase[] = [
     provider: "grok-cli",
     driver: "grok",
     login: "grok login",
-    unsafe: ["--yolo"],
+    unsafe: ["--yolo", "--always-approve", "bypassPermissions", "--tools"],
     required: [
-      ["--tools", ""],
+      ["--permission-mode", "dontAsk"],
+      ["--deny", "Bash"],
+      ["--deny", "Edit"],
+      ["--deny", "Write"],
+      ["--deny", "MCPTool"],
+      ["--sandbox", "read-only"],
+      ["--disallowed-tools"],
       ["--no-subagents"],
       ["--disable-web-search"],
       ["--max-turns", "1"],
       ["--no-plan"],
+      ["--no-memory"],
       ["--prompt-file"],
     ],
   },
@@ -285,6 +330,11 @@ async function backendFor(
     FAKE_LOG: log,
     FAKE_SCHEMA: extra.schema ? "1" : "0",
     PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
+    GROK_AGENT: "1",
+    GROK_SESSION_ID: "parent-session",
+    GROK_CONFIG: '{"models":{"max_retries":15}}',
+    GROK_CONFIG_PATH: "/tmp/yb-should-not-load.toml",
+    GROK_SANDBOX: "off",
     ...(extra.marker ? { FAKE_MARKER: extra.marker } : {}),
   };
   const backend = await createLlmBackend({
@@ -301,7 +351,20 @@ async function backendFor(
   return { backend, log, env };
 }
 
-function readLog(log: string): Array<{ event: string; argv: string[]; cwd: string; prompt: string; at: number }> {
+function readLog(log: string): Array<{
+  event: string;
+  argv: string[];
+  cwd: string;
+  prompt: string;
+  at: number;
+  grokHome?: string;
+  grokAgent?: string;
+  grokSession?: string;
+  grokConfigOverlay?: string;
+  grokConfigPath?: string;
+  grokSandbox?: string;
+  grokConfig?: string;
+}> {
   return readFileSync(log, "utf8")
     .trim()
     .split("\n")
@@ -350,6 +413,22 @@ describe("subscription cli backends", () => {
       const argv = events[0]?.argv ?? [];
       for (const sequence of item.required) expect(hasSequence(argv, sequence)).toBe(true);
       for (const flag of item.unsafe) expect(argv).not.toContain(flag);
+      if (item.provider === "grok-cli") {
+        const tools = argv[argv.indexOf("--disallowed-tools") + 1] ?? "";
+        expect(tools).toContain("run_terminal_cmd");
+        expect(tools).toContain("run_terminal_command");
+        expect(tools).toContain("write");
+        expect(events[0]?.grokHome ?? "").not.toBe("");
+        expect(existsSync(events[0]?.grokHome ?? "missing")).toBe(false);
+        expect(events[0]?.grokAgent).toBe("");
+        expect(events[0]?.grokSession).toBe("");
+        expect(events[0]?.grokConfigOverlay).toBe("");
+        expect(events[0]?.grokConfigPath).toBe("");
+        expect(events[0]?.grokSandbox).toBe("");
+        expect(events[0]?.grokConfig ?? "").toContain("max_retries = 1");
+        expect(events[0]?.grokConfig ?? "").toContain('"Bash"');
+        expect(events[0]?.grokConfig ?? "").toContain("dontAsk");
+      }
       expect(argv).not.toContain("-m");
       expect(argv).not.toContain("--model");
       expect(events[0]?.cwd).toBe(physicalPath(llmCliWorkDir(root)));
@@ -455,9 +534,9 @@ describe("subscription cli backends", () => {
       expect(isCliNoOutputTimeout(timeout)).toBe(true);
       expect((timeout as LlmRequestError).kind).toBe("network");
       expect((timeout as LlmRequestError).retryable).toBe(true);
-      expect((timeout as LlmRequestError).message).toContain("没有任何输出");
-      expect((timeout as LlmRequestError).message).toContain("可能需要重新登录");
-      expect((timeout as LlmRequestError).message).toContain(item.login);
+      expect((timeout as LlmRequestError).message).toBe(
+        `${item.driver} 在 1 秒内没有响应。可能是服务暂时不可用，或需要重新登录（请运行 ${item.login}）。可稍后重试。`,
+      );
       await new Promise((resolve) => setTimeout(resolve, 800));
       const [parent, child] = readFileSync(marker, "utf8")
         .trim()
@@ -621,4 +700,152 @@ describe("subscription cli backends", () => {
     expect(existsSync(schemaFile)).toBe(false);
     expect(existsSync(lastFile)).toBe(false);
   }, 15_000);
+
+  test("skips a broken codex and runs the next candidate", async () => {
+    const root = await tempDir();
+    const badDir = join(root, "bad");
+    const goodDir = join(root, "good");
+    const bad = await writeBrokenCli(badDir, "codex");
+    await mkdir(goodDir, { recursive: true });
+    const good = join(goodDir, "codex");
+    await writeFile(good, FAKE_SCRIPT, { mode: 0o755 });
+    const log = join(root, "picked.log");
+    const probed = join(root, "probed");
+    const backend = await createLlmBackend({
+      config: { provider: "codex-cli", model: "", baseUrl: "" },
+      getApiKey: () => {
+        throw new Error("cli backend must not read an API key");
+      },
+      dataDir: root,
+      homeDir: join(root, "home"),
+      env: {
+        PATH: `${badDir}:${goodDir}:/usr/bin:/bin`,
+        FAKE_MODE: "ok",
+        FAKE_DRIVER: "codex",
+        FAKE_LOG: log,
+        FAKE_SCHEMA: "0",
+        BAD_PROBE: probed,
+      },
+    });
+    expect(await backend.complete({ system: "system", user: "ok" })).toBe("ok");
+    expect(readFileSync(probed, "utf8")).toContain("probed");
+    expect(readLog(log)[0]?.argv[0]).toBe("exec");
+    expect(bad).not.toBe(good);
+  });
+
+  test("reports one line when every codex candidate fails --version", async () => {
+    const root = await tempDir();
+    const first = await writeBrokenCli(join(root, "a"), "codex");
+    const second = await writeBrokenCli(join(root, "b"), "codex");
+    const located = await locateRunnableCli({
+      provider: "codex-cli",
+      env: { PATH: `${join(root, "a")}:${join(root, "b")}` },
+      homeDir: join(root, "home"),
+      fallbacks: [],
+    });
+    expect(located.bin).toBeNull();
+    const message = formatUnusableCli(located.unusable);
+    expect(message).toBe(`找到了 ${first}、${second}，但无法运行：Error: Missing optional dependency demo`);
+    expect(message).not.toContain("at boom");
+    expect(message).not.toContain("file://");
+    expect(message).not.toContain("Node.js");
+    expect(message).not.toContain("throw new Error");
+    expect(
+      cliRunFailureLine(
+        "file:///opt/fake/codex.js:107\n  throw new Error(\nError: Missing optional dependency demo\n    at boom\n",
+        "",
+      ),
+    ).toBe("Error: Missing optional dependency demo");
+  });
+
+  test("a pinned cli path that fails --version does not fall through", async () => {
+    const root = await tempDir();
+    const bad = await writeBrokenCli(join(root, "bad"), "codex");
+    const goodDir = join(root, "good");
+    await mkdir(goodDir, { recursive: true });
+    await writeFile(join(goodDir, "codex"), FAKE_SCRIPT, { mode: 0o755 });
+    const log = join(root, "pinned.log");
+    const error = await createLlmBackend({
+      config: { provider: "codex-cli", model: "", baseUrl: "" },
+      getApiKey: () => null,
+      cliBin: bad,
+      dataDir: root,
+      homeDir: join(root, "home"),
+      env: {
+        PATH: `${goodDir}:/usr/bin:/bin`,
+        FAKE_MODE: "ok",
+        FAKE_DRIVER: "codex",
+        FAKE_LOG: log,
+        FAKE_SCHEMA: "0",
+      },
+    }).then(
+      () => {
+        throw new Error("expected the pinned binary to be rejected");
+      },
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(LlmRequestError);
+    expect((error as LlmRequestError).message).toBe(
+      `找到了 ${bad}，但无法运行：Error: Missing optional dependency demo`,
+    );
+    expect(existsSync(log)).toBe(false);
+
+    const missing = join(root, "not-executable");
+    await writeFile(missing, "#!/bin/sh\necho no\n", { mode: 0o644 });
+    const absent = await createLlmBackend({
+      config: { provider: "codex-cli", model: "", baseUrl: "" },
+      getApiKey: () => null,
+      cliBin: missing,
+      dataDir: root,
+      homeDir: join(root, "home"),
+      env: { PATH: `${goodDir}:/usr/bin:/bin` },
+    }).then(
+      () => {
+        throw new Error("expected a missing binary");
+      },
+      (caught: unknown) => caught,
+    );
+    expect(absent).toBeInstanceOf(LlmRequestError);
+    expect((absent as LlmRequestError).message).toBe("未找到 codex 命令行，请先安装并登录");
+  });
+
+  test("prepareGrokHome copies auth read-only and leaves the source untouched", async () => {
+    const root = await tempDir();
+    const userHome = join(root, "user");
+    await mkdir(join(userHome, ".grok"), { recursive: true });
+    const source = join(userHome, ".grok", "auth.json");
+    const body = '{"refresh":"not-a-real-token"}';
+    await writeFile(source, body, { mode: 0o600 });
+    const before = statSync(source);
+    const home = await prepareGrokHome(join(root, "scratch"), userHome);
+    const copy = join(home, "auth.json");
+    expect(statSync(copy).mode & 0o777).toBe(0o400);
+    expect(readFileSync(copy, "utf8")).toBe(body);
+    const after = statSync(source);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.size).toBe(before.size);
+    expect(readFileSync(source, "utf8")).toBe(body);
+    expect(readFileSync(join(home, "config.toml"), "utf8")).toContain("max_retries = 1");
+
+    const empty = await prepareGrokHome(join(root, "scratch-empty"), join(root, "empty-user"));
+    expect(existsSync(join(empty, "config.toml"))).toBe(true);
+    expect(existsSync(join(empty, "auth.json"))).toBe(false);
+  });
 });
+
+async function writeBrokenCli(dir: string, name: string): Promise<string> {
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, name);
+  const script = `#!${process.execPath}
+import { appendFileSync, writeSync } from "node:fs";
+if (process.env.BAD_PROBE) appendFileSync(process.env.BAD_PROBE, "probed\\n");
+writeSync(2, "file:///opt/fake/codex.js:107\\n");
+writeSync(2, "  throw new Error(\\n");
+writeSync(2, "Error: Missing optional dependency demo\\n");
+writeSync(2, "    at boom\\n");
+writeSync(2, "Node.js v22.15.0\\n");
+process.exit(1);
+`;
+  await writeFile(path, script, { mode: 0o755 });
+  return path;
+}

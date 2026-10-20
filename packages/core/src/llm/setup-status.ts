@@ -1,6 +1,7 @@
 import type { LlmProvider } from "@you-brain/protocol";
 
-import { cliCommandName, cliLoginCommand, isCliProvider } from "./cli/locate.js";
+import { DEFAULT_CLI_TIMEOUT_MS } from "./cli/exec.js";
+import { cliCommandName, cliLoginCommand, cliNoResponseMessage, isCliProvider } from "./cli/locate.js";
 import { isLlmRequestError } from "./errors.js";
 
 export interface LlmSetupWarning {
@@ -19,12 +20,15 @@ const NOT_CONFIGURED: LlmSetupWarning = {
 };
 
 /** Status after two silent CLI timeouts. The caller decides when the streak is long enough. */
-export function cliUnresponsiveWarning(provider: LlmProvider): LlmSetupWarning | null {
+export function cliUnresponsiveWarning(
+  provider: LlmProvider,
+  timeoutMs = DEFAULT_CLI_TIMEOUT_MS,
+): LlmSetupWarning | null {
   if (!isCliProvider(provider)) return null;
   const command = cliCommandName(provider);
   return {
     code: "LLM_CLI_UNRESPONSIVE",
-    message: `${command} 没有响应，已上传会话但跳过提炼。请运行 ${cliLoginCommand(provider)} 检查登录`,
+    message: `${cliNoResponseMessage(command, timeoutMs, cliLoginCommand(provider))}已上传会话但跳过提炼。`,
   };
 }
 
