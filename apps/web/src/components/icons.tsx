@@ -133,19 +133,16 @@ export function BrandMark({ size = 22 }: { size?: number }) {
       width={size}
       height={size}
       viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.75"
-      strokeLinecap="round"
-      strokeLinejoin="round"
+      fill="currentColor"
       aria-hidden="true"
     >
-      <rect x="3" y="3" width="18" height="18" rx="5.5" />
-      <path d="M12 6.4c-2.7.2-4.4 1.9-4.6 4.1-1.3.4-2.1 1.7-1.9 3.2.2 1.7 1.6 3 3.3 3.3.8.5 1.9.8 3.2.7" />
-      <path d="M12 6.4c2.7.2 4.4 1.9 4.6 4.1 1.3.4 2.1 1.7 1.9 3.2-.2 1.7-1.6 3-3.3 3.3-.8.5-1.9.8-3.2.7" />
-      <path d="M12 6.8v10.6" />
-      <path d="M8.2 11.4c.9.6 1.1 1.6.4 2.6" />
-      <path d="M15.8 11.4c-.9.6-1.1 1.6-.4 2.6" />
+      <circle cx="12" cy="12.33" r="3.85" fill="none" stroke="currentColor" strokeWidth="1.42" />
+      <circle cx="12" cy="12.33" r="1.83" />
+      <circle cx="12" cy="4.36" r="2.1" />
+      <circle cx="19.57" cy="9.87" r="1.83" />
+      <circle cx="16.68" cy="18.77" r="1.96" />
+      <circle cx="7.32" cy="18.77" r="1.77" />
+      <circle cx="4.43" cy="9.87" r="1.88" />
     </svg>
   );
 }
