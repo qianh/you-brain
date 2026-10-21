@@ -2,7 +2,7 @@ import { useDaemon } from "../daemon-context.js";
 import { Banner } from "../components/ui.js";
 import { Card } from "../components/card.js";
 import { EmptyState } from "../components/empty.js";
-import { SourceMark } from "../components/icons.js";
+import { SourceMark } from "../components/tile.js";
 import { Row } from "../components/row.js";
 import { StatBlock, StatGrid } from "../components/stat.js";
 import { consolidationView, readCaptures, readLogs } from "../lib/copy.js";

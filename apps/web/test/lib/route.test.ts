@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
 
-import { isNavActive, isPrimaryNavActive, parseAppLocation, topicHref } from "../../src/lib/route.js";
+import {
+  isNavActive,
+  isPrimaryNavActive,
+  parseAppLocation,
+  readQuery,
+  searchHref,
+  settingsHref,
+  topicHref,
+} from "../../src/lib/route.js";
 import { openFullWindow, quitShell } from "../../src/lib/window.js";
 
 describe("routes", () => {
@@ -8,8 +16,25 @@ describe("routes", () => {
     expect(parseAppLocation("/topics/history/?id=you-brain")).toEqual({
       pathname: "/topics/history",
       id: "you-brain",
+      section: "account",
+      q: null,
     });
-    expect(parseAppLocation("/panel")).toEqual({ pathname: "/panel", id: null });
+    expect(parseAppLocation("/panel")).toEqual({ pathname: "/panel", id: null, section: "account", q: null });
+  });
+
+  test("settings and search links keep unknown sections on account", () => {
+    expect(settingsHref("model")).toBe("/settings?section=model");
+    expect(settingsHref()).toBe("/settings?section=account");
+    expect(parseAppLocation("/settings?section=appearance").section).toBe("appearance");
+    expect(parseAppLocation("/settings?section=nope").section).toBe("account");
+    expect(parseAppLocation("/settings").section).toBe("account");
+    expect(searchHref("京都 夜")).toBe("/search?q=%E4%BA%AC%E9%83%BD%20%E5%A4%9C");
+    expect(parseAppLocation("/search?q=hello").q).toBe("hello");
+    expect(parseAppLocation("/search?q=%20").q).toBe(null);
+    expect(parseAppLocation("/search").q).toBe(null);
+    expect(readQuery("/_design?open=palette&pq=话题", "open")).toBe("palette");
+    expect(readQuery("/_design?open=palette&pq=话题", "pq")).toBe("话题");
+    expect(readQuery("/today", "open")).toBe(null);
   });
 
   test("builds topic links and does not mark history as the active shelf", () => {

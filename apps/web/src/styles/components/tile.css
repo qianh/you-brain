@@ -1,0 +1,38 @@
+.tile {
+  --tile-color: var(--text-2);
+  --tile-ink: var(--text-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--tile);
+  height: var(--tile);
+  border-radius: var(--r-tile);
+  border: 1px solid color-mix(in srgb, var(--tile-color) 22%, transparent);
+  background: color-mix(in srgb, var(--tile-color) 14%, transparent);
+  color: var(--tile-ink);
+  flex: none;
+  user-select: none;
+}
+
+[data-theme="light"] .tile { background: color-mix(in srgb, var(--tile-color) 12%, transparent); }
+
+.tile.sm { width: var(--tile-sm); height: var(--tile-sm); border-radius: 6px; }
+.tile svg { display: block; }
+.tile-letter { font-size: var(--fs-sm); font-weight: 600; line-height: 1; }
+
+.tile.source-claude-code { --tile-color: var(--tile-claude); --tile-ink: var(--tile-claude-ink); }
+.tile.source-codex { --tile-color: var(--tile-codex); --tile-ink: var(--tile-codex-ink); }
+.tile.source-grok-build { --tile-color: var(--tile-grok); --tile-ink: var(--tile-grok-ink); }
+.tile.source-cursor { --tile-color: var(--tile-cursor); --tile-ink: var(--tile-cursor-ink); }
+.tile.source-gemini-cli { --tile-color: var(--tile-gemini); --tile-ink: var(--tile-gemini-ink); }
+
+.tile.swatch-1 { --tile-color: var(--swatch-1); --tile-ink: var(--swatch-1-ink); }
+.tile.swatch-2 { --tile-color: var(--swatch-2); --tile-ink: var(--swatch-2-ink); }
+.tile.swatch-3 { --tile-color: var(--swatch-3); --tile-ink: var(--swatch-3-ink); }
+.tile.swatch-4 { --tile-color: var(--swatch-4); --tile-ink: var(--swatch-4-ink); }
+.tile.swatch-5 { --tile-color: var(--swatch-5); --tile-ink: var(--swatch-5-ink); }
+.tile.swatch-6 { --tile-color: var(--swatch-6); --tile-ink: var(--swatch-6-ink); }
+.tile.swatch-7 { --tile-color: var(--swatch-7); --tile-ink: var(--swatch-7-ink); }
+.tile.swatch-8 { --tile-color: var(--swatch-8); --tile-ink: var(--swatch-8-ink); }
+
+.mark { display: inline-flex; }

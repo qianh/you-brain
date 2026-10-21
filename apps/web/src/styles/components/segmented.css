@@ -1,0 +1,57 @@
+.segmented {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  max-width: 100%;
+  padding: 2px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  user-select: none;
+  overflow: auto;
+  scrollbar-width: none;
+}
+
+.segmented::-webkit-scrollbar { display: none; }
+
+.segmented-thumb {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  left: 0;
+  border-radius: 8px;
+  background: var(--surface-3);
+  transition: transform var(--ease-pop), width var(--ease-pop);
+  pointer-events: none;
+}
+
+[data-theme="light"] .segmented-thumb {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-slider);
+}
+
+.segmented button, .segmented a {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-base);
+  font-weight: 500;
+  white-space: nowrap;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.segmented button[aria-selected="true"], .segmented a[aria-selected="true"],
+.segmented button[aria-checked="true"] { color: var(--text); }
+
+.segmented button:hover, .segmented a:hover { color: var(--text); }
+.segmented button:focus-visible, .segmented a:focus-visible { outline-offset: -2px; }

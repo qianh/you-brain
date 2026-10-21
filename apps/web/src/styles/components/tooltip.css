@@ -1,0 +1,19 @@
+.tooltip {
+  position: fixed;
+  z-index: 80;
+  max-width: 240px;
+  padding: 4px 8px;
+  border-radius: var(--r-chip);
+  background: var(--surface-3);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-sm);
+  box-shadow: var(--shadow-pop);
+  pointer-events: none;
+  animation: fade-in var(--ease-exit) both;
+}
+
+.tooltip-row { display: inline-flex; align-items: center; gap: 6px; }
+
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }

@@ -1,0 +1,27 @@
+.capsule {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--h-capsule);
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-pill);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: var(--fs-micro);
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: background var(--ease-color), border-color var(--ease-color);
+}
+
+.capsule:hover, .capsule.is-hover { background: var(--surface-3); color: var(--text); }
+.capsule:focus-visible { outline-offset: 2px; }
+.capsule .dot { width: 6px; height: 6px; }
+.capsule.ok .dot { background: var(--success); }
+.capsule.warn .dot { background: var(--warn); }
+.capsule.bad .dot { background: var(--danger); }
+.capsule.muted .dot { background: var(--text-3); }
+.capsule .spinner { width: 10px; height: 10px; }

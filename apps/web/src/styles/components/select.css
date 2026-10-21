@@ -1,0 +1,110 @@
+.select { position: relative; display: inline-flex; min-width: 0; max-width: 100%; }
+
+.select-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 140px;
+  height: var(--h-ctl);
+  padding: 0 8px 0 var(--sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--r-ctl);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--fs-base);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--ease-color), background var(--ease-color);
+}
+
+.select-trigger:hover, .select-trigger.is-hover { border-color: var(--border-strong); }
+.select-trigger:focus-visible, .select-trigger.is-focus { border-color: var(--accent); background: var(--surface); }
+.select-trigger:disabled, .select-trigger.is-disabled { opacity: 0.45; cursor: not-allowed; }
+.select-trigger[aria-expanded="true"] { border-color: var(--accent); background: var(--surface); }
+.select-trigger svg { color: var(--text-3); flex: none; }
+.select-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-flex; align-items: center; gap: var(--sp-2); }
+
+.select-pop { display: flex; flex-direction: column; max-height: 320px; padding: var(--sp-1); }
+.select-search { padding: var(--sp-1); }
+.select-list { overflow: auto; padding: 2px; }
+.select-group {
+  margin: var(--sp-2) var(--sp-2) var(--sp-1);
+  color: var(--text-3);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  line-height: var(--lh-micro);
+}
+.select-option {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: var(--h-ctl);
+  padding: 0 var(--sp-2);
+  border: 0;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-base);
+  text-align: left;
+  cursor: pointer;
+}
+.select-option:hover, .select-option.is-hover, .select-option.is-active { background: var(--hover); }
+.select-option[aria-selected="true"] { background: var(--accent-soft); }
+.select-option:disabled { opacity: 0.45; cursor: not-allowed; }
+.select-option .check-slot { width: 16px; flex: none; color: var(--accent); display: inline-flex; }
+.select-empty { color: var(--text-3); font-size: var(--fs-sm); padding: var(--sp-3); }
+
+.picker-search {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-2);
+  padding: 0 var(--sp-2);
+  background: var(--surface-2);
+  border-radius: var(--r-ctl);
+  border: 1px solid transparent;
+}
+.picker-search:focus-within { border-color: var(--accent); background: var(--surface); }
+.picker-search input { border: 0; background: transparent; height: var(--h-ctl); padding: 0; }
+.picker-search input:focus-visible { outline: none; }
+.picker-layout { display: grid; grid-template-columns: auto minmax(0, 1fr); min-width: 0; }
+.picker-rail { display: flex; flex-direction: column; gap: 2px; padding: var(--sp-1); }
+.picker-rail button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--h-ctl);
+  padding: 0 var(--sp-2);
+  border: 0;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.picker-rail button:hover, .picker-rail button.on { background: var(--surface-3); color: var(--text); }
+.picker-list { padding: var(--sp-1); min-width: 0; max-height: 280px; overflow: auto; }
+.picker-group { margin: var(--sp-2) var(--sp-2) var(--sp-1); color: var(--text-3); font-size: var(--fs-micro); font-weight: 600; }
+.picker-option {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: var(--h-ctl);
+  padding: 0 var(--sp-2);
+  border: 0;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.picker-option:hover { background: var(--hover); }
+.picker-option.on { background: var(--accent-soft); }
+.picker-option svg { color: var(--accent); }
+.picker-empty { color: var(--text-3); padding: var(--sp-3); font-size: var(--fs-sm); }
+.trail-field .row-trail { width: min(280px, 48%); }
+.trail-field .row-trail .select, .trail-field .row-trail .popover-root, .trail-field .row-trail .select-trigger,
+.trail-field .row-trail .control, .trail-field .row-trail input { width: 100%; }

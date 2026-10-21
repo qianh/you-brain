@@ -1,0 +1,21 @@
+.popover-root { position: relative; min-width: 0; display: inline-flex; max-width: 100%; }
+
+.popover, .menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 180px;
+  max-width: min(440px, calc(100vw - 24px));
+  padding: var(--sp-1);
+  border-radius: var(--r-pop);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
+  transform-origin: var(--pop-origin, top left);
+  animation: pop-in var(--ease-pop) both;
+}
+
+@keyframes pop-in {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: none; }
+}

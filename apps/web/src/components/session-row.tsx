@@ -3,7 +3,7 @@ import type { TopicSessionLink, TodaySession } from "@you-brain/core/http/types.
 import { useDaemon } from "../daemon-context.js";
 import { deviceLabel, driveFileUrl, formatDateTime, sourceLabel, type Language } from "../lib/format.js";
 import type { NamedDevice } from "../lib/format.js";
-import { SourceMark } from "./icons.js";
+import { SourceMark } from "./tile.js";
 import { Row } from "./row.js";
 
 export interface SessionCardModel {

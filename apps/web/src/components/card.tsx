@@ -21,3 +21,28 @@ export function CardHead({ title, hint }: { title: string; hint?: string }) {
     </header>
   );
 }
+
+export function Section({
+  title,
+  hint,
+  actions,
+  children,
+}: {
+  title: ReactNode;
+  hint?: ReactNode;
+  actions?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section className="section">
+      <header className="section-head">
+        <div className="section-title">
+          <span>{title}</span>
+          {hint ? <span className="section-hint">{hint}</span> : null}
+        </div>
+        {actions ? <div className="section-actions">{actions}</div> : null}
+      </header>
+      {children}
+    </section>
+  );
+}

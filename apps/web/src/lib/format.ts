@@ -42,6 +42,116 @@ export function formatDateTime(
   }
 }
 
+export interface ZonedParts {
+  year: number;
+  month: number;
+  day: number;
+  hour: string;
+  minute: string;
+}
+
+export function zonedParts(date: Date, timeZone: string | undefined): ZonedParts {
+  const options: Intl.DateTimeFormatOptions = {
+    year: "numeric",
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  };
+  if (timeZone !== undefined && timeZone !== "") options.timeZone = timeZone;
+  let parts: Intl.DateTimeFormatPart[];
+  try {
+    parts = new Intl.DateTimeFormat("en-US", options).formatToParts(date);
+  } catch {
+    parts = new Intl.DateTimeFormat("en-US", {
+      year: "numeric",
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    }).formatToParts(date);
+  }
+  const map: Record<string, string> = {};
+  for (const part of parts) map[part.type] = part.value;
+  return {
+    year: Number(map.year),
+    month: Number(map.month),
+    day: Number(map.day),
+    hour: (map.hour ?? "00").padStart(2, "0"),
+    minute: (map.minute ?? "00").padStart(2, "0"),
+  };
+}
+
+function calendarSerial(parts: Pick<ZonedParts, "year" | "month" | "day">): number {
+  return parts.year * 10000 + parts.month * 100 + parts.day;
+}
+
+function previousCalendarDay(parts: ZonedParts): number {
+  const utc = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
+  utc.setUTCDate(utc.getUTCDate() - 1);
+  return utc.getUTCFullYear() * 10000 + (utc.getUTCMonth() + 1) * 100 + utc.getUTCDate();
+}
+
+const EN_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function absoluteStamp(parts: ZonedParts, language: Language, withYear: boolean): string {
+  const clock = `${parts.hour}:${parts.minute}`;
+  if (language === "zh") {
+    const date = `${parts.month}月${parts.day}日`;
+    return withYear ? `${parts.year}年${date} ${clock}` : `${date} ${clock}`;
+  }
+  const month = EN_MONTHS[parts.month - 1] ?? String(parts.month);
+  return withYear ? `${month} ${parts.day}, ${parts.year}, ${clock}` : `${month} ${parts.day}, ${clock}`;
+}
+
+function unit(count: number, language: Language, one: string, many: string): string {
+  if (language === "zh") return `${count} ${one}前`;
+  return count === 1 ? `1 ${one} ago` : `${count} ${many} ago`;
+}
+
+/**
+ * 1 分钟内「刚刚」，1 小时内「N 分钟前」，同一天内「N 小时前」，
+ * 前一个日历日「昨天 HH:mm」，同年「M月D日 HH:mm」，跨年带年份。
+ * `now` 只用于测试。
+ */
+export function formatRelative(
+  iso: string | null,
+  language: Language,
+  timeZone?: string,
+  now: Date | number = Date.now(),
+): string {
+  if (iso === null || iso.trim() === "") return "—";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const nowDate = typeof now === "number" ? new Date(now) : now;
+  const diffMs = nowDate.getTime() - date.getTime();
+  const future = diffMs < 0;
+  const abs = Math.abs(diffMs);
+  if (abs < 60_000) return language === "zh" ? "刚刚" : "Just now";
+  if (future) {
+    const then = zonedParts(date, timeZone);
+    const current = zonedParts(nowDate, timeZone);
+    return absoluteStamp(then, language, then.year !== current.year);
+  }
+  if (abs < 3_600_000) {
+    const minutes = Math.max(1, Math.floor(abs / 60_000));
+    return unit(minutes, language, language === "zh" ? "分钟" : "minute", "minutes");
+  }
+  const then = zonedParts(date, timeZone);
+  const current = zonedParts(nowDate, timeZone);
+  if (calendarSerial(then) === calendarSerial(current)) {
+    const hours = Math.max(1, Math.floor(abs / 3_600_000));
+    return unit(hours, language, language === "zh" ? "小时" : "hour", "hours");
+  }
+  const clock = `${then.hour}:${then.minute}`;
+  if (calendarSerial(then) === previousCalendarDay(current)) {
+    return language === "zh" ? `昨天 ${clock}` : `Yesterday ${clock}`;
+  }
+  return absoluteStamp(then, language, then.year !== current.year);
+}
+
 export function formatDay(isoDate: string, language: Language): string {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(isoDate);
   if (!match) return isoDate;

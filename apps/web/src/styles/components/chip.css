@@ -1,0 +1,49 @@
+.chip, .pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--h-chip);
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-chip);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: var(--fs-micro);
+  font-weight: 500;
+  line-height: var(--lh-micro);
+  white-space: nowrap;
+  user-select: none;
+  vertical-align: middle;
+}
+
+button.chip, button.pill { cursor: pointer; font: inherit; }
+button.chip:hover, button.pill:hover, .chip.is-hover { background: var(--surface-3); }
+button.chip:disabled, .chip.is-disabled { opacity: 0.45; cursor: not-allowed; }
+
+.chip.accent, .pill.on, .chip[data-tone="accent"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+.chip.success, .chip[data-tone="success"] {
+  background: var(--success-soft);
+  color: var(--success-text);
+  border-color: color-mix(in srgb, var(--success) 28%, transparent);
+}
+.chip.warn, .chip[data-tone="warn"] {
+  background: var(--warn-soft);
+  color: var(--warn-text);
+  border-color: color-mix(in srgb, var(--warn) 28%, transparent);
+}
+.chip.danger, .chip[data-tone="danger"] {
+  background: var(--danger-soft);
+  color: var(--danger-text);
+  border-color: color-mix(in srgb, var(--danger) 28%, transparent);
+}
+
+.chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: currentColor;
+}

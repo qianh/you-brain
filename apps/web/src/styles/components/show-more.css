@@ -1,0 +1,21 @@
+.show-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 100%;
+  min-height: var(--h-row-compact);
+  border: 0;
+  border-top: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-2);
+  font-size: var(--fs-base);
+  cursor: pointer;
+  transition: background var(--ease-color), color var(--ease-color);
+}
+
+.show-more:hover, .show-more.is-hover { background: var(--hover); color: var(--text); }
+.show-more.inline { width: auto; min-height: 0; border: 0; padding: 0; background: transparent; }
+.show-more-panel { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 200ms ease-out; }
+.show-more-panel.is-open { grid-template-rows: 1fr; }
+.show-more-panel > div { overflow: hidden; min-height: 0; }

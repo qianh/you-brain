@@ -1,7 +1,9 @@
 import { useEffect } from "react";
 
 import { BrandMark } from "./components/icons.js";
+import { ToastProvider } from "./components/toast.js";
 import { DaemonProvider, useDaemon } from "./daemon-context.js";
+import { DesignPage } from "./pages/design.js";
 import { PanelPage } from "./pages/panel.js";
 import { TodayPage } from "./pages/today.js";
 import { TopicsPage } from "./pages/topics.js";
@@ -18,9 +20,11 @@ export function App() {
   return (
     <ThemeProvider>
       <DaemonProvider>
-        <Router>
-          <Frame />
-        </Router>
+        <ToastProvider>
+          <Router>
+            <Frame />
+          </Router>
+        </ToastProvider>
       </DaemonProvider>
     </ThemeProvider>
   );
@@ -72,6 +76,7 @@ function Frame() {
   else if (location.pathname === "/devices") page = <DevicesPage />;
   else if (location.pathname === "/settings") page = <SettingsPage />;
   else if (location.pathname === "/status") page = <StatusPage />;
+  else if (location.pathname === "/_design") page = <DesignPage />;
   return <Shell>{page}</Shell>;
 }
 

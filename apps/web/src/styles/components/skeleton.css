@@ -1,0 +1,32 @@
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--r-ctl);
+  background: var(--surface-2);
+  color: transparent;
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--hover), transparent);
+  animation: shimmer var(--dur-shimmer) ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  100% { transform: translateX(100%); }
+}
+
+.skeleton-row {
+  display: grid;
+  grid-template-columns: var(--tile) minmax(0, 1fr) 72px;
+  gap: var(--sp-3);
+  align-items: center;
+  min-height: var(--h-row);
+  padding: 11px var(--sp-4);
+}
+
+.skeleton-stat { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-4); }
+.skeleton-card { display: flex; flex-direction: column; }

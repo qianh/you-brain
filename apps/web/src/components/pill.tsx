@@ -1,5 +1,8 @@
 import type { ReactNode } from "react";
 
+import { Chip } from "./chip.js";
+
+/** Filter chip kept for the current pages. New pages should use `Chip`. */
 export function Pill({
   children,
   pressed = false,
@@ -9,10 +12,9 @@ export function Pill({
   pressed?: boolean;
   onClick?: () => void;
 }) {
-  if (!onClick) return <span className={pressed ? "pill on" : "pill"}>{children}</span>;
   return (
-    <button type="button" className={pressed ? "pill on" : "pill"} aria-pressed={pressed} onClick={onClick}>
+    <Chip tone={pressed ? "accent" : "neutral"} pressed={pressed} {...(onClick ? { onClick } : {})}>
       {children}
-    </button>
+    </Chip>
   );
 }

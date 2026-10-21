@@ -1,0 +1,42 @@
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-6);
+  background: var(--scrim);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+}
+
+.scrim.top { align-items: start; padding-top: 16vh; }
+
+.dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(440px, calc(100vw - 32px));
+  border-radius: var(--r-dialog);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
+  animation: pop-in var(--ease-pop) both;
+}
+
+.dialog.lg { width: min(560px, calc(100vw - 32px)); }
+
+.dialog-head { padding: var(--sp-5) var(--sp-5) 0; display: flex; flex-direction: column; gap: var(--sp-2); }
+.dialog-head h2 { font-size: var(--fs-lg); font-weight: 600; line-height: var(--lh-lg); }
+.dialog-head p { color: var(--text-2); font-size: var(--fs-base); line-height: var(--lh-zh); }
+.dialog-body { padding: var(--sp-4) var(--sp-5); }
+.dialog-head,
+.dialog-body,
+.dialog-foot { width: 100%; }
+.dialog-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+  padding: 0 var(--sp-5) var(--sp-5);
+}

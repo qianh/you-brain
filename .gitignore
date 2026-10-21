@@ -4,3 +4,4 @@ dist/
 .DS_Store
 .orchestration/
 apps/desktop/src-tauri/target/
+.worktrees/

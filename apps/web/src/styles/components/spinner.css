@@ -1,0 +1,10 @@
+.spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: var(--r-pill);
+  border: 1.5px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-top-color: currentColor;
+  animation: spin var(--dur-spin) linear infinite;
+  flex: none;
+  display: inline-block;
+}

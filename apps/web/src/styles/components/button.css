@@ -1,0 +1,87 @@
+.btn, .button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: var(--h-ctl);
+  padding: 0 var(--sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--r-ctl);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--fs-base);
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--ease-color), border-color var(--ease-color), filter var(--ease-color), transform var(--ease-color), opacity var(--ease-color);
+}
+
+.btn:hover, .button:hover, .btn.is-hover, .button.is-hover { background: var(--surface-3); }
+
+.btn:active, .button:active, .btn.is-active, .button.is-active { transform: scale(0.98); background: var(--pressed); }
+
+.btn:disabled, .button:disabled, .btn.is-disabled, .button.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn.primary, .button.primary, .button[data-variant="primary"] {
+  background: var(--accent-solid);
+  color: var(--on-accent);
+  border-color: transparent;
+}
+
+.btn.primary:hover, .button.primary:hover, .button.primary.is-hover { filter: brightness(1.08); background: var(--accent-solid); }
+
+.btn.quiet, .btn.text, .button.ghost, .button[data-variant="ghost"] {
+  background: transparent;
+  color: var(--text);
+}
+
+.btn.quiet:hover, .btn.text:hover, .button.ghost:hover, .button.ghost.is-hover { background: var(--hover); }
+
+.button.danger, .button[data-variant="danger"] {
+  background: transparent;
+  color: var(--danger-text);
+}
+
+.button.danger:hover, .button.danger.is-hover { background: var(--danger-soft); }
+
+.btn.small, .button.sm, .button[data-size="sm"] {
+  height: var(--h-ctl-sm);
+  padding: 0 10px;
+}
+
+.button.is-loading { pointer-events: none; }
+
+.button .btn-label { display: inline-flex; align-items: center; gap: 6px; }
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--h-ctl);
+  height: var(--h-ctl);
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-ctl);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  user-select: none;
+  transition: background var(--ease-color), color var(--ease-color), transform var(--ease-color);
+}
+
+.icon-btn:hover, .icon-btn.is-hover { background: var(--hover); color: var(--text); }
+.icon-btn:active, .icon-btn.is-active { background: var(--pressed); transform: scale(0.98); }
+.icon-btn:disabled, .icon-btn.is-disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+.icon-btn[aria-current="page"] { background: var(--accent-soft); color: var(--accent); }
+.icon-btn.sm { width: 24px; height: 24px; border-radius: var(--r-chip); }
+.icon-btn.is-spinning svg { animation: spin var(--dur-spin) linear infinite; }
+
+.tip-wrap { display: inline-flex; }
+
+@keyframes spin { to { transform: rotate(360deg); } }

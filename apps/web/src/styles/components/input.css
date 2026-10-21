@@ -1,0 +1,74 @@
+.field-control, .control, .field input, .field textarea, .pair input, .picker-search input {
+  width: 100%;
+  min-width: 0;
+  height: var(--h-ctl);
+  padding: 0 var(--sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--r-ctl);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--fs-base);
+  line-height: var(--lh-base);
+  transition: border-color var(--ease-color), background var(--ease-color);
+}
+
+.field textarea, textarea.field-control {
+  height: auto;
+  min-height: calc(var(--h-ctl) * 3);
+  padding: var(--sp-2) var(--sp-3);
+  resize: vertical;
+  line-height: var(--lh-zh);
+}
+
+.field-control::placeholder, .control::placeholder, .field input::placeholder, .field textarea::placeholder {
+  color: var(--text-3);
+}
+
+.field-control:hover, .control:hover, .field input:hover, .field textarea:hover,
+.field-control.is-hover, .control.is-hover {
+  border-color: var(--border-strong);
+}
+
+.field-control:focus, .control:focus, .field input:focus, .field textarea:focus,
+.field-control.is-focus, .control.is-focus {
+  outline: none;
+  border-color: var(--accent);
+  background: var(--surface);
+}
+
+.field-control.is-error, .field-control[aria-invalid="true"] { border-color: var(--danger); }
+
+.field-error, .field .field-error {
+  margin: 0;
+  color: var(--danger-text);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-sm);
+}
+
+.input-shell { position: relative; display: flex; align-items: center; min-width: 0; }
+.input-shell .field-control { padding-right: 36px; }
+.input-shell.with-kbd .field-control { padding-right: 72px; }
+.input-affix {
+  position: absolute;
+  right: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.search-field { position: relative; display: flex; align-items: center; min-width: 0; }
+.search-field .search-icon {
+  position: absolute;
+  left: 10px;
+  color: var(--text-3);
+  display: inline-flex;
+  pointer-events: none;
+}
+.search-field .field-control { padding-left: 32px; }
+.search-field.lg .field-control { height: var(--h-ctl-lg); }
+.search-clear {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--ease-color);
+}
+.search-field.has-value .search-clear { opacity: 1; pointer-events: auto; }

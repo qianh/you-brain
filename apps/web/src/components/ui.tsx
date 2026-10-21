@@ -4,15 +4,7 @@ import { useDaemon } from "../daemon-context.js";
 import { parseInline, parseMarkdown } from "../lib/markdown.js";
 import type { MessageKey } from "../i18n/messages.js";
 
-export function Banner({
-  tone,
-  children,
-}: {
-  tone: "warn" | "bad" | "ok" | "info";
-  children: ReactNode;
-}) {
-  return <div className={`banner banner-${tone}`}>{children}</div>;
-}
+export { Banner } from "./banner.js";
 
 export function InlineText({ text }: { text: string }) {
   const nodes = parseInline(text);

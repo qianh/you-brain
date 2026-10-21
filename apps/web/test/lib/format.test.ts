@@ -7,6 +7,7 @@ import {
   formatDay,
   LLM_PROVIDER_IDS,
   providerNeedsKey,
+  formatRelative,
   sourceLabel,
   variantName,
   weekdayName,
@@ -71,5 +72,43 @@ describe("labels", () => {
 
   test("builds a stable Drive link", () => {
     expect(driveFileUrl("abc/123")).toBe("https://drive.google.com/file/d/abc%2F123/view");
+  });
+});
+
+describe("formatRelative", () => {
+  const zone = "Asia/Shanghai";
+  const now = new Date("2026-10-18T02:00:00.000Z");
+
+  test("keeps empty and invalid values readable", () => {
+    expect(formatRelative(null, "zh", zone, now)).toBe("—");
+    expect(formatRelative("  ", "en", zone, now)).toBe("—");
+    expect(formatRelative("yesterday", "en", zone, now)).toBe("yesterday");
+  });
+
+  test("says just now inside a minute, including a short future", () => {
+    expect(formatRelative("2026-10-18T01:59:20.000Z", "zh", zone, now)).toBe("刚刚");
+    expect(formatRelative("2026-10-18T02:00:30.000Z", "en", zone, now)).toBe("Just now");
+  });
+
+  test("counts minutes and hours before it crosses a calendar day", () => {
+    expect(formatRelative("2026-10-18T01:55:00.000Z", "zh", zone, now)).toBe("5 分钟前");
+    expect(formatRelative("2026-10-18T01:59:00.000Z", "en", zone, now)).toBe("1 minute ago");
+    expect(formatRelative("2026-10-18T01:30:00.000Z", "en", zone, now)).toBe("30 minutes ago");
+    expect(formatRelative("2026-10-17T23:00:00.000Z", "zh", zone, now)).toBe("3 小时前");
+    expect(formatRelative("2026-10-17T23:00:00.000Z", "en", zone, now)).toBe("3 hours ago");
+  });
+
+  test("keeps a short midnight span in minutes", () => {
+    const midnight = new Date("2026-10-17T16:20:00.000Z");
+    expect(formatRelative("2026-10-17T15:50:00.000Z", "zh", zone, midnight)).toBe("30 分钟前");
+  });
+
+  test("uses yesterday, same-year, and cross-year stamps", () => {
+    expect(formatRelative("2026-10-17T08:05:00.000Z", "zh", zone, now)).toBe("昨天 16:05");
+    expect(formatRelative("2026-10-17T08:05:00.000Z", "en", zone, now)).toBe("Yesterday 16:05");
+    expect(formatRelative("2026-10-01T08:05:00.000Z", "zh", zone, now)).toBe("10月1日 16:05");
+    expect(formatRelative("2026-10-01T08:05:00.000Z", "en", zone, now)).toBe("Oct 1, 16:05");
+    expect(formatRelative("2025-10-18T08:05:00.000Z", "zh", zone, now)).toBe("2025年10月18日 16:05");
+    expect(formatRelative("2025-10-18T08:05:00.000Z", "en", zone, now)).toBe("Oct 18, 2025, 16:05");
   });
 });

@@ -1,0 +1,36 @@
+.banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--h-banner);
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-banner);
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: var(--fs-base);
+  line-height: var(--lh-base);
+}
+
+.banner + .banner { margin-top: var(--sp-2); }
+.banner-icon { display: inline-flex; color: var(--accent); flex: none; }
+.banner-text { flex: 1; min-width: 0; }
+.banner-actions { display: inline-flex; align-items: center; gap: var(--sp-1); flex: none; }
+
+.banner.info, .banner-info { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 20%, transparent); }
+.banner.info .banner-icon { color: var(--accent); }
+.banner.success, .banner-ok {
+  background: var(--success-soft);
+  border-color: color-mix(in srgb, var(--success) 20%, transparent);
+}
+.banner.success .banner-icon, .banner-ok .banner-icon { color: var(--success); }
+.banner.warn, .banner-warn {
+  background: var(--warn-soft);
+  border-color: color-mix(in srgb, var(--warn) 20%, transparent);
+}
+.banner.warn .banner-icon, .banner-warn .banner-icon { color: var(--warn); }
+.banner.danger, .banner-bad {
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 20%, transparent);
+}
+.banner.danger .banner-icon, .banner-bad .banner-icon { color: var(--danger); }

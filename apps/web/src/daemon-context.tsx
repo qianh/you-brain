@@ -35,7 +35,7 @@ interface DaemonValue extends DaemonSnapshot {
   detailRevision: number;
   timeZone: string;
   t: (key: MessageKey, vars?: Record<string, string | number>) => string;
-  reload: (scope?: "today" | "topics" | "status" | "all") => Promise<void>;
+  reload: (scope?: "today" | "topics" | "status" | "all") => Promise<boolean>;
   replaceConfig: (config: SharedConfig) => void;
   replaceRoles: (roles: Roles) => void;
 }
@@ -97,7 +97,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const reload = useCallback(
-    async (scope: "today" | "topics" | "status" | "all" = "all") => {
+    async (scope: "today" | "topics" | "status" | "all" = "all"): Promise<boolean> => {
       const currentLanguage = languageRef.current;
       try {
         if (scope === "all") {
@@ -110,7 +110,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
             client.status(),
             client.reminders(),
           ]);
-          if (!alive.current) return;
+          if (!alive.current) return false;
           applyLanguage(config);
           setSnapshot({
             config,
@@ -122,29 +122,31 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
             reminders: reminders.reminders,
           });
           setError(null);
-          return;
+          return true;
         }
         if (scope === "today") {
           const today = await client.today();
-          if (!alive.current) return;
+          if (!alive.current) return false;
           setSnapshot((current) => ({ ...current, today }));
           setDetailRevision((value) => value + 1);
-          return;
+          return true;
         }
         if (scope === "topics") {
           const topics = await client.topics();
-          if (!alive.current) return;
+          if (!alive.current) return false;
           setSnapshot((current) => ({ ...current, topics: topics.topics }));
           setDetailRevision((value) => value + 1);
-          return;
+          return true;
         }
         const [status, reminders] = await Promise.all([client.status(), client.reminders()]);
-        if (!alive.current) return;
+        if (!alive.current) return false;
         setSnapshot((current) => ({ ...current, status, reminders: reminders.reminders }));
+        return true;
       } catch (caught) {
-        if (!alive.current) return;
+        if (!alive.current) return false;
         const message = errorText(caught, currentLanguage);
         if (message) setError(message);
+        return false;
       }
     },
     [applyLanguage, client],

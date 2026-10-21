@@ -4,6 +4,23 @@ import { fileURLToPath } from "node:url";
 
 const token = process.env.MOCK_TOKEN || "you-brain-mock-token";
 const port = Number(process.env.MOCK_PORT || 4731);
+const scenario = (process.env.MOCK_SCENARIO || "rich").trim() || "rich";
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+function ago(ms: number): string {
+  return new Date(Date.now() - ms).toISOString();
+}
+
+function shanghaiToday(): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+}
 const dist = join(fileURLToPath(new URL("..", import.meta.url)), "dist");
 
 if (!existsSync(join(dist, "index.html"))) {
@@ -21,9 +38,9 @@ const KEY = {
   scratch: "d".repeat(64),
   tax: "e".repeat(64),
 };
-const MORNING = "2026-10-18T09:40:00+08:00";
-const NOON = "2026-10-18T13:15:00+08:00";
-const AFTERNOON = "2026-10-18T16:05:00+08:00";
+const MORNING = ago(6 * HOUR);
+const NOON = ago(3 * HOUR);
+const AFTERNOON = ago(25 * MINUTE);
 
 interface SessionRow {
   sessionKey: string;
@@ -82,9 +99,10 @@ const sessions: SessionRow[] = [
     source: "claude-code",
     device: MAC,
     fileId: "1AbCDeFgHiJkLmNoPqRsTuVwXyZ",
-    title: "同步按设备分片",
-    summary: "事件日志按设备分片写入 Drive。冲突时按字段后写胜出，用户手动改过的状态不会被自动提炼盖掉。",
-    startedAt: "2026-10-18T09:12:00+08:00",
+    title: "同步按设备分片：事件日志、冲突后写胜出，以及用户锁不能被夜里的自动提炼盖掉",
+    summary:
+      "事件日志按设备分片写入 Drive。冲突时按字段后写胜出，用户手动改过的状态不会被自动提炼盖掉。This pass also covers the outbox cursor, the per-device events file, and what happens when two machines refine the same topic overnight. 结论是先写本地再上传，合并时用户锁优先。超长摘要用来看截断：后面还有游标过期、补拉、以及办公室那台机器落后十五分钟时怎么对齐。",
+    startedAt: ago(6 * HOUR + 20 * MINUTE),
     updatedAt: MORNING,
     msgCount: 28,
     refinedUpTo: 28,
@@ -96,9 +114,9 @@ const sessions: SessionRow[] = [
     source: "codex",
     device: OFFICE,
     fileId: "1ZyXwVuTsRqPoNmLkJiHgFeDcBa",
-    title: "话题册的合并与拆分",
-    summary: "合并建立 from 到 into 的映射。拆分是把一条会话移出，再归到新话题或已有话题。",
-    startedAt: "2026-10-18T14:02:00+08:00",
+    title: "话题册的合并与拆分：from 到 into 只建映射，拆分把单条会话挪到新话题",
+    summary: "合并建立 from 到 into 的映射。拆分是把一条会话移出，再归到新话题或已有话题。历史区要能搜索并重新激活。",
+    startedAt: ago(2 * HOUR),
     updatedAt: AFTERNOON,
     msgCount: 16,
     refinedUpTo: 16,
@@ -110,9 +128,9 @@ const sessions: SessionRow[] = [
     source: "grok-build",
     device: MAC,
     fileId: "1TripFileKyotoOctober2026",
-    title: "京都四天",
-    summary: "想避开周末的人潮，住在鸭川东。还没定返程的新干线。",
-    startedAt: "2026-10-18T11:20:00+08:00",
+    title: "京都四天：鸭川东的住处、工作日的伏见稻荷，还有没订的返程新干线",
+    summary: "想避开周末的人潮，住在鸭川东。还没定返程的新干线。Kyoto, east of the river, weekday visit to Fushimi. 中英混在同一段里，用来看摘要换行。",
+    startedAt: ago(4 * HOUR),
     updatedAt: NOON,
     msgCount: 9,
     refinedUpTo: 9,
@@ -124,13 +142,42 @@ const sessions: SessionRow[] = [
     source: "cursor",
     device: MAC,
     fileId: null,
-    title: "临时看了一眼日志",
-    summary: "只是确认 daemon.json 的权限，没有形成话题。",
-    startedAt: "2026-10-18T08:05:00+08:00",
-    updatedAt: "2026-10-18T08:11:00+08:00",
+    title: "临时看了一眼日志：只确认 daemon.json 的权限，没有形成话题，也没有 Drive 原文",
+    summary: "只是确认 daemon.json 的权限，没有形成话题。这条故意没有 fileId。",
+    startedAt: ago(8 * HOUR),
+    updatedAt: ago(8 * HOUR - 6 * MINUTE),
     msgCount: 3,
     refinedUpTo: 3,
     topicId: null,
+    today: true,
+  },
+  {
+    sessionKey: "f".repeat(64),
+    source: "claude-code",
+    device: MAC,
+    fileId: "1LongDesignReviewOctober",
+    title: "界面重做的验收清单：字号、间距、空状态和窄窗口要一起看，不能只看深色主路径",
+    summary:
+      "对照设计稿把按钮、输入、选择器和状态胶囊的深浅色都走了一遍。Light mode still needs the same hierarchy: background, surface, then the floating layer. 空状态要居中，不能靠左裸文字。",
+    startedAt: ago(90 * MINUTE),
+    updatedAt: ago(70 * MINUTE),
+    msgCount: 22,
+    refinedUpTo: 22,
+    topicId: "topic-ui",
+    today: true,
+  },
+  {
+    sessionKey: "6".repeat(64),
+    source: "cursor",
+    device: OFFICE,
+    fileId: "1CursorPathMissingNotes",
+    title: "Cursor 扫描路径不存在，办公室那台机器的采集停在昨天晚上",
+    summary: "路径写成了旧的 Application Support。换机之后没改。English path mixed with 中文说明，错误要说清下一步。",
+    startedAt: ago(20 * HOUR),
+    updatedAt: ago(18 * HOUR),
+    msgCount: 6,
+    refinedUpTo: 4,
+    topicId: "topic-ui",
     today: true,
   },
   {
@@ -210,6 +257,22 @@ const topics: TopicRow[] = [
     createdTs: "2026-04-02T12:00:00+08:00",
     lastUserOpAt: "2026-05-02T09:00:00+08:00",
     userLocked: true,
+  },
+  {
+    topicId: "topic-ui",
+    name: "界面重做：设计系统、共享组件和窄窗口",
+    aliases: ["G1", "design system"],
+    status: "active",
+    statusBy: "auto",
+    summary:
+      "令牌、外壳和共享组件先落地，页面之后再重写。深色和浅色要像同一个产品。Empty states stay centered, with an icon and a next step.",
+    nextStep: "用 /_design 对一下组件状态，再开页面任务。",
+    lastActive: ago(70 * MINUTE),
+    zone: "active",
+    mergedInto: null,
+    createdTs: ago(2 * DAY),
+    lastUserOpAt: null,
+    userLocked: false,
   },
 ];
 
@@ -462,7 +525,7 @@ function requireTopic(id: string): TopicRow | Response {
 
 function today(): Response {
   return json({
-    date: "2026-10-18",
+    date: shanghaiToday(),
     timeZone: "Asia/Shanghai",
     sessions: sessions
       .filter((session) => session.today)
@@ -486,29 +549,50 @@ function today(): Response {
 }
 
 function statusBody(): unknown {
+  if (scenario === "fresh") {
+    return {
+      deviceId: MAC,
+      drive: { reachable: null, accountEmail: null },
+      sync: { lastSyncAt: null, pendingOutbox: 0 },
+      search: { ready: false, documents: 0 },
+      refine: { pending: 0, lastError: null },
+      consolidation: { enabled: false, lastFinishedAt: null, stale: false, status: "disabled" },
+      warnings: [{ code: "LLM_NOT_CONFIGURED", message: "提炼模型还没配置" }],
+      captures: [],
+      logs: [],
+    };
+  }
+  const healthy = scenario === "healthy";
   return {
     deviceId: MAC,
     drive: { reachable: accountEmail !== null, accountEmail },
-    sync: { lastSyncAt: "2026-10-18T16:08:00+08:00", pendingOutbox: 1 },
-    search: { ready: false, documents: 128 },
-    refine: { pending: 2, lastError: "模型返回的 JSON 无法解析，两分钟后重试" },
+    sync: { lastSyncAt: ago(4 * MINUTE), pendingOutbox: healthy ? 0 : 1 },
+    search: { ready: healthy, documents: 128 },
+    refine: { pending: healthy ? 0 : 2, lastError: null },
     consolidation: { enabled: false, lastFinishedAt: null, stale: false, status: "disabled" },
-    warnings: [{ code: "SEARCH_STALE", message: "搜索索引已超过一天没有更新" }],
+    warnings: healthy
+      ? []
+      : [
+          { code: "SEARCH_STALE", message: "搜索索引已超过一天没有更新" },
+          { code: "CAPTURE_CURSOR", message: "Cursor 的扫描路径不存在" },
+        ],
     captures: [
       { source: "claude-code", lastCaptureAt: MORNING, error: null },
       { source: "codex", lastCaptureAt: AFTERNOON, error: null },
       { source: "grok-build", lastCaptureAt: NOON, error: null },
       {
         source: "cursor",
-        lastCaptureAt: null,
-        error: "扫描路径不存在：~/Library/Application Support/Cursor",
+        lastCaptureAt: healthy ? AFTERNOON : null,
+        error: healthy ? null : "扫描路径不存在：~/Library/Application Support/Cursor",
       },
-      { source: "gemini-cli", lastCaptureAt: "2026-10-17T22:10:00+08:00", error: null },
+      { source: "gemini-cli", lastCaptureAt: ago(20 * HOUR), error: null },
     ],
-    logs: [
-      { at: "2026-10-18T15:12:00+08:00", message: "提炼队列：模型返回的 JSON 无法解析" },
-      { at: "2026-10-18T11:02:00+08:00", message: "Drive 变更游标过期，已从头拉取" },
-    ],
+    logs: healthy
+      ? []
+      : [
+          { at: ago(50 * MINUTE), message: "搜索索引已超过一天没有更新" },
+          { at: ago(5 * HOUR), message: "Drive 变更游标过期，已从头拉取" },
+        ],
   };
 }
 
@@ -615,6 +699,9 @@ const searchHits = [
 function search(url: URL): Response {
   const query = url.searchParams.get("q")?.trim() ?? "";
   if (query === "") return fail(400, "INVALID_INPUT", "缺少搜索词");
+  if (scenario === "fresh") {
+    return json({ query, indexStatus: "stale", searchMode: "keyword", results: [], warnings: [] });
+  }
   const needle = query.toLocaleLowerCase();
   const sources = url.searchParams.getAll("sources");
   const results = searchHits.filter((hit) => {
@@ -623,10 +710,10 @@ function search(url: URL): Response {
   });
   return json({
     query,
-    indexStatus: "stale",
-    searchMode: "keyword",
+    indexStatus: scenario === "healthy" ? "fresh" : "stale",
+    searchMode: scenario === "healthy" ? "semantic" : "keyword",
     results,
-    warnings: [{ code: "EMBED_UNAVAILABLE", message: "嵌入模型还没就绪，已改用关键词" }],
+    warnings: scenario === "healthy" ? [] : [{ code: "EMBED_UNAVAILABLE", message: "嵌入模型还没就绪，已改用关键词" }],
   });
 }
 
@@ -697,10 +784,12 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
   if (path === "/api/today" && request.method === "GET") return today();
   if (path === "/api/topics" && request.method === "GET") return listTopics(url);
   if (path === "/api/portrait/snapshots" && request.method === "GET") {
+    if (scenario === "fresh") return json({ snapshots: [] });
     return json({
       snapshots: [
-        { name: "JOHN-DIGITAL-TWIN-v12-2026-10-01.md", path: "digital-twin/JOHN-DIGITAL-TWIN-v12-2026-10-01.md", updatedAt: "2026-10-01T03:10:00+08:00" },
-        { name: "JOHN-DIGITAL-TWIN-v11-2026-09-01.md", path: "digital-twin/JOHN-DIGITAL-TWIN-v11-2026-09-01.md", updatedAt: "2026-09-01T03:10:00+08:00" },
+        { name: "JOHN-DIGITAL-TWIN-v13.md", path: "digital-twin/JOHN-DIGITAL-TWIN-v13.md", updatedAt: ago(DAY) },
+        { name: "JOHN-DIGITAL-TWIN-v12.md", path: "digital-twin/JOHN-DIGITAL-TWIN-v12.md", updatedAt: ago(18 * DAY) },
+        { name: "JOHN-DIGITAL-TWIN-v11.md", path: "digital-twin/JOHN-DIGITAL-TWIN-v11.md", updatedAt: ago(48 * DAY) },
       ],
     });
   }
@@ -714,10 +803,28 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
         : variant === "coding"
           ? "digital-twin/JOHN-TWIN-coding.md"
           : "digital-twin/JOHN-DIGITAL-TWIN-latest.md";
-    return json({ variant, content, path: variantPath, updatedAt: "2026-10-17T03:05:00+08:00" });
+    if (scenario === "fresh") return json({ variant, content: "", path: variantPath, updatedAt: null });
+    return json({ variant, content, path: variantPath, updatedAt: ago(20 * HOUR) });
   }
   if (path === "/api/search" && request.method === "GET") return search(url);
   if (path === "/api/devices" && request.method === "GET") {
+    if (scenario === "fresh") {
+      return json({
+        devices: [
+          {
+            deviceId: MAC,
+            displayName: "这台 Mac",
+            kind: "desktop",
+            platform: "darwin",
+            appVersion: "0.1.0",
+            protocolVersion: 1,
+            capabilities: ["capture"],
+            lastSeenAt: ago(MINUTE),
+            lastActiveAt: ago(MINUTE),
+          },
+        ],
+      });
+    }
     return json({
       devices: [
         {
@@ -728,7 +835,7 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
           appVersion: "0.1.0",
           protocolVersion: 1,
           capabilities: ["capture", "refine", "consolidate"],
-          lastSeenAt: "2026-10-18T16:10:00+08:00",
+          lastSeenAt: ago(2 * MINUTE),
           lastActiveAt: AFTERNOON,
         },
         {
@@ -739,8 +846,8 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
           appVersion: "0.1.0",
           protocolVersion: 1,
           capabilities: ["capture", "refine"],
-          lastSeenAt: "2026-10-18T15:40:00+08:00",
-          lastActiveAt: "2026-10-18T15:02:00+08:00",
+          lastSeenAt: ago(15 * MINUTE),
+          lastActiveAt: ago(20 * MINUTE),
         },
         {
           deviceId: SERVER,
@@ -750,8 +857,8 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
           appVersion: "0.1.0",
           protocolVersion: 1,
           capabilities: ["consolidate"],
-          lastSeenAt: "2026-10-18T04:00:00+08:00",
-          lastActiveAt: "2026-10-17T03:12:00+08:00",
+          lastSeenAt: ago(2 * DAY),
+          lastActiveAt: ago(2 * DAY + 3 * HOUR),
         },
       ],
     });
@@ -776,7 +883,31 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
     return json(config);
   }
   if (path === "/api/status" && request.method === "GET") return json(statusBody());
-  if (path === "/api/reminders" && request.method === "GET") return json({ reminders: [] });
+  if (path === "/api/reminders" && request.method === "GET") {
+    if (scenario === "fresh" || scenario === "healthy") return json({ reminders: [] });
+    return json({
+      reminders: [
+        {
+          reminderId: "rem-train",
+          kind: "follow_up",
+          topicId: "topic-trip",
+          text: "订返程新干线，京都行程还差这一段。",
+          status: "open",
+          until: ago(-2 * DAY),
+          issuedAt: ago(2 * HOUR),
+        },
+        {
+          reminderId: "rem-ui",
+          kind: "digest",
+          topicId: "topic-ui",
+          text: "界面重做的验收清单还有几条没过。",
+          status: "open",
+          until: null,
+          issuedAt: ago(30 * MINUTE),
+        },
+      ],
+    });
+  }
   if (path === "/api/actions/sync" && request.method === "POST") {
     publish("status");
     return json({ started: true, at: new Date().toISOString() });
@@ -864,6 +995,14 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
   return fail(404, "NOT_FOUND", "找不到接口");
 }
 
+if (scenario === "fresh") {
+  sessions.length = 0;
+  topics.length = 0;
+  conclusions.length = 0;
+  todos.length = 0;
+  accountEmail = null;
+}
+
 Bun.serve({
   hostname: "127.0.0.1",
   port,
@@ -871,11 +1010,19 @@ Bun.serve({
   fetch(request) {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/api/")) {
+      if (scenario === "offline") return undefined as unknown as Response;
       if (!authorized(request, url)) return fail(401, "UNAUTHORIZED", "缺少或无效的访问令牌");
+      if (scenario === "error") return fail(500, "INTERNAL", "后台暂时不可用");
+      if (scenario === "slow") {
+        const ms = 1500 + Math.floor(Math.random() * 1001);
+        return new Promise((resolve) => {
+          setTimeout(() => resolve(handleApi(request, url)), ms);
+        });
+      }
       return handleApi(request, url);
     }
     return staticFile(url.pathname);
   },
 });
 
-console.log(`mock daemon http://127.0.0.1:${port}/  token=${token}`);
+console.log(`mock daemon http://127.0.0.1:${port}/  token=${token}  scenario=${scenario}`);
