@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 
 import {
+  createVirtualDeviceRecord,
   mergeDefaults,
   parseRoles,
   parseSharedConfig,
@@ -28,6 +29,7 @@ import {
   TodoActionBodySchema,
   TopicMutationBodySchema,
   UploadActionBodySchema,
+  VirtualDeviceCreateBodySchema,
   type ActionResponse,
   type ApiErrorBody,
   type DaemonChangeKind,
@@ -141,6 +143,15 @@ export async function handleApi(
   if (path === "/api/portrait") return method(request, "GET", () => portrait(url, context));
   if (path === "/api/search") return method(request, "GET", () => search(url, context));
   if (path === "/api/devices") return method(request, "GET", () => devices(context));
+  if (path === "/api/devices/virtual") {
+    return method(request, "POST", () => createVirtualDevice(request, context));
+  }
+  const deviceMatch = /^\/api\/devices\/([^/]+)$/u.exec(path);
+  if (deviceMatch) {
+    const id = decodeURIComponent(deviceMatch[1] ?? "");
+    if (id.length === 0) return apiError(404, "NOT_FOUND", "设备不存在");
+    return method(request, "DELETE", () => removeVirtualDevice(id, context));
+  }
   if (path === "/api/roles") {
     if (request.method === "GET") return roles(context);
     if (request.method === "PUT") return writeRoles(request, context);
@@ -419,6 +430,39 @@ async function search(url: URL, context: ApiContext): Promise<Response> {
 
 async function devices(context: ApiContext): Promise<Response> {
   return json({ devices: await context.deps.devices() });
+}
+
+function driveUnavailable(): never {
+  throw new HttpError(503, "DRIVE_UNAVAILABLE", "Drive 未就绪");
+}
+
+async function createVirtualDevice(request: Request, context: ApiContext): Promise<Response> {
+  if (!context.deps.registerVirtualDevice) driveUnavailable();
+  const body = VirtualDeviceCreateBodySchema.parse(await readJson(request));
+  const device = await context.deps.registerVirtualDevice(
+    createVirtualDeviceRecord({
+      displayName: body.displayName,
+      ...(body.capabilities === undefined ? {} : { capabilities: body.capabilities }),
+      now: context.deps.now(),
+    }),
+  );
+  publish(context.hub, ["devices"]);
+  return json({ device });
+}
+
+async function removeVirtualDevice(deviceId: string, context: ApiContext): Promise<Response> {
+  if (!context.deps.removeVirtualDevice) driveUnavailable();
+  const devices = await context.deps.devices();
+  const device = devices.find((item) => item.deviceId === deviceId);
+  if (!device) return apiError(404, "NOT_FOUND", "设备不存在");
+  if (device.kind !== "virtual") return apiError(409, "NOT_VIRTUAL", "只能移除虚拟设备");
+  const roles = await context.deps.readRoles();
+  if (roles.mainDevice === deviceId || roles.webProcessor === deviceId) {
+    return apiError(409, "DEVICE_IN_USE", "该设备是主设备或网页会话处理设备，不能移除");
+  }
+  await context.deps.removeVirtualDevice(deviceId);
+  publish(context.hub, ["devices"]);
+  return json({ ok: true });
 }
 
 async function roles(context: ApiContext): Promise<Response> {

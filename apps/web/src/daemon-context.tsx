@@ -103,7 +103,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const reload = useCallback(
-    async (scope: "today" | "topics" | "status" | "all" = "all"): Promise<boolean> => {
+    async (scope: "today" | "topics" | "status" | "devices" | "all" = "all"): Promise<boolean> => {
       const currentLanguage = languageRef.current;
       try {
         if (scope === "all") {
@@ -142,6 +142,12 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
           if (!alive.current) return false;
           setSnapshot((current) => ({ ...current, topics: topics.topics }));
           setDetailRevision((value) => value + 1);
+          return true;
+        }
+        if (scope === "devices") {
+          const devices = await client.devices();
+          if (!alive.current) return false;
+          setSnapshot((current) => ({ ...current, devices: devices.devices }));
           return true;
         }
         const [status, reminders] = await Promise.all([client.status(), client.reminders()]);

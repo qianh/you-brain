@@ -28,6 +28,9 @@ import {
   type TopicsResponse,
   type UploadActionInput,
   type UploadActionResult,
+  type VirtualDeviceCreateBody,
+  type VirtualDeviceResponse,
+  type RemoveDeviceResponse,
 } from "./types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 
@@ -54,6 +57,8 @@ export interface DaemonClient {
   addPortraitCorrection(input: PortraitCorrectionBody): Promise<PortraitCorrectionResult>;
   search(query: SearchRequest): Promise<SearchResponse>;
   devices(): Promise<DevicesResponse>;
+  addVirtualDevice(body: VirtualDeviceCreateBody): Promise<VirtualDeviceResponse>;
+  removeVirtualDevice(deviceId: string): Promise<RemoveDeviceResponse>;
   roles(): Promise<Roles>;
   updateRoles(patch: unknown): Promise<Roles>;
   config(): Promise<SharedConfig>;
@@ -86,7 +91,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
   const baseUrl = `http://127.0.0.1:${options.port}`;
 
   async function request<T>(
-    method: "GET" | "POST" | "PUT",
+    method: "GET" | "POST" | "PUT" | "DELETE",
     path: string,
     body?: unknown,
   ): Promise<T> {
@@ -141,6 +146,9 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     addPortraitCorrection: (input) => request("POST", "/api/portrait/corrections", input),
     search: (query) => request("GET", `/api/search${searchString(query)}`),
     devices: () => request("GET", "/api/devices"),
+    addVirtualDevice: (body) => request("POST", "/api/devices/virtual", body),
+    removeVirtualDevice: (deviceId) =>
+      request("DELETE", `/api/devices/${encodeURIComponent(deviceId)}`),
     roles: () => request("GET", "/api/roles"),
     updateRoles: (patch) => request("PUT", "/api/roles", patch),
     config: () => request("GET", "/api/config"),

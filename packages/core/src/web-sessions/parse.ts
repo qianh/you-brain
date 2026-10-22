@@ -1,3 +1,5 @@
+import { sessionFrontmatterFields } from "@you-brain/protocol";
+
 export interface WebSessionTurn {
   role: "user" | "assistant";
   text: string;
@@ -22,14 +24,7 @@ function normalizeNewlines(markdown: string): string {
 
 /** YAML-ish frontmatter used by uploaded session markdown. Missing block yields an empty map. */
 export function frontmatter(markdown: string): Map<string, string> {
-  const match = /^---\n([\s\S]*?)\n---\n/u.exec(normalizeNewlines(markdown));
-  const fields = new Map<string, string>();
-  for (const line of match?.[1]?.split("\n") ?? []) {
-    const index = line.indexOf(":");
-    if (index <= 0) continue;
-    fields.set(line.slice(0, index).trim(), line.slice(index + 1).trim());
-  }
-  return fields;
+  return sessionFrontmatterFields(markdown);
 }
 
 function bodyAfterFrontmatter(markdown: string): string {

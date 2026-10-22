@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "confidence": {
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+    },
+    "sessionKey": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "text": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "todoId": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "topicId": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "todoId",
+    "topicId",
+    "text",
+    "sessionKey",
+    "confidence"
+  ],
+  "type": "object"
+}

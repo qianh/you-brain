@@ -31,6 +31,7 @@ if (!existsSync(join(dist, "index.html"))) {
 const MAC = "11111111-1111-4111-8111-111111111111";
 const OFFICE = "22222222-2222-4222-8222-222222222222";
 const SERVER = "33333333-3333-4333-8333-333333333333";
+const BOT = "44444444-4444-4444-8444-444444444444";
 const KEY = {
   sync: "a".repeat(64),
   events: "b".repeat(64),
@@ -1147,6 +1148,17 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
           capabilities: ["consolidate"],
           lastSeenAt: ago(2 * DAY),
           lastActiveAt: ago(2 * DAY + 3 * HOUR),
+        },
+        {
+          deviceId: BOT,
+          displayName: "沉淀机器人",
+          kind: "virtual",
+          platform: "bot",
+          appVersion: "virtual",
+          protocolVersion: 1,
+          capabilities: ["refine", "consolidate"],
+          lastSeenAt: ago(5 * MINUTE),
+          lastActiveAt: ago(30 * MINUTE),
         },
       ],
     });

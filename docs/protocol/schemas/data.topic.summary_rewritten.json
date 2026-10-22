@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "nextStep": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "topicId": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "topicId",
+    "summary",
+    "nextStep"
+  ],
+  "type": "object"
+}

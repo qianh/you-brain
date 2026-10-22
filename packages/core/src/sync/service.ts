@@ -242,6 +242,49 @@ export class ProtocolSync {
     return this.#writeDevice(options?.lastActiveAt);
   }
 
+  /**
+   * Write another device's record. Only `kind: "virtual"` is accepted.
+   * `lastActiveAt` does not move backward. `lastSeenAt` is the incoming value.
+   */
+  async registerVirtual(record: DeviceRecord): Promise<DeviceRecord> {
+    const incoming = parseDeviceRecord(record);
+    if (incoming.kind !== "virtual") {
+      throw new YouBrainError("INVALID_INPUT", "只能注册虚拟设备");
+    }
+    const path = deviceRecordPath(incoming.deviceId);
+    const result = await updateJsonWithMerge<DeviceRecord>(this.#drive, path, (current) => {
+      const existing = current === null ? null : parseDeviceRecord(current);
+      if (existing && existing.kind !== "virtual") {
+        throw new YouBrainError("INVALID_INPUT", "已有同名非虚拟设备记录");
+      }
+      return parseDeviceRecord({
+        ...incoming,
+        lastActiveAt: mergeLastActiveAt(existing?.lastActiveAt ?? null, incoming.lastActiveAt),
+      });
+    });
+    return this.#store.upsertDevice(result.value);
+  }
+
+  /** Trash a virtual device file and drop the local row. Other devices are left alone. */
+  async removeDevice(deviceId: string): Promise<void> {
+    const path = deviceRecordPath(deviceId);
+    const remote = await this.#drive.findByPath(path);
+    const local = this.#store.getDevice(deviceId);
+    let kind = local?.kind ?? null;
+    if (remote) {
+      const object = await this.#drive.read(remote.id);
+      kind = parseDeviceRecord(parseJsonText(object.bytes.toString("utf8"), path)).kind;
+    }
+    if (!remote && !local) {
+      throw new YouBrainError("INVALID_INPUT", "设备不存在");
+    }
+    if (kind !== "virtual") {
+      throw new YouBrainError("INVALID_INPUT", "只能移除虚拟设备");
+    }
+    if (remote) await this.#drive.trash(remote.id);
+    this.#store.deleteDevice(deviceId);
+  }
+
   async readShared(): Promise<SharedConfig> {
     const current = await readJson(this.#drive, DRIVE_PATHS.sharedConfig);
     if (current === null) return createDefaultSharedConfig();

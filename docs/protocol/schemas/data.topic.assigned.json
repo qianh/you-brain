@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "sessionKey": {
+      "pattern": "^[a-f0-9]{64}$",
+      "type": "string"
+    },
+    "topicId": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "topicId",
+    "sessionKey"
+  ],
+  "type": "object"
+}

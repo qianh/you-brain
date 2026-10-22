@@ -22,6 +22,9 @@ import type {
   TopicsQuery,
   TopicsResponse,
   UploadActionResult,
+  VirtualDeviceCreateBody,
+  VirtualDeviceResponse,
+  RemoveDeviceResponse,
 } from "@you-brain/core/http/types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 
@@ -83,7 +86,11 @@ export function createBrowserDaemon(options?: {
   const fetchImpl = options?.fetch ?? fetch;
   const baseUrl = window.location.origin;
 
-  async function request<T>(method: "GET" | "POST" | "PUT", path: string, body?: unknown): Promise<T> {
+  async function request<T>(
+    method: "GET" | "POST" | "PUT" | "DELETE",
+    path: string,
+    body?: unknown,
+  ): Promise<T> {
     const headers = new Headers({ authorization: `Bearer ${token}` });
     const init: RequestInit = { method, headers };
     if (body !== undefined) {
@@ -134,6 +141,10 @@ export function createBrowserDaemon(options?: {
       request<PortraitCorrectionResult>("POST", "/api/portrait/corrections", input),
     search: (query) => request<SearchResponse>("GET", `/api/search${searchString(query)}`),
     devices: () => request<DevicesResponse>("GET", "/api/devices"),
+    addVirtualDevice: (body: VirtualDeviceCreateBody) =>
+      request<VirtualDeviceResponse>("POST", "/api/devices/virtual", body),
+    removeVirtualDevice: (deviceId: string) =>
+      request<RemoveDeviceResponse>("DELETE", `/api/devices/${encodeURIComponent(deviceId)}`),
     roles: () => request<Roles>("GET", "/api/roles"),
     updateRoles: (patch) => request<Roles>("PUT", "/api/roles", patch),
     config: () => request<SharedConfig>("GET", "/api/config"),
@@ -216,7 +227,8 @@ function asDaemonEvent(value: unknown): DaemonEvent | null {
     kind !== "topics" &&
     kind !== "today" &&
     kind !== "status" &&
-    kind !== "portrait"
+    kind !== "portrait" &&
+    kind !== "devices"
   ) {
     return null;
   }

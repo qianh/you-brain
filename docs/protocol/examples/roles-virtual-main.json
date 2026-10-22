@@ -1,0 +1,9 @@
+{
+  "mainDevice": "44444444-4444-4444-8444-444444444444",
+  "webProcessor": null,
+  "consolidation": {
+    "enabled": true,
+    "time": "03:00"
+  },
+  "timezone": "Asia/Shanghai"
+}

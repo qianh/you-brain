@@ -20,6 +20,8 @@ export interface SyncStore extends TopicBookPersistence {
   getCursor(key: string): string | null;
   setCursor(key: string, value: string): void;
   upsertDevice(record: DeviceRecord): DeviceRecord;
+  getDevice(deviceId: string): DeviceRecord | null;
+  deleteDevice(deviceId: string): void;
   listEvents(): Event[];
 }
 

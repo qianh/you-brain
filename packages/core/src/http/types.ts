@@ -1,4 +1,5 @@
 import {
+  DeviceCapabilitySchema,
   IsoTimestampSchema,
   ReminderActionSchema,
   SessionKeySchema,
@@ -282,6 +283,21 @@ export interface SearchResponse {
   warnings: Array<{ code: string; message: string }>;
 }
 
+export const VirtualDeviceCreateBodySchema = z.object({
+  displayName: z.string().trim().min(1).max(60),
+  capabilities: z.array(DeviceCapabilitySchema).optional(),
+});
+
+export type VirtualDeviceCreateBody = z.infer<typeof VirtualDeviceCreateBodySchema>;
+
+export interface VirtualDeviceResponse {
+  device: DeviceRecord;
+}
+
+export interface RemoveDeviceResponse {
+  ok: true;
+}
+
 export interface DevicesResponse {
   devices: DeviceRecord[];
 }
@@ -394,7 +410,7 @@ export interface ConsolidateActionResult {
 
 export const DaemonEventSchema = z.object({
   id: z.number().int().nonnegative(),
-  kind: z.enum(["ready", "topics", "today", "status", "portrait"]),
+  kind: z.enum(["ready", "topics", "today", "status", "portrait", "devices"]),
   at: z.string().min(1),
 });
 

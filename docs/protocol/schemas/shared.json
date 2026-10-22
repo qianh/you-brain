@@ -1,0 +1,457 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "capture": {
+      "additionalProperties": false,
+      "properties": {
+        "includeSubagents": {
+          "type": "boolean"
+        },
+        "keepToolCalls": {
+          "type": "boolean"
+        },
+        "redact": {
+          "type": "boolean"
+        },
+        "sources": {
+          "additionalProperties": false,
+          "properties": {
+            "claude-code": {
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "exclude": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "include": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "paths": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "enabled",
+                "paths",
+                "include",
+                "exclude"
+              ],
+              "type": "object"
+            },
+            "codex": {
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "exclude": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "include": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "paths": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "enabled",
+                "paths",
+                "include",
+                "exclude"
+              ],
+              "type": "object"
+            },
+            "cursor": {
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "exclude": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "include": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "paths": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "enabled",
+                "paths",
+                "include",
+                "exclude"
+              ],
+              "type": "object"
+            },
+            "gemini-cli": {
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "exclude": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "include": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "paths": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "enabled",
+                "paths",
+                "include",
+                "exclude"
+              ],
+              "type": "object"
+            },
+            "grok-build": {
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "exclude": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "include": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "paths": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "enabled",
+                "paths",
+                "include",
+                "exclude"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "claude-code",
+            "codex",
+            "grok-build",
+            "cursor",
+            "gemini-cli"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "sources",
+        "keepToolCalls",
+        "includeSubagents",
+        "redact"
+      ],
+      "type": "object"
+    },
+    "drive": {
+      "additionalProperties": false,
+      "properties": {
+        "root": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "root"
+      ],
+      "type": "object"
+    },
+    "integrations": {
+      "additionalProperties": false,
+      "properties": {
+        "codingPortraitClients": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "mcpClients": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "skillClients": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "mcpClients",
+        "codingPortraitClients",
+        "skillClients"
+      ],
+      "type": "object"
+    },
+    "llm": {
+      "additionalProperties": false,
+      "properties": {
+        "baseUrl": {
+          "anyOf": [
+            {
+              "const": "",
+              "type": "string"
+            },
+            {
+              "format": "uri",
+              "type": "string"
+            }
+          ]
+        },
+        "model": {
+          "type": "string"
+        },
+        "provider": {
+          "enum": [
+            "deepseek",
+            "glm",
+            "qwen",
+            "kimi",
+            "openai",
+            "claude",
+            "ollama",
+            "custom",
+            "grok-cli",
+            "claude-cli",
+            "codex-cli",
+            "gemini-cli",
+            "opencode-cli"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "model",
+        "baseUrl"
+      ],
+      "type": "object"
+    },
+    "portrait": {
+      "additionalProperties": false,
+      "properties": {
+        "snapshotPattern": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "variants": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "path": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "path"
+            ],
+            "type": "object"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "variants",
+        "snapshotPattern"
+      ],
+      "type": "object"
+    },
+    "refine": {
+      "additionalProperties": false,
+      "properties": {
+        "idleMinutes": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "idleMinutes"
+      ],
+      "type": "object"
+    },
+    "reminders": {
+      "additionalProperties": false,
+      "properties": {
+        "morningDigestTime": {
+          "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$",
+          "type": "string"
+        },
+        "notifications": {
+          "type": "boolean"
+        },
+        "weeklyReviewDay": {
+          "maximum": 7,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "weeklyReviewTime": {
+          "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "notifications",
+        "morningDigestTime",
+        "weeklyReviewDay",
+        "weeklyReviewTime"
+      ],
+      "type": "object"
+    },
+    "search": {
+      "additionalProperties": false,
+      "properties": {
+        "semantic": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "semantic"
+      ],
+      "type": "object"
+    },
+    "topics": {
+      "additionalProperties": false,
+      "properties": {
+        "activeLimit": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        },
+        "historyDays": {
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "activeLimit",
+        "historyDays"
+      ],
+      "type": "object"
+    },
+    "ui": {
+      "additionalProperties": false,
+      "properties": {
+        "language": {
+          "enum": [
+            "zh",
+            "en"
+          ],
+          "type": "string"
+        },
+        "shortcut": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "language",
+        "shortcut"
+      ],
+      "type": "object"
+    },
+    "version": {
+      "const": 1,
+      "type": "number"
+    }
+  },
+  "required": [
+    "version",
+    "drive",
+    "capture",
+    "llm",
+    "refine",
+    "topics",
+    "reminders",
+    "portrait",
+    "integrations",
+    "ui",
+    "search"
+  ],
+  "type": "object"
+}

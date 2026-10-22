@@ -780,6 +780,10 @@ export class SqliteStore {
     });
   }
 
+  deleteDevice(deviceId: string): void {
+    this.#db.query("DELETE FROM devices WHERE device_id = ?").run(deviceId);
+  }
+
   listDevices(): DeviceRecord[] {
     const rows = this.#db
       .query<DeviceRow, []>("SELECT * FROM devices ORDER BY device_id")

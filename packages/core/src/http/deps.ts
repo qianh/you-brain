@@ -32,6 +32,9 @@ export interface HttpDeps {
   portraitCorrections(variant?: string): Promise<PortraitCorrectionView[]>;
   search(query: SearchRequest): Promise<SearchResponse>;
   devices(): Promise<DeviceRecord[]>;
+  /** Optional so older test doubles keep compiling. The daemon supplies it when Drive is open. */
+  registerVirtualDevice?(record: DeviceRecord): Promise<DeviceRecord>;
+  removeVirtualDevice?(deviceId: string): Promise<void>;
   readRoles(): Promise<Roles>;
   writeRoles(roles: Roles): Promise<void>;
   readConfig(): Promise<SharedConfig>;

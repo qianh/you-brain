@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "by": {
+      "enum": [
+        "auto",
+        "user"
+      ],
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "active",
+        "follow_up",
+        "done",
+        "parked"
+      ],
+      "type": "string"
+    },
+    "topicId": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "topicId",
+    "status",
+    "by"
+  ],
+  "type": "object"
+}

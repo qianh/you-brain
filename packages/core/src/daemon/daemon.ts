@@ -38,6 +38,7 @@ import {
   type YouBrainPaths,
 } from "../domain/index.js";
 import type { DriveEntry, DrivePort } from "../drive/drive-port.js";
+import { HttpError } from "../http/handlers.js";
 import { ChangeHub } from "../http/hub.js";
 import {
   listPortraitSnapshots,
@@ -1620,6 +1621,16 @@ export class YouBrainDaemon {
         ),
       search: (query) => this.#searchLocal(query),
       devices: () => readers.devices(),
+      registerVirtualDevice: async (record) => {
+        const sync = this.#sync;
+        if (!sync) throw new HttpError(503, "DRIVE_UNAVAILABLE", "Drive 未就绪");
+        return sync.registerVirtual(record);
+      },
+      removeVirtualDevice: async (deviceId) => {
+        const sync = this.#sync;
+        if (!sync) throw new HttpError(503, "DRIVE_UNAVAILABLE", "Drive 未就绪");
+        await sync.removeDevice(deviceId);
+      },
       readRoles: async () => this.#roles,
       writeRoles: (roles) => this.#writeRoles(roles),
       readConfig: async () => this.#shared,

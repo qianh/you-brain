@@ -13,6 +13,7 @@ import {
   createDefaultSharedConfig,
   parseRoles,
   parseSharedConfig,
+  type DeviceCapability,
 } from "@you-brain/protocol";
 import { YouBrainError, loadLocalConfig } from "@you-brain/core";
 import { openGoogleDrive, resolveWebDir, startDaemon } from "@you-brain/core/daemon";
@@ -36,6 +37,7 @@ import {
   runtimePaths,
   supportedPlatform,
 } from "./env.js";
+import { registerProtocolCommand } from "./protocol-command.js";
 import { applyIntegrations, listIntegrations, restoreBrainHub, uninstall } from "./maintenance.js";
 import { registerServiceCommand } from "./service/command.js";
 import { runSetup, type SetupFlags } from "./setup.js";
@@ -234,9 +236,43 @@ program
   .description("设备列表")
   .option("--set-main <id>", "设为主设备")
   .option("--set-web-processor <id>", "设为 Web 会话处理设备")
-  .action(async (opts: { setMain?: string; setWebProcessor?: string }) => {
+  .option("--add-virtual <name>", "注册一台虚拟设备")
+  .option("--remove-virtual <id>", "移除一台虚拟设备")
+  .option("--capabilities <list>", "逗号分隔：capture、refine、consolidate")
+  .action(async (opts: {
+    setMain?: string;
+    setWebProcessor?: string;
+    addVirtual?: string;
+    removeVirtual?: string;
+    capabilities?: string;
+  }) => {
     try {
+      if (opts.capabilities !== undefined && opts.addVirtual === undefined) {
+        throw new CliError("--capabilities 只能和 --add-virtual 一起用");
+      }
+      if (opts.addVirtual !== undefined && opts.removeVirtual !== undefined) {
+        throw new CliError("不能同时注册和移除虚拟设备");
+      }
+      const displayName = opts.addVirtual?.trim();
+      if (opts.addVirtual !== undefined && (displayName === undefined || displayName.length < 1 || displayName.length > 60)) {
+        throw new CliError("设备名称需要 1 到 60 个字");
+      }
+      const capabilities = opts.addVirtual === undefined ? undefined : parseCapabilities(opts.capabilities);
       const client = await connectDaemon();
+      if (opts.addVirtual !== undefined && displayName !== undefined) {
+        const { device } = await client.addVirtualDevice({
+          displayName,
+          ...(capabilities === undefined ? {} : { capabilities }),
+        });
+        console.log(device.deviceId);
+        console.log(`下一步：you-brain devices --set-main ${device.deviceId}`);
+        return;
+      }
+      if (opts.removeVirtual !== undefined) {
+        await client.removeVirtualDevice(opts.removeVirtual);
+        console.log(`已移除 ${opts.removeVirtual}`);
+        return;
+      }
       if (opts.setMain || opts.setWebProcessor) {
         const roles = await client.updateRoles({
           ...(opts.setMain ? { mainDevice: opts.setMain } : {}),
@@ -322,6 +358,20 @@ brainhub
   });
 
 registerServiceCommand(program);
+registerProtocolCommand(program);
+
+function parseCapabilities(text: string | undefined): DeviceCapability[] | undefined {
+  if (text === undefined) return undefined;
+  const allowed = new Set<DeviceCapability>(["capture", "refine", "consolidate"]);
+  const parts = text
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+  if (parts.length === 0 || parts.some((item) => !allowed.has(item as DeviceCapability))) {
+    throw new CliError("能力只能是 capture、refine、consolidate");
+  }
+  return parts as DeviceCapability[];
+}
 
 program
   .command("uninstall")

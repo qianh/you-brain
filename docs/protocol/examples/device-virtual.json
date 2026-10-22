@@ -1,0 +1,11 @@
+{
+  "deviceId": "44444444-4444-4444-8444-444444444444",
+  "displayName": "沉淀机器人",
+  "kind": "virtual",
+  "platform": "bot",
+  "appVersion": "virtual",
+  "protocolVersion": 1,
+  "capabilities": ["refine", "consolidate"],
+  "lastSeenAt": "2026-10-18T03:00:00.000Z",
+  "lastActiveAt": "2026-10-18T03:00:00.000Z"
+}

@@ -311,6 +311,10 @@ describe("sqlite store", () => {
       store.upsertDevice({ ...device, displayName: "MacBook" });
       expect(store.getDevice(device.deviceId)?.displayName).toBe("MacBook");
       expect(store.listDevices()).toHaveLength(1);
+      store.deleteDevice(device.deviceId);
+      expect(store.getDevice(device.deviceId)).toBeNull();
+      expect(store.listDevices()).toHaveLength(0);
+      store.upsertDevice(device);
 
       store.upsertPortrait({
         variant: "work",
