@@ -1,10 +1,6 @@
 import type { EmbedWorkerRequest } from "./embed-protocol.js";
 import { E5Embedder } from "./e5-embedder.js";
 
-console.log = (...args: unknown[]) => {
-  console.error(...args);
-};
-
 let embedder: E5Embedder | null = null;
 
 function modelFor(request: EmbedWorkerRequest): E5Embedder {
@@ -47,7 +43,10 @@ function respond(id: number, body: Record<string, unknown>): void {
   process.stdout.write(`${JSON.stringify({ id, ...body })}\n`);
 }
 
-async function serve(): Promise<void> {
+export async function serveEmbedWorker(): Promise<void> {
+  console.log = (...args: unknown[]) => {
+    console.error(...args);
+  };
   const decoder = new TextDecoder();
   let buffer = "";
   for await (const chunk of Bun.stdin.stream()) {
@@ -82,5 +81,5 @@ async function serve(): Promise<void> {
 }
 
 if (import.meta.main) {
-  await serve();
+  await serveEmbedWorker();
 }

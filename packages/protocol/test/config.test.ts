@@ -51,7 +51,17 @@ describe("shared config defaults", () => {
     expect(config.reminders.notifications).toBe(true);
     expect(config.reminders.morningDigestTime).toBe("08:00");
     expect(config.ui.language).toBe("zh");
+    expect(config.search.semantic).toBe(true);
     expect(config.integrations.mcpClients).toEqual([]);
+  });
+
+  it("defaults search.semantic when an older config omits it", () => {
+    expect(parseSharedConfig({ ui: { language: "en" } }).search.semantic).toBe(true);
+    expect(parseSharedConfig({ search: {} }).search.semantic).toBe(true);
+    expect(parseSharedConfig({ search: { semantic: false } }).search).toEqual({
+      semantic: false,
+    });
+    expect(parseSharedConfig({ ui: { language: "en" } }).ui.language).toBe("en");
   });
 
   it("returns a fresh object and deep-merges partial input", () => {

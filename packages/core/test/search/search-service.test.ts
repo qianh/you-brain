@@ -475,4 +475,94 @@ describe("local hybrid search", () => {
     expect(stored).toContain("[image omitted]");
     expect(stored).not.toContain("https://example.com/a.png");
   });
+
+  it("splits index embedding into capped batches and clamps each passage", async () => {
+    const drive = new MemoryDrive();
+    await drive.put({
+      path: "inbox/mac/batch.md",
+      bytes: markdown({
+        source: "codex",
+        conversationId: "batch-session",
+        contentSha: "8".repeat(64),
+        text: "SUPERCALIFRAGILISTIC alpha beta",
+      }),
+      mimeType: "text/markdown",
+    });
+    const batches: string[][] = [];
+    const embedder: Embedder = {
+      model: "batch-test",
+      revision: "v1",
+      dimensions: 3,
+      embedQuery() {
+        return Promise.resolve([1, 0, 0]);
+      },
+      embedPassages(texts) {
+        batches.push([...texts]);
+        return Promise.resolve(texts.map(() => [1, 0, 0]));
+      },
+    };
+    const service = new SearchService({
+      drive,
+      embedder,
+      database: openDatabase(),
+      chunkTokens: 1,
+      chunkOverlap: 0,
+      embedBatchSize: 2,
+      embedMaxChars: 4,
+    });
+
+    await service.sync();
+
+    const flat = batches.flat();
+    expect(batches.length).toBeGreaterThan(1);
+    expect(batches.every((batch) => batch.length <= 2)).toBe(true);
+    expect(batches.some((batch) => batch.length === 2)).toBe(true);
+    expect(flat.every((text) => text.length <= 4)).toBe(true);
+    expect(flat).toContain("SUPE");
+  });
+
+  it("stays on keyword search without a fallback warning when semantic search is off", async () => {
+    const drive = new MemoryDrive();
+    await drive.put({
+      path: "inbox/mac/off.md",
+      bytes: markdown({
+        source: "codex",
+        conversationId: "semantic-off",
+        contentSha: "9".repeat(64),
+        text: "The launch checklist contains a rollback step.",
+      }),
+      mimeType: "text/markdown",
+    });
+    const read = spyOn(drive, "read");
+    let embedded = 0;
+    const embedder: Embedder = {
+      model: "off-test",
+      revision: "v1",
+      dimensions: 3,
+      embedQuery() {
+        embedded += 1;
+        return Promise.resolve([1, 0, 0]);
+      },
+      embedPassages(texts) {
+        embedded += 1;
+        return Promise.resolve(texts.map(() => [1, 0, 0]));
+      },
+    };
+    const service = new SearchService({
+      drive,
+      embedder,
+      database: openDatabase(),
+      semantic: false,
+    });
+
+    await service.sync();
+    await service.sync();
+    const result = await service.search({ query: "rollback", limit: 5 });
+
+    expect(embedded).toBe(0);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(result.searchMode).toBe("keyword");
+    expect(result.results[0]?.conversationId).toBe("semantic-off");
+    expect(result.warnings).toEqual([]);
+  });
 });

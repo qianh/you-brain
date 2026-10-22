@@ -25,7 +25,7 @@ import type {
   TopicListItem,
 } from "@you-brain/core/http";
 import { createLocalMcpServices, serveMcp } from "@you-brain/core/mcp";
-import { SearchService, type Embedder } from "@you-brain/core/search";
+import { SearchService, serveEmbedWorker, type Embedder } from "@you-brain/core/search";
 import { SqliteStore } from "@you-brain/core/store";
 
 import {
@@ -89,6 +89,18 @@ program
     } catch (error) {
       fail(error);
     }
+  });
+
+program
+  .command("embed-worker")
+  .description("嵌入模型子进程。由 daemon 拉起，不要手动调用。")
+  .action(async () => {
+    try {
+      await serveEmbedWorker();
+    } catch (error) {
+      fail(error);
+    }
+    process.exit(0);
   });
 
 program
@@ -517,6 +529,7 @@ async function readConfig<T>(path: string, fallback: T, parse: (input: unknown) 
 
 const TOP_COMMANDS = new Set([
   "daemon",
+  "embed-worker",
   "native-check",
   "mcp",
   "setup",
@@ -541,6 +554,8 @@ try {
 // Bun 的 fetch 会保持到 daemon 的连接（服务端 idleTimeout 为 0），
 // 查询命令打完日志后进程不会自己退出。
 // mcp 要一直占住 stdin。这里退出会在 initialize 写出之前把进程杀掉。
-if (invokedCommand() !== "mcp") {
+const command = invokedCommand();
+// mcp 和 embed-worker 占着 stdin。这里退出会在它们写完响应之前把进程杀掉。
+if (command !== "mcp" && command !== "embed-worker") {
   process.exit(0);
 }

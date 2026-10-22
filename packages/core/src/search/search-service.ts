@@ -4,7 +4,14 @@ import type { Database } from "bun:sqlite";
 
 import { chunkText } from "./chunk-text.js";
 import type { SearchDrive, SearchDriveEntry } from "./drive.js";
-import type { Embedder } from "./embedder.js";
+import {
+  E5_SMALL,
+  EMBED_MAX_CHARS,
+  EMBED_PASSAGE_BATCH,
+  clampEmbedText,
+  splitEmbedBatches,
+  type Embedder,
+} from "./embedder.js";
 import { chunkKey, indexBody, keywordScores } from "./fts.js";
 import { redactText, type RedactionOptions } from "./redact.js";
 import { ensureSearchSchema, SEARCH_DRIVE_CURSOR } from "./schema.js";
@@ -154,7 +161,13 @@ function metadataMap(database: Database): Record<string, string> {
 
 export class SearchService {
   readonly #drive: SearchDrive;
-  readonly #embedder: Embedder;
+  readonly #embedder: Embedder | null;
+  readonly #model: string;
+  readonly #revision: string;
+  readonly #dimensions: number;
+  readonly #semantic: boolean;
+  readonly #batchSize: number;
+  readonly #maxChars: number;
   readonly #database: Database;
   readonly #chunkTokens: number;
   readonly #chunkOverlap: number;
@@ -162,8 +175,12 @@ export class SearchService {
 
   constructor(options: {
     drive: SearchDrive;
-    embedder: Embedder;
+    embedder: Embedder | null;
     database: Database;
+    /** Default true. False skips the embedder and reports keyword mode without a fallback warning. */
+    semantic?: boolean;
+    embedBatchSize?: number;
+    embedMaxChars?: number;
     chunkTokens?: number;
     chunkOverlap?: number;
     redact?: (text: string) => string;
@@ -171,6 +188,12 @@ export class SearchService {
   }) {
     this.#drive = options.drive;
     this.#embedder = options.embedder;
+    this.#model = options.embedder?.model ?? E5_SMALL.model;
+    this.#revision = options.embedder?.revision ?? E5_SMALL.revision;
+    this.#dimensions = options.embedder?.dimensions ?? E5_SMALL.dimensions;
+    this.#semantic = options.semantic !== false;
+    this.#batchSize = options.embedBatchSize ?? EMBED_PASSAGE_BATCH;
+    this.#maxChars = options.embedMaxChars ?? EMBED_MAX_CHARS;
     this.#database = options.database;
     this.#chunkTokens = options.chunkTokens ?? 448;
     this.#chunkOverlap = options.chunkOverlap ?? 64;
@@ -184,20 +207,23 @@ export class SearchService {
   }
 
   #indexFingerprint(): string {
-    return JSON.stringify({
-      model: this.#embedder.model,
-      revision: this.#embedder.revision,
-      dimensions: this.#embedder.dimensions,
+    const fingerprint: Record<string, string | number | boolean> = {
+      model: this.#model,
+      revision: this.#revision,
+      dimensions: this.#dimensions,
       chunkTokens: this.#chunkTokens,
       chunkOverlap: this.#chunkOverlap,
-    });
+    };
+    if (!this.#semantic) fingerprint.semantic = false;
+    return JSON.stringify(fingerprint);
   }
 
   #cursor(): string | undefined {
     const metadata = metadataMap(this.#database);
-    const missingVector = this.#database
-      .prepare(
-        `
+    const missingVector = this.#semantic
+      ? (this.#database
+          .prepare(
+            `
         SELECT 1 AS missing
         FROM search_chunks c
         LEFT JOIN search_vectors v
@@ -205,8 +231,9 @@ export class SearchService {
         WHERE v.chunk_id IS NULL
         LIMIT 1
       `,
-      )
-      .get() as { missing: number } | null;
+          )
+          .get() as { missing: number } | null)
+      : null;
     if (metadata.index_fingerprint !== this.#indexFingerprint() || missingVector) {
       return undefined;
     }
@@ -260,11 +287,9 @@ export class SearchService {
         overlapTokens: this.#chunkOverlap,
       });
       let vectors: number[][] = [];
-      if (modelAvailable && textChunks.length > 0) {
+      if (this.#semantic && modelAvailable && textChunks.length > 0) {
         try {
-          vectors = await this.#embedder.embedPassages(
-            textChunks.map((chunk) => chunk.text),
-          );
+          vectors = await this.#embedBatched(textChunks.map((chunk) => chunk.text));
         } catch {
           modelAvailable = false;
           addWarning(warnings, keywordFallback);
@@ -352,9 +377,9 @@ export class SearchService {
         INSERT INTO manifest(key, value) VALUES (?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
       `);
-      manifest.run("model", this.#embedder.model);
-      manifest.run("revision", this.#embedder.revision);
-      manifest.run("dimensions", String(this.#embedder.dimensions));
+      manifest.run("model", this.#model);
+      manifest.run("revision", this.#revision);
+      manifest.run("dimensions", String(this.#dimensions));
       manifest.run("index_fingerprint", this.#indexFingerprint());
       manifest.run("generated_at", new Date().toISOString());
       database
@@ -445,13 +470,13 @@ export class SearchService {
     const lexical = keywordScores(this.#database, input.query);
 
     let queryVector: number[] | null = null;
-    if (rows.some((row) => row.vector !== null)) {
+    if (this.#semantic && rows.some((row) => row.vector !== null)) {
       try {
-        queryVector = await this.#embedder.embedQuery(input.query);
+        queryVector = await this.#embedQuery(input.query);
       } catch {
         addWarning(warnings, keywordFallback);
       }
-    } else if (rows.length > 0) {
+    } else if (this.#semantic && rows.length > 0) {
       addWarning(warnings, keywordFallback);
     }
     const searchMode: SearchOutput["searchMode"] = queryVector
@@ -502,5 +527,22 @@ export class SearchService {
       results: ranked.slice(0, input.limit),
       warnings,
     };
+  }
+
+  async #embedQuery(text: string): Promise<number[]> {
+    const embedder = this.#embedder;
+    if (!embedder) throw new Error("Embedding model is unavailable");
+    return embedder.embedQuery(clampEmbedText(text, this.#maxChars));
+  }
+
+  async #embedBatched(texts: string[]): Promise<number[][]> {
+    const embedder = this.#embedder;
+    if (!embedder) throw new Error("Embedding model is unavailable");
+    const clamped = texts.map((text) => clampEmbedText(text, this.#maxChars));
+    const vectors: number[][] = [];
+    for (const batch of splitEmbedBatches(clamped, this.#batchSize)) {
+      vectors.push(...(await embedder.embedPassages(batch)));
+    }
+    return vectors;
   }
 }

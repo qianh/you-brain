@@ -128,6 +128,9 @@ const SharedConfigObjectSchema = z.object({
     language: UiLanguageSchema,
     shortcut: z.string(),
   }),
+  search: z.object({
+    semantic: z.boolean(),
+  }),
 });
 
 export type SharedConfig = z.infer<typeof SharedConfigObjectSchema>;
@@ -179,6 +182,9 @@ export const DEFAULT_SHARED_CONFIG = {
   ui: {
     language: DEFAULT_LANGUAGE,
     shortcut: "",
+  },
+  search: {
+    semantic: true,
   },
 } satisfies SharedConfig;
 

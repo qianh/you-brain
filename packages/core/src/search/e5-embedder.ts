@@ -1,6 +1,22 @@
 import { loadPackage } from "../native/resolver.js";
-import { normalizeVector, type Embedder } from "./embedder.js";
+import {
+  clampEmbedText,
+  normalizeVector,
+  splitEmbedBatches,
+  type Embedder,
+} from "./embedder.js";
 import { markModelReady } from "./model-cache.js";
+
+/** CPU only. `auto` on macOS includes CoreML and shows up as a large IOAccelerator region. */
+const CPU_SESSION: {
+  executionProviders: string[];
+  intraOpNumThreads: number;
+  interOpNumThreads: number;
+} = {
+  executionProviders: ["cpu"],
+  intraOpNumThreads: 2,
+  interOpNumThreads: 1,
+};
 
 interface TensorOutput {
   tolist(): number[][];
@@ -18,6 +34,12 @@ type Pipeline = (
     revision: string;
     dtype: "q8";
     cache_dir: string;
+    device: "cpu";
+    session_options: {
+      executionProviders: string[];
+      intraOpNumThreads: number;
+      interOpNumThreads: number;
+    };
     progress_callback?: (value: ModelProgress) => void;
   },
 ) => Promise<Extractor>;
@@ -65,6 +87,8 @@ export class E5Embedder implements Embedder {
       revision: this.revision,
       dtype: "q8",
       cache_dir: this.#cacheDir,
+      device: "cpu",
+      session_options: CPU_SESSION,
       ...(progress
         ? {
             progress_callback: (value: ModelProgress) => {
@@ -116,13 +140,17 @@ export class E5Embedder implements Embedder {
   }
 
   async embedQuery(text: string): Promise<number[]> {
-    const [vector] = await this.#embed([`query: ${text}`]);
+    const [vector] = await this.#embed([`query: ${clampEmbedText(text)}`]);
     if (!vector) throw new Error("Embedding model returned no query vector");
     return vector;
   }
 
   async embedPassages(texts: string[]): Promise<number[][]> {
     if (texts.length === 0) return [];
-    return this.#embed(texts.map((text) => `passage: ${text}`));
+    const vectors: number[][] = [];
+    for (const batch of splitEmbedBatches(texts.map((text) => clampEmbedText(text)))) {
+      vectors.push(...(await this.#embed(batch.map((text) => `passage: ${text}`))));
+    }
+    return vectors;
   }
 }

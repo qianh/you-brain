@@ -64,7 +64,7 @@ import {
 } from "../llm/index.js";
 import { cliUnresponsiveWarning } from "../llm/setup-status.js";
 import { OutputService } from "../output/service.js";
-import { installVendorResolver, usesVendorModules } from "../native/resolver.js";
+
 import { CodingInjection } from "../portrait/injection.js";
 import { FilePortraitConsentStore, portraitConsentPath } from "../portrait/consent.js";
 import { PortraitService } from "../portrait/service.js";
@@ -152,6 +152,7 @@ class LazyEmbedder implements Embedder {
   #inner: Embedder | null = null;
   #close: (() => Promise<void>) | null = null;
   #loading: Promise<Embedder> | null = null;
+  #closed = false;
 
   constructor(private readonly cacheDir: string) {}
 
@@ -163,11 +164,18 @@ class LazyEmbedder implements Embedder {
     return this.#load().then((inner) => inner.embedPassages(texts));
   }
 
-  close(): Promise<void> {
-    return this.#close?.() ?? Promise.resolve();
+  async close(): Promise<void> {
+    this.#closed = true;
+    try {
+      await this.#loading;
+    } catch {
+      // A failed load has nothing to stop.
+    }
+    await this.#close?.();
   }
 
   #load(): Promise<Embedder> {
+    if (this.#closed) return Promise.reject(new Error("embed worker is closed"));
     if (this.#inner) return Promise.resolve(this.#inner);
     this.#loading ??= this.#open().then((inner) => {
       this.#inner = inner;
@@ -177,16 +185,6 @@ class LazyEmbedder implements Embedder {
   }
 
   async #open(): Promise<Embedder> {
-    if (usesVendorModules()) {
-      installVendorResolver();
-      const { E5Embedder } = await import("../search/e5-embedder.js");
-      return new E5Embedder({
-        model: this.model,
-        revision: this.revision,
-        dimensions: this.dimensions,
-        cacheDir: this.cacheDir,
-      });
-    }
     const inner = new ProcessEmbedder({
       model: this.model,
       revision: this.revision,
@@ -195,8 +193,19 @@ class LazyEmbedder implements Embedder {
       command: embedWorkerCommand(),
     });
     this.#close = () => inner.close();
+    if (this.#closed) await inner.close();
     return inner;
   }
+}
+
+/** Semantic off never constructs an embedder, including an injected one. */
+export function resolveDaemonEmbedder(options: {
+  semantic: boolean;
+  injected?: Embedder;
+  openDefault: () => Embedder;
+}): Embedder | null {
+  if (!options.semantic) return null;
+  return options.injected ?? options.openDefault();
 }
 
 export async function startDaemon(options: DaemonOptions = {}): Promise<YouBrainDaemon> {
@@ -241,6 +250,7 @@ export class YouBrainDaemon {
   #log: EventLog | null = null;
   #search: SearchService | null = null;
   #searchDb: Database | null = null;
+  #searchSemantic: boolean | null = null;
   #embedderClose: (() => Promise<void>) | null = null;
   #uploader: UploadService | null = null;
   #portrait: PortraitService | null = null;
@@ -356,7 +366,7 @@ export class YouBrainDaemon {
         deviceId: this.#local.deviceId,
         clock: { now: () => this.#clock.nowMs() },
       });
-      this.#mountSearch();
+      await this.#mountSearch();
       this.#portrait = new PortraitService({
         drive: this.#drive,
         store: this.#store,
@@ -469,6 +479,7 @@ export class YouBrainDaemon {
         this.#searchDb?.close();
         this.#searchDb = null;
         this.#search = null;
+        this.#searchSemantic = null;
         this.#store?.close();
         this.#store = null;
         await this.#http?.stop();
@@ -819,6 +830,7 @@ export class YouBrainDaemon {
       if (this.#llmOverride === undefined) this.#llm = await this.#createLlm();
       await this.#rewatch();
       await this.#ensureCoding();
+      await this.#mountSearch();
     }
     if (update.roles) {
       this.#roles = update.roles;
@@ -885,20 +897,35 @@ export class YouBrainDaemon {
     this.#driveReachable = opened !== null;
   }
 
-  #mountSearch(): void {
+  async #mountSearch(): Promise<void> {
     if (!this.#drive || !this.#paths) return;
-    const database = new Database(this.#paths.stateFile);
-    database.exec("PRAGMA busy_timeout = 5000");
-    const embedder = this.#options.embedder ?? new LazyEmbedder(this.#paths.modelCacheDir);
-    if (!this.#options.embedder) {
-      const lazy = embedder as LazyEmbedder;
-      this.#embedderClose = () => lazy.close();
+    const semantic = this.#shared.search.semantic;
+    if (this.#search && this.#searchSemantic === semantic) return;
+    if (this.#embedderClose) {
+      const close = this.#embedderClose;
+      this.#embedderClose = null;
+      await close().catch(() => undefined);
     }
-    this.#searchDb = database;
+    if (!this.#searchDb) {
+      const database = new Database(this.#paths.stateFile);
+      database.exec("PRAGMA busy_timeout = 5000");
+      this.#searchDb = database;
+    }
+    const embedder = resolveDaemonEmbedder({
+      semantic,
+      ...(this.#options.embedder ? { injected: this.#options.embedder } : {}),
+      openDefault: () => {
+        const lazy = new LazyEmbedder(this.#paths.modelCacheDir);
+        this.#embedderClose = () => lazy.close();
+        return lazy;
+      },
+    });
+    this.#searchSemantic = semantic;
     this.#search = new SearchService({
       drive: asSearchDrive(this.#drive),
       embedder,
-      database,
+      database: this.#searchDb,
+      semantic,
     });
   }
 
@@ -1019,6 +1046,7 @@ export class YouBrainDaemon {
     if (this.#llmOverride === undefined) this.#llm = await this.#createLlm();
     await this.#rewatch();
     await this.#ensureCoding();
+    await this.#mountSearch();
     if (this.#sync) await this.#sync.updateShared(config);
     this.changes.publish("status", this.#clock.now().toISOString());
   }

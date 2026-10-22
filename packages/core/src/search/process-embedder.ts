@@ -2,11 +2,29 @@ import { fileURLToPath } from "node:url";
 
 import type { Subprocess } from "bun";
 
+import { usesVendorModules } from "../native/resolver.js";
 import type { Embedder } from "./embedder.js";
 import type {
   EmbedWorkerRequest,
   EmbedWorkerResponse,
 } from "./embed-protocol.js";
+
+/** Unload the worker after this much quiet time. Tests inject a shorter clock. */
+export const DEFAULT_EMBED_IDLE_MS = 120_000;
+
+export interface IdleClock {
+  schedule(ms: number, callback: () => void): () => void;
+}
+
+function systemIdleClock(): IdleClock {
+  return {
+    schedule(ms, callback) {
+      const timer = setTimeout(callback, ms);
+      timer.unref();
+      return () => clearTimeout(timer);
+    },
+  };
+}
 
 interface LineWaiter {
   resolve: (line: string) => void;
@@ -64,7 +82,8 @@ class LineQueue {
   }
 }
 
-export function embedWorkerCommand(bun = "bun"): string[] {
+export function embedWorkerCommand(bun = "bun", execPath = process.execPath): string[] {
+  if (usesVendorModules(execPath)) return [execPath, "embed-worker"];
   return [
     bun,
     fileURLToPath(new URL("./embed-worker.ts", import.meta.url)),
@@ -77,6 +96,9 @@ export interface ProcessEmbedderOptions {
   revision: string;
   dimensions: number;
   cacheDir: string;
+  /** Idle time before the worker process is stopped. Default 120 seconds. */
+  idleMs?: number;
+  idleClock?: IdleClock;
 }
 
 export class ProcessEmbedder implements Embedder {
@@ -90,7 +112,14 @@ export class ProcessEmbedder implements Embedder {
   #stderr = { text: "" };
   #nextId = 0;
   #chain: Promise<void> = Promise.resolve();
-  #closed = false;
+  /** Permanent. Set only by close(). Idle unload must not set this. */
+  #stopped = false;
+  #pending = 0;
+  #stopping: Promise<void> | null = null;
+  #cancelIdle: (() => void) | null = null;
+  #idleGeneration = 0;
+  readonly #idleMs: number;
+  readonly #idleClock: IdleClock;
 
   constructor(options: ProcessEmbedderOptions) {
     if (options.command.length === 0) {
@@ -101,6 +130,8 @@ export class ProcessEmbedder implements Embedder {
     this.dimensions = options.dimensions;
     this.#command = options.command;
     this.#cacheDir = options.cacheDir;
+    this.#idleMs = options.idleMs ?? DEFAULT_EMBED_IDLE_MS;
+    this.#idleClock = options.idleClock ?? systemIdleClock();
   }
 
   async embedQuery(text: string): Promise<number[]> {
@@ -136,17 +167,21 @@ export class ProcessEmbedder implements Embedder {
   }
 
   async close(): Promise<void> {
-    this.#closed = true;
-    const child = this.#child;
-    this.#child = null;
-    if (!child) return;
-    try {
-      child.stdin.end();
-    } catch {
-      // The worker may already be gone.
+    this.#stopped = true;
+    this.#clearIdle();
+    for (;;) {
+      if (this.#stopping) {
+        await this.#stopping;
+        continue;
+      }
+      if (this.#child) {
+        await this.#stopCurrent();
+        continue;
+      }
+      await Promise.resolve();
+      if (this.#child || this.#stopping) continue;
+      break;
     }
-    child.kill();
-    await child.exited;
   }
 
   async #request(
@@ -155,12 +190,20 @@ export class ProcessEmbedder implements Embedder {
       texts: string[];
     },
   ): Promise<EmbedWorkerResponse> {
+    if (this.#stopped) throw new Error("embed worker is closed");
+    this.#pending += 1;
+    this.#clearIdle();
     const run = this.#chain.then(() => this.#roundtrip(body));
     this.#chain = run.then(
       () => undefined,
       () => undefined,
     );
-    return run;
+    try {
+      return await run;
+    } finally {
+      this.#pending -= 1;
+      if (!this.#stopped && this.#pending === 0) this.#armIdle();
+    }
   }
 
   async #roundtrip(
@@ -169,7 +212,7 @@ export class ProcessEmbedder implements Embedder {
       texts: string[];
     },
   ): Promise<EmbedWorkerResponse> {
-    if (this.#closed) throw new Error("embed worker is closed");
+    if (this.#stopped) throw new Error("embed worker is closed");
     const child = this.#spawn();
     const id = ++this.#nextId;
     const request: EmbedWorkerRequest = {
@@ -232,9 +275,67 @@ export class ProcessEmbedder implements Embedder {
     return child;
   }
 
+  #clearIdle(): void {
+    this.#cancelIdle?.();
+    this.#cancelIdle = null;
+    this.#idleGeneration += 1;
+  }
+
+  #armIdle(): void {
+    this.#clearIdle();
+    if (this.#stopped || this.#pending !== 0) return;
+    if (!this.#child || this.#child.exitCode !== null) return;
+    const generation = this.#idleGeneration;
+    this.#cancelIdle = this.#idleClock.schedule(this.#idleMs, () => {
+      this.#enqueueIdleStop(generation);
+    });
+  }
+
+  #enqueueIdleStop(generation: number): void {
+    const run = this.#chain.then(async () => {
+      if (generation !== this.#idleGeneration) return;
+      if (this.#stopped || this.#pending > 0) return;
+      await this.#stopCurrent();
+    });
+    this.#chain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+  }
+
+  async #stopCurrent(): Promise<void> {
+    if (this.#stopping) return this.#stopping;
+    const child = this.#child;
+    const lines = this.#lines;
+    if (!child) return;
+    this.#child = null;
+    this.#clearIdle();
+    if (child.exitCode !== null) return;
+    const stopping = this.#kill(child, lines).finally(() => {
+      if (this.#stopping === stopping) this.#stopping = null;
+    });
+    this.#stopping = stopping;
+    return stopping;
+  }
+
+  async #kill(
+    child: Subprocess<"pipe", "pipe", "pipe">,
+    lines: LineQueue,
+  ): Promise<void> {
+    try {
+      child.stdin.end();
+    } catch {
+      // The worker may already be gone.
+    }
+    child.kill();
+    lines.fail(new Error("embed worker stopped"));
+    await child.exited;
+  }
+
   #discard(): void {
     const child = this.#child;
     this.#child = null;
+    this.#clearIdle();
     if (child && child.exitCode === null) child.kill();
   }
 
