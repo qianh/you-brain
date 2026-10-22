@@ -29,6 +29,9 @@ export interface OutputCopy {
   conclusions: string;
   sessions: string;
   remindersEmpty: string;
+  remindersFollow: string;
+  remindersDigest: string;
+  remindersWeekly: string;
   statusLabels: Record<TopicStatus, string>;
   sources: Record<string, string>;
 }
@@ -76,6 +79,9 @@ const ZH: OutputCopy = {
   conclusions: "最近结论",
   sessions: "相关会话",
   remindersEmpty: "暂无提醒",
+  remindersFollow: "待跟进话题",
+  remindersDigest: "今日早报",
+  remindersWeekly: "本周回顾",
   statusLabels: TOPIC_STATUS_LABELS,
   sources: SOURCES,
 };
@@ -108,6 +114,9 @@ const EN: OutputCopy = {
   conclusions: "Recent conclusions",
   sessions: "Sessions",
   remindersEmpty: "No reminders yet",
+  remindersFollow: "Topics to follow up",
+  remindersDigest: "Morning digest",
+  remindersWeekly: "Weekly review",
   statusLabels: EN_STATUS,
   sources: SOURCES,
 };

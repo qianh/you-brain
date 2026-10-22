@@ -11,10 +11,12 @@ import { z } from "zod";
 
 import type { HttpDeps } from "./deps.js";
 import { YouBrainError } from "../domain/errors.js";
+import { planReminderAction } from "../reminders/action.js";
 import { ChangeHub } from "./hub.js";
 import { assertPortraitVariant } from "./portrait-files.js";
 import {
   ConclusionActionBodySchema,
+  ReminderActionBodySchema,
   TodoActionBodySchema,
   TopicMutationBodySchema,
   UploadActionBodySchema,
@@ -130,7 +132,10 @@ export async function handleApi(
     return methodNotAllowed("GET, PUT");
   }
   if (path === "/api/status") return method(request, "GET", () => status(context));
-  if (path === "/api/reminders") return method(request, "GET", () => reminders());
+  if (path === "/api/reminders") return method(request, "GET", () => reminders(url, context));
+  if (path === "/api/actions/reminder") {
+    return method(request, "POST", () => reminderAction(request, context));
+  }
   if (path === "/api/actions/sync") return method(request, "POST", () => sync(context));
   if (path === "/api/actions/upload") {
     return method(request, "POST", () => upload(request, context));
@@ -378,8 +383,31 @@ async function status(context: ApiContext): Promise<Response> {
   return json(await context.deps.status());
 }
 
-function reminders(): Response {
-  return json({ reminders: [] });
+async function reminders(url: URL, context: ApiContext): Promise<Response> {
+  const all = url.searchParams.get("all") === "1";
+  return json(await context.deps.reminders(all));
+}
+
+async function reminderAction(request: Request, context: ApiContext): Promise<Response> {
+  const body = ReminderActionBodySchema.parse(await readJson(request));
+  const current = await context.deps.reminder(body.reminderId);
+  if (!current) return apiError(404, "NOT_FOUND", "提醒不存在");
+  const plan = planReminderAction({
+    reminder: current,
+    action: body.action,
+    until: body.until ?? null,
+    now: context.deps.now().toISOString(),
+  });
+  if ("error" in plan) {
+    throw new HttpError(plan.error.status, plan.error.code, plan.error.message);
+  }
+  await emitAll(context.deps.events, plan.events);
+  const kinds: DaemonChangeKind[] = ["status"];
+  if (plan.events.some((event) => event.type === "topic.status_changed")) {
+    kinds.push("topics", "today");
+  }
+  publish(context.hub, kinds);
+  return json(plan.reminder);
 }
 
 async function sync(context: ApiContext): Promise<Response> {
@@ -478,6 +506,9 @@ async function emitAll(
         await sink.emit(event.type, event.data);
         break;
       case "conclusion.added":
+        await sink.emit(event.type, event.data);
+        break;
+      case "reminder.action":
         await sink.emit(event.type, event.data);
         break;
       default: {

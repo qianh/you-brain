@@ -96,6 +96,11 @@ export interface DerivedSnapshot {
   conclusions: readonly ConclusionRecord[];
   todos: readonly TodoRecord[];
   events: readonly Event[];
+  /**
+   * When set, replaces the reminders table in the same transaction.
+   * Omit it to leave reminders untouched.
+   */
+  reminders?: readonly ReminderRecord[];
 }
 
 export interface TopicBookPersistence {

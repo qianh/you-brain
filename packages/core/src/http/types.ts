@@ -1,4 +1,6 @@
 import {
+  IsoTimestampSchema,
+  ReminderActionSchema,
   SessionKeySchema,
   TodoStatusSchema,
   TopicStatusSchema,
@@ -126,7 +128,8 @@ export type UserEvent =
   | { type: "topic.assigned"; data: EventOf<"topic.assigned">["data"] }
   | { type: "topic.created"; data: EventOf<"topic.created">["data"] }
   | { type: "todo.status_changed"; data: EventOf<"todo.status_changed">["data"] }
-  | { type: "conclusion.added"; data: EventOf<"conclusion.added">["data"] };
+  | { type: "conclusion.added"; data: EventOf<"conclusion.added">["data"] }
+  | { type: "reminder.action"; data: EventOf<"reminder.action">["data"] };
 
 export interface ActionResponse {
   ok: true;
@@ -194,6 +197,14 @@ export const ConclusionActionBodySchema = z.object({
 });
 
 export type ConclusionActionBody = z.infer<typeof ConclusionActionBodySchema>;
+
+export const ReminderActionBodySchema = z.object({
+  reminderId: z.string().min(1),
+  action: ReminderActionSchema,
+  until: IsoTimestampSchema.optional(),
+});
+
+export type ReminderActionBody = z.infer<typeof ReminderActionBodySchema>;
 
 export interface PortraitResponse {
   variant: string;
@@ -276,6 +287,7 @@ export interface ReminderView {
   reminderId: string;
   kind: string;
   topicId: string | null;
+  topicName?: string | null;
   text: string;
   status: string;
   until: string | null;

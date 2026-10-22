@@ -25,6 +25,7 @@ export { startDaemonHttp } from "./server.js";
 export type { DaemonHttpServer, StartDaemonHttpOptions } from "./server.js";
 export {
   ConclusionActionBodySchema,
+  ReminderActionBodySchema,
   DaemonEndpointSchema,
   DaemonEventSchema,
   RenameTopicBodySchema,
@@ -39,6 +40,7 @@ export type {
   ActionResponse,
   ApiErrorBody,
   ConclusionActionBody,
+  ReminderActionBody,
   ConclusionView,
   DaemonChangeKind,
   DaemonEndpoint,

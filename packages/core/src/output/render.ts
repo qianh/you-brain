@@ -23,6 +23,12 @@ export interface OutputRenderInput {
   conclusions: readonly ConclusionRecord[];
   todos: readonly TodoRecord[];
   devices: readonly DeviceRecord[];
+  reminders: readonly RenderedReminder[];
+}
+
+export interface RenderedReminder {
+  kind: string;
+  text: string;
 }
 
 export interface RenderedOutput {
@@ -41,12 +47,43 @@ export function renderLocalMarkdown(input: OutputRenderInput): RenderedOutput {
   return {
     today: renderToday(input, copy),
     topics: renderTopics(input, copy, zoned.active, zoned.history),
-    reminders: renderReminders(copy),
+    reminders: renderReminders(copy, input.reminders),
   };
 }
 
-export function renderReminders(copy: OutputCopy): string {
-  return finish([`# ${copy.remindersTitle}`, "", copy.remindersEmpty]);
+export function renderReminders(
+  copy: OutputCopy,
+  reminders: readonly RenderedReminder[],
+): string {
+  const follow = reminders.filter(
+    (item) => item.kind !== "morning_digest" && item.kind !== "weekly_review",
+  );
+  const digest = reminders.filter((item) => item.kind === "morning_digest");
+  const weekly = reminders.filter((item) => item.kind === "weekly_review");
+  const sections = [
+    reminderSection(copy.remindersFollow, follow),
+    reminderSection(copy.remindersDigest, digest),
+    reminderSection(copy.remindersWeekly, weekly),
+  ].filter((section): section is string[] => section !== null);
+  if (sections.length === 0) {
+    return finish([`# ${copy.remindersTitle}`, "", copy.remindersEmpty]);
+  }
+  const lines = [`# ${copy.remindersTitle}`, ""];
+  sections.forEach((section, index) => {
+    if (index > 0) lines.push("");
+    lines.push(...section);
+  });
+  return finish(lines);
+}
+
+function reminderSection(title: string, items: readonly RenderedReminder[]): string[] | null {
+  if (items.length === 0) return null;
+  const lines = [`## ${title}`, ""];
+  items.forEach((item, index) => {
+    if (index > 0) lines.push("");
+    lines.push(item.text);
+  });
+  return lines;
 }
 
 function renderToday(input: OutputRenderInput, copy: OutputCopy): string {

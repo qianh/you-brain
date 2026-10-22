@@ -22,6 +22,7 @@ function services(): McpServices & {
   searchSessions: ReturnType<typeof mock>;
   getPortrait: ReturnType<typeof mock>;
   getSession: ReturnType<typeof mock>;
+  getReminders: ReturnType<typeof mock>;
 } {
   const uploadSessions = mock(async () => ({
     dryRun: true,
@@ -59,6 +60,7 @@ function services(): McpServices & {
       throw Object.assign(new Error("missing"), { code: "NOT_FOUND" });
     },
     updateTopic: async () => ({ ok: true as const, topicId: "topic-1", events: [] }),
+    getReminders: mock(async () => ({ reminders: [] })),
   };
 }
 
@@ -108,6 +110,7 @@ describe("MCP tool handlers", () => {
       conversationId: "session-1",
     });
     expect((await handlers.get_reminders()).structuredContent).toEqual({ reminders: [] });
+    expect(runtime.getReminders).toHaveBeenCalled();
     const today = await handlers.get_today();
     expect(today.structuredContent).toMatchObject({ date: "2026-07-20" });
     expect((await handlers.get_topics({ zone: "history", status: "done" })).isError).not.toBe(
@@ -124,6 +127,30 @@ describe("MCP tool handlers", () => {
       status: "parked",
     });
     expect(updated.isError).not.toBe(true);
+  });
+
+  it("returns the reminder payload from the service", async () => {
+    const runtime = services();
+    runtime.getReminders.mockImplementation(async () => ({
+      reminders: [
+        {
+          reminderId: "morning:2026-10-21",
+          kind: "morning_digest",
+          topicId: null,
+          topicName: null,
+          text: "早报",
+          status: "open",
+          until: null,
+          issuedAt: "2026-10-21T00:00:00.000Z",
+        },
+      ],
+    }));
+    const handlers = createToolHandlers(runtime);
+    const result = await handlers.get_reminders();
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      reminders: [{ reminderId: "morning:2026-10-21", text: "早报" }],
+    });
   });
 
   it("maps domain errors without leaking a stack", async () => {

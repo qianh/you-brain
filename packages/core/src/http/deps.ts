@@ -4,6 +4,8 @@ import type { EventSink } from "./types.js";
 import type {
   PortraitResponse,
   PortraitSnapshot,
+  ReminderView,
+  RemindersResponse,
   SearchRequest,
   SearchResponse,
   StatusResponse,
@@ -32,6 +34,9 @@ export interface HttpDeps {
   readConfig(): Promise<SharedConfig>;
   writeConfig(config: SharedConfig): Promise<void>;
   status(): Promise<StatusResponse>;
+  reminders(all: boolean): Promise<RemindersResponse>;
+  reminder(id: string): Promise<ReminderView | null>;
+  now(): Date;
   sync(): Promise<SyncActionResult>;
   upload(input: UploadActionInput): Promise<UploadActionResult>;
   events: EventSink;

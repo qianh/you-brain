@@ -191,6 +191,24 @@ describe("events", () => {
     expect(() => parseEvent("{")).toThrow();
   });
 
+  it("accepts a reminder that is not attached to a topic", () => {
+    for (const type of ["reminder.issued", "reminder.action"] as const) {
+      const data = validData(type);
+      data.topicId = null;
+      const parsed = parseEvent(envelope(type, data));
+      expect(parsed.type).toBe(type);
+      if (parsed.type !== "reminder.issued" && parsed.type !== "reminder.action") {
+        throw new Error("expected a reminder");
+      }
+      expect(parsed.data.topicId).toBeNull();
+    }
+    const named = validData("reminder.issued");
+    named.topicId = "topic-1";
+    const namedParsed = parseEvent(envelope("reminder.issued", named));
+    if (namedParsed.type !== "reminder.issued") throw new Error("expected issued");
+    expect(namedParsed.data.topicId).toBe("topic-1");
+  });
+
   it("fills v and a ULID when creating an event", () => {
     const event = createEvent({
       type: "topic.created",

@@ -31,6 +31,9 @@ describe("schedule intervals", () => {
     expect(intervalDue(0, INTERVALS.flushMs, INTERVALS.flushMs)).toBe(true);
     expect(pullInterval(0)).toBe(INTERVALS.pullMs);
     expect(pullInterval(1)).toBe(INTERVALS.fastPullMs);
+    expect(INTERVALS.reminderMs).toBe(10 * 60_000);
+    expect(intervalDue(null, 0, INTERVALS.reminderMs)).toBe(true);
+    expect(intervalDue(0, INTERVALS.reminderMs - 1, INTERVALS.reminderMs)).toBe(false);
   });
 
   it("uploads an idle session at 5 minutes and not at 4", async () => {

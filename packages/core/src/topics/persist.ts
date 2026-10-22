@@ -1,3 +1,4 @@
+import { foldReminders } from "../reminders/fold.js";
 import type { TopicBookPersistence } from "../store/types.js";
 import type { TopicBook } from "./types.js";
 import { deriveLastActive } from "./zones.js";
@@ -36,5 +37,6 @@ export function persistTopicBook(store: TopicBookPersistence, book: TopicBook): 
     conclusions: book.conclusions.map((conclusion) => ({ ...conclusion })),
     todos: book.todos.map((todo) => ({ ...todo })),
     events: book.memory.log,
+    reminders: foldReminders(book.memory.log),
   });
 }

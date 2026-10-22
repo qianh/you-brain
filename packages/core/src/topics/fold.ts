@@ -324,6 +324,7 @@ function applyReminderAction(
   memory: FoldMemory,
   event: EventOf<"reminder.action">,
 ): void {
+  if (event.data.topicId === null) return;
   const topic = ensureRow(memory, resolveTopicId(memory, event.data.topicId));
   touchUser(topic, event.ts);
 }
@@ -366,9 +367,10 @@ function applyOne(memory: FoldMemory, event: Event): void {
     case "reminder.action":
       applyReminderAction(memory, event);
       break;
+    case "reminder.issued":
+      break;
     case "portrait.correction":
     case "portrait.correction_applied":
-    case "reminder.issued":
       break;
     default: {
       const unreachable: never = event;

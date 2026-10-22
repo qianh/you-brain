@@ -67,6 +67,8 @@ import {
 } from "../llm/index.js";
 import { cliUnresponsiveWarning } from "../llm/setup-status.js";
 import { OutputService } from "../output/service.js";
+import { dueRemindersForDevice } from "../reminders/run.js";
+import { timeZoneOffsetMinutes } from "../reminders/time.js";
 
 import { CodingInjection } from "../portrait/injection.js";
 import { FilePortraitConsentStore, portraitConsentPath } from "../portrait/consent.js";
@@ -333,6 +335,7 @@ export class YouBrainDaemon {
   #lastPull: number | null = null;
   #lastPortrait: number | null = null;
   #lastSearch: number | null = null;
+  #lastReminders: number | null = null;
   #lastSyncAt: string | null = null;
   #lastSyncError: { message: string; at: string } | null = null;
   #searchDirty = false;
@@ -423,6 +426,12 @@ export class YouBrainDaemon {
     this.#lastPortrait = startedAt;
     this.#lastSearch = startedAt;
     this.#started = true;
+    try {
+      await this.#issueReminders();
+    } catch {
+      // A reminder failure must not block startup.
+    }
+    this.#lastReminders = this.#clock.nowMs();
     if (this.#options.signals === true) {
       this.#onSignal = () => {
         void this.stop();
@@ -690,6 +699,14 @@ export class YouBrainDaemon {
       }
       this.#searchDirty = false;
       this.#lastSearch = this.#clock.nowMs();
+    }
+    if (intervalDue(this.#lastReminders, now, INTERVALS.reminderMs)) {
+      try {
+        await this.#issueReminders();
+      } catch {
+        // Keep the loop alive. The next interval tries again.
+      }
+      this.#lastReminders = this.#clock.nowMs();
     }
   }
 
@@ -1042,6 +1059,35 @@ export class YouBrainDaemon {
     const at = this.#clock.now().toISOString();
     this.changes.publish("topics", at);
     this.changes.publish("today", at);
+    this.changes.publish("status", at);
+  }
+
+  async #issueReminders(): Promise<void> {
+    const store = this.#store;
+    if (this.#stopped || !store || !this.#log) return;
+    const now = this.#clock.now();
+    const sessionUpdatedAt: Record<string, string> = {};
+    for (const session of store.listSessions()) {
+      if (session.updatedAt !== null) sessionUpdatedAt[session.sessionKey] = session.updatedAt;
+    }
+    const due = dueRemindersForDevice({
+      deviceId: this.#local.deviceId,
+      mainDevice: this.#roles.mainDevice,
+      notifications: this.#shared.reminders.notifications,
+      events: store.listEvents(),
+      sessionUpdatedAt,
+      activeLimit: this.#shared.topics.activeLimit,
+      historyDays: this.#shared.topics.historyDays,
+      morningDigestTime: this.#shared.reminders.morningDigestTime,
+      weeklyReviewDay: this.#shared.reminders.weeklyReviewDay,
+      weeklyReviewTime: this.#shared.reminders.weeklyReviewTime,
+      now: now.toISOString(),
+      timeZoneOffsetMinutes: timeZoneOffsetMinutes(this.#roles.timezone, now),
+    });
+    for (const item of due) {
+      if (this.#stopped) return;
+      await this.#emitUser("reminder.issued", item);
+    }
   }
 
   async #onConfigChanged(update: {
@@ -1228,6 +1274,9 @@ export class YouBrainDaemon {
       status: () => this.#status(),
       sync: () => this.#syncNow(),
       upload: (input) => this.#uploadNow(input),
+      reminders: (all) => readers.reminders(all),
+      reminder: (id) => readers.reminder(id),
+      now: () => this.#clock.now(),
       events: {
         emit: (type, data) => this.#emitUser(type, data),
       },

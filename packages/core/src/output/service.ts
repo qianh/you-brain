@@ -13,11 +13,13 @@ import type { YouBrainPaths } from "../domain/paths.js";
 import type {
   ConclusionRecord,
   DeviceRecord,
+  ReminderRecord,
   SessionRecord,
   TodayQuery,
   TodoRecord,
   TopicRecord,
 } from "../store/types.js";
+import { presentReminders } from "../reminders/present.js";
 import { foldEvents } from "../topics/index.js";
 import type { OutputClock, OutputTimer } from "./clock.js";
 import { systemClock } from "./clock.js";
@@ -31,6 +33,7 @@ export interface OutputSource {
   listDevices(): readonly DeviceRecord[];
   listEvents(): readonly Event[];
   getSession(sessionKey: string): SessionRecord | null;
+  listReminders(): readonly ReminderRecord[];
 }
 
 export interface OutputWriteResult {
@@ -134,6 +137,16 @@ export class OutputService {
       conclusions: this.#source.listConclusions(),
       todos: this.#source.listTodos(),
       devices: this.#source.listDevices(),
+      reminders: presentReminders(
+        this.#source.listReminders(),
+        now.toISOString(),
+        topics.map((topic) => ({
+          topicId: topic.topicId,
+          name: topic.name,
+          mergedInto: topic.mergedInto,
+        })),
+        false,
+      ),
     });
   }
 

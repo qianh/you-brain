@@ -124,6 +124,7 @@ export function createLocalMcpServices(options: LocalMcpOptions): McpServices {
     updateTopic(input) {
       return forwardUpdate(call, input);
     },
+    getReminders: () => readers.reminders(false),
   };
 }
 

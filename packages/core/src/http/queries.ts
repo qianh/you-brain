@@ -7,8 +7,12 @@ import type {
 } from "../store/index.js";
 import type { DeviceRecord } from "@you-brain/protocol";
 
+import { presentReminder, presentReminders } from "../reminders/present.js";
+import type { ReminderTopicName } from "../reminders/present.js";
 import type {
   ConclusionView,
+  ReminderView,
+  RemindersResponse,
   TodayResponse,
   TodaySession,
   TodoView,
@@ -220,6 +224,8 @@ export interface StoreReaders {
   topic(id: string): Promise<TopicDetail | null>;
   todo(todoId: string): Promise<TodoView | null>;
   devices(): Promise<DeviceRecord[]>;
+  reminders(all: boolean): Promise<RemindersResponse>;
+  reminder(id: string): Promise<ReminderView | null>;
 }
 
 export function createStoreReaders(
@@ -319,5 +325,32 @@ export function createStoreReaders(
     async devices() {
       return store.listDevices();
     },
+    async reminders(all) {
+      return {
+        reminders: presentReminders(
+          store.listReminders(),
+          readerNow(settings),
+          reminderTopics(store),
+          all,
+        ),
+      };
+    },
+    async reminder(id) {
+      const record = store.listReminders().find((item) => item.reminderId === id);
+      if (!record) return null;
+      return presentReminder(record, readerNow(settings), reminderTopics(store));
+    },
   };
+}
+
+function readerNow(settings: ZoneSettings): string {
+  return (settings.now?.() ?? new Date()).toISOString();
+}
+
+function reminderTopics(store: SqliteStore): ReminderTopicName[] {
+  return store.listTopics().map((topic) => ({
+    topicId: topic.topicId,
+    name: topic.name,
+    mergedInto: topic.mergedInto,
+  }));
 }

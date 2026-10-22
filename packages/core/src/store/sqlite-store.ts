@@ -590,6 +590,10 @@ export class SqliteStore {
           session.topicId,
         );
       }
+      if (snapshot.reminders !== undefined) {
+        this.#db.exec("DELETE FROM reminders");
+        for (const reminder of snapshot.reminders) this.upsertReminder(reminder);
+      }
     });
     write();
   }

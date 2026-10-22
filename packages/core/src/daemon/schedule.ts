@@ -5,6 +5,7 @@ export const INTERVALS = {
   pullMs: 60_000,
   fastPullMs: 5_000,
   fullScanMs: 10 * 60_000,
+  reminderMs: 10 * 60_000,
   portraitMs: 24 * 60 * 60_000,
   searchMs: 60_000,
   outputDebounceMs: 10_000,

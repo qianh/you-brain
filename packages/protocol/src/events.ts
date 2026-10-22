@@ -94,13 +94,13 @@ export const PortraitCorrectionAppliedDataSchema = z.object({
 export const ReminderIssuedDataSchema = z.object({
   reminderId: IdSchema,
   kind: z.string().min(1),
-  topicId: IdSchema,
+  topicId: IdSchema.nullable(),
   text: z.string().min(1),
 });
 
 export const ReminderActionDataSchema = z.object({
   reminderId: IdSchema,
-  topicId: IdSchema,
+  topicId: IdSchema.nullable(),
   action: ReminderActionSchema,
   until: IsoTimestampSchema.nullable(),
 });

@@ -83,6 +83,7 @@ export interface McpServices {
   updateTopic(
     input: UpdateTopicInput,
   ): Promise<TopicMutationResponse | ActionResponse>;
+  getReminders(): Promise<RemindersResponse>;
 }
 
 type ToolResult = {
@@ -283,8 +284,12 @@ export function createToolHandlers(services: McpServices) {
       }
     },
     get_reminders: async (): Promise<ToolResult> => {
-      const output: RemindersResponse = { reminders: [] };
-      return success(output, JSON.stringify(output, null, 2));
+      try {
+        const output = await services.getReminders();
+        return success(output, JSON.stringify(output, null, 2));
+      } catch (error) {
+        return failure(error);
+      }
     },
   };
 }
@@ -391,7 +396,7 @@ export function createMcpServer(services: McpServices): McpServer {
   server.registerTool(
     "get_reminders",
     {
-      description: "读取当前提醒。提醒尚未实现，固定返回空列表",
+      description: "读取当前应展示的提醒，包括未处理的和已经到期的稍后提醒",
       inputSchema: {},
     },
     handlers.get_reminders,

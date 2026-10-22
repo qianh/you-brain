@@ -213,6 +213,9 @@ describe("local MCP services", () => {
       status: async () => {
         throw new Error("unused");
       },
+      reminders: async () => ({ reminders: [] }),
+      reminder: async () => null,
+      now: () => new Date(NOW),
       sync: async () => ({ started: true, at: NOW }),
       upload: async (input) => ({
         dryRun: input.dryRun ?? false,
@@ -322,8 +325,51 @@ describe("local MCP services", () => {
       expect(upload.isError).not.toBe(true);
       expect(textOf(upload)).toContain("扫描 3 个会话，上传 0 个。");
       expect(fetches).toBe(3);
+      store.upsertReminder({
+        reminderId: "rem-open",
+        kind: "stale",
+        topicId: "topic-1",
+        text: "该跟进了",
+        status: "open",
+        until: null,
+        issuedAt: NOW,
+        updatedAt: NOW,
+      });
+      store.upsertReminder({
+        reminderId: "rem-later",
+        kind: "stale",
+        topicId: "topic-1",
+        text: "稍后再看",
+        status: "snoozed",
+        until: "2099-01-01T00:00:00.000Z",
+        issuedAt: "2026-07-19T00:00:00.000Z",
+        updatedAt: NOW,
+      });
+      store.upsertReminder({
+        reminderId: "rem-closed",
+        kind: "morning_digest",
+        topicId: null,
+        text: "已读早报",
+        status: "dismissed",
+        until: null,
+        issuedAt: "2026-07-18T00:00:00.000Z",
+        updatedAt: NOW,
+      });
       const reminders = await call(services, "get_reminders");
-      expect(reminders.structuredContent).toEqual({ reminders: [] });
+      expect(reminders.structuredContent).toEqual({
+        reminders: [
+          {
+            reminderId: "rem-open",
+            kind: "stale",
+            topicId: "topic-1",
+            topicName: "设计",
+            text: "该跟进了",
+            status: "open",
+            until: null,
+            issuedAt: NOW,
+          },
+        ],
+      });
     } finally {
       await http.stop();
       store.close();

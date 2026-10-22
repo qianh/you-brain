@@ -529,6 +529,36 @@ describe("event fold", () => {
     expect(book.topics[0]?.lastUserOpAt).toBe(plus(2));
   });
 
+  it("does not create a topic for a digest reminder", () => {
+    const book = foldEvents([
+      buildEvent({
+        type: "reminder.issued",
+        data: {
+          reminderId: "morning:2026-10-21",
+          kind: "morning_digest",
+          topicId: null,
+          text: "早报",
+        },
+        device: "dev-a",
+        ts: plus(1),
+        seq: 1,
+      }),
+      buildEvent({
+        type: "reminder.action",
+        data: {
+          reminderId: "morning:2026-10-21",
+          topicId: null,
+          action: "ignore",
+          until: null,
+        },
+        device: "dev-a",
+        ts: plus(2),
+        seq: 2,
+      }),
+    ]);
+    expect(book.topics).toEqual([]);
+  });
+
   it("counts a reminder action as user activity and ignores portrait events", () => {
     const created = buildEvent({
       type: "topic.created",

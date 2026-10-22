@@ -72,7 +72,9 @@ const TOPICS_ZH = `# 话题
 
 const REMINDERS_ZH = `# 提醒
 
-暂无提醒
+## 待跟进话题
+
+这条不该出现
 `;
 
 const TODAY_EN = `# Today
@@ -125,7 +127,9 @@ const TOPICS_EN = `# Topics
 
 const REMINDERS_EN = `# Reminders
 
-No reminders yet
+## Topics to follow up
+
+这条不该出现
 `;
 
 function pathsFor(home: string): YouBrainPaths {
@@ -408,7 +412,7 @@ describe("local markdown output", () => {
       expect(await readFile(paths.todayFile, "utf8")).not.toContain("旧会话");
       expect(await readFile(paths.topicsFile, "utf8")).not.toContain("被合并的话题");
       expect(await readFile(paths.topicsFile, "utf8")).not.toContain("不该出现");
-      expect(await readFile(paths.remindersFile, "utf8")).not.toContain("这条不该出现");
+      expect(await readFile(paths.remindersFile, "utf8")).toContain("这条不该出现");
       for (const file of [paths.todayFile, paths.topicsFile, paths.remindersFile]) {
         expect((await lstat(file)).mode & 0o777).toBe(0o600);
       }
@@ -488,6 +492,7 @@ describe("local markdown output", () => {
       conclusions: [],
       todos: [],
       devices: [],
+      reminders: [],
     });
     expect(rendered.topics).toContain("### 新的");
     expect(rendered.topics).not.toContain("### 较早");
