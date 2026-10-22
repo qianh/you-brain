@@ -43,7 +43,8 @@
 
 ## D. 验收与文档
 
-- [ ] **D1 M0 六项验证记录**：补全 [进度.md](./进度.md) M0 表的验证结论（transformers 与 sharp 在编译产物中的运行、Drive etag 并发、CLI 恢复会话 ID、`changes.list` 配额与延迟、Tauri 打包 / 签名 / 开机自启），能自动化验证的写脚本留证据
+- [x] **D1 M0 六项验证记录**：`scripts/m0/*`（`bun scripts/m0/<项>.ts`）；1/2/6 本机已跑（onnxruntime/sharp 在 vendor 与编译产物中可加载；.app 为 ad-hoc 签名且 `codesign --verify` 失败），3/5 需真实 Drive、4 需真实 CLI 额度，脚本已备未跑，结论写入 进度.md
+- [ ] **D3 .app 整包 ad-hoc 签名**：D1 发现 `dist/app.noindex/you-brain.app` 只有链接器 ad-hoc 签名（Sealed Resources=none，`codesign --verify --deep --strict` 失败）；在 `bundle.sh` 末尾对整包 `codesign --force --deep -s -`，并让 `scripts/m0/desktop-package.ts` 通过（不做公证）
 - [ ] **D2 进度文档更新**：每完成一项，同步更新 `进度.md` 对应行（状态、证据提交）
 
 ## 需要你决定或配合（不进自动队列）
