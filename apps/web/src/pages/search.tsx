@@ -1,148 +1,316 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { SearchResponse } from "@you-brain/core/http/types.js";
 
 import { useDaemon } from "../daemon-context.js";
+import { useRoute } from "../router.js";
 import { BrowserDaemonError } from "../api/client.js";
-import { Banner } from "../components/ui.js";
+import { Banner } from "../components/banner.js";
+import { Button } from "../components/button.js";
 import { Card } from "../components/card.js";
+import { Chip } from "../components/chip.js";
 import { EmptyState } from "../components/empty.js";
 import { Icon } from "../components/icons.js";
-import { SourceMark } from "../components/tile.js";
-import { Pill } from "../components/pill.js";
-import { Row } from "../components/row.js";
-import { searchNotices, searchTitle } from "../lib/copy.js";
-import { formatDateTime, sourceLabel } from "../lib/format.js";
-
-const SOURCES = ["claude-code", "codex", "grok-build", "cursor", "gemini-cli"] as const;
+import { SearchField } from "../components/input.js";
+import { Kbd } from "../components/kbd.js";
+import { Page, PageHeader } from "../components/page.js";
+import { Select } from "../components/select.js";
+import { SkeletonRow } from "../components/skeleton.js";
+import { SourceTile } from "../components/tile.js";
+import { useDelayed } from "../components/use-delayed.js";
+import { sourceLabel } from "../lib/format.js";
+import { nextIndex, type ListKey } from "../lib/list-nav.js";
+import { SearchResults } from "./search/result-list.js";
+import {
+  SEARCH_SOURCES,
+  hasActiveFilters,
+  isSearchRange,
+  joinNotice,
+  nextSources,
+  parseSearchSources,
+  rangeBounds,
+  searchNoticeLines,
+  suggestionNames,
+  type SearchRange,
+  type SearchSource,
+} from "./search/logic.js";
 
 export function SearchPage() {
-  const { t, language, client, timeZone } = useDaemon();
-  const [query, setQuery] = useState("");
-  const [source, setSource] = useState("");
+  const { t, topics, client, timeZone } = useDaemon();
+  const { location } = useRoute();
+  const [query, setQuery] = useState(location.q ?? "");
+  const [sources, setSources] = useState<SearchSource[]>(() => parseSearchSources(window.location.search));
+  const [range, setRange] = useState<SearchRange>("all");
   const [result, setResult] = useState<SearchResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const notices = result ? searchNotices(result, language) : [];
+  const [cursor, setCursor] = useState(-1);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const generation = useRef(0);
+  const sourcesRef = useRef(sources);
+  const rangeRef = useRef(range);
+  sourcesRef.current = sources;
+  rangeRef.current = range;
+  const showSkeleton = useDelayed(busy);
+  const suggestions = suggestionNames(topics);
 
-  async function run(text: string, sourceId: string): Promise<void> {
+  function run(text: string, sourceIds: readonly string[], nextRange: SearchRange): void {
     const trimmed = text.trim();
-    if (!trimmed) return;
+    if (trimmed === "") return;
+    const id = generation.current + 1;
+    generation.current = id;
     setBusy(true);
     setError(null);
-    try {
-      const next = await client.search(
-        sourceId === "" ? { query: trimmed } : { query: trimmed, sources: [sourceId] },
-      );
-      setResult(next);
-    } catch (caught) {
-      setResult(null);
-      setError(caught instanceof BrowserDaemonError ? caught.message : t("actionFailed"));
-    } finally {
-      setBusy(false);
-    }
+    const bounds = rangeBounds(nextRange, new Date(), timeZone);
+    void client
+      .search({
+        query: trimmed,
+        ...(sourceIds.length > 0 ? { sources: [...sourceIds] } : {}),
+        ...(bounds.from !== undefined ? { from: bounds.from } : {}),
+        ...(bounds.to !== undefined ? { to: bounds.to } : {}),
+      })
+      .then((next) => {
+        if (generation.current !== id) return;
+        setResult(next);
+        setCursor(next.results.length > 0 ? 0 : -1);
+      })
+      .catch((caught: unknown) => {
+        if (generation.current !== id) return;
+        setError(caught instanceof BrowserDaemonError ? caught.message : t("actionFailed"));
+      })
+      .finally(() => {
+        if (generation.current === id) setBusy(false);
+      });
   }
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const initial = params.get("q")?.trim() ?? "";
-    const initialSource = params.get("source") ?? "";
-    if (initial === "") return;
-    setQuery(initial);
-    if (SOURCES.some((item) => item === initialSource)) setSource(initialSource);
-    void run(initial, SOURCES.some((item) => item === initialSource) ? initialSource : "");
-    // The address bar is only a starting point for a shared or screenshot link.
+    if (location.q === null) return;
+    setQuery(location.q);
+    run(location.q, sourcesRef.current, rangeRef.current);
+    // Deep link from the command palette. Filters stay as the reader left them.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [location.q]);
+
+  useEffect(() => {
+    const hits = result?.results.length ?? 0;
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      if (target.closest("input, textarea, select, [role=dialog]")) {
+        if (event.key === "ArrowDown" && target.matches("[data-page-search]") && hits > 0) {
+          event.preventDefault();
+          setCursor(0);
+          document.getElementById("search-hit-0")?.focus();
+        }
+        return;
+      }
+      const inList = target === document.body || target === document.documentElement || target.closest(".search-stage") !== null;
+      if (!inList || hits === 0) return;
+      if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Home" || event.key === "End" || event.key === "j" || event.key === "k") {
+        event.preventDefault();
+        const key: ListKey = event.key === "j" ? "ArrowDown" : event.key === "k" ? "ArrowUp" : event.key;
+        setCursor((current) => {
+          const next = nextIndex(current, hits, key);
+          document.getElementById(`search-hit-${next}`)?.focus();
+          return next;
+        });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [result]);
+
+  const hits = result?.results ?? [];
+  const notices = result
+    ? searchNoticeLines(result, { keyword: t("searchKeywordNote"), stale: t("searchStaleNote") })
+    : [];
+  const summary = joinNotice(notices);
+  const filtered = hasActiveFilters(sources, range);
+  const showInitial = result === null && !busy && error === null;
+  const showNone = result !== null && hits.length === 0 && !busy && error === null;
+
+  function submit(text = query): void {
+    run(text, sources, range);
+  }
+
+  function pickSource(source: string): void {
+    const next = nextSources(sources, source);
+    setSources(next);
+    if (query.trim() !== "") run(query, next, range);
+  }
+
+  function pickRange(value: string): void {
+    if (!isSearchRange(value) || value === range) return;
+    setRange(value);
+    if (query.trim() !== "") run(query, sources, value);
+  }
+
+  function clearFilters(): void {
+    setSources([]);
+    setRange("all");
+    if (query.trim() !== "") run(query, [], "all");
+  }
 
   return (
-    <div className="page">
-      <header className="page-head">
-        <h1>{t("search")}</h1>
-      </header>
-      <form
-        className="search-hero"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void run(query, source);
-        }}
-      >
-        <Icon name="search" />
-        <input
-          aria-label={t("searchQuery")}
-          value={query}
-          placeholder={t("searchPlaceholder")}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-        <button type="submit" className="btn primary small" disabled={busy || query.trim() === ""}>
-          {busy ? t("working") : t("search")}
-        </button>
-      </form>
-      <div className="pill-row" role="group" aria-label={t("filterSources")}>
-        <Pill
-          pressed={source === ""}
-          onClick={() => {
-            setSource("");
-            if (query.trim() !== "") void run(query, "");
-          }}
-        >
-          {t("allSources")}
-        </Pill>
-        {SOURCES.map((item) => (
-          <Pill
-            key={item}
-            pressed={source === item}
-            onClick={() => {
-              const next = source === item ? "" : item;
-              setSource(next);
-              if (query.trim() !== "") void run(query, next);
+    <Page>
+      <div className="search-page">
+        <PageHeader title={t("search")} />
+        <div className="search-panel">
+          <form
+            className="search-bar"
+            onSubmit={(event) => {
+              event.preventDefault();
+              submit();
             }}
           >
-            {sourceLabel(item)}
-          </Pill>
-        ))}
-      </div>
-      {error ? <p className="form-error">{error}</p> : null}
-      {notices.map((notice) => (
-        <Banner key={notice.text} tone={notice.tone === "warn" ? "warn" : "info"}>
-          {notice.text}
-        </Banner>
-      ))}
-      {result ? (
-        <p className="muted">
-          {t("results", { count: result.results.length })}
-          {" · "}
-          {result.searchMode === "keyword" ? t("degradation") : t("searchSemantic")}
-          {" · "}
-          {result.indexStatus === "stale" ? t("expired") : t("indexFresh")}
-        </p>
-      ) : (
-        <EmptyState title={t("emptySearchPrompt")} icon="search" />
-      )}
-      {result && result.results.length === 0 ? <EmptyState title={t("emptySearch")} icon="search" /> : null}
-      {result && result.results.length > 0 ? (
-        <Card>
-          {result.results.map((hit) => (
-            <Row
-              key={`${hit.conversationId}-${hit.updatedAt}-${hit.excerpt.slice(0, 24)}`}
-              icon={<SourceMark source={hit.source} />}
-              title={searchTitle(hit)}
-              subtitle={
-                <>
-                  <i className="dot dot-ok" />
-                  <span>{sourceLabel(hit.source)}</span>
-                  <span>{" · "}{hit.excerpt}</span>
-                </>
-              }
-              trailing={
-                <>
-                  <time dateTime={hit.updatedAt}>{formatDateTime(hit.updatedAt, language, timeZone)}</time>
-                  <span>{hit.score.toFixed(2)}</span>
-                </>
-              }
+            <SearchField
+              size="lg"
+              autoFocus
+              value={query}
+              onChange={setQuery}
+              label={t("searchQuery")}
+              placeholder={t("searchPlaceholder")}
             />
-          ))}
-        </Card>
-      ) : null}
-    </div>
+            {query.trim() !== "" ? (
+              <Button className="search-go" type="submit" variant="primary" loading={busy} iconRight={<Kbd>↵</Kbd>}>
+                {t("search")}
+              </Button>
+            ) : null}
+          </form>
+          <div className="search-filters">
+            <div className="search-sources" role="group" aria-label={t("filterSources")}>
+              <Chip tone={sources.length === 0 ? "accent" : "neutral"} pressed={sources.length === 0} onClick={() => {
+                if (sources.length === 0) return;
+                setSources([]);
+                if (query.trim() !== "") run(query, [], range);
+              }}>
+                {t("allSources")}
+              </Chip>
+              {SEARCH_SOURCES.map((source) => {
+                const on = sources.includes(source);
+                return (
+                  <Chip key={source} tone={on ? "accent" : "neutral"} pressed={on} onClick={() => pickSource(source)} icon={<SourceTile source={source} size="sm" label={sourceLabel(source)} />}>
+                    {sourceLabel(source)}
+                  </Chip>
+                );
+              })}
+            </div>
+            <div className="search-range">
+              <span className="search-range-label" id="search-range-label">
+                {t("searchRangeShort")}
+              </span>
+              <Select
+                label={t("searchRangeLabel")}
+                value={range}
+                onChange={pickRange}
+                options={[
+                  { value: "all", label: t("searchRangeAll") },
+                  { value: "today", label: t("searchRangeToday") },
+                  { value: "7d", label: t("searchRangeWeek") },
+                  { value: "30d", label: t("searchRangeMonth") },
+                ]}
+              />
+            </div>
+          </div>
+          {result ? (
+            <div className="search-note">
+              {summary !== "" ? (
+                <button type="button" className="search-note-toggle" aria-expanded={notesOpen} onClick={() => setNotesOpen((open) => !open)}>
+                  <Icon name="info" />
+                  <span className="search-note-text">{summary}</span>
+                  <Icon name={notesOpen ? "chevron-up" : "chevron-down"} size={14} />
+                </button>
+              ) : (
+                <span />
+              )}
+              <span className="search-count">{t("results", { count: hits.length })}</span>
+            </div>
+          ) : null}
+          {notesOpen && notices.length > 0 ? (
+            <ul className="search-note-detail">
+              {notices.map((line) => (
+                <li key={line}>{line}</li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+        {error ? (
+          <Banner
+            tone="danger"
+            action={
+              <Button variant="ghost" size="sm" onClick={() => submit()}>
+                {t("retry")}
+              </Button>
+            }
+          >
+            {error}
+          </Banner>
+        ) : null}
+        <div className="search-stage" aria-busy={busy || undefined}>
+          {showSkeleton ? (
+            <Card className="search-skel" aria-hidden="true">
+              <SkeletonRow />
+              <SkeletonRow />
+              <SkeletonRow />
+            </Card>
+          ) : null}
+          {hits.length > 0 ? (
+            <Card>
+              <SearchResults hits={hits} query={query} cursor={cursor} pending={busy} onSelect={(index) => {
+                setCursor(index);
+                document.getElementById(`search-hit-${index}`)?.focus();
+              }} />
+            </Card>
+          ) : null}
+          {showInitial ? (
+            <div className="search-empty">
+              <EmptyState
+                icon="search"
+                title={t("searchIntroTitle")}
+                description={t("searchIntroBody")}
+                secondary={
+                  suggestions.length > 0 ? (
+                    <div className="search-try">
+                      <span className="search-try-label">{t("searchTry")}</span>
+                      <div className="search-try-list">
+                        {suggestions.map((name) => (
+                          <Chip
+                            key={name}
+                            onClick={() => {
+                              setQuery(name);
+                              run(name, sources, range);
+                            }}
+                          >
+                            <span className="search-try-name" title={name}>
+                              {name}
+                            </span>
+                          </Chip>
+                        ))}
+                      </div>
+                    </div>
+                  ) : undefined
+                }
+              />
+            </div>
+          ) : null}
+          {showNone ? (
+            <div className="search-empty">
+              <EmptyState
+                icon="search-x"
+                title={t("searchNoneTitle", { query: query.trim() })}
+                description={t("searchNoneBody")}
+                action={
+                  filtered ? (
+                    <Button variant="secondary" onClick={clearFilters}>
+                      {t("searchClearFilters")}
+                    </Button>
+                  ) : undefined
+                }
+              />
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </Page>
   );
 }
