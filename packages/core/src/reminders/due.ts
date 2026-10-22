@@ -49,6 +49,7 @@ export interface ComputeDueInput {
   weeklyReviewTime: string;
   now: string;
   timeZoneOffsetMinutes: number;
+  mergeLines?: readonly { fromName: string; intoName: string; reason: string }[];
 }
 
 interface RankedTopic {
@@ -269,7 +270,13 @@ function weeklyBody(
   const historyNames = history
     .filter((topic) => (openTodos.get(topic.topicId) ?? 0) > 0)
     .map((topic) => topic.name);
-  return weeklyText({ activeCount, conclusionCount, staleNames, historyNames });
+  return weeklyText({
+    activeCount,
+    conclusionCount,
+    staleNames,
+    historyNames,
+    ...(input.mergeLines ? { mergeSuggestions: input.mergeLines } : {}),
+  });
 }
 
 function rankSuggestions(

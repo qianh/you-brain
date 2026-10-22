@@ -67,14 +67,18 @@ export function weeklyText(input: {
   conclusionCount: number;
   staleNames: readonly string[];
   historyNames: readonly string[];
+  mergeSuggestions?: readonly { fromName: string; intoName: string; reason: string }[];
 }): string {
-  return boundReminder([
+  const lines = [
     `本周活跃话题 ${input.activeCount} 个。`,
     `新增结论 ${input.conclusionCount} 条。`,
     `停滞话题：${nameList(input.staleNames)}。`,
     `历史未完成：${nameList(input.historyNames)}。`,
-    "相似话题：合并建议稍后给出。",
-  ]);
+  ];
+  for (const item of (input.mergeSuggestions ?? []).slice(0, 3)) {
+    lines.push(`${item.fromName} 与 ${item.intoName} 看起来是同一件事（${item.reason}）。`);
+  }
+  return boundReminder(lines);
 }
 
 function nameList(names: readonly string[]): string {

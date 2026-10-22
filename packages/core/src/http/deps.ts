@@ -9,6 +9,7 @@ import type {
   SearchRequest,
   SearchResponse,
   StatusResponse,
+  ConsolidateActionResult,
   SyncActionResult,
   TodayResponse,
   TodoView,
@@ -41,5 +42,7 @@ export interface HttpDeps {
   now(): Date;
   sync(): Promise<SyncActionResult>;
   upload(input: UploadActionInput): Promise<UploadActionResult>;
+  /** Optional so older test doubles keep compiling. The daemon always supplies it. */
+  consolidate?(input: { force?: boolean }): Promise<ConsolidateActionResult>;
   events: EventSink;
 }

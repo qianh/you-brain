@@ -18,6 +18,7 @@ export interface DueDeviceInput {
   weeklyReviewTime: string;
   now: string;
   timeZoneOffsetMinutes: number;
+  mergeLines?: readonly { fromName: string; intoName: string; reason: string }[];
 }
 
 export function dueRemindersForDevice(input: DueDeviceInput): ReminderIssuedData[] {
@@ -35,6 +36,7 @@ export function dueRemindersForDevice(input: DueDeviceInput): ReminderIssuedData
     weeklyReviewTime: input.weeklyReviewTime,
     now: input.now,
     timeZoneOffsetMinutes: input.timeZoneOffsetMinutes,
+    ...(input.mergeLines ? { mergeLines: input.mergeLines } : {}),
   });
 }
 

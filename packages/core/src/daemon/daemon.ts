@@ -67,6 +67,17 @@ import {
 } from "../llm/index.js";
 import { cliUnresponsiveWarning } from "../llm/setup-status.js";
 import { OutputService } from "../output/service.js";
+import {
+  ConsolidationRejected,
+  emptyConsolidationState,
+  executeConsolidation,
+  mergeSuggestionLines,
+  parseMergeSuggestions,
+  readConsolidateLease,
+  writeConsolidateLease,
+  MERGE_SUGGESTIONS_CURSOR,
+  type ConsolidationState,
+} from "../consolidate/index.js";
 import { dueRemindersForDevice } from "../reminders/run.js";
 import { timeZoneOffsetMinutes } from "../reminders/time.js";
 
@@ -338,6 +349,8 @@ export class YouBrainDaemon {
   #lastPortrait: number | null = null;
   #lastSearch: number | null = null;
   #lastReminders: number | null = null;
+  #lastConsolidation: number | null = null;
+  #consolidationState: ConsolidationState = emptyConsolidationState();
   /** Latest keyboard, pointer, or captured-session time. Not the heartbeat clock. */
   #lastActivityAt: string | null = null;
   /** Device-table activity from before this process wrote a row. */
@@ -718,6 +731,14 @@ export class YouBrainDaemon {
         // Keep the loop alive. The next interval tries again.
       }
       this.#lastReminders = this.#clock.nowMs();
+    }
+    if (intervalDue(this.#lastConsolidation, now, INTERVALS.consolidationMs)) {
+      try {
+        await this.#consolidate({ manual: false, force: false });
+      } catch {
+        // A bad lease or model call must not stop the loop.
+      }
+      this.#lastConsolidation = this.#clock.nowMs();
     }
   }
 
@@ -1107,11 +1128,12 @@ export class YouBrainDaemon {
     for (const session of store.listSessions()) {
       if (session.updatedAt !== null) sessionUpdatedAt[session.sessionKey] = session.updatedAt;
     }
+    const events = store.listEvents();
     const due = dueRemindersForDevice({
       deviceId: this.#local.deviceId,
       mainDevice: this.#roles.mainDevice,
       notifications: this.#shared.reminders.notifications,
-      events: store.listEvents(),
+      events,
       sessionUpdatedAt,
       activeLimit: this.#shared.topics.activeLimit,
       historyDays: this.#shared.topics.historyDays,
@@ -1120,6 +1142,10 @@ export class YouBrainDaemon {
       weeklyReviewTime: this.#shared.reminders.weeklyReviewTime,
       now: now.toISOString(),
       timeZoneOffsetMinutes: timeZoneOffsetMinutes(this.#roles.timezone, now),
+      mergeLines: mergeSuggestionLines(
+        parseMergeSuggestions(store.getCursor(MERGE_SUGGESTIONS_CURSOR)),
+        foldEvents(events).topics,
+      ),
     });
     for (const item of due) {
       if (this.#stopped) return;
@@ -1357,6 +1383,7 @@ export class YouBrainDaemon {
       status: () => this.#status(),
       sync: () => this.#syncNow(),
       upload: (input) => this.#uploadNow(input),
+      consolidate: (input) => this.#run(() => this.#consolidate({ manual: true, force: input.force === true })),
       reminders: async (all) => {
         const body = await readers.reminders(all);
         return {
@@ -1534,6 +1561,9 @@ export class YouBrainDaemon {
     if (consolidation.status === "stale") {
       warnings.push({ code: "CONSOLIDATION_STALE", message: "超过 1 天未沉淀" });
     }
+    if (consolidation.enabled && this.#consolidationState.lastRun && !this.#consolidationState.lastRun.ok) {
+      warnings.push({ code: "CONSOLIDATION_FAILED", message: "每日沉淀没有完成" });
+    }
     return {
       deviceId: this.#local.deviceId,
       drive: {
@@ -1556,16 +1586,81 @@ export class YouBrainDaemon {
     };
   }
 
+  async #consolidate(options: { manual: boolean; force: boolean }) {
+    const store = this.#store;
+    const outcome = await executeConsolidation(
+      {
+        deviceId: this.#local.deviceId,
+        mainDevice: this.#roles.mainDevice,
+        enabled: this.#roles.consolidation.enabled,
+        time: this.#roles.consolidation.time,
+        timeZone: this.#roles.timezone,
+        hasLlm: this.#llm !== null,
+        hasDrive: this.#drive !== null,
+        llm: this.#llm,
+        activeLimit: this.#shared.topics.activeLimit,
+        historyDays: this.#shared.topics.historyDays,
+        clock: this.#clock,
+        load: () => this.#consolidationView(),
+        emit: (type, data) => this.#emitUser(type, data),
+        cursors: {
+          get: (key) => store?.getCursor(key) ?? null,
+          set: (key, value) => {
+            store?.setCursor(key, value);
+          },
+        },
+        readLease: async () => {
+          if (!this.#drive) return null;
+          return readConsolidateLease(this.#drive, (message) => {
+            console.warn(message);
+          });
+        },
+        writeLease: async (lease) => {
+          if (!this.#drive) throw new Error("Drive 未打开");
+          await writeConsolidateLease(this.#drive, lease);
+        },
+      },
+      this.#consolidationState,
+      options,
+    );
+    if (outcome.status === "rejected") throw new ConsolidationRejected(outcome.code);
+    if (outcome.status === "done" && outcome.attempted) {
+      const at = this.#clock.now().toISOString();
+      this.changes.publish("topics", at);
+      this.changes.publish("status", at);
+    }
+    if (outcome.status === "skipped") {
+      return { day: outcome.day, ok: true, steps: [] };
+    }
+    return {
+      day: outcome.result.day,
+      ok: outcome.result.ok,
+      steps: outcome.result.steps.map((step) =>
+        step.error === undefined ? { id: step.id, ok: step.ok } : step,
+      ),
+    };
+  }
+
+  #consolidationView() {
+    const store = this.#store;
+    const events = store?.listEvents() ?? [];
+    const sessionUpdatedAt: Record<string, string> = {};
+    for (const session of store?.listSessions() ?? []) {
+      if (session.updatedAt !== null) sessionUpdatedAt[session.sessionKey] = session.updatedAt;
+    }
+    return { book: foldEvents(events), sessionUpdatedAt };
+  }
+
   async #consolidation(): Promise<StatusResponse["consolidation"]> {
     if (!this.#roles.consolidation.enabled) {
       return { enabled: false, lastFinishedAt: null, stale: false, status: "disabled" };
     }
-    const idle = {
+    const idle = this.#withLastRun({
       enabled: true,
       lastFinishedAt: null,
       stale: false,
-      status: "ok",
-    } as const;
+      status: "ok" as const,
+    });
     if (!this.#drive || !this.#driveKnown || !this.#driveReachable) return idle;
     try {
       const read = this.#drive.readPath(DRIVE_PATHS.consolidateLease).catch(() => null);
@@ -1579,15 +1674,21 @@ export class YouBrainDaemon {
       if (!finished) return idle;
       const ms = Date.parse(finished);
       const stale = Number.isNaN(ms) ? false : this.#clock.nowMs() - ms > INTERVALS.portraitMs;
-      return {
+      return this.#withLastRun({
         enabled: true,
         lastFinishedAt: finished,
         stale,
         status: stale ? "stale" : "ok",
-      };
+      });
     } catch {
       return idle;
     }
+  }
+
+  #withLastRun<T extends StatusResponse["consolidation"]>(value: T): T {
+    const lastRun = this.#consolidationState.lastRun;
+    if (!lastRun) return value;
+    return { ...value, lastRun };
   }
 
   #codingVariantPath(): string {

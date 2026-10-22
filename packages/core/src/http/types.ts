@@ -285,6 +285,13 @@ export interface StatusResponse {
     stale: boolean;
     /** `disabled` is “未启用”. Stale is only computed when consolidation is enabled. */
     status: "disabled" | "ok" | "stale";
+    /** Present after this process has attempted a run. Memory only. */
+    lastRun?: {
+      day: string;
+      ok: boolean;
+      error?: string;
+      finishedAt: string;
+    };
   };
   warnings: Array<{ code: string; message: string }>;
 }
@@ -330,6 +337,24 @@ export interface UploadActionResult {
 export interface SyncActionResult {
   started: boolean;
   at: string;
+}
+
+export const ConsolidateActionBodySchema = z.object({
+  force: z.boolean().optional(),
+});
+
+export type ConsolidateActionInput = z.infer<typeof ConsolidateActionBodySchema>;
+
+export interface ConsolidateStepResult {
+  id: string;
+  ok: boolean;
+  error?: string;
+}
+
+export interface ConsolidateActionResult {
+  day: string;
+  ok: boolean;
+  steps: ConsolidateStepResult[];
 }
 
 export const DaemonEventSchema = z.object({

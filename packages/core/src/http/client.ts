@@ -3,6 +3,8 @@ import {
   type ActionResponse,
   type ApiErrorBody,
   type ConclusionActionBody,
+  type ConsolidateActionInput,
+  type ConsolidateActionResult,
   type DaemonEvent,
   type DevicesResponse,
   type PortraitResponse,
@@ -55,6 +57,8 @@ export interface DaemonClient {
   reminders(all?: boolean): Promise<RemindersResponse>;
   /** Optional so the web client can adopt the write call in a later task. */
   reminderAction?(body: ReminderActionBody): Promise<ReminderView>;
+  /** Optional so older clients can ignore the manual trigger. */
+  consolidate?(body?: ConsolidateActionInput): Promise<ConsolidateActionResult>;
   sync(): Promise<SyncActionResult>;
   upload(body?: UploadActionInput): Promise<UploadActionResult>;
   todo(body: TodoActionBody): Promise<ActionResponse>;
@@ -131,6 +135,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     status: () => request("GET", "/api/status"),
     reminders: (all) => request("GET", all ? "/api/reminders?all=1" : "/api/reminders"),
     reminderAction: (body) => request("POST", "/api/actions/reminder", body),
+    consolidate: (body) => request("POST", "/api/actions/consolidate", body ?? {}),
     sync: () => request("POST", "/api/actions/sync"),
     upload: (body) => request("POST", "/api/actions/upload", body ?? {}),
     todo: (body) => request("POST", "/api/actions/todo", body),

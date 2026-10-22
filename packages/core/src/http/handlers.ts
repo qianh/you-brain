@@ -10,6 +10,10 @@ import {
 import { z } from "zod";
 
 import type { HttpDeps } from "./deps.js";
+import {
+  ConsolidationRejected,
+  consolidationRejectMessage,
+} from "../consolidate/execute.js";
 import { YouBrainError } from "../domain/errors.js";
 import { acceptActivityAt } from "../reminders/activity.js";
 import { planReminderAction } from "../reminders/action.js";
@@ -17,6 +21,7 @@ import { ChangeHub } from "./hub.js";
 import { assertPortraitVariant } from "./portrait-files.js";
 import {
   ActivityBodySchema,
+  ConsolidateActionBodySchema,
   ConclusionActionBodySchema,
   ReminderActionBodySchema,
   TodoActionBodySchema,
@@ -140,6 +145,9 @@ export async function handleApi(
     return method(request, "POST", () => reminderAction(request, context));
   }
   if (path === "/api/actions/sync") return method(request, "POST", () => sync(context));
+  if (path === "/api/actions/consolidate") {
+    return method(request, "POST", () => consolidate(request, context));
+  }
   if (path === "/api/actions/upload") {
     return method(request, "POST", () => upload(request, context));
   }
@@ -418,6 +426,20 @@ async function reminderAction(request: Request, context: ApiContext): Promise<Re
   }
   publish(context.hub, kinds);
   return json(plan.reminder);
+}
+
+async function consolidate(request: Request, context: ApiContext): Promise<Response> {
+  const body = ConsolidateActionBodySchema.parse(await readJson(request));
+  if (!context.deps.consolidate) return apiError(404, "NOT_FOUND", "找不到接口");
+  try {
+    const result = await context.deps.consolidate({ force: body.force === true });
+    return json(result);
+  } catch (error) {
+    if (error instanceof ConsolidationRejected) {
+      return apiError(409, error.code, consolidationRejectMessage(error.code));
+    }
+    throw error;
+  }
 }
 
 async function sync(context: ApiContext): Promise<Response> {

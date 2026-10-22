@@ -37,6 +37,7 @@ function due(
     weeklyReviewTime: patch.weeklyReviewTime ?? "09:00",
     now: patch.now ?? NOW,
     timeZoneOffsetMinutes: patch.timeZoneOffsetMinutes ?? 0,
+    ...(patch.mergeLines ? { mergeLines: patch.mergeLines } : {}),
   };
   return computeDueReminders(input);
 }
@@ -181,9 +182,32 @@ describe("computeDueReminders", () => {
     });
     expect(after.some((item) => item.kind === "weekly_review")).toBe(true);
     expect(after.some((item) => item.kind === "history")).toBe(true);
-    expect(after.find((item) => item.kind === "weekly_review")?.text).toContain(
-      "相似话题：合并建议稍后给出。",
-    );
+    const weekly = after.find((item) => item.kind === "weekly_review");
+    expect(weekly?.reminderId).toBe(`weekly:${isoWeekKey(parts)}`);
+    expect(weekly?.text).not.toContain("相似话题");
+    expect(weekly?.text).toContain("本周活跃话题");
+  });
+
+  it("lists up to three merge suggestions and keeps the weekly id", () => {
+    const parts = localParts(NOW_MS, 0);
+    const events = topicEvents({ topicId: "old", name: "旧题", key: KEY_A, at: at(NOW_MS - 40 * DAY) });
+    const lines = [
+      { fromName: "甲", intoName: "乙", reason: "重复" },
+      { fromName: "丙", intoName: "丁", reason: "同一件" },
+      { fromName: "戊", intoName: "己", reason: "重叠" },
+      { fromName: "庚", intoName: "辛", reason: "多余" },
+    ];
+    const after = due(events, {
+      sessionUpdatedAt: { [KEY_A]: at(NOW_MS - 40 * DAY) },
+      weeklyReviewDay: parts.isoWeekday,
+      weeklyReviewTime: "16:30",
+      mergeLines: lines,
+    });
+    const weekly = after.find((item) => item.kind === "weekly_review");
+    expect(weekly?.reminderId).toBe(`weekly:${isoWeekKey(parts)}`);
+    expect(weekly?.text).toContain("甲 与 乙 看起来是同一件事（重复）。");
+    expect(weekly?.text).toContain("戊 与 己 看起来是同一件事（重叠）。");
+    expect(weekly?.text).not.toContain("庚");
   });
 
   it("changes the digest date and yesterday across offsets", () => {

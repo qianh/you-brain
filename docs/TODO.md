@@ -26,7 +26,9 @@
   - [x] B1c 桌面外壳：上报键鼠活动、按 `delivery.notify` 弹系统通知（通知正文用提醒文案、已通知的不重复）、角标
   - [x] B1d 同步层：设备记录的 `lastActiveAt` 写入真实活动时间（目前 Drive 上仍写成「现在」，会让其他设备误判这台正在使用）
   - [x] B1e 提醒相关的多设备端到端验证（两个 daemon 共用内存 Drive：只生成一次、只在一台设备 `notify`）
-- [ ] **B2 每日全局沉淀**：`packages/core/src/consolidate` 实现技术方案第 11 节流程；主设备租约 `leases/consolidate.json` 的写入与续约；沉淀开关与过期提示（读取侧已完成）联动真实结果
+- [~] **B2 每日全局沉淀**（技术方案 §11）
+  - [x] B2a 租约 `leases/consolidate.json`、调度与补跑、话题概要重写、合并建议、`POST /api/actions/consolidate`
+  - [ ] B2b 数字分身重新生成（先存快照再原地更新、异常变短拒绝覆盖、未应用纠正的输入预留）与状态页/设置页展示 `lastRun`
 - [ ] **B3 Drive 话题总览与详情文件**：把话题册写成 Drive 上 `topics/TOPICS-latest.md` 及各话题详情文件（路径见 `packages/protocol/src/paths.ts`），随沉淀与话题变更更新，设备 B 可读
 - [ ] **B4 数字分身纠正**：`portrait.correction` / `portrait.correction_applied` 事件的折叠与应用（`topics/fold.ts` 目前忽略）；界面纠正入口（替换「纠正会在后续版本开放」）；MCP 暴露
 - [ ] **B5 网页会话处理设备**：`webProcessor` 角色真正生效——被指定设备负责处理网页版 AI 会话的提炼；角色切换的行为与状态展示
