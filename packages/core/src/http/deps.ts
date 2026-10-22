@@ -19,6 +19,9 @@ import type {
   TopicsResponse,
   UploadActionInput,
   UploadActionResult,
+  WebhookPublic,
+  WebhookPutBody,
+  WebhookTestResult,
 } from "./types.js";
 
 /** Read and write ports for the local API. The daemon supplies the implementations. */
@@ -49,5 +52,9 @@ export interface HttpDeps {
   upload(input: UploadActionInput): Promise<UploadActionResult>;
   /** Optional so older test doubles keep compiling. The daemon always supplies it. */
   consolidate?(input: { force?: boolean }): Promise<ConsolidateActionResult>;
+  /** Optional so older test doubles keep compiling. The daemon always supplies it. */
+  readWebhook?(): Promise<WebhookPublic>;
+  writeWebhook?(body: WebhookPutBody): Promise<WebhookPublic>;
+  testWebhook?(): Promise<WebhookTestResult>;
   events: EventSink;
 }

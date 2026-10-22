@@ -39,7 +39,7 @@
 
 ## C. P2
 
-- [ ] **C1 Webhook 推送**：把提醒 / 话题事件推送到用户配置的 webhook（含签名、重试、设置页入口、测试）；依赖 B1
+- [x] **C1 Webhook 推送**：`packages/core/src/webhook/`；本机 `<dataDir>/webhook.json`（0600，不进 Drive）；仅主设备推 `reminder.issued`/`topic.created`/`topic.status_changed`/`topic.merged`；HMAC-SHA256 签名（`X-YouBrain-Signature: v1=…`）、退避 1m/5m/30m/2h/6h 共 6 次后放弃；`GET/PUT /api/webhook`、`POST /api/actions/webhook-test`；设置页「接入」下 Webhook 分区。未对真实 webhook 端点联调
 
 ## D. 验收与文档
 

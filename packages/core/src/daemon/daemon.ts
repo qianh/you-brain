@@ -12,6 +12,7 @@ import {
   createDefaultRoles,
   createDefaultSharedConfig,
   resolveWebProcessor,
+  ulid,
   type Event,
   type EventOf,
   type EventType,
@@ -56,6 +57,9 @@ import type {
   SyncActionResult,
   UploadActionInput,
   UploadActionResult,
+  WebhookPublic,
+  WebhookPutBody,
+  WebhookTestResult,
   ZoneSettings,
 } from "../http/types.js";
 import { isCliNoOutputTimeout } from "../llm/cli/exec.js";
@@ -84,6 +88,24 @@ import {
 } from "../consolidate/index.js";
 import { dueRemindersForDevice } from "../reminders/run.js";
 import { timeZoneOffsetMinutes } from "../reminders/time.js";
+import {
+  WEBHOOK_STATE_CURSOR,
+  applyWebhookUpdate,
+  countWebhookPending,
+  defaultWebhookConfig,
+  emptyWebhookState,
+  parseWebhookState,
+  postWebhook,
+  readWebhookConfig,
+  runWebhookDelivery,
+  serializeWebhookState,
+  webhookConfigPath,
+  webhookErrorHost,
+  webhookUrlProblem,
+  writeWebhookConfig,
+  type WebhookConfig,
+  type WebhookFetch,
+} from "../webhook/index.js";
 
 import { CodingInjection } from "../portrait/injection.js";
 import { FilePortraitConsentStore, portraitConsentPath } from "../portrait/consent.js";
@@ -192,6 +214,8 @@ export interface DaemonOptions {
   /** Default true. Tests set false so discovery is driven only by scan() and the 10 minute timer. */
   watch?: boolean;
   port?: number;
+  /** Test injection. Defaults to the global fetch. Tests must not open a real connection. */
+  webhookFetch?: WebhookFetch;
 }
 
 interface LiveSession {
@@ -370,6 +394,12 @@ export class YouBrainDaemon {
   #lastReminders: number | null = null;
   #lastConsolidation: number | null = null;
   #lastWebSessions: number | null = null;
+  #lastWebhook: number | null = null;
+  #webhook: WebhookConfig = defaultWebhookConfig();
+  #webhookFetch: WebhookFetch = fetch;
+  #webhookTimer: { cancel(): void } | null = null;
+  /** Serializes delivery and config writes. Independent of the daemon tick chain. */
+  #webhookChain: Promise<void> = Promise.resolve();
   #consolidationState: ConsolidationState = emptyConsolidationState();
   /** Latest keyboard, pointer, or captured-session time. Not the heartbeat clock. */
   #lastActivityAt: string | null = null;
@@ -395,6 +425,7 @@ export class YouBrainDaemon {
     this.#env = options.env ?? process.env;
     this.#appVersion = options.appVersion ?? APP_VERSION;
     this.#watchEnabled = options.watch !== false;
+    this.#webhookFetch = options.webhookFetch ?? fetch;
     this.#llmOverride = options.llm;
     const platform = options.platform ?? process.platform;
     assertSupportedPlatform(platform);
@@ -435,6 +466,10 @@ export class YouBrainDaemon {
     this.#log = new EventLog(this.#store, this.#local.deviceId, {
       now: () => this.#clock.now(),
     });
+    this.#webhook = await log.time("readWebhook", () =>
+      readWebhookConfig(webhookConfigPath(this.#paths.dataDir)),
+    );
+    this.#armWebhookWindow();
     const consent = new FilePortraitConsentStore(portraitConsentPath(this.#paths.dataDir));
     const managedStatePath = join(this.#paths.dataDir, "managed-blocks.json");
     this.#coding = new CodingInjection({
@@ -615,6 +650,9 @@ export class YouBrainDaemon {
   async #stopBody(): Promise<void> {
     this.#stopped = true;
     this.#abort.abort();
+    this.#webhookTimer?.cancel();
+    this.#webhookTimer = null;
+    await this.#webhookChain.catch(() => undefined);
     await Promise.race([
       this.#online.catch(() => undefined),
       delay(BACKGROUND_STOP_MS),
@@ -719,8 +757,9 @@ export class YouBrainDaemon {
       intervalDue(this.#lastPull, now, pullInterval(this.changes.subscriberCount()))
     ) {
       try {
-        await this.#sync.pull();
+        const pulled = await this.#sync.pull();
         this.#rememberSyncSuccess();
+        if (pulled.applied > 0) this.#scheduleWebhook();
       } catch (error) {
         this.#rememberSyncFailure(error);
       }
@@ -788,6 +827,14 @@ export class YouBrainDaemon {
           this.#topicFilesQuietUntil = this.#clock.nowMs() + INTERVALS.topicFilesDebounceMs;
         }
       }
+    }
+    if (!this.#stopped && intervalDue(this.#lastWebhook, now, INTERVALS.webhookMs)) {
+      try {
+        await this.#runWebhook();
+      } catch {
+        // One bad delivery must not stop the loop.
+      }
+      this.#lastWebhook = this.#clock.nowMs();
     }
   }
 
@@ -1246,6 +1293,7 @@ export class YouBrainDaemon {
   async #emitCopied(event: Event): Promise<void> {
     if (this.#sync) {
       await appendCopied(this.#sync, event);
+      this.#scheduleWebhook();
       return;
     }
     if (!this.#log || !this.#store) return;
@@ -1253,11 +1301,13 @@ export class YouBrainDaemon {
     this.#enqueueLocal(allocated);
     persistTopicBook(this.#store, applyEvents(foldEvents(this.#store.listEvents()), [allocated]));
     this.#onTopicsChanged();
+    this.#scheduleWebhook();
   }
 
   async #emitUser<T extends EventType>(type: T, data: EventOf<T>["data"]): Promise<void> {
     if (this.#sync) {
       await this.#sync.append(type, data);
+      this.#scheduleWebhook();
       return;
     }
     if (!this.#log || !this.#store) return;
@@ -1265,6 +1315,7 @@ export class YouBrainDaemon {
     this.#enqueueLocal(event);
     persistTopicBook(this.#store, applyEvents(foldEvents(this.#store.listEvents()), [event]));
     this.#onTopicsChanged();
+    this.#scheduleWebhook();
   }
 
   /** Drive may still be closed. Queue the event so the first flush replicates it. */
@@ -1391,6 +1442,134 @@ export class YouBrainDaemon {
       if (this.#stopped) return;
       await this.#emitUser("reminder.issued", item);
     }
+  }
+
+  /** A disabled file with no cursor must not backfill events from before this start. */
+  #armWebhookWindow(): void {
+    const store = this.#store;
+    if (!store || !this.#webhook.enabled) return;
+    const state = parseWebhookState(store.getCursor(WEBHOOK_STATE_CURSOR));
+    if (state.enabledAt !== null) return;
+    state.enabledAt = this.#clock.now().toISOString();
+    store.setCursor(WEBHOOK_STATE_CURSOR, serializeWebhookState(state));
+  }
+
+  #markWebhookEnabled(at: string): void {
+    const store = this.#store;
+    if (!store) return;
+    const state = parseWebhookState(store.getCursor(WEBHOOK_STATE_CURSOR));
+    state.enabledAt = at;
+    store.setCursor(WEBHOOK_STATE_CURSOR, serializeWebhookState(state));
+  }
+
+  /** One in flight. A timer that is already waiting is left alone so the wait stays ≤ 2s. */
+  #scheduleWebhook(): void {
+    if (this.#stopped || !this.#webhook.enabled) return;
+    if (this.#roles.mainDevice !== this.#local.deviceId) return;
+    if (this.#webhookTimer) return;
+    this.#webhookTimer = this.#clock.schedule(INTERVALS.webhookDebounceMs, () => {
+      this.#webhookTimer = null;
+      return this.#runWebhook().catch(() => undefined);
+    });
+  }
+
+  #runWebhook(): Promise<void> {
+    return this.#enqueueWebhook(() => this.#deliverWebhook());
+  }
+
+  #enqueueWebhook<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.#webhookChain.then(fn, fn);
+    this.#webhookChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  async #deliverWebhook(): Promise<void> {
+    if (this.#stopped) return;
+    const store = this.#store;
+    if (!store || !this.#webhook.enabled) return;
+    if (this.#roles.mainDevice !== this.#local.deviceId) return;
+    const result = await runWebhookDelivery({
+      events: store.listEventsByType(this.#webhook.events),
+      state: parseWebhookState(store.getCursor(WEBHOOK_STATE_CURSOR)),
+      now: this.#clock.now(),
+      config: this.#webhook,
+      fetch: this.#webhookFetch,
+      signal: this.#abort.signal,
+    });
+    if (this.#store !== store) return;
+    store.setCursor(WEBHOOK_STATE_CURSOR, serializeWebhookState(result.state));
+    const error = result.state.last?.error;
+    if (result.failed > 0 && error) console.error(`webhook: ${error}`);
+  }
+
+  async #writeWebhook(body: WebhookPutBody): Promise<WebhookPublic> {
+    const next = applyWebhookUpdate(this.#webhook, {
+      ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
+      ...(body.url !== undefined ? { url: body.url } : {}),
+      ...(body.secret !== undefined ? { secret: body.secret } : {}),
+      ...(body.events !== undefined ? { events: body.events } : {}),
+    });
+    const turningOn = next.enabled && !this.#webhook.enabled;
+    await writeWebhookConfig(webhookConfigPath(this.#paths.dataDir), next);
+    this.#webhook = next;
+    if (turningOn) this.#markWebhookEnabled(this.#clock.now().toISOString());
+    if (next.enabled) this.#scheduleWebhook();
+    return this.#webhookView();
+  }
+
+  #webhookView(): WebhookPublic {
+    const store = this.#store;
+    const state = store
+      ? parseWebhookState(store.getCursor(WEBHOOK_STATE_CURSOR))
+      : emptyWebhookState();
+    const pending =
+      this.#webhook.enabled && store
+        ? countWebhookPending(
+            store.listEventsByType(this.#webhook.events),
+            state,
+            this.#webhook.events,
+          )
+        : 0;
+    return {
+      enabled: this.#webhook.enabled,
+      url: this.#webhook.url,
+      hasSecret: this.#webhook.secret !== "",
+      events: [...this.#webhook.events],
+      active: this.#webhook.enabled && this.#roles.mainDevice === this.#local.deviceId,
+      last: state.last,
+      pending,
+    };
+  }
+
+  async #testWebhook(): Promise<WebhookTestResult> {
+    const url = this.#webhook.url;
+    if (url === "") throw new YouBrainError("INVALID_INPUT", "还没有保存 Webhook URL");
+    const problem = webhookUrlProblem(url);
+    if (problem) throw new YouBrainError("INVALID_INPUT", problem);
+    const now = this.#clock.now();
+    const result = await postWebhook({
+      url,
+      secret: this.#webhook.secret,
+      payload: {
+        id: `test-${ulid(now.getTime())}`,
+        type: "webhook.test",
+        occurredAt: now.toISOString(),
+        deviceId: this.#local.deviceId,
+        data: {},
+      },
+      fetch: this.#webhookFetch,
+      now,
+      signal: this.#abort.signal,
+    });
+    if (result.ok) return { ok: true, status: result.status };
+    if (result.reason === "aborted") {
+      return { ok: false, error: `${webhookErrorHost(url)}: 连接失败` };
+    }
+    if (result.reason === "http") return { ok: false, status: result.status, error: result.error };
+    return { ok: false, error: result.error };
   }
 
   async #onConfigChanged(update: {
@@ -1637,6 +1816,9 @@ export class YouBrainDaemon {
       writeRoles: (roles) => this.#writeRoles(roles),
       readConfig: async () => this.#shared,
       writeConfig: (config) => this.#writeConfig(config),
+      readWebhook: () => Promise.resolve(this.#webhookView()),
+      writeWebhook: (body) => this.#enqueueWebhook(() => this.#writeWebhook(body)),
+      testWebhook: () => this.#testWebhook(),
       status: () => this.#status(),
       sync: () => this.#syncNow(),
       upload: (input) => this.#uploadNow(input),
@@ -1723,9 +1905,10 @@ export class YouBrainDaemon {
     if (!this.#sync) return { started: false, at };
     await this.#run(async () => {
       try {
-        await this.#sync?.pull();
+        const pulled = await this.#sync?.pull();
         this.#rememberSyncSuccess();
         this.#lastPull = this.#clock.nowMs();
+        if (pulled && pulled.applied > 0) this.#scheduleWebhook();
       } catch (error) {
         this.#rememberSyncFailure(error);
         throw new Error(this.#lastSyncError?.message ?? "同步失败");

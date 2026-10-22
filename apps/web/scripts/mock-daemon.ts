@@ -401,6 +401,86 @@ let roles: Record<string, unknown> = {
   timezone: "Asia/Shanghai",
 };
 
+const WEBHOOK_EVENTS = ["reminder.issued", "topic.created", "topic.status_changed", "topic.merged"];
+
+let webhookSecret = scenario === "rich" || scenario === "error" ? "stored-secret" : "";
+let webhook: {
+  enabled: boolean;
+  url: string;
+  events: string[];
+  last: { at: string; ok: boolean; status?: number; error?: string; eventId?: string } | null;
+  pending: number;
+} =
+  scenario === "rich"
+    ? {
+        enabled: true,
+        url: "https://hooks.example.com/you-brain",
+        events: [...WEBHOOK_EVENTS],
+        last: { at: ago(2 * MINUTE), ok: true, status: 204, eventId: "01HZWEBHOOKRICH000000000000" },
+        pending: 0,
+      }
+    : scenario === "error"
+      ? {
+          enabled: true,
+          url: "https://hooks.example.com/you-brain",
+          events: [...WEBHOOK_EVENTS],
+          last: {
+            at: ago(4 * MINUTE),
+            ok: false,
+            status: 502,
+            error: "hooks.example.com: HTTP 502",
+            eventId: "01HZWEBHOOKERR0000000000000",
+          },
+          pending: 2,
+        }
+      : { enabled: false, url: "", events: [...WEBHOOK_EVENTS], last: null, pending: 0 };
+
+function webhookPublic(): unknown {
+  return {
+    enabled: webhook.enabled,
+    url: webhook.url,
+    hasSecret: webhookSecret !== "",
+    events: webhook.events,
+    active: webhook.enabled && roles.mainDevice === MAC,
+    last: webhook.last,
+    pending: webhook.enabled ? webhook.pending : 0,
+  };
+}
+
+function webhookUrlProblem(url: string): string | null {
+  if (url.length > 2048) return "URL 最长 2048 个字符";
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return "URL 必须是 http 或 https";
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return "URL 必须是 http 或 https";
+  if (parsed.username !== "" || parsed.password !== "") return "URL 不能包含用户名或密码";
+  if (parsed.host === "") return "URL 必须是 http 或 https";
+  return null;
+}
+
+function putWebhook(patch: unknown): Response {
+  if (!isObject(patch)) return fail(400, "INVALID_INPUT", "请求体必须是 JSON 对象");
+  const enabled = typeof patch.enabled === "boolean" ? patch.enabled : webhook.enabled;
+  const url = typeof patch.url === "string" ? patch.url.trim() : webhook.url;
+  if (url !== "") {
+    const problem = webhookUrlProblem(url);
+    if (problem) return fail(400, "INVALID_INPUT", problem);
+  } else if (enabled) {
+    return fail(400, "INVALID_INPUT", "启用时需要有效的 Webhook URL");
+  }
+  webhook.enabled = enabled;
+  webhook.url = url;
+  if (typeof patch.secret === "string") webhookSecret = patch.secret;
+  if (Array.isArray(patch.events)) {
+    const next = patch.events.filter((item): item is string => typeof item === "string" && WEBHOOK_EVENTS.includes(item));
+    webhook.events = [...new Set(next)];
+  }
+  return json(webhookPublic());
+}
+
 interface MockReminder {
   reminderId: string;
   kind: string;
@@ -1181,6 +1261,16 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
     config = merge(config, patch) as Record<string, unknown>;
     publish("status");
     return json(config);
+  }
+  if (path === "/api/webhook" && request.method === "GET") return json(webhookPublic());
+  if (path === "/api/webhook" && request.method === "PUT") return putWebhook(await request.json().catch(() => null));
+  if (path === "/api/webhook") return fail(405, "METHOD_NOT_ALLOWED", "方法不被允许");
+  if (path === "/api/actions/webhook-test" && request.method === "POST") {
+    if (webhook.url.trim() === "") return fail(400, "INVALID_INPUT", "还没有保存 Webhook URL");
+    if (scenario === "error") {
+      return json({ ok: false, status: 502, error: "hooks.example.com: HTTP 502" });
+    }
+    return json({ ok: true, status: 204 });
   }
   if (path === "/api/status" && request.method === "GET") return json(statusBody());
   if (path === "/api/reminders" && request.method === "GET") {

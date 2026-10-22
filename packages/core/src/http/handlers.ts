@@ -30,6 +30,9 @@ import {
   TopicMutationBodySchema,
   UploadActionBodySchema,
   VirtualDeviceCreateBodySchema,
+  WebhookPublicSchema,
+  WebhookPutSchema,
+  WebhookTestResultSchema,
   type ActionResponse,
   type ApiErrorBody,
   type DaemonChangeKind,
@@ -162,6 +165,11 @@ export async function handleApi(
     if (request.method === "PUT") return writeConfig(request, context);
     return methodNotAllowed("GET, PUT");
   }
+  if (path === "/api/webhook") {
+    if (request.method === "GET") return readWebhook(context);
+    if (request.method === "PUT") return writeWebhook(request, context);
+    return methodNotAllowed("GET, PUT");
+  }
   if (path === "/api/status") return method(request, "GET", () => status(context));
   if (path === "/api/reminders") return method(request, "GET", () => reminders(url, context));
   if (path === "/api/activity") return method(request, "POST", () => activity(request, context));
@@ -169,6 +177,9 @@ export async function handleApi(
     return method(request, "POST", () => reminderAction(request, context));
   }
   if (path === "/api/actions/sync") return method(request, "POST", () => sync(context));
+  if (path === "/api/actions/webhook-test") {
+    return method(request, "POST", () => sendWebhookTest(context));
+  }
   if (path === "/api/actions/consolidate") {
     return method(request, "POST", () => consolidate(request, context));
   }
@@ -483,6 +494,22 @@ async function writeRoles(request: Request, context: ApiContext): Promise<Respon
   }
   await context.deps.writeRoles(next);
   return json(next);
+}
+
+async function readWebhook(context: ApiContext): Promise<Response> {
+  if (!context.deps.readWebhook) throw new HttpError(500, "INTERNAL_ERROR", "webhook 未接入");
+  return json(WebhookPublicSchema.parse(await context.deps.readWebhook()));
+}
+
+async function writeWebhook(request: Request, context: ApiContext): Promise<Response> {
+  if (!context.deps.writeWebhook) throw new HttpError(500, "INTERNAL_ERROR", "webhook 未接入");
+  const body = WebhookPutSchema.parse(await readJson(request));
+  return json(WebhookPublicSchema.parse(await context.deps.writeWebhook(body)));
+}
+
+async function sendWebhookTest(context: ApiContext): Promise<Response> {
+  if (!context.deps.testWebhook) throw new HttpError(500, "INTERNAL_ERROR", "webhook 未接入");
+  return json(WebhookTestResultSchema.parse(await context.deps.testWebhook()));
 }
 
 async function config(context: ApiContext): Promise<Response> {

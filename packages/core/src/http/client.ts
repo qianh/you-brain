@@ -31,6 +31,9 @@ import {
   type VirtualDeviceCreateBody,
   type VirtualDeviceResponse,
   type RemoveDeviceResponse,
+  type WebhookPublic,
+  type WebhookPutBody,
+  type WebhookTestResult,
 } from "./types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 
@@ -64,6 +67,9 @@ export interface DaemonClient {
   config(): Promise<SharedConfig>;
   updateConfig(patch: unknown): Promise<SharedConfig>;
   status(): Promise<StatusResponse>;
+  webhook(): Promise<WebhookPublic>;
+  updateWebhook(body: WebhookPutBody): Promise<WebhookPublic>;
+  testWebhook(): Promise<WebhookTestResult>;
   reminders(all?: boolean): Promise<RemindersResponse>;
   /** Optional so the web client can adopt the write call in a later task. */
   reminderAction?(body: ReminderActionBody): Promise<ReminderView>;
@@ -154,6 +160,9 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     config: () => request("GET", "/api/config"),
     updateConfig: (patch) => request("PUT", "/api/config", patch),
     status: () => request("GET", "/api/status"),
+    webhook: () => request("GET", "/api/webhook"),
+    updateWebhook: (body) => request("PUT", "/api/webhook", body),
+    testWebhook: () => request("POST", "/api/actions/webhook-test"),
     reminders: (all) => request("GET", all ? "/api/reminders?all=1" : "/api/reminders"),
     reminderAction: (body) => request("POST", "/api/actions/reminder", body),
     consolidate: (body) => request("POST", "/api/actions/consolidate", body ?? {}),

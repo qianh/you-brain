@@ -14,6 +14,7 @@ import {
 } from "@you-brain/protocol";
 
 import { SessionSourceSchema } from "../domain/session.js";
+import { WebhookEventKindSchema, type WebhookEventKind } from "../webhook/kinds.js";
 import { z } from "zod";
 
 export interface ApiErrorBody {
@@ -407,6 +408,47 @@ export interface ConsolidateActionResult {
   ok: boolean;
   steps: ConsolidateStepResult[];
 }
+
+export const WebhookPutSchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    url: z.string().optional(),
+    secret: z.string().optional(),
+    events: z.array(WebhookEventKindSchema).optional(),
+  })
+  .strict();
+
+export type WebhookPutBody = z.infer<typeof WebhookPutSchema>;
+
+export const WebhookLastSchema = z.object({
+  at: z.string(),
+  ok: z.boolean(),
+  status: z.number().int().optional(),
+  error: z.string().optional(),
+  eventId: z.string().optional(),
+});
+
+export const WebhookPublicSchema = z.object({
+  enabled: z.boolean(),
+  url: z.string(),
+  hasSecret: z.boolean(),
+  events: z.array(WebhookEventKindSchema),
+  active: z.boolean(),
+  last: WebhookLastSchema.nullable(),
+  pending: z.number().int().nonnegative(),
+});
+
+export type WebhookPublic = z.infer<typeof WebhookPublicSchema>;
+
+export const WebhookTestResultSchema = z.object({
+  ok: z.boolean(),
+  status: z.number().int().optional(),
+  error: z.string().optional(),
+});
+
+export type WebhookTestResult = z.infer<typeof WebhookTestResultSchema>;
+
+export type { WebhookEventKind };
 
 export const DaemonEventSchema = z.object({
   id: z.number().int().nonnegative(),

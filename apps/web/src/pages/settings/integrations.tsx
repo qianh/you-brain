@@ -8,6 +8,7 @@ import { Toggle } from "../../components/toggle.js";
 import { useDaemon } from "../../daemon-context.js";
 import { sourceLabel } from "../../lib/format.js";
 import { toggleMember } from "./logic.js";
+import { WebhookSection } from "./webhook.js";
 
 const GROUPS = [
   { key: "mcpClients", title: "mcp" },
@@ -62,6 +63,7 @@ export function IntegrationsSection({
           </Section>
         );
       })}
+      <WebhookSection />
     </div>
   );
 }

@@ -25,6 +25,9 @@ import type {
   VirtualDeviceCreateBody,
   VirtualDeviceResponse,
   RemoveDeviceResponse,
+  WebhookPublic,
+  WebhookPutBody,
+  WebhookTestResult,
 } from "@you-brain/core/http/types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 
@@ -67,6 +70,9 @@ export interface BrowserDaemon extends Omit<DaemonClient, "reminderAction" | "co
   putOauth(body: OauthSecretInput): Promise<void>;
   testLlm(body: { provider: string; model: string; baseUrl: string }): Promise<ActionMessage>;
   googleLogin(): Promise<ActionMessage>;
+  webhook(): Promise<WebhookPublic>;
+  updateWebhook(body: WebhookPutBody): Promise<WebhookPublic>;
+  testWebhook(): Promise<WebhookTestResult>;
   reminderAction(reminderId: string, action: ReminderActionName, until?: string): Promise<ReminderView>;
   consolidate(body?: { force?: boolean }): Promise<ConsolidateActionResult>;
 }
@@ -176,6 +182,9 @@ export function createBrowserDaemon(options?: {
     },
     testLlm: (body) => request<ActionMessage>("POST", "/api/actions/llm-test", body),
     googleLogin: () => request<ActionMessage>("POST", "/api/actions/google-login"),
+    webhook: () => request<WebhookPublic>("GET", "/api/webhook"),
+    updateWebhook: (body) => request<WebhookPublic>("PUT", "/api/webhook", body),
+    testWebhook: () => request<WebhookTestResult>("POST", "/api/actions/webhook-test"),
   };
 }
 
