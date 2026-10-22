@@ -10,6 +10,8 @@ import {
 
 import type {
   ActionResponse,
+  PortraitCorrectionResult,
+  PortraitCorrectionsResponse,
   PortraitResponse,
   RemindersResponse,
   SearchRequest,
@@ -84,6 +86,12 @@ export interface McpServices {
     input: UpdateTopicInput,
   ): Promise<TopicMutationResponse | ActionResponse>;
   getReminders(): Promise<RemindersResponse>;
+  addPortraitCorrection(input: {
+    variant?: string;
+    section: string;
+    text: string;
+  }): Promise<PortraitCorrectionResult>;
+  getPortraitCorrections(input: { variant?: string }): Promise<PortraitCorrectionsResponse>;
 }
 
 type ToolResult = {
@@ -291,6 +299,37 @@ export function createToolHandlers(services: McpServices) {
         return failure(error);
       }
     },
+    add_portrait_correction: async (input: {
+      variant?: string | undefined;
+      section: string;
+      text: string;
+    }): Promise<ToolResult> => {
+      try {
+        const output = await services.addPortraitCorrection({
+          section: input.section,
+          text: input.text,
+          ...(input.variant !== undefined ? { variant: input.variant } : {}),
+        });
+        return success(
+          output,
+          "已记录纠正。纠正会在下一次每日沉淀时并入数字分身，不会立刻改写。",
+        );
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    get_portrait_corrections: async (input: {
+      variant?: string | undefined;
+    }): Promise<ToolResult> => {
+      try {
+        const output = await services.getPortraitCorrections(
+          input.variant !== undefined ? { variant: input.variant } : {},
+        );
+        return success(output, JSON.stringify(output, null, 2));
+      } catch (error) {
+        return failure(error);
+      }
+    },
   };
 }
 
@@ -400,6 +439,29 @@ export function createMcpServer(services: McpServices): McpServer {
       inputSchema: {},
     },
     handlers.get_reminders,
+  );
+  server.registerTool(
+    "add_portrait_correction",
+    {
+      description:
+        "记录一条数字分身纠正。纠正会在下一次每日沉淀时并入数字分身，不会立刻改写。variant 默认 full",
+      inputSchema: {
+        variant: z.string().min(1).optional(),
+        section: z.string().min(1).max(80),
+        text: z.string().min(1).max(1000),
+      },
+    },
+    handlers.add_portrait_correction,
+  );
+  server.registerTool(
+    "get_portrait_corrections",
+    {
+      description: "读取数字分身纠正及状态。variant 省略时返回全部变体，不会要求 daemon 在线",
+      inputSchema: {
+        variant: z.string().min(1).optional(),
+      },
+    },
+    handlers.get_portrait_corrections,
   );
   return server;
 }

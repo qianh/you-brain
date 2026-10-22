@@ -26,6 +26,7 @@ export type { DaemonHttpServer, StartDaemonHttpOptions } from "./server.js";
 export {
   ConclusionActionBodySchema,
   ConsolidateActionBodySchema,
+  PortraitCorrectionBodySchema,
   ActivityBodySchema,
   ReminderActionBodySchema,
   DaemonEndpointSchema,
@@ -54,6 +55,10 @@ export type {
   DaemonEvent,
   DevicesResponse,
   EventSink,
+  PortraitCorrectionBody,
+  PortraitCorrectionResult,
+  PortraitCorrectionView,
+  PortraitCorrectionsResponse,
   PortraitResponse,
   PortraitSnapshot,
   PortraitSnapshotsResponse,

@@ -164,11 +164,114 @@
   line-height: var(--lh-sm);
 }
 
-.portrait-history-note {
-  margin: var(--sp-2) 0 var(--sp-3);
+.portrait-note {
+  margin: var(--sp-2) 0 0;
   color: var(--text-2);
   font-size: var(--fs-sm);
   line-height: var(--lh-zh);
+}
+
+.portrait-corrections { min-width: 0; }
+
+.portrait-correction-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+  margin-top: var(--sp-3);
+}
+
+.portrait-correction-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.portrait-correction-picks button {
+  max-width: 100%;
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-chip);
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: var(--fs-micro);
+  line-height: var(--lh-sm);
+  text-align: start;
+  cursor: pointer;
+}
+
+.portrait-correction-picks button:hover { background: var(--hover); color: var(--text); }
+
+.portrait-correction-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.portrait-correction-list {
+  list-style: none;
+  margin: var(--sp-3) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.portrait-correction {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.portrait-correction + .portrait-correction {
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border);
+}
+
+.portrait-correction-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.portrait-correction-section {
+  min-width: 0;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  line-height: var(--lh-sm);
+  overflow-wrap: anywhere;
+}
+
+.portrait-correction-text {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-zh);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.portrait-correction-more {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--fs-micro);
+  line-height: var(--lh-sm);
+  cursor: pointer;
+}
+
+.portrait-correction time {
+  color: var(--text-3);
+  font-size: var(--fs-micro);
+  line-height: var(--lh-sm);
+  font-variant-numeric: tabular-nums;
 }
 
 .portrait-copy { width: 100%; margin-top: var(--sp-3); }

@@ -4,6 +4,7 @@ import type { Event } from "@you-brain/protocol";
 
 import { ConflictError } from "../drive/errors.js";
 import type { DrivePort } from "../drive/drive-port.js";
+import { classifyPortraitCorrections } from "../portrait/corrections.js";
 import type { PortraitConfig, PortraitService } from "../portrait/service.js";
 import { globPrefix, globToRegExp, resolveDrivePath } from "../portrait/path.js";
 import type { ConsolidationPortrait } from "./steps.js";
@@ -62,28 +63,18 @@ export function createDrivePortrait(source: DrivePortraitSource): ConsolidationP
 export function pendingCorrections(
   events: readonly Event[],
 ): Array<{ correctionId: string; section: string; text: string }> {
-  const ordered = [...events].sort(
-    (left, right) => left.ts.localeCompare(right.ts) || left.id.localeCompare(right.id),
-  );
-  const applied = new Set<string>();
-  for (const event of ordered) {
-    if (event.type === "portrait.correction_applied") applied.add(event.data.correctionId);
-  }
-  const pending: Array<{ correctionId: string; section: string; text: string }> = [];
-  const seen = new Set<string>();
-  for (const event of ordered) {
-    if (event.type !== "portrait.correction") continue;
-    if (event.data.variant !== "full") continue;
-    if (applied.has(event.data.correctionId) || seen.has(event.data.correctionId)) continue;
-    seen.add(event.data.correctionId);
-    pending.push({
-      correctionId: event.data.correctionId,
-      section: event.data.section,
-      text: event.data.text,
-    });
-    if (pending.length >= CORRECTION_LIMIT) break;
-  }
-  return pending;
+  return classifyPortraitCorrections(events)
+    .filter((item) => item.variant === "full" && item.status === "pending")
+    .sort(
+      (left, right) =>
+        left.createdAt.localeCompare(right.createdAt) || left.eventId.localeCompare(right.eventId),
+    )
+    .slice(0, CORRECTION_LIMIT)
+    .map((item) => ({
+      correctionId: item.correctionId,
+      section: item.section,
+      text: item.text,
+    }));
 }
 
 async function writeBackup(drive: DrivePort, latestPath: string, previous: string, day: string): Promise<void> {

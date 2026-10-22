@@ -194,6 +194,7 @@ describe("local MCP services", () => {
           : null,
       portrait: async () => null,
       portraitSnapshots: async () => [],
+      portraitCorrections: async () => [],
       search: async (query) => ({
         query: query.query,
         indexStatus: "fresh",

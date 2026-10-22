@@ -489,4 +489,60 @@ describe("sqlite store", () => {
       ]);
     });
   });
+
+  it("lists events of the requested types in the same order as the full log", () => {
+    withStore((store) => {
+      const created = createEvent({
+        type: "topic.created",
+        data: { topicId: "topic-1", name: "Alpha", aliases: [] },
+        device: "dev-a",
+        ts: "2026-07-01T00:00:00.000Z",
+        seq: 1,
+      });
+      const correction = createEvent({
+        type: "portrait.correction",
+        data: { correctionId: "c1", variant: "full", section: "语气", text: "改短" },
+        device: "dev-a",
+        ts: "2026-07-02T00:00:00.000Z",
+        seq: 1,
+      });
+      const renamed = createEvent({
+        type: "topic.renamed",
+        data: { topicId: "topic-1", name: "Beta", aliases: [] },
+        device: "dev-b",
+        ts: "2026-07-02T00:00:00.000Z",
+        seq: 2,
+      });
+      const applied = createEvent({
+        type: "portrait.correction_applied",
+        data: { correctionId: "c1", snapshot: "JOHN-DIGITAL-TWIN-v1.3.4-2026-10-18.md" },
+        device: "dev-a",
+        ts: "2026-07-03T00:00:00.000Z",
+        seq: 1,
+      });
+      store.replaceDerived({
+        topics: [],
+        sessions: [],
+        conclusions: [],
+        todos: [],
+        events: [applied, created, renamed, correction],
+      });
+      const wanted = ["portrait.correction", "portrait.correction_applied"] as const;
+      expect(store.listEventsByType(wanted).map((item) => item.id)).toEqual(
+        store
+          .listEvents()
+          .filter((item) => item.type === "portrait.correction" || item.type === "portrait.correction_applied")
+          .map((item) => item.id),
+      );
+      expect(store.listEventsByType(wanted).map((item) => item.type)).toEqual([
+        "portrait.correction",
+        "portrait.correction_applied",
+      ]);
+      expect(store.listEventsByType([])).toEqual([]);
+      expect(store.listEventsByType(["topic.created", "topic.created"]).map((item) => item.id)).toEqual([
+        created.id,
+      ]);
+      expect(store.listEventsByType(["session.refined"])).toEqual([]);
+    });
+  });
 });

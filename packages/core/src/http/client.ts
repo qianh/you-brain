@@ -7,6 +7,9 @@ import {
   type ConsolidateActionResult,
   type DaemonEvent,
   type DevicesResponse,
+  type PortraitCorrectionBody,
+  type PortraitCorrectionResult,
+  type PortraitCorrectionsResponse,
   type PortraitResponse,
   type PortraitSnapshotsResponse,
   type ReminderActionBody,
@@ -47,6 +50,8 @@ export interface DaemonClient {
   updateTopic(id: string, body: TopicMutationBody): Promise<TopicMutationResponse>;
   portrait(variant?: string): Promise<PortraitResponse>;
   portraitSnapshots(): Promise<PortraitSnapshotsResponse>;
+  portraitCorrections(variant?: string): Promise<PortraitCorrectionsResponse>;
+  addPortraitCorrection(input: PortraitCorrectionBody): Promise<PortraitCorrectionResult>;
   search(query: SearchRequest): Promise<SearchResponse>;
   devices(): Promise<DevicesResponse>;
   roles(): Promise<Roles>;
@@ -126,6 +131,14 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
           : `/api/portrait?variant=${encodeURIComponent(variant)}`,
       ),
     portraitSnapshots: () => request("GET", "/api/portrait/snapshots"),
+    portraitCorrections: (variant) =>
+      request(
+        "GET",
+        variant === undefined
+          ? "/api/portrait/corrections"
+          : `/api/portrait/corrections?variant=${encodeURIComponent(variant)}`,
+      ),
+    addPortraitCorrection: (input) => request("POST", "/api/portrait/corrections", input),
     search: (query) => request("GET", `/api/search${searchString(query)}`),
     devices: () => request("GET", "/api/devices"),
     roles: () => request("GET", "/api/roles"),

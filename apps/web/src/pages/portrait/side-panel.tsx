@@ -7,9 +7,11 @@ import { Icon } from "../../components/icons.js";
 import { Tooltip } from "../../components/tooltip.js";
 import { formatDateTime, formatRelative } from "../../lib/format.js";
 import { shouldShowToc, type TocItem } from "../../lib/markdown.js";
+import { PortraitCorrections } from "./corrections.js";
 import { scrollBehavior, snapshotVersion } from "./logic.js";
 
 export function PortraitSide({
+  variant,
   toc,
   activeId,
   onJump,
@@ -20,6 +22,7 @@ export function PortraitSide({
   onCopyPath,
   onCopyBody,
 }: {
+  variant: string;
   toc: readonly TocItem[];
   activeId: string | null;
   onJump: (id: string) => void;
@@ -88,12 +91,12 @@ export function PortraitSide({
               {t("portraitCopyAll")}
             </Button>
           </section>
+          <PortraitCorrections variant={variant} toc={toc} />
           <section className="portrait-block" aria-label={t("portraitHistory")}>
             <div className="portrait-kicker-row">
               <p className="portrait-kicker">{t("portraitHistory")}</p>
               <Chip>{snapshots.length}</Chip>
             </div>
-            <p className="portrait-history-note">{t("correctionLater")}</p>
             {snapshots.length === 0 ? <p className="portrait-meta-line">{t("portraitNoHistory")}</p> : null}
             {snapshots.length > 0 ? (
               <ul className="portrait-snaps">

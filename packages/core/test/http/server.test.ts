@@ -169,6 +169,7 @@ async function withServer(
     portraitSnapshots: async () => [
       { name: "twin-v1.md", path: "/portrait/twin-v1.md", updatedAt: null },
     ],
+    portraitCorrections: async () => [],
     search: async (query) => {
       calls.search.push(query);
       return {

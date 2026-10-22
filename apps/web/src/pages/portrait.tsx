@@ -167,6 +167,7 @@ export function PortraitPage() {
               <PortraitMarkdown source={body.content} />
             </Card>
             <PortraitSide
+              variant={variant}
               toc={toc}
               activeId={activeId}
               onJump={setActiveId}

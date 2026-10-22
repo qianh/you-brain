@@ -5,7 +5,9 @@ import { mock, describe, expect, it } from "bun:test";
 import { createMcpServer, createToolHandlers, type McpServices } from "../../src/mcp/server.js";
 
 const TOOLS = [
+  "add_portrait_correction",
   "get_portrait",
+  "get_portrait_corrections",
   "get_reminders",
   "get_session",
   "get_today",
@@ -23,6 +25,8 @@ function services(): McpServices & {
   getPortrait: ReturnType<typeof mock>;
   getSession: ReturnType<typeof mock>;
   getReminders: ReturnType<typeof mock>;
+  addPortraitCorrection: ReturnType<typeof mock>;
+  getPortraitCorrections: ReturnType<typeof mock>;
 } {
   const uploadSessions = mock(async () => ({
     dryRun: true,
@@ -61,6 +65,18 @@ function services(): McpServices & {
     },
     updateTopic: async () => ({ ok: true as const, topicId: "topic-1", events: [] }),
     getReminders: mock(async () => ({ reminders: [] })),
+    addPortraitCorrection: mock(async () => ({
+      ok: true as const,
+      correction: {
+        correctionId: "corr-1",
+        variant: "full",
+        section: "语气",
+        text: "改短",
+        createdAt: "2026-07-20T00:00:00.000Z",
+        status: "pending" as const,
+      },
+    })),
+    getPortraitCorrections: mock(async () => ({ corrections: [] })),
   };
 }
 
@@ -191,6 +207,61 @@ describe("MCP tool handlers", () => {
   });
 });
 
+describe("portrait correction tools", () => {
+  it("returns the saved correction and surfaces service failures", async () => {
+    const runtime = services();
+    const handlers = createToolHandlers(runtime);
+    const added = await handlers.add_portrait_correction({ section: "语气", text: "改短" });
+    expect(added.isError).not.toBe(true);
+    expect(added.structuredContent).toMatchObject({
+      ok: true,
+      correction: { correctionId: "corr-1", status: "pending" },
+    });
+    expect(textOf(added)).toContain("不会立刻改写");
+
+    runtime.addPortraitCorrection.mockImplementation(async () => {
+      throw Object.assign(new Error("无效的数字分身变体"), { code: "INVALID_INPUT" });
+    });
+    const rejected = await handlers.add_portrait_correction({
+      variant: "nope",
+      section: "语气",
+      text: "改短",
+    });
+    expect(rejected.isError).toBe(true);
+    expect(rejected.structuredContent).toEqual({
+      error: { code: "INVALID_INPUT", message: "无效的数字分身变体" },
+    });
+
+    runtime.getPortraitCorrections.mockImplementation(async () => ({
+      corrections: [
+        {
+          correctionId: "corr-1",
+          variant: "full",
+          section: "语气",
+          text: "改短",
+          createdAt: "2026-07-20T00:00:00.000Z",
+          status: "pending",
+        },
+      ],
+    }));
+    const listed = await handlers.get_portrait_corrections({ variant: "full" });
+    expect(listed.isError).not.toBe(true);
+    expect(listed.structuredContent).toMatchObject({
+      corrections: [{ correctionId: "corr-1", status: "pending" }],
+    });
+
+    runtime.getPortraitCorrections.mockImplementation(async () => {
+      throw Object.assign(new Error("读失败"), { code: "INTERNAL_ERROR" });
+    });
+    const failed = await handlers.get_portrait_corrections({});
+    expect(failed.isError).toBe(true);
+    expect(failed.structuredContent).toEqual({
+      error: { code: "INTERNAL_ERROR", message: "读失败" },
+    });
+    expect(textOf(failed)).not.toContain("at ");
+  });
+});
+
 describe("MCP protocol", () => {
   it("negotiates every tool and validates arguments", async () => {
     const runtime = services();
@@ -228,6 +299,24 @@ describe("MCP protocol", () => {
       const reminders = await client.callTool({ name: "get_reminders", arguments: {} });
       expect(reminders.isError).not.toBe(true);
       expect(reminders.structuredContent).toEqual({ reminders: [] });
+      const added = await client.callTool({
+        name: "add_portrait_correction",
+        arguments: { section: "语气", text: "改短" },
+      });
+      expect(added.isError).not.toBe(true);
+      expect(textOf(added)).toContain("不会立刻改写");
+      expect(runtime.addPortraitCorrection).toHaveBeenCalledWith({ section: "语气", text: "改短" });
+      const emptySection = await client.callTool({
+        name: "add_portrait_correction",
+        arguments: { section: "", text: "改短" },
+      });
+      expect(emptySection.isError).toBe(true);
+      const listed = await client.callTool({
+        name: "get_portrait_corrections",
+        arguments: { variant: "full" },
+      });
+      expect(listed.isError).not.toBe(true);
+      expect(runtime.getPortraitCorrections).toHaveBeenCalledWith({ variant: "full" });
       const update = await client.callTool({
         name: "update_topic",
         arguments: { action: "conclusion", topic_id: "topic-1", text: "记下", session_key: "ab".repeat(32) },

@@ -23,6 +23,7 @@ import {
   ActivityBodySchema,
   ConsolidateActionBodySchema,
   ConclusionActionBodySchema,
+  PortraitCorrectionBodySchema,
   ReminderActionBodySchema,
   TodoActionBodySchema,
   TopicMutationBodySchema,
@@ -30,6 +31,7 @@ import {
   type ActionResponse,
   type ApiErrorBody,
   type DaemonChangeKind,
+  type PortraitCorrectionResult,
   type SearchRequest,
   type TopicDetail,
   type TopicMutationResponse,
@@ -37,6 +39,12 @@ import {
   type UploadActionInput,
   type UserEvent,
 } from "./types.js";
+
+const SECTION_LIMIT = 80;
+const TEXT_LIMIT = 1_000;
+const SECTION_MESSAGE = "「哪一部分」需要 1 到 80 个字";
+const TEXT_MESSAGE = "「应该怎么改」需要 1 到 1000 个字";
+const VARIANT_MESSAGE = "无效的数字分身变体";
 
 const SEARCH_LIMIT = z.coerce.number().int().min(1).max(50);
 const ZONE = z.enum(["active", "history"]);
@@ -124,6 +132,11 @@ export async function handleApi(
   if (path === "/api/topics") return method(request, "GET", () => topics(url, context));
   if (path === "/api/portrait/snapshots") {
     return method(request, "GET", () => snapshots(context));
+  }
+  if (path === "/api/portrait/corrections") {
+    if (request.method === "GET") return portraitCorrections(url, context);
+    if (request.method === "POST") return addPortraitCorrection(request, context);
+    return methodNotAllowed("GET, POST");
   }
   if (path === "/api/portrait") return method(request, "GET", () => portrait(url, context));
   if (path === "/api/search") return method(request, "GET", () => search(url, context));
@@ -317,6 +330,65 @@ async function portrait(url: URL, context: ApiContext): Promise<Response> {
 
 async function snapshots(context: ApiContext): Promise<Response> {
   return json({ snapshots: await context.deps.portraitSnapshots() });
+}
+
+async function portraitCorrections(url: URL, context: ApiContext): Promise<Response> {
+  const raw = url.searchParams.get("variant");
+  const variant = raw === null ? undefined : raw.trim();
+  if (variant !== undefined) await requirePortraitVariant(context, variant);
+  return json({ corrections: await context.deps.portraitCorrections(variant) });
+}
+
+async function addPortraitCorrection(request: Request, context: ApiContext): Promise<Response> {
+  const parsed = PortraitCorrectionBodySchema.safeParse(await readJson(request));
+  if (!parsed.success) {
+    throw new HttpError(400, "INVALID_INPUT", correctionBodyMessage(parsed.error));
+  }
+  const section = parsed.data.section.trim();
+  const text = parsed.data.text.trim();
+  if (section.length < 1 || section.length > SECTION_LIMIT) {
+    throw new HttpError(400, "INVALID_INPUT", SECTION_MESSAGE);
+  }
+  if (text.length < 1 || text.length > TEXT_LIMIT) {
+    throw new HttpError(400, "INVALID_INPUT", TEXT_MESSAGE);
+  }
+  const variant = (parsed.data.variant ?? "full").trim();
+  await requirePortraitVariant(context, variant);
+  const correctionId = context.createId();
+  const events: UserEvent[] = [
+    {
+      type: "portrait.correction",
+      data: { correctionId, variant, section, text },
+    },
+  ];
+  await emitAll(context.deps.events, events);
+  publish(context.hub, ["portrait"]);
+  const listed = await context.deps.portraitCorrections(variant);
+  const correction = listed.find((item) => item.correctionId === correctionId);
+  if (!correction) throw new HttpError(500, "INTERNAL_ERROR", "纠正没有写入");
+  const response: PortraitCorrectionResult = { ok: true, correction };
+  return json(response);
+}
+
+async function requirePortraitVariant(context: ApiContext, variant: string): Promise<void> {
+  try {
+    assertPortraitVariant(variant);
+  } catch (error) {
+    if (error instanceof YouBrainError) throw new HttpError(400, error.code, error.message);
+    throw error;
+  }
+  const config = await context.deps.readConfig();
+  if (!config.portrait.variants.some((item) => item.id === variant)) {
+    throw new HttpError(400, "INVALID_INPUT", VARIANT_MESSAGE);
+  }
+}
+
+function correctionBodyMessage(error: z.ZodError): string {
+  const fields = new Set(error.issues.map((issue) => String(issue.path[0])));
+  if (fields.has("variant") && !fields.has("section") && !fields.has("text")) return VARIANT_MESSAGE;
+  if (fields.has("section") && !fields.has("text")) return SECTION_MESSAGE;
+  if (fields.has("text") && !fields.has("section")) return TEXT_MESSAGE;
+  return "纠正内容不完整";
 }
 
 async function search(url: URL, context: ApiContext): Promise<Response> {
@@ -541,6 +613,9 @@ async function emitAll(
         await sink.emit(event.type, event.data);
         break;
       case "reminder.action":
+        await sink.emit(event.type, event.data);
+        break;
+      case "portrait.correction":
         await sink.emit(event.type, event.data);
         break;
       default: {

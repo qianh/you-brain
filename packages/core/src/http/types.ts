@@ -129,7 +129,8 @@ export type UserEvent =
   | { type: "topic.created"; data: EventOf<"topic.created">["data"] }
   | { type: "todo.status_changed"; data: EventOf<"todo.status_changed">["data"] }
   | { type: "conclusion.added"; data: EventOf<"conclusion.added">["data"] }
-  | { type: "reminder.action"; data: EventOf<"reminder.action">["data"] };
+  | { type: "reminder.action"; data: EventOf<"reminder.action">["data"] }
+  | { type: "portrait.correction"; data: EventOf<"portrait.correction">["data"] };
 
 export interface ActionResponse {
   ok: true;
@@ -227,6 +228,33 @@ export interface PortraitSnapshot {
 
 export interface PortraitSnapshotsResponse {
   snapshots: PortraitSnapshot[];
+}
+
+export interface PortraitCorrectionView {
+  correctionId: string;
+  variant: string;
+  section: string;
+  text: string;
+  createdAt: string;
+  status: "pending" | "applied";
+  snapshot?: string;
+}
+
+export interface PortraitCorrectionsResponse {
+  corrections: PortraitCorrectionView[];
+}
+
+export const PortraitCorrectionBodySchema = z.object({
+  variant: z.string().optional(),
+  section: z.string(),
+  text: z.string(),
+});
+
+export type PortraitCorrectionBody = z.infer<typeof PortraitCorrectionBodySchema>;
+
+export interface PortraitCorrectionResult {
+  ok: true;
+  correction: PortraitCorrectionView;
 }
 
 export interface SearchRequest {
@@ -359,7 +387,7 @@ export interface ConsolidateActionResult {
 
 export const DaemonEventSchema = z.object({
   id: z.number().int().nonnegative(),
-  kind: z.enum(["ready", "topics", "today", "status"]),
+  kind: z.enum(["ready", "topics", "today", "status", "portrait"]),
   at: z.string().min(1),
 });
 

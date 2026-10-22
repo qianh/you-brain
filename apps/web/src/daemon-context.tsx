@@ -167,7 +167,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
       while (alive.current && !controller.signal.aborted) {
         try {
           await client.events((event) => {
-            if (event.kind === "ready") return;
+            if (event.kind === "ready" || event.kind === "portrait") return;
             void reload(event.kind);
           }, { signal: controller.signal });
           setStreamError(null);

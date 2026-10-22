@@ -43,6 +43,7 @@ import {
   readPortraitFile,
 } from "../http/portrait-files.js";
 import { createStoreReaders } from "../http/queries.js";
+import { portraitCorrectionViews } from "../portrait/corrections.js";
 import { startDaemonHttp, type DaemonHttpServer } from "../http/server.js";
 import type {
   HttpDeps,
@@ -1471,6 +1472,11 @@ export class YouBrainDaemon {
           this.#paths.portraitDir,
           this.#shared.portrait.snapshotPattern,
         ),
+      portraitCorrections: async (variant) =>
+        portraitCorrectionViews(
+          store.listEventsByType(["portrait.correction", "portrait.correction_applied"]),
+          variant,
+        ),
       search: (query) => this.#searchLocal(query),
       devices: () => readers.devices(),
       readRoles: async () => this.#roles,
@@ -1754,7 +1760,8 @@ export class YouBrainDaemon {
           variants: this.#shared.portrait.variants,
           snapshotPattern: this.#shared.portrait.snapshotPattern,
         }),
-        events: () => store.listEvents(),
+        events: () =>
+          store.listEventsByType(["portrait.correction", "portrait.correction_applied"]),
       }),
     };
   }

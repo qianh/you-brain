@@ -6,9 +6,11 @@ import { YouBrainError } from "../domain/errors.js";
 import type { DrivePort } from "../drive/drive-port.js";
 import { readPortraitFile } from "../http/portrait-files.js";
 import { createStoreReaders } from "../http/queries.js";
+import { portraitCorrectionViews } from "../portrait/corrections.js";
 import type { SqliteStore } from "../store/index.js";
 import type {
   ActionResponse,
+  PortraitCorrectionResult,
   SearchRequest,
   SearchResponse,
   StatusResponse,
@@ -125,6 +127,23 @@ export function createLocalMcpServices(options: LocalMcpOptions): McpServices {
       return forwardUpdate(call, input);
     },
     getReminders: () => readers.reminders(false),
+    addPortraitCorrection(input) {
+      const body = {
+        section: input.section,
+        text: input.text,
+        ...(input.variant !== undefined ? { variant: input.variant } : {}),
+      };
+      return call<PortraitCorrectionResult>("POST", "/api/portrait/corrections", body);
+    },
+    getPortraitCorrections(input) {
+      const events = options.store.listEventsByType([
+        "portrait.correction",
+        "portrait.correction_applied",
+      ]);
+      return Promise.resolve({
+        corrections: portraitCorrectionViews(events, input.variant),
+      });
+    },
   };
 }
 

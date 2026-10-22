@@ -4,6 +4,9 @@ import type {
   ApiErrorBody,
   DaemonEvent,
   DevicesResponse,
+  PortraitCorrectionBody,
+  PortraitCorrectionResult,
+  PortraitCorrectionsResponse,
   PortraitResponse,
   PortraitSnapshotsResponse,
   ReminderView,
@@ -120,6 +123,15 @@ export function createBrowserDaemon(options?: {
         variant === undefined ? "/api/portrait" : `/api/portrait?variant=${encodeURIComponent(variant)}`,
       ),
     portraitSnapshots: () => request<PortraitSnapshotsResponse>("GET", "/api/portrait/snapshots"),
+    portraitCorrections: (variant) =>
+      request<PortraitCorrectionsResponse>(
+        "GET",
+        variant === undefined
+          ? "/api/portrait/corrections"
+          : `/api/portrait/corrections?variant=${encodeURIComponent(variant)}`,
+      ),
+    addPortraitCorrection: (input: PortraitCorrectionBody) =>
+      request<PortraitCorrectionResult>("POST", "/api/portrait/corrections", input),
     search: (query) => request<SearchResponse>("GET", `/api/search${searchString(query)}`),
     devices: () => request<DevicesResponse>("GET", "/api/devices"),
     roles: () => request<Roles>("GET", "/api/roles"),
@@ -199,7 +211,15 @@ function asDaemonEvent(value: unknown): DaemonEvent | null {
   const kind = "kind" in value ? value.kind : undefined;
   const at = "at" in value ? value.at : undefined;
   if (typeof id !== "number" || !Number.isInteger(id) || id < 0) return null;
-  if (kind !== "ready" && kind !== "topics" && kind !== "today" && kind !== "status") return null;
+  if (
+    kind !== "ready" &&
+    kind !== "topics" &&
+    kind !== "today" &&
+    kind !== "status" &&
+    kind !== "portrait"
+  ) {
+    return null;
+  }
   if (typeof at !== "string" || at.length === 0) return null;
   return { id, kind, at };
 }

@@ -8,6 +8,7 @@ import {
   SessionKeySchema,
   type DeviceRecord,
   type Event,
+  type EventType,
 } from "@you-brain/protocol";
 
 import { YouBrainError } from "../domain/errors.js";
@@ -472,6 +473,19 @@ export class SqliteStore {
     const rows = this.#db
       .query<EventRow, []>("SELECT payload FROM events ORDER BY ts_ms, device, seq, id")
       .all();
+    return rows.map((row) => parseEvent(parsePayload(row.payload)));
+  }
+
+  /** Same order as {@link listEvents}. An empty type list matches nothing. */
+  listEventsByType(types: readonly EventType[]): Event[] {
+    const unique = [...new Set(types)];
+    if (unique.length === 0) return [];
+    const placeholders = unique.map(() => "?").join(", ");
+    const rows = this.#db
+      .query<EventRow, string[]>(
+        `SELECT payload FROM events WHERE type IN (${placeholders}) ORDER BY ts_ms, device, seq, id`,
+      )
+      .all(...unique);
     return rows.map((row) => parseEvent(parsePayload(row.payload)));
   }
 

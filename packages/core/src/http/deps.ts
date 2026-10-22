@@ -2,6 +2,7 @@ import type { DeviceRecord, Roles, SharedConfig } from "@you-brain/protocol";
 
 import type { EventSink } from "./types.js";
 import type {
+  PortraitCorrectionView,
   PortraitResponse,
   PortraitSnapshot,
   ReminderView,
@@ -28,6 +29,7 @@ export interface HttpDeps {
   todo(todoId: string): Promise<TodoView | null>;
   portrait(variant: string): Promise<PortraitResponse | null>;
   portraitSnapshots(): Promise<PortraitSnapshot[]>;
+  portraitCorrections(variant?: string): Promise<PortraitCorrectionView[]>;
   search(query: SearchRequest): Promise<SearchResponse>;
   devices(): Promise<DeviceRecord[]>;
   readRoles(): Promise<Roles>;

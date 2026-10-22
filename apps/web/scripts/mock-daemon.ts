@@ -484,6 +484,42 @@ const portraits: Record<string, string> = {
   ].join("\n"),
 };
 
+interface MockCorrection {
+  correctionId: string;
+  variant: string;
+  section: string;
+  text: string;
+  createdAt: string;
+  status: "pending" | "applied";
+  snapshot?: string;
+}
+
+const PENDING_TEXT =
+  "配置一次之后，默认先写测试再改实现。不要把没要求的说明写进仓库，回复保持中文，界面跟设计 token 走，不要硬编码颜色。单条失败不要把整批回滚。";
+
+const corrections: MockCorrection[] =
+  scenario === "rich"
+    ? [
+        {
+          correctionId: "corr-pending",
+          variant: "full",
+          section: "工作方式",
+          text: PENDING_TEXT,
+          createdAt: ago(2 * HOUR),
+          status: "pending",
+        },
+        {
+          correctionId: "corr-applied",
+          variant: "full",
+          section: "语气",
+          text: "回复保持中文，少用英文术语。",
+          createdAt: ago(3 * DAY),
+          status: "applied",
+          snapshot: "JOHN-DIGITAL-TWIN-v1.3.4-2026-10-18.md",
+        },
+      ]
+    : [];
+
 const subscribers = new Set<(frame: string) => void>();
 let seq = 0;
 
@@ -558,7 +594,7 @@ function applyReminderAction(body: unknown): Response {
   return json(item);
 }
 
-function publish(kind: "topics" | "today" | "status"): void {
+function publish(kind: "topics" | "today" | "status" | "portrait"): void {
   seq += 1;
   const event = { id: seq, kind, at: new Date().toISOString() };
   const frame = `id: ${event.id}\nevent: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`;
@@ -928,6 +964,66 @@ function htmlPage(): Response {
   });
 }
 
+function correctionViews(variant: string | null): MockCorrection[] {
+  return corrections
+    .filter((item) => variant === null || item.variant === variant)
+    .sort(
+      (left, right) =>
+        right.createdAt.localeCompare(left.createdAt) ||
+        right.correctionId.localeCompare(left.correctionId),
+    )
+    .slice(0, 50)
+    .map((item) => {
+      const view: MockCorrection = {
+        correctionId: item.correctionId,
+        variant: item.variant,
+        section: item.section,
+        text: item.text,
+        createdAt: item.createdAt,
+        status: item.status,
+      };
+      if (item.snapshot !== undefined) view.snapshot = item.snapshot;
+      return view;
+    });
+}
+
+async function addCorrection(request: Request): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return fail(400, "INVALID_INPUT", "请求体不是合法 JSON");
+  }
+  if (!isObject(body) || typeof body.section !== "string" || typeof body.text !== "string") {
+    return fail(400, "INVALID_INPUT", "纠正内容不完整");
+  }
+  if (body.variant !== undefined && typeof body.variant !== "string") {
+    return fail(400, "INVALID_INPUT", "无效的数字分身变体");
+  }
+  const section = body.section.trim();
+  const text = body.text.trim();
+  if (section.length < 1 || section.length > 80) {
+    return fail(400, "INVALID_INPUT", "「哪一部分」需要 1 到 80 个字");
+  }
+  if (text.length < 1 || text.length > 1000) {
+    return fail(400, "INVALID_INPUT", "「应该怎么改」需要 1 到 1000 个字");
+  }
+  const variant = (typeof body.variant === "string" ? body.variant : "full").trim();
+  if (!Object.hasOwn(portraits, variant)) return fail(400, "INVALID_INPUT", "无效的数字分身变体");
+  const correction: MockCorrection = {
+    correctionId: `corr-${nextId}`,
+    variant,
+    section,
+    text,
+    createdAt: new Date().toISOString(),
+    status: "pending",
+  };
+  nextId += 1;
+  corrections.unshift(correction);
+  publish("portrait");
+  return json({ ok: true, correction });
+}
+
 async function handleApi(request: Request, url: URL): Promise<Response> {
   const path = url.pathname;
   if (path === "/api/events" && request.method === "GET") {
@@ -968,6 +1064,14 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
       ],
     });
   }
+  if (path === "/api/portrait/corrections" && request.method === "GET") {
+    const raw = url.searchParams.get("variant");
+    if (raw === null) return json({ corrections: correctionViews(null) });
+    const variant = raw.trim();
+    if (!Object.hasOwn(portraits, variant)) return fail(400, "INVALID_INPUT", "无效的数字分身变体");
+    return json({ corrections: correctionViews(variant) });
+  }
+  if (path === "/api/portrait/corrections" && request.method === "POST") return addCorrection(request);
   if (path === "/api/portrait" && request.method === "GET") {
     const variant = url.searchParams.get("variant") ?? "full";
     const content = portraits[variant];
