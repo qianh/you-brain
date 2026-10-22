@@ -98,6 +98,10 @@ pub fn shell_file(data_dir: &Path) -> PathBuf {
     data_dir.join("shell.json")
 }
 
+pub fn notified_file(data_dir: &Path) -> PathBuf {
+    data_dir.join("shell-notified.json")
+}
+
 pub fn parse_daemon_json(text: &str) -> Result<DaemonEndpoint, DaemonJsonError> {
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|_| DaemonJsonError::InvalidJson)?;
@@ -488,6 +492,10 @@ mod tests {
         assert_eq!(
             daemon_file(&dir),
             PathBuf::from("/Users/test/Library/Application Support/you-brain/daemon.json")
+        );
+        assert_eq!(
+            notified_file(&dir),
+            PathBuf::from("/Users/test/Library/Application Support/you-brain/shell-notified.json")
         );
     }
 

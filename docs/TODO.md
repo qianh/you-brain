@@ -23,7 +23,7 @@
 - [~] **B1 提醒系统**（拆为五步，参考 技术方案 §12、产品说明 §6.6）
   - [x] B1a 后端：生成（停滞 / 历史 / 早报 / 周回顾）、事件折叠落库、`GET /api/reminders`、`POST /api/actions/reminder`、MCP、`REMINDERS.md`
   - [x] B1b daemon 活跃信号与投递判定（`POST /api/activity`、`delivery`）、今日页与面板的提醒操作
-  - [ ] B1c 桌面外壳：上报键鼠活动、按 `delivery.notify` 弹系统通知（通知正文用提醒文案、已通知的不重复）、角标
+  - [x] B1c 桌面外壳：上报键鼠活动、按 `delivery.notify` 弹系统通知（通知正文用提醒文案、已通知的不重复）、角标
   - [ ] B1d 同步层：设备记录的 `lastActiveAt` 写入真实活动时间（目前 Drive 上仍写成「现在」，会让其他设备误判这台正在使用）
   - [ ] B1e 提醒相关的多设备端到端验证（两个 daemon 共用内存 Drive：只生成一次、只在一台设备 `notify`）
 - [ ] **B2 每日全局沉淀**：`packages/core/src/consolidate` 实现技术方案第 11 节流程；主设备租约 `leases/consolidate.json` 的写入与续约；沉淀开关与过期提示（读取侧已完成）联动真实结果

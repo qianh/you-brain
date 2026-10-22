@@ -41,14 +41,6 @@ pub fn parse_status_value(value: &serde_json::Value) -> Result<StatusSnapshot, (
     })
 }
 
-pub fn reminder_count(value: &serde_json::Value) -> usize {
-    value
-        .get("reminders")
-        .and_then(serde_json::Value::as_array)
-        .map(Vec::len)
-        .unwrap_or(0)
-}
-
 pub fn present(status: &StatusSnapshot, reminders: usize) -> TrayPresentation {
     let anomalies = anomaly_lines(status);
     let attention = attention_key(&anomalies, reminders);
@@ -87,13 +79,12 @@ pub fn disconnected() -> TrayPresentation {
     }
 }
 
-pub fn notification_body(status: &StatusSnapshot, reminders: usize) -> String {
+/// Anomaly text only. Reminder copy is a separate notification, so a count change
+/// does not produce a second body for the same poll.
+pub fn notification_body(status: &StatusSnapshot) -> String {
     let anomalies = anomaly_lines(status);
     if let Some(message) = anomalies.first() {
         return format!("异常：{message}");
-    }
-    if reminders > 0 {
-        return format!("有 {reminders} 条提醒");
     }
     String::new()
 }
@@ -194,7 +185,16 @@ mod tests {
     fn reminders_alone_use_the_reminder_title() {
         let view = present(&sample(), 3);
         assert_eq!(view.title, "提醒 3");
-        assert_eq!(notification_body(&sample(), 3), "有 3 条提醒");
+        assert!(view.tooltip.contains("提醒：3"));
+        assert_eq!(notification_body(&sample()), "");
+    }
+
+    #[test]
+    fn anomaly_notification_does_not_count_reminders() {
+        let mut status = sample();
+        status.warnings.push("队列堵塞".into());
+        assert_eq!(notification_body(&status), "异常：队列堵塞");
+        assert!(!notification_body(&status).contains("提醒"));
     }
 
     #[test]
@@ -229,7 +229,5 @@ mod tests {
         assert_eq!(status.refine_error.as_deref(), Some("timeout"));
         assert!(status.consolidation_stale);
         assert!(parse_status_json("[]").is_err());
-        let reminders = serde_json::json!({"reminders":[{},{}]});
-        assert_eq!(reminder_count(&reminders), 2);
     }
 }

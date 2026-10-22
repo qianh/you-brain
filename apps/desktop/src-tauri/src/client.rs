@@ -2,7 +2,8 @@ use std::io::Read;
 use std::time::Duration;
 
 use crate::daemon::shared_shortcut;
-use crate::status_view::{parse_status_json, reminder_count, StatusSnapshot};
+use crate::reminders::{parse_reminders_response, RemindersSnapshot};
+use crate::status_view::{parse_status_json, StatusSnapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientError {
@@ -58,8 +59,24 @@ impl LoopbackClient {
         }
     }
 
-    pub fn reminder_count(&self) -> Result<usize, ClientError> {
-        Ok(reminder_count(&self.get_json("/api/reminders")?))
+    pub fn reminders(&self) -> Result<RemindersSnapshot, ClientError> {
+        parse_reminders_response(&self.get_text("/api/reminders")?)
+            .map_err(|_| ClientError::BadBody)
+    }
+
+    /// `POST /api/activity` with `{}`. The daemon stamps the time.
+    pub fn report_activity(&self) -> Result<(), ClientError> {
+        let response = self
+            .agent
+            .post(&format!("{}/api/activity", self.base))
+            .set("Authorization", &self.authorization())
+            .set("Content-Type", "application/json")
+            .send_bytes(b"{}")
+            .map_err(classify_transport)?;
+        if !(200..300).contains(&response.status()) {
+            return Err(ClientError::Status(response.status()));
+        }
+        Ok(())
     }
 
     pub fn shared_shortcut(&self) -> Result<Option<String>, ClientError> {

@@ -1,6 +1,8 @@
+mod activity;
 mod client;
 mod daemon;
 mod geometry;
+mod reminders;
 mod shortcut;
 mod sse;
 mod status_view;
@@ -11,7 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -44,6 +46,8 @@ struct ShellState {
     launch_attempt: Mutex<u32>,
     /// Pid of the daemon process this shell started and has not yet seen go healthy.
     launching: Mutex<Option<u32>>,
+    /// `None` until the first reminder poll loads `shell-notified.json`.
+    notified: Mutex<Option<Vec<String>>>,
 }
 
 static BLUR_GUARD_UNTIL: AtomicU64 = AtomicU64::new(0);
@@ -88,6 +92,7 @@ pub fn run() {
                 main_target: Mutex::new(None),
                 launch_attempt: Mutex::new(0),
                 launching: Mutex::new(None),
+                notified: Mutex::new(None),
             });
             install_tray(app)?;
             let data_dir = current_data_dir();
@@ -98,6 +103,8 @@ pub fn run() {
 
             let handle = app.handle().clone();
             thread::spawn(move || supervise(handle));
+            let activity = app.handle().clone();
+            thread::spawn(move || report_activity(activity));
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -183,6 +190,25 @@ fn supervise(app: tauri::AppHandle) {
                 thread::sleep(Duration::from_secs(5));
             }
         }
+    }
+}
+
+fn report_activity(app: tauri::AppHandle) {
+    let mut last_post: Option<Instant> = None;
+    loop {
+        if current_endpoint(&app).is_some() {
+            let since = last_post.map(|at| at.elapsed());
+            let idle = activity::read_hid_idle_ns();
+            if activity::should_post_activity(idle, since) {
+                if let Some(endpoint) = current_endpoint(&app) {
+                    let client = LoopbackClient::new(endpoint.port, &endpoint.token);
+                    if client.report_activity().is_ok() {
+                        last_post = Some(Instant::now());
+                    }
+                }
+            }
+        }
+        thread::sleep(activity::ACTIVITY_INTERVAL);
     }
 }
 
@@ -378,9 +404,10 @@ fn refresh_status(app: &tauri::AppHandle, data_dir: &std::path::Path) {
             return;
         }
     };
-    let reminders = client.reminder_count().unwrap_or(0);
+    let snapshot = client.reminders().ok();
+    let reminders = snapshot.as_ref().map(|item| item.count).unwrap_or(0);
     let view = status_view::present(&status, reminders);
-    let body = status_view::notification_body(&status, reminders);
+    let body = status_view::notification_body(&status);
     let notify_now = {
         let state = app.state::<ShellState>();
         let mut previous = state
@@ -394,6 +421,9 @@ fn refresh_status(app: &tauri::AppHandle, data_dir: &std::path::Path) {
     show_tray(app, view);
     if notify_now && !body.is_empty() {
         notify(app, "you-brain", &body);
+    }
+    if let Some(snapshot) = snapshot.as_ref() {
+        notify_due_reminders(app, data_dir, snapshot);
     }
     if let Ok(shared) = client.shared_shortcut() {
         let local = read_shell(data_dir).shortcut;
@@ -411,6 +441,38 @@ fn refresh_status(app: &tauri::AppHandle, data_dir: &std::path::Path) {
                 .run_on_main_thread(move || register_shortcut(&app, &next));
         }
     }
+}
+
+fn notify_due_reminders(
+    app: &tauri::AppHandle,
+    data_dir: &std::path::Path,
+    snapshot: &reminders::RemindersSnapshot,
+) {
+    let now_ms = i64::try_from(now_millis()).unwrap_or(0);
+    let state = app.state::<ShellState>();
+    let mut known = state
+        .notified
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if known.is_none() {
+        *known = Some(reminders::load_notified(&daemon::notified_file(data_dir)));
+    }
+    let existing = known.as_deref().unwrap_or(&[]);
+    // Missing delivery or notify=false yields nothing, so those ids stay unmarked.
+    let selected = reminders::select_reminders_to_notify(
+        &snapshot.reminders,
+        snapshot.delivery.as_ref(),
+        existing,
+        now_ms,
+    );
+    let body = reminders::notification_text(&selected);
+    if body.is_empty() {
+        return;
+    }
+    notify(app, "you-brain", &body);
+    let updated = reminders::remember_notified(existing, &selected);
+    reminders::save_notified(&daemon::notified_file(data_dir), &updated);
+    *known = Some(updated);
 }
 
 fn sync_now(app: &tauri::AppHandle) {
