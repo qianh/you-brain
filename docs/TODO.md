@@ -32,7 +32,7 @@
 - [x] **B3 Drive 话题总览与详情文件**：把话题册写成 Drive 上 `topics/TOPICS-latest.md` 及各话题详情文件（路径见 `packages/protocol/src/paths.ts`），随沉淀与话题变更更新，设备 B 可读
 - [x] **B4 数字分身纠正**：`portrait.correction` / `portrait.correction_applied` 事件的折叠与应用（`topics/fold.ts` 目前忽略）；界面纠正入口（替换「纠正会在后续版本开放」）；MCP 暴露
 - [x] **B5 网页会话处理设备**：`webProcessor` 角色真正生效——被指定设备负责处理网页版 AI 会话的提炼；角色切换的行为与状态展示
-- [ ] **B6 服务器模式**：生成并安装 launchd / systemd 单元（`you-brain service install|uninstall|status`），与 `maintenance.ts` 的卸载清理对齐，使无界面机器可担任主设备
+- [x] **B6 服务器模式**：生成并安装 launchd / systemd 单元（`you-brain service install|uninstall|status`），与 `maintenance.ts` 的卸载清理对齐，使无界面机器可担任主设备
 - [ ] **B7 虚拟设备协议**：`docs/protocol/` 协议文档，注册虚拟设备（`kind: virtual`）与对外发布所需的 API / 校验
 - [ ] **B8 Linux 桌面打包**：`tauri.bundle.conf.json` 与构建脚本增加 linux 三元组资源（此机为 macOS，无法实机验证，只做配置与可编译性检查，验证项留待 Linux 机器）
 

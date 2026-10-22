@@ -22,6 +22,8 @@ import type { SessionSource } from "@you-brain/core";
 import { SESSION_SOURCES } from "@you-brain/core";
 
 import { CliError, runtimePaths } from "./env.js";
+import { createRuntimeServiceManager } from "./service/manager.js";
+import { serviceUnitPath } from "./service/paths.js";
 
 export async function listIntegrations(only: string[] | undefined): Promise<void> {
   const plan = await planClientIntegrations({
@@ -143,14 +145,24 @@ function assertDaemonStopped(lockFile: string): void {
 }
 
 async function removeStartupItems(homeDir: string): Promise<string[]> {
-  const candidates = [
-    join(homeDir, "Library", "LaunchAgents", "com.you-brain.daemon.plist"),
-    join(homeDir, ".config", "systemd", "user", "you-brain.service"),
-  ];
+  const ordered = [serviceUnitPath("darwin", homeDir), serviceUnitPath("linux", homeDir)];
+  const present = new Set(ordered.filter((path) => existsSync(path)));
+  if ((process.platform === "darwin" || process.platform === "linux") && present.size > 0) {
+    try {
+      const manager = createRuntimeServiceManager({
+        homeDir,
+        platform: process.platform,
+      });
+      await manager.uninstall();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`停止开机服务失败：${message}`);
+    }
+  }
   const removed: string[] = [];
-  for (const path of candidates) {
-    if (!existsSync(path)) continue;
-    await rm(path, { force: true });
+  for (const path of ordered) {
+    if (!present.has(path)) continue;
+    if (existsSync(path)) await rm(path, { force: true });
     removed.push(path);
   }
   return removed;

@@ -37,6 +37,7 @@ import {
   supportedPlatform,
 } from "./env.js";
 import { applyIntegrations, listIntegrations, restoreBrainHub, uninstall } from "./maintenance.js";
+import { registerServiceCommand } from "./service/command.js";
 import { runSetup, type SetupFlags } from "./setup.js";
 
 function cliVersion(): string {
@@ -320,6 +321,8 @@ brainhub
     }
   });
 
+registerServiceCommand(program);
+
 program
   .command("uninstall")
   .description("撤销接入、开机项，可选删除本地数据")
@@ -538,6 +541,7 @@ const TOP_COMMANDS = new Set([
   "topics",
   "integrations",
   "brainhub",
+  "service",
   "uninstall",
 ]);
 
