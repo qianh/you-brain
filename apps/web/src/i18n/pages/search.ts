@@ -1,2 +1,39 @@
-export const zh = {} as const;
-export const en = {} as const;
+export const zh = {
+  searchIntroTitle: "搜索你的所有 AI 会话",
+  searchIntroBody: "按关键词或意思搜索，跨所有工具和设备。",
+  searchTry: "试试搜索",
+  searchNoneTitle: "没有找到『{query}』",
+  searchNoneBody: "换个关键词，或去掉来源和时间筛选。",
+  searchClearFilters: "清除筛选",
+  searchRangeLabel: "时间范围",
+  searchRangeShort: "时间",
+  searchRangeAll: "全部",
+  searchRangeToday: "今天",
+  searchRangeWeek: "近 7 天",
+  searchRangeMonth: "近 30 天",
+  searchKeywordNote: "语义搜索暂不可用，已改用关键词匹配",
+  searchStaleNote: "索引超过 1 天未更新",
+  searchRelevance: "相关度 {score}",
+  searchNotes: "搜索提示",
+  searchList: "搜索结果",
+} as const;
+
+export const en = {
+  searchIntroTitle: "Search all of your AI sessions",
+  searchIntroBody: "Search by keyword or meaning, across every tool and device.",
+  searchTry: "Try searching",
+  searchNoneTitle: "No results for “{query}”",
+  searchNoneBody: "Try another keyword, or clear the source and time filters.",
+  searchClearFilters: "Clear filters",
+  searchRangeLabel: "Time range",
+  searchRangeShort: "Time",
+  searchRangeAll: "All",
+  searchRangeToday: "Today",
+  searchRangeWeek: "Last 7 days",
+  searchRangeMonth: "Last 30 days",
+  searchKeywordNote: "Semantic search is unavailable, so this is a keyword match",
+  searchStaleNote: "The index has not updated for over a day",
+  searchRelevance: "Relevance {score}",
+  searchNotes: "Search notes",
+  searchList: "Search results",
+} as const;

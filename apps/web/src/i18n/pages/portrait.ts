@@ -1,2 +1,37 @@
-export const zh = {} as const;
-export const en = {} as const;
+export const zh = {
+  portraitLead: "你的长期偏好与编码规范，会被各 AI 工具读取。",
+  portraitToc: "目录",
+  portraitFile: "文件",
+  portraitCopyPath: "复制路径",
+  portraitCopiedPath: "已复制路径",
+  portraitCopyAll: "复制全文",
+  portraitCopied: "已复制",
+  portraitCopyFailed: "没能复制",
+  portraitWords: "约 {count} 字",
+  portraitUpdatedAt: "更新于 {time}",
+  portraitHistory: "历史版本",
+  portraitNoHistory: "还没有历史版本",
+  portraitEmptyTitle: "还没有生成数字分身",
+  portraitEmptyBody: "数字分身会在每日沉淀后生成（默认每天 10:00），你也可以先去看看状态。",
+  portraitViewStatus: "查看状态",
+  portraitSideSummary: "目录、文件和历史版本",
+} as const;
+
+export const en = {
+  portraitLead: "Your long-term preferences and coding norms, read by each AI tool.",
+  portraitToc: "Contents",
+  portraitFile: "File",
+  portraitCopyPath: "Copy path",
+  portraitCopiedPath: "Path copied",
+  portraitCopyAll: "Copy text",
+  portraitCopied: "Copied",
+  portraitCopyFailed: "Could not copy",
+  portraitWords: "About {count} characters",
+  portraitUpdatedAt: "Updated {time}",
+  portraitHistory: "History",
+  portraitNoHistory: "No earlier versions",
+  portraitEmptyTitle: "No portrait yet",
+  portraitEmptyBody: "A portrait is written after the daily pass (10:00 by default). You can check status in the meantime.",
+  portraitViewStatus: "View status",
+  portraitSideSummary: "Contents, file, and history",
+} as const;
