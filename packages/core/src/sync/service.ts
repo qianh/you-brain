@@ -25,6 +25,7 @@ import {
 
 import { YouBrainError } from "../domain/errors.js";
 import type { DriveChanges, DriveEntry, DrivePort } from "../drive/drive-port.js";
+import { ACTIVITY_EPOCH } from "../reminders/delivery.js";
 import { updateJsonWithMerge, upsertByPath } from "../upload/write.js";
 import { applyEvents, foldEvents, persistTopicBook } from "../topics/index.js";
 import type { TopicBook } from "../topics/types.js";
@@ -37,6 +38,7 @@ import type {
   DeviceIdentity,
   FlushResult,
   FlushedEventFile,
+  DeviceActivityOptions,
   JsonPatch,
   ProtocolSyncOptions,
   PullResult,
@@ -132,6 +134,22 @@ async function readJson(drive: DrivePort, path: string): Promise<unknown | null>
   return parseJsonText(text, path);
 }
 
+function activityMs(value: string | null): number | null {
+  if (value === null || value.trim() === "") return null;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/** Newer instant wins. Missing on both sides is the epoch, not "now". */
+function mergeLastActiveAt(existing: string | null, incoming: string | null): string {
+  const incomingMs = activityMs(incoming);
+  const existingMs = activityMs(existing);
+  if (incomingMs === null && existingMs === null) return ACTIVITY_EPOCH;
+  if (incomingMs === null) return existing ?? ACTIVITY_EPOCH;
+  if (existingMs === null || incomingMs > existingMs) return new Date(incomingMs).toISOString();
+  return existing ?? ACTIVITY_EPOCH;
+}
+
 function unionBySeq(groups: readonly (readonly Event[])[]): Event[] {
   const byId = new Map<string, Event>();
   for (const group of groups) {
@@ -215,13 +233,13 @@ export class ProtocolSync {
     return this.#pullIncremental(cursor);
   }
 
-  async register(): Promise<DeviceRecord> {
+  async register(options?: DeviceActivityOptions): Promise<DeviceRecord> {
     await this.ensureProtocol();
-    return this.#writeDevice(true);
+    return this.#writeDevice(options?.lastActiveAt);
   }
 
-  async heartbeat(options?: { active?: boolean }): Promise<DeviceRecord> {
-    return this.#writeDevice(options?.active === true);
+  async heartbeat(options?: DeviceActivityOptions): Promise<DeviceRecord> {
+    return this.#writeDevice(options?.lastActiveAt);
   }
 
   async readShared(): Promise<SharedConfig> {
@@ -417,12 +435,12 @@ export class ProtocolSync {
     return update;
   }
 
-  async #writeDevice(active: boolean): Promise<DeviceRecord> {
+  async #writeDevice(incoming: string | null | undefined): Promise<DeviceRecord> {
     const now = this.#now().toISOString();
     const path = deviceRecordPath(this.#device.deviceId);
     const result = await updateJsonWithMerge<DeviceRecord>(this.#drive, path, (current) => {
       const existing = current === null ? null : parseDeviceRecord(current);
-      const lastActiveAt = active || existing === null ? now : existing.lastActiveAt;
+      const lastActiveAt = mergeLastActiveAt(existing?.lastActiveAt ?? null, incoming ?? null);
       return parseDeviceRecord({
         deviceId: this.#device.deviceId,
         displayName: this.#device.displayName,

@@ -9,6 +9,7 @@ export {
   ProtocolSync,
 } from "./service.js";
 export type {
+  DeviceActivityOptions,
   DeviceIdentity,
   FlushResult,
   FlushedEventFile,

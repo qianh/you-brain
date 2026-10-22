@@ -17,6 +17,7 @@ import { describe, expect, it } from "bun:test";
 
 import type { DrivePort, DrivePutInput, DriveUpdateOptions } from "../../src/drive/drive-port.js";
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
+import { ACTIVITY_EPOCH } from "../../src/reminders/delivery.js";
 import { SqliteStore } from "../../src/store/index.js";
 import {
   EVENT_FLUSH_INTERVAL_MS,
@@ -557,7 +558,7 @@ describe("protocol sync", () => {
     }
   });
 
-  it("registers a device and keeps lastActiveAt until an active heartbeat", async () => {
+  it("registers a device without raising lastActiveAt and never moves it backward", async () => {
     const drive = new MemoryDrive();
     const local = openStore();
     const remote = openStore();
@@ -584,22 +585,38 @@ describe("protocol sync", () => {
         protocolVersion: 1,
         capabilities: ["capture", "refine"],
         lastSeenAt: now.toISOString(),
-        lastActiveAt: now.toISOString(),
+        lastActiveAt: ACTIVITY_EPOCH,
       });
       const fileId = (await drive.findByPath(deviceRecordPath(DEVICE_A)))!.id;
       const protocolId = (await drive.findByPath(DRIVE_PATHS.protocolFile))!.id;
 
       now = new Date("2026-07-01T00:05:00.000Z");
-      const seen = await sync.heartbeat();
+      const seen = await sync.register();
       expect(seen.lastSeenAt).toBe(now.toISOString());
-      expect(seen.lastActiveAt).toBe(registered.lastActiveAt);
+      expect(seen.lastActiveAt).toBe(ACTIVITY_EPOCH);
       expect((await drive.findByPath(deviceRecordPath(DEVICE_A)))!.id).toBe(fileId);
 
       now = new Date("2026-07-01T00:06:00.000Z");
-      const active = await sync.heartbeat({ active: true });
+      const quiet = await sync.heartbeat();
+      expect(quiet.lastSeenAt).toBe(now.toISOString());
+      expect(quiet.lastActiveAt).toBe(ACTIVITY_EPOCH);
+
+      const activeAt = "2026-07-01T00:04:00.000Z";
+      now = new Date("2026-07-01T00:07:00.000Z");
+      const active = await sync.heartbeat({ lastActiveAt: activeAt });
       expect(active.lastSeenAt).toBe(now.toISOString());
-      expect(active.lastActiveAt).toBe(now.toISOString());
-      expect(local.store.getDevice(DEVICE_A)).toEqual(active);
+      expect(active.lastActiveAt).toBe(activeAt);
+
+      now = new Date("2026-07-01T00:10:00.000Z");
+      const older = await sync.heartbeat({ lastActiveAt: "2026-07-01T00:01:00.000Z" });
+      expect(older.lastSeenAt).toBe(now.toISOString());
+      expect(older.lastActiveAt).toBe(activeAt);
+      const kept = await sync.heartbeat({ lastActiveAt: null });
+      expect(kept.lastActiveAt).toBe(activeAt);
+      const reregistered = await sync.register();
+      expect(reregistered.lastActiveAt).toBe(activeAt);
+      expect(reregistered.lastSeenAt).toBe(now.toISOString());
+      expect(local.store.getDevice(DEVICE_A)).toEqual(reregistered);
       await sync.ensureProtocol();
       expect((await drive.findByPath(DRIVE_PATHS.protocolFile))!.id).toBe(protocolId);
 
@@ -609,10 +626,76 @@ describe("protocol sync", () => {
         device: identity(DEVICE_B, "Studio"),
       });
       await syncB.pull();
-      expect(remote.store.getDevice(DEVICE_A)).toEqual(active);
+      expect(remote.store.getDevice(DEVICE_A)).toEqual(reregistered);
     } finally {
       local.close();
       remote.close();
+    }
+  });
+
+  it("keeps the newer lastActiveAt when two heartbeats conflict", async () => {
+    const drive = new MemoryDrive();
+    const local = openStore();
+    const other = openStore();
+    const base = "2026-07-01T00:05:00.000Z";
+    const older = "2026-07-01T00:10:00.000Z";
+    const newer = "2026-07-01T00:20:00.000Z";
+    const now = new Date("2026-07-01T01:00:00.000Z");
+    let releaseHold!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      releaseHold = resolve;
+    });
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    let armed = true;
+    const wrapped = wrap(drive, {
+      async update(fileId: string, content: Buffer | string, options?: DriveUpdateOptions) {
+        if (armed) {
+          armed = false;
+          markEntered();
+          await hold;
+        }
+        return drive.update(fileId, content, options);
+      },
+    });
+    try {
+      const seed = new ProtocolSync({
+        drive,
+        store: local.store,
+        device: identity(DEVICE_A, "MacBook Air"),
+        now: () => now,
+      });
+      await seed.register();
+      await seed.heartbeat({ lastActiveAt: base });
+      const syncA = new ProtocolSync({
+        drive: wrapped,
+        store: local.store,
+        device: identity(DEVICE_A, "MacBook Air"),
+        now: () => now,
+      });
+      const syncB = new ProtocolSync({
+        drive,
+        store: other.store,
+        device: identity(DEVICE_A, "MacBook Air"),
+        now: () => now,
+      });
+      const pending = syncA.heartbeat({ lastActiveAt: newer });
+      await entered;
+      const writtenOlder = await syncB.heartbeat({ lastActiveAt: older });
+      expect(writtenOlder.lastActiveAt).toBe(older);
+      releaseHold();
+      const written = await pending;
+      expect(written.lastActiveAt).toBe(newer);
+      const object = await drive.readPath(deviceRecordPath(DEVICE_A));
+      const body = JSON.parse(object?.bytes.toString("utf8") ?? "{}") as { lastActiveAt: string };
+      expect(body.lastActiveAt).toBe(newer);
+      expect(other.store.getDevice(DEVICE_A)?.lastActiveAt).toBe(older);
+      expect(local.store.getDevice(DEVICE_A)?.lastActiveAt).toBe(newer);
+    } finally {
+      local.close();
+      other.close();
     }
   });
 

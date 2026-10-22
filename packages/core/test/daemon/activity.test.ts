@@ -46,6 +46,8 @@ describe("device activity", () => {
     expect(first.local.lastSeenAt).toBe(startedAt);
     const registered = await readDriveDevice(drive, first.local.deviceId);
     expect(registered.lastSeenAt).toBe(startedAt);
+    expect(registered.lastActiveAt).toBe(ACTIVITY_EPOCH);
+    expect(registered.lastActiveAt).not.toBe(startedAt);
 
     await clock.advance(INTERVALS.heartbeatMs);
     await daemon.settled();
@@ -55,7 +57,8 @@ describe("device activity", () => {
     expect(second.local.lastActiveAt).toBe(ACTIVITY_EPOCH);
     const driveAfter = await readDriveDevice(drive, second.local.deviceId);
     expect(driveAfter.lastSeenAt).toBe(heart);
-    expect(driveAfter.lastActiveAt).toBe(startedAt);
+    expect(driveAfter.lastActiveAt).toBe(ACTIVITY_EPOCH);
+    expect(driveAfter.lastActiveAt).not.toBe(startedAt);
 
     const activity = new Date(clock.nowMs() - 60_000).toISOString();
     const reported = await postActivity(daemon, { at: activity });
@@ -70,6 +73,9 @@ describe("device activity", () => {
     expect(fourth.local.lastSeenAt).toBe(clock.now().toISOString());
     expect(fourth.local.lastActiveAt).toBe(activity);
     expect(fourth.delivery).toEqual({ notify: true, reason: "ok" });
+    const driveActive = await readDriveDevice(drive, fourth.local.deviceId);
+    expect(driveActive.lastActiveAt).toBe(activity);
+    expect(driveActive.lastSeenAt).toBe(clock.now().toISOString());
   }, 30_000);
 
   it("rejects activity outside an hour behind or a minute ahead, and requires the bearer token", async () => {

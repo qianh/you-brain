@@ -91,6 +91,7 @@ import {
 import { withSessionCounts } from "./topic-session-count.js";
 import { SqliteStore } from "../store/sqlite-store.js";
 import { EventLog } from "../sync/event-log.js";
+import { readOutboxQueue, writeOutboxQueue } from "../sync/queue.js";
 import { ProtocolSync } from "../sync/service.js";
 import type { DeviceIdentity } from "../sync/types.js";
 import { applyEvents, foldEvents, partitionTopics, persistTopicBook } from "../topics/index.js";
@@ -117,7 +118,7 @@ import {
   type DaemonClock,
   systemDaemonClock,
 } from "./clock.js";
-import { ACTIVITY_EPOCH, activityIsRecent, decideDelivery } from "../reminders/delivery.js";
+import { ACTIVITY_EPOCH, decideDelivery } from "../reminders/delivery.js";
 import { allocateCopied, appendCopied } from "./events.js";
 import { openGoogleDrive } from "./google.js";
 import { acquireDaemonLock } from "./lock.js";
@@ -508,7 +509,9 @@ export class YouBrainDaemon {
           this.#driveReachable = false;
         } else {
           try {
-            await log.time("syncRegister", () => sync.register());
+            await log.time("syncRegister", () =>
+              sync.register({ lastActiveAt: this.#activityForDevice() }),
+            );
             if (!this.#stopped) this.#driveReachable = true;
           } catch {
             this.#driveReachable = false;
@@ -1056,6 +1059,7 @@ export class YouBrainDaemon {
     }
     if (!this.#log || !this.#store) return;
     const allocated = allocateCopied(this.#log, event);
+    this.#enqueueLocal(allocated);
     persistTopicBook(this.#store, applyEvents(foldEvents(this.#store.listEvents()), [allocated]));
     this.#onTopicsChanged();
   }
@@ -1067,8 +1071,24 @@ export class YouBrainDaemon {
     }
     if (!this.#log || !this.#store) return;
     const event = this.#log.allocate(type, data);
+    this.#enqueueLocal(event);
     persistTopicBook(this.#store, applyEvents(foldEvents(this.#store.listEvents()), [event]));
     this.#onTopicsChanged();
+  }
+
+  /** Drive may still be closed. Queue the event so the first flush replicates it. */
+  #enqueueLocal(event: Event): void {
+    const store = this.#store;
+    if (!store) return;
+    const queue = readOutboxQueue(store, this.#local.deviceId);
+    queue.push(event);
+    writeOutboxQueue(store, this.#local.deviceId, queue);
+    store.enqueueOutbox({
+      id: event.id,
+      kind: "event",
+      payload: event,
+      createdAt: event.ts,
+    });
   }
 
   #onTopicsChanged(): void {
@@ -1138,9 +1158,7 @@ export class YouBrainDaemon {
   async #heartbeat(): Promise<void> {
     if (this.#sync) {
       try {
-        await this.#sync.heartbeat({
-          active: activityIsRecent(this.#lastActivityAt, this.#clock.nowMs()),
-        });
+        await this.#sync.heartbeat({ lastActiveAt: this.#activityForDevice() });
         this.#driveReachable = true;
       } catch {
         this.#driveReachable = false;
@@ -1159,20 +1177,23 @@ export class YouBrainDaemon {
   #noteActivity(at: string): void {
     const ms = Date.parse(at);
     if (Number.isNaN(ms)) return;
-    this.#loadPreservedActivity();
-    const floor = this.#lastActivityAt ?? this.#preservedActivityAt;
-    if (floor !== null) {
-      const floorMs = Date.parse(floor);
-      if (!Number.isNaN(floorMs) && ms <= floorMs) return;
-    }
+    const floorMs = Date.parse(this.#activityForDevice());
+    if (!Number.isNaN(floorMs) && ms <= floorMs) return;
     this.#lastActivityAt = new Date(ms).toISOString();
     this.#rememberDevice();
   }
 
+  /**
+   * Newest of this process, the startup row, and the current device row.
+   * Epoch when none of those is a real timestamp.
+   */
   #activityForDevice(): string {
-    if (this.#lastActivityAt) return this.#lastActivityAt;
     this.#loadPreservedActivity();
-    return this.#preservedActivityAt ?? ACTIVITY_EPOCH;
+    return latestActivity([
+      this.#lastActivityAt,
+      this.#preservedActivityAt,
+      this.#store?.getDevice(this.#local.deviceId)?.lastActiveAt ?? null,
+    ]);
   }
 
   #rememberDevice(): void {
@@ -1192,8 +1213,8 @@ export class YouBrainDaemon {
   }
 
   /**
-   * Pull copies the Drive device row, whose `lastActiveAt` is only as precise
-   * as the boolean heartbeat. Put this device's real activity back.
+   * Pull copies the Drive row. Keep the newer of that row and this process's
+   * real activity so an older copy cannot move the timestamp backward.
    */
   #restoreLocalActivity(): void {
     if (!this.#store) return;
@@ -1791,6 +1812,17 @@ export class YouBrainDaemon {
 }
 
 const FLUSH_DEADLINE_MS = 3_000;
+
+function latestActivity(values: readonly (string | null)[]): string {
+  let best = Date.parse(ACTIVITY_EPOCH);
+  for (const value of values) {
+    if (value === null) continue;
+    const ms = Date.parse(value);
+    if (Number.isNaN(ms)) continue;
+    if (ms > best) best = ms;
+  }
+  return new Date(best).toISOString();
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {

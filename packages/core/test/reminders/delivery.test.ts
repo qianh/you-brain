@@ -6,7 +6,9 @@ import {
   acceptActivityAt,
 } from "../../src/reminders/activity.js";
 import {
+  ACTIVITY_EPOCH,
   ACTIVITY_WINDOW_MS,
+  activityIsRecent,
   decideDelivery,
   type DeliveryDevice,
 } from "../../src/reminders/delivery.js";
@@ -145,6 +147,38 @@ describe("decideDelivery", () => {
         now: NOW,
       }),
     ).toEqual({ notify: false, reason: "other-device" });
+  });
+
+  it("treats the epoch as inactive even when now is the epoch", () => {
+    expect(
+      decideDelivery({
+        notifications: true,
+        deviceId: "local",
+        lastActivityAt: ACTIVITY_EPOCH,
+        devices: [],
+        now: NOW,
+      }),
+    ).toEqual({ notify: false, reason: "inactive" });
+    expect(
+      decideDelivery({
+        notifications: true,
+        deviceId: "local",
+        lastActivityAt: ACTIVITY_EPOCH,
+        devices: [device("other", 0)],
+        now: ACTIVITY_EPOCH,
+      }),
+    ).toEqual({ notify: false, reason: "inactive" });
+    expect(
+      decideDelivery({
+        notifications: true,
+        deviceId: "local",
+        lastActivityAt: NOW,
+        devices: [{ deviceId: "other", lastActiveAt: ACTIVITY_EPOCH }],
+        now: NOW,
+      }),
+    ).toEqual({ notify: true, reason: "ok" });
+    expect(activityIsRecent(ACTIVITY_EPOCH, NOW_MS)).toBe(false);
+    expect(activityIsRecent(ACTIVITY_EPOCH, Date.parse(ACTIVITY_EPOCH))).toBe(false);
   });
 
   it("ignores a far-future timestamp outside the window", () => {

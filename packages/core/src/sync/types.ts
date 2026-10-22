@@ -52,6 +52,15 @@ export interface SyncListener {
   onConfigChanged?(update: SyncConfigUpdate): void | Promise<void>;
 }
 
+/**
+ * Activity time for `devices/<id>.json`.
+ * Null or omitted keeps the Drive value. A first record with no value uses
+ * 1970-01-01T00:00:00.000Z. A passed instant never moves the stored time backward.
+ */
+export interface DeviceActivityOptions {
+  lastActiveAt?: string | null;
+}
+
 export interface ProtocolSyncOptions {
   drive: DrivePort;
   store: SyncStore;
