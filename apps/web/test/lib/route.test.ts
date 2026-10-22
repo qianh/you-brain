@@ -85,17 +85,17 @@ describe("quitShell", () => {
 
 describe("openFullWindow", () => {
   test("asks the Tauri shell when it is present", async () => {
-    const calls: string[] = [];
+    const calls: Array<[string, Record<string, unknown> | undefined]> = [];
     const mode = await openFullWindow({
-      invoke: (command) => {
-        calls.push(command);
+      invoke: (command, args) => {
+        calls.push([command, args]);
         return Promise.resolve(undefined);
       },
       open: () => null,
       pageUrl: "http://127.0.0.1:4731/panel",
     });
     expect(mode).toBe("tauri");
-    expect(calls).toEqual(["open_main_window"]);
+    expect(calls).toEqual([["open_main_window", { path: "/" }]]);
   });
 
   test("opens the full window in the browser otherwise", async () => {

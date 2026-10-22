@@ -75,7 +75,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![open_main_window])
+        .invoke_handler(tauri::generate_handler![open_main_window, quit])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
@@ -127,7 +127,7 @@ fn install_tray(app: &tauri::App) -> tauri::Result<()> {
             }
             "open-main" => show_main(app),
             "sync" => sync_now(app),
-            "quit" => app.exit(0),
+            "quit" => exit_app(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -432,6 +432,11 @@ fn sync_now(app: &tauri::AppHandle) {
 /// the loopback token into `index.html`; the shell must not put it in the URL.
 fn publish_daemon_windows(app: &tauri::AppHandle, port: u16) {
     ensure_content(app, PANEL, &format!("http://127.0.0.1:{port}/panel"), true);
+    // A deep link already on this daemon origin must survive the supervisor.
+    // The homepage URL is unchanged, so a main window at `/` still no-ops.
+    if app.get_webview_window(MAIN).is_some() && main_target_on_port(app, port) {
+        return;
+    }
     ensure_content(app, MAIN, &format!("http://127.0.0.1:{port}/"), false);
 }
 
@@ -491,30 +496,173 @@ fn toggle_panel(app: &tauri::AppHandle, anchor: Option<tauri::Rect>, toggle: boo
     let _ = window.set_focus();
 }
 
+const MAX_APP_PATH: usize = 512;
+
+/// Same-origin path only: starts with `/`, not `//`, no scheme, at most 512 bytes.
+/// Query and hash are kept. Anything else is an error so the caller can open `/`.
+fn normalize_app_path(raw: &str) -> Result<String, String> {
+    if raw.len() > MAX_APP_PATH {
+        return Err("路径过长".to_string());
+    }
+    if !raw.starts_with('/') || raw.starts_with("//") {
+        return Err("路径必须是站内路径".to_string());
+    }
+    if raw.contains("://") || raw.contains('\\') || raw.chars().any(char::is_control) {
+        return Err("路径必须是站内路径".to_string());
+    }
+    let base =
+        url::Url::parse("http://127.0.0.1/").map_err(|_| "路径必须是站内路径".to_string())?;
+    let joined = base
+        .join(raw)
+        .map_err(|_| "路径必须是站内路径".to_string())?;
+    if joined.scheme() != "http"
+        || joined.host_str() != Some("127.0.0.1")
+        || joined.port().is_some()
+    {
+        return Err("路径必须是站内路径".to_string());
+    }
+    let path = joined.path();
+    if !path.starts_with('/') || path.starts_with("//") {
+        return Err("路径必须是站内路径".to_string());
+    }
+    Ok(raw.to_string())
+}
+
+/// The SPA router reads `popstate`. `location.assign` and webview `navigate`
+/// both load a new document, so an already-open daemon page stays in place.
+fn spa_route_script(path: &str) -> String {
+    let literal = serde_json::to_string(path).unwrap_or_else(|_| "\"/\"".to_string());
+    format!(
+        "history.pushState(null,\"\",{literal});dispatchEvent(new PopStateEvent(\"popstate\"));"
+    )
+}
+
+fn exit_app(app: &tauri::AppHandle) {
+    app.exit(0);
+}
+
 #[tauri::command]
-fn open_main_window(app: tauri::AppHandle) -> Result<(), String> {
-    let handle = app.clone();
-    handle
-        .run_on_main_thread(move || show_main(&app))
+fn quit(app: tauri::AppHandle) {
+    exit_app(&app);
+}
+
+#[tauri::command]
+fn open_main_window(app: tauri::AppHandle, path: Option<String>) -> Result<(), String> {
+    let requested = match path.as_deref() {
+        None => None,
+        Some(raw) => match normalize_app_path(raw) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                let handle = app.clone();
+                let _ = handle.run_on_main_thread(move || show_main(&app));
+                return Err(error);
+            }
+        },
+    };
+    let app_for_ui = app.clone();
+    app.run_on_main_thread(move || show_main_at(&app_for_ui, requested.as_deref()))
         .map_err(|error| format!("打开完整窗口失败：{error}"))
 }
 
 fn show_main(app: &tauri::AppHandle) {
+    show_main_at(app, None);
+}
+
+fn show_main_at(app: &tauri::AppHandle, path: Option<&str>) {
     if app.get_webview_window(MAIN).is_none() {
+        if let Some(path) = path {
+            if open_main_at_path(app, path) {
+                reveal_main(app);
+                return;
+            }
+        }
         let _ = build_main(app, WebviewUrl::App("index.html".into()));
-        *app.state::<ShellState>()
-            .main_target
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some("app://index.html".into());
+        set_main_target(app, "app://index.html".into());
         if let Some(endpoint) = current_endpoint(app) {
             publish_daemon_windows(app, endpoint.port);
         }
+        reveal_main(app);
+        return;
     }
+    if let Some(path) = path {
+        route_existing_main(app, path);
+    }
+    reveal_main(app);
+}
+
+/// Create the main window on `http://127.0.0.1:{port}{path}`. The token stays
+/// out of the URL; the daemon injects it into `index.html`.
+fn open_main_at_path(app: &tauri::AppHandle, path: &str) -> bool {
+    let Some(endpoint) = current_endpoint(app) else {
+        return false;
+    };
+    let url = format!("http://127.0.0.1:{}{path}", endpoint.port);
+    let Ok(parsed) = url.parse::<url::Url>() else {
+        return false;
+    };
+    if build_main(app, WebviewUrl::External(parsed)).is_err() {
+        return false;
+    }
+    set_main_target(app, url);
+    true
+}
+
+fn route_existing_main(app: &tauri::AppHandle, path: &str) {
+    let Some(target) = main_target(app) else {
+        return;
+    };
+    // `app://` is the built-in page. Leave the existing handoff to the daemon homepage.
+    let Some(origin) = daemon_origin(&target) else {
+        return;
+    };
+    let Some(window) = app.get_webview_window(MAIN) else {
+        return;
+    };
+    let _ = window.eval(&spa_route_script(path));
+    set_main_target(app, format!("{origin}{path}"));
+}
+
+fn reveal_main(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
+}
+
+fn set_main_target(app: &tauri::AppHandle, url: String) {
+    *app.state::<ShellState>()
+        .main_target
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some(url);
+}
+
+fn main_target(app: &tauri::AppHandle) -> Option<String> {
+    app.state::<ShellState>()
+        .main_target
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone()
+}
+
+fn main_target_on_port(app: &tauri::AppHandle, port: u16) -> bool {
+    let Some(origin) = main_target(app).as_deref().and_then(daemon_origin) else {
+        return false;
+    };
+    origin == format!("http://127.0.0.1:{port}") || origin == format!("http://localhost:{port}")
+}
+
+fn daemon_origin(target: &str) -> Option<String> {
+    let url = url::Url::parse(target).ok()?;
+    if url.scheme() != "http" {
+        return None;
+    }
+    let host = url.host_str()?;
+    if host != "127.0.0.1" && host != "localhost" {
+        return None;
+    }
+    let port = url.port()?;
+    Some(format!("http://{host}:{port}"))
 }
 
 fn position_panel(app: &tauri::AppHandle, window: &WebviewWindow, rect: tauri::Rect) {
@@ -763,4 +911,59 @@ fn now_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{daemon_origin, normalize_app_path, spa_route_script, MAX_APP_PATH};
+
+    #[test]
+    fn accepts_same_origin_paths() {
+        assert_eq!(normalize_app_path("/").as_deref(), Ok("/"));
+        assert_eq!(normalize_app_path("/today").as_deref(), Ok("/today"));
+        assert_eq!(
+            normalize_app_path("/topics/history").as_deref(),
+            Ok("/topics/history")
+        );
+        assert_eq!(
+            normalize_app_path("/settings?section=account#model").as_deref(),
+            Ok("/settings?section=account#model")
+        );
+        assert_eq!(
+            normalize_app_path("/search?q=hello#top").as_deref(),
+            Ok("/search?q=hello#top")
+        );
+        let max = format!("/{}", "a".repeat(MAX_APP_PATH - 1));
+        assert_eq!(max.len(), MAX_APP_PATH);
+        assert!(normalize_app_path(&max).is_ok());
+    }
+
+    #[test]
+    fn rejects_open_redirects_and_overlong_paths() {
+        assert!(normalize_app_path("//evil.com").is_err());
+        assert!(normalize_app_path("///evil.com").is_err());
+        assert!(normalize_app_path("https://x").is_err());
+        assert!(normalize_app_path("http://127.0.0.1/today").is_err());
+        assert!(normalize_app_path("today").is_err());
+        assert!(normalize_app_path("").is_err());
+        assert!(normalize_app_path("/\\\\evil.com").is_err());
+        assert!(normalize_app_path("/foo\n/bar").is_err());
+        let long = format!("/{}", "a".repeat(MAX_APP_PATH));
+        assert!(long.len() > MAX_APP_PATH);
+        assert!(normalize_app_path(&long).is_err());
+    }
+
+    #[test]
+    fn routes_inside_the_loaded_document() {
+        let script = spa_route_script("/settings?section=account#model");
+        assert!(script.contains("history.pushState"));
+        assert!(script.contains("PopStateEvent"));
+        assert!(!script.contains("location.assign"));
+        assert!(script.contains("/settings?section=account#model"));
+        assert_eq!(
+            daemon_origin("http://127.0.0.1:4802/settings?section=account"),
+            Some("http://127.0.0.1:4802".to_string())
+        );
+        assert_eq!(daemon_origin("app://index.html"), None);
+    }
 }

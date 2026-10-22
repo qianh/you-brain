@@ -104,13 +104,13 @@ describe("panelShortcut", () => {
 });
 
 describe("openAppPath", () => {
-  test("asks the Tauri shell and ignores the path there", async () => {
-    const calls: string[] = [];
+  test("asks the Tauri shell to open that path", async () => {
+    const calls: Array<[string, Record<string, unknown> | undefined]> = [];
     let opened = false;
     const mode = await openAppPath(
       {
-        invoke: (command) => {
-          calls.push(command);
+        invoke: (command, args) => {
+          calls.push([command, args]);
           return Promise.resolve(undefined);
         },
         open: () => {
@@ -122,7 +122,7 @@ describe("openAppPath", () => {
       "/settings?section=account",
     );
     expect(mode).toBe("tauri");
-    expect(calls).toEqual(["open_main_window"]);
+    expect(calls).toEqual([["open_main_window", { path: "/settings?section=account" }]]);
     expect(opened).toBe(false);
   });
 

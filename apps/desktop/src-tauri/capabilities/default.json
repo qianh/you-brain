@@ -5,5 +5,5 @@
   "remote": {
     "urls": ["http://127.0.0.1:*/*", "http://localhost:*/*"]
   },
-  "permissions": ["allow-open-main-window"]
+  "permissions": ["allow-open-main-window", "allow-quit"]
 }

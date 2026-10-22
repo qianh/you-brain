@@ -8,7 +8,7 @@ export async function openFullWindow(
   bridge: WindowBridge,
 ): Promise<"tauri" | "browser" | "blocked"> {
   if (bridge.invoke) {
-    await bridge.invoke("open_main_window");
+    await bridge.invoke("open_main_window", { path: "/" });
     return "tauri";
   }
   const url = new URL("/", bridge.pageUrl).toString();

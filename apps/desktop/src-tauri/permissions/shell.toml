@@ -2,3 +2,8 @@
 identifier = "allow-open-main-window"
 description = "Lets the daemon-served Web UI open the full window."
 commands.allow = ["open_main_window"]
+
+[[permission]]
+identifier = "allow-quit"
+description = "Lets the daemon-served Web UI quit the shell."
+commands.allow = ["quit"]
