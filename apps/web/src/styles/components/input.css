@@ -45,16 +45,22 @@
   line-height: var(--lh-sm);
 }
 
-.input-shell { position: relative; display: flex; align-items: center; min-width: 0; }
-.input-shell .field-control { padding-right: 36px; }
+.input-shell { position: relative; display: block; width: 100%; min-width: 0; }
+.input-shell .field-control { display: block; width: 100%; padding-right: 36px; }
 .input-shell.with-kbd .field-control { padding-right: 72px; }
 .input-affix {
   position: absolute;
-  right: 4px;
+  top: 0;
+  right: 2px;
+  bottom: 0;
   display: inline-flex;
   align-items: center;
   gap: 2px;
+  pointer-events: none;
 }
+.input-affix .tip-wrap,
+.input-affix .icon-btn,
+.input-affix .chip { pointer-events: auto; }
 
 .search-field { position: relative; display: flex; align-items: center; min-width: 0; }
 .search-field .search-icon {

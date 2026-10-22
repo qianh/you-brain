@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { countReadingChars, formatReadingCount, scrollBehavior, writeClipboard } from "../../src/pages/portrait/logic.js";
+import { countReadingChars, formatReadingCount, scrollBehavior, snapshotVersion, writeClipboard } from "../../src/pages/portrait/logic.js";
 
 describe("portrait reading helpers", () => {
   test("counts graphemes after stripping whitespace", () => {
@@ -21,6 +21,13 @@ describe("portrait reading helpers", () => {
         throw new Error("denied");
       }),
     ).toBe(false);
+  });
+
+  test("shows a version token and keeps an untitled name readable", () => {
+    expect(snapshotVersion("JOHN-DIGITAL-TWIN-v13.md")).toBe("v13");
+    expect(snapshotVersion("JOHN-DIGITAL-TWIN-v1.3.2.md")).toBe("v1.3.2");
+    expect(snapshotVersion("notes.md")).toBe("notes");
+    expect(snapshotVersion(".md")).toBe(".md");
   });
 
   test("does not ask for smooth scrolling when motion is reduced or unavailable", () => {

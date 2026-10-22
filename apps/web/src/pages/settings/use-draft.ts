@@ -8,6 +8,7 @@ import type { MessageKey } from "../../i18n/messages.js";
 import { validateSettings } from "../../lib/copy.js";
 import {
   appearanceConfig,
+  configSaveBody,
   isSettingsDirty,
   llmKeyPayload,
   oauthPayload,
@@ -159,7 +160,7 @@ export function useSettingsDraft(): SettingsDraftApi {
   }, [config, roles]);
 
   const save = useCallback(async (): Promise<boolean> => {
-    if (!draft || !rolesDraft || busy) return false;
+    if (!draft || !rolesDraft || !config || busy) return false;
     if (issues.length > 0) {
       setError(t("fieldError"));
       return false;
@@ -174,7 +175,7 @@ export function useSettingsDraft(): SettingsDraftApi {
     setBusy(true);
     setError(null);
     try {
-      const savedConfig = await client.updateConfig(draft);
+      const savedConfig = await client.updateConfig(configSaveBody(config, draft));
       const savedRoles = await client.updateRoles(rolesDraft);
       replaceConfig(savedConfig);
       replaceRoles(savedRoles);
@@ -209,6 +210,7 @@ export function useSettingsDraft(): SettingsDraftApi {
     apiKey,
     busy,
     client,
+    config,
     clientId,
     clientSecret,
     draft,

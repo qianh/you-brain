@@ -3,6 +3,7 @@ import type { SharedConfig } from "@you-brain/protocol";
 import { Card } from "../../components/card.js";
 import { Section } from "../../components/card.js";
 import { Input } from "../../components/input.js";
+import { Toggle } from "../../components/toggle.js";
 import { useDaemon } from "../../daemon-context.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { numberOrZero } from "./logic.js";
@@ -71,6 +72,22 @@ export function RefineSection({
                 onDraft({
                   ...draft,
                   topics: { ...draft.topics, historyDays: numberOrZero(event.target.valueAsNumber) },
+                })
+              }
+            />
+          </SettingRow>
+        </Card>
+      </Section>
+      <Section title={t("settingsSearch")}>
+        <Card>
+          <SettingRow title={t("semanticSearch")} hint={t("semanticSearchHint")} control="toggle">
+            <Toggle
+              checked={draft.search?.semantic !== false}
+              label={t("semanticSearch")}
+              onChange={(checked) =>
+                onDraft({
+                  ...draft,
+                  search: { ...(draft.search ?? { semantic: true }), semantic: checked },
                 })
               }
             />

@@ -1,15 +1,30 @@
-.page-frame { display: flex; flex-direction: column; gap: var(--sp-6); min-width: 0; }
+.page-frame { display: flex; flex-direction: column; gap: var(--sp-5); min-width: 0; }
 .page-frame.read { max-width: var(--read-max); }
 .page-header {
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   justify-content: space-between;
   gap: var(--sp-4);
   min-width: 0;
 }
-.page-header .page-copy { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.page-header p { color: var(--text-2); font-size: var(--fs-sm); line-height: var(--lh-sm); }
-.page-header .page-actions { display: inline-flex; align-items: center; gap: var(--sp-2); flex: none; }
+.page-header .page-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  /* Title line + subtitle line, so pages without a subtitle keep the same rhythm. */
+  min-height: calc(var(--fs-xl) * var(--lh-xl) + 2px + var(--fs-base) * var(--lh-base));
+}
+.page-header h1 { font-size: var(--fs-xl); line-height: var(--lh-xl); font-weight: 600; }
+.page-header p { color: var(--text-2); font-size: var(--fs-base); line-height: var(--lh-base); }
+.page-header .page-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  flex: none;
+  height: calc(var(--fs-xl) * var(--lh-xl));
+}
 
 @media (max-width: 759px) {
   .page-header { flex-direction: column; align-items: flex-start; }

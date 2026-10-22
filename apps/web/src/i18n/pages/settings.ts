@@ -28,6 +28,9 @@ export const zh = {
   settingsLoadTitle: "设置没有加载出来",
   settingsLoadBody: "后台暂时没有返回配置。可以重试。",
   settingsKeepVariant: "至少保留一个变体",
+  settingsSearch: "搜索",
+  semanticSearch: "语义搜索",
+  semanticSearchHint: "用本地小模型理解问题含义，让搜索更准。需要额外内存，约一分钟不用后自动释放；关闭后只用关键词匹配。",
 } as const;
 
 export const en = {
@@ -60,4 +63,7 @@ export const en = {
   settingsLoadTitle: "Settings didn't load",
   settingsLoadBody: "The local daemon didn't return a config. Try again.",
   settingsKeepVariant: "Keep at least one variant",
+  settingsSearch: "Search",
+  semanticSearch: "Semantic search",
+  semanticSearchHint: "A small local model reads what the question means, so search is more accurate. It needs extra memory and unloads after about a minute idle. Turn it off to match keywords only.",
 } as const;

@@ -1,7 +1,7 @@
 .portrait-page {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-6);
+  gap: var(--sp-5);
   min-width: 0;
   min-height: calc(100dvh - var(--h-topbar) - var(--sp-4) - var(--sp-10));
 }
@@ -164,6 +164,13 @@
   line-height: var(--lh-sm);
 }
 
+.portrait-history-note {
+  margin: var(--sp-2) 0 var(--sp-3);
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-zh);
+}
+
 .portrait-copy { width: 100%; margin-top: var(--sp-3); }
 
 .portrait-snap {
@@ -172,18 +179,21 @@
   justify-content: space-between;
   gap: var(--sp-3);
   min-height: var(--h-ctl);
+  padding: var(--sp-2) 0;
 }
 
 .portrait-snap + .portrait-snap { border-top: 1px solid var(--border); }
 
+.portrait-snap .tip-wrap { min-width: 0; max-width: 100%; }
+
 .portrait-snap-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: inline-block;
+  max-width: 100%;
   color: var(--text);
   font-size: var(--fs-sm);
+  font-weight: 500;
   line-height: var(--lh-sm);
+  overflow-wrap: anywhere;
 }
 
 .portrait-snap time {

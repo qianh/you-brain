@@ -1,7 +1,7 @@
 .topics-page {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-4);
+  gap: var(--sp-5);
   height: calc(100dvh - var(--h-topbar) - var(--sp-4) - var(--sp-10));
   min-height: 420px;
 }
@@ -40,15 +40,10 @@
 
 .topics-filters {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--sp-2);
-  overflow-x: auto;
-  padding: var(--sp-3) var(--sp-6) var(--sp-2) var(--sp-3);
-  scrollbar-width: none;
-  /* 只淡出最右一截，提示还能横滑，不把「已完成」整字吃掉。 */
-  mask-image: linear-gradient(to right, #000 calc(100% - var(--sp-3)), transparent);
+  padding: var(--sp-3);
 }
-
-.topics-filters::-webkit-scrollbar { display: none; }
 
 .topics-filters > .chip { flex: none; }
 
@@ -114,9 +109,12 @@
   padding: var(--sp-4) var(--sp-5) var(--sp-8);
   display: flex;
   flex-direction: column;
+  gap: var(--sp-6);
   flex: 1;
   min-height: 100%;
 }
+
+.topics-read > .section + .section { margin-top: 0; }
 
 .topics-read.is-fill > .empty-state { flex: 1; }
 
@@ -140,7 +138,6 @@
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
-  margin-bottom: var(--sp-2);
 }
 
 .topics-head-row {
@@ -406,7 +403,7 @@
 }
 
 @media (max-width: 859px) {
-  .topics-page .page-header { flex-direction: row; align-items: flex-end; }
+  .topics-page .page-header { flex-direction: row; align-items: flex-start; }
   .topics-grid { grid-template-columns: minmax(0, 1fr); }
   .topics-page.is-detail .topics-rail,
   .topics-page.is-detail .page-header,

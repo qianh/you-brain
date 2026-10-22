@@ -27,6 +27,41 @@ const TABS: ReadonlyArray<{ key: MessageKey; href: string; icon: IconName }> = [
   { key: "navStatus", href: "/status", icon: "activity" },
 ];
 
+function RouteFade({ pathname, children }: { pathname: string; children: ReactNode }) {
+  const [path, setPath] = useState(pathname);
+  const [entering, setEntering] = useState(false);
+  if (path !== pathname) {
+    setPath(pathname);
+    setEntering(false);
+  }
+  useEffect(() => {
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduced || document.visibilityState === "hidden") return;
+    setEntering(true);
+    const stop = (): void => setEntering(false);
+    const timer = window.setTimeout(stop, 220);
+    const onHide = (): void => {
+      if (document.visibilityState === "hidden") stop();
+    };
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onHide);
+    };
+  }, [pathname]);
+  return (
+    <div
+      key={pathname}
+      className={entering ? "route-fade is-entering" : "route-fade"}
+      onAnimationEnd={(event) => {
+        if (event.target === event.currentTarget) setEntering(false);
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 function capsuleText(kind: CapsuleKind, count: number, t: (key: MessageKey, vars?: Record<string, string | number>) => string): string {
   if (kind === "offline") return t("capsuleOffline");
   if (kind === "loading") return t("capsuleLoading");
@@ -181,9 +216,7 @@ export function Shell({ children }: { children: ReactNode }) {
           </Banner>
         ) : null}
         {streamError ? <Banner tone="warn">{t("streamDown")}</Banner> : null}
-        <div key={location.pathname} className="route-fade">
-          {children}
-        </div>
+        <RouteFade pathname={location.pathname}>{children}</RouteFade>
       </main>
       <CommandPalette open={palette} onClose={() => setPalette(false)} initialQuery={preset} />
     </div>

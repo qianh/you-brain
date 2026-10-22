@@ -119,16 +119,27 @@ export function suggestionNames(
   return names;
 }
 
+const KEYWORD_FALLBACK_CODES = new Set(["MODEL_UNAVAILABLE_KEYWORD_FALLBACK", "EMBED_UNAVAILABLE"]);
+
+/** Keyword mode is a fault only when the backend says the model fell back. Turning semantic search off does not. */
+export function keywordFallbackWarned(
+  searchMode: "semantic" | "keyword",
+  warnings: readonly { code?: string; message: string }[],
+): boolean {
+  if (searchMode !== "keyword") return false;
+  return warnings.some((warning) => warning.code !== undefined && KEYWORD_FALLBACK_CODES.has(warning.code));
+}
+
 export function searchNoticeLines(
   input: {
     indexStatus: "fresh" | "stale";
     searchMode: "semantic" | "keyword";
-    warnings: readonly { message: string }[];
+    warnings: readonly { code?: string; message: string }[];
   },
   copy: { keyword: string; stale: string },
 ): string[] {
   const lines: string[] = [];
-  if (input.searchMode === "keyword") lines.push(copy.keyword);
+  if (keywordFallbackWarned(input.searchMode, input.warnings)) lines.push(copy.keyword);
   if (input.indexStatus === "stale") lines.push(copy.stale);
   for (const warning of input.warnings) {
     const message = warning.message.trim();

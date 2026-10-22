@@ -157,9 +157,9 @@ export function TodayPage() {
                   </Button>
                 }
                 secondary={
-                  <button type="button" className="text-link" onClick={() => navigate(settingsHref("integrations"))}>
+                  <Button variant="ghost" onClick={() => navigate(settingsHref("integrations"))}>
                     {t("todaySetupCapture")}
-                  </button>
+                  </Button>
                 }
               />
             ) : (

@@ -4,9 +4,10 @@ import { useDaemon } from "../../daemon-context.js";
 import { Button, IconButton } from "../../components/button.js";
 import { Chip } from "../../components/chip.js";
 import { Icon } from "../../components/icons.js";
+import { Tooltip } from "../../components/tooltip.js";
 import { formatDateTime, formatRelative } from "../../lib/format.js";
 import { shouldShowToc, type TocItem } from "../../lib/markdown.js";
-import { scrollBehavior } from "./logic.js";
+import { scrollBehavior, snapshotVersion } from "./logic.js";
 
 export function PortraitSide({
   toc,
@@ -92,15 +93,15 @@ export function PortraitSide({
               <p className="portrait-kicker">{t("portraitHistory")}</p>
               <Chip>{snapshots.length}</Chip>
             </div>
-            <p className="portrait-meta-line">{t("correctionLater")}</p>
+            <p className="portrait-history-note">{t("correctionLater")}</p>
             {snapshots.length === 0 ? <p className="portrait-meta-line">{t("portraitNoHistory")}</p> : null}
             {snapshots.length > 0 ? (
               <ul className="portrait-snaps">
                 {snapshots.map((snapshot) => (
                   <li key={snapshot.path} className="portrait-snap">
-                    <span className="portrait-snap-name" title={snapshot.path}>
-                      {snapshot.name}
-                    </span>
+                    <Tooltip content={snapshot.name}>
+                      <span className="portrait-snap-name">{snapshotVersion(snapshot.name)}</span>
+                    </Tooltip>
                     <time dateTime={snapshot.updatedAt ?? undefined} title={formatDateTime(snapshot.updatedAt, language, timeZone)}>
                       {formatRelative(snapshot.updatedAt, language, timeZone)}
                     </time>

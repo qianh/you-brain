@@ -20,6 +20,7 @@ body {
 }
 
 button, input, textarea { font: inherit; color: inherit; }
+button { background: none; border: 0; padding: 0; }
 
 button, a { -webkit-tap-highlight-color: transparent; }
 
@@ -96,7 +97,14 @@ h3 {
   padding: var(--sp-4) var(--page-pad) var(--sp-10);
 }
 
-.route-fade { animation: route-in var(--ease-pop) both; }
+/* Resting state is fully opaque. The enter class is removed when the
+   animation ends, motion is reduced, or the window hides, so a cancelled
+   transition cannot leave the page half transparent. */
+.route-fade { opacity: 1; transform: none; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .route-fade.is-entering { animation: route-in var(--ease-pop) forwards; }
+}
 
 @keyframes route-in {
   from { opacity: 0; transform: translateY(4px); }
@@ -296,7 +304,11 @@ h3 {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .route-fade, .popover, .menu, .dialog, .toast, .tooltip { animation: none; }
+  .route-fade, .route-fade.is-entering, .popover, .menu, .dialog, .toast, .tooltip {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
   .skeleton::after { animation: none !important; }
   .spinner, .is-spinning, .icon-btn.is-spinning svg { animation: none !important; }
   .segmented-thumb, .toggle-knob, .row-chevron, .show-more-panel { transition: none; }

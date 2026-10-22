@@ -390,6 +390,7 @@ let config: Record<string, unknown> = {
     skillClients: ["codex"],
   },
   ui: { language: "zh", shortcut: "CmdOrCtrl+Shift+Y" },
+  search: { semantic: true },
 };
 
 let roles: Record<string, unknown> = {

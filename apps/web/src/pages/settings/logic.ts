@@ -149,6 +149,25 @@ export function buildSavePlan(input: {
   };
 }
 
+/** Missing means the protocol default: semantic search stays on. */
+export function searchSemantic(config: { search?: { semantic?: boolean } } | null | undefined): boolean {
+  return config?.search?.semantic !== false;
+}
+
+export type ConfigSaveBody = Omit<SharedConfig, "search"> & { search?: SharedConfig["search"] };
+
+/**
+ * The save body keeps every other field. `search` is included only when the
+ * semantic switch actually changed, as `{ search: { semantic } }`.
+ */
+export function configSaveBody(saved: SharedConfig, draft: SharedConfig): ConfigSaveBody {
+  if (searchSemantic(saved) === searchSemantic(draft)) {
+    const { search: _search, ...rest } = draft;
+    return rest;
+  }
+  return { ...draft, search: { semantic: searchSemantic(draft) } };
+}
+
 /** Appearance writes only `ui` onto the last saved config, never the dirty draft. */
 export function appearanceConfig(
   saved: SharedConfig,

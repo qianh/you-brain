@@ -1,7 +1,7 @@
 .search-page {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-6);
+  gap: var(--sp-5);
   min-width: 0;
   min-height: calc(100dvh - var(--h-topbar) - var(--sp-4) - var(--sp-10));
 }

@@ -227,7 +227,10 @@ export function searchNotices(input: SearchNoticeInput, language: Language): Sea
   if (input.indexStatus === "stale") {
     notices.push({ tone: "warn", text: translate(language, "searchStale") });
   }
-  if (input.searchMode === "keyword") {
+  const fellBack = input.warnings.some(
+    (warning) => warning.code === "MODEL_UNAVAILABLE_KEYWORD_FALLBACK" || warning.code === "EMBED_UNAVAILABLE",
+  );
+  if (input.searchMode === "keyword" && fellBack) {
     notices.push({ tone: "warn", text: translate(language, "searchKeyword") });
   }
   for (const warning of input.warnings) {

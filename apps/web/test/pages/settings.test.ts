@@ -4,6 +4,8 @@ import { createDefaultRoles, createDefaultSharedConfig, LLM_PROVIDERS, type Role
 import {
   appearanceConfig,
   buildSavePlan,
+  configSaveBody,
+  searchSemantic,
   cliCommand,
   cliProbe,
   deepEqual,
@@ -174,6 +176,28 @@ describe("settings save payload", () => {
       mode: "custom",
       clientId: "id",
     });
+  });
+
+  test("semantic search defaults to on and is omitted from the save body until it changes", () => {
+    const saved = createDefaultSharedConfig();
+    expect(saved.search.semantic).toBe(true);
+    expect(searchSemantic(saved)).toBe(true);
+    expect(searchSemantic({})).toBe(true);
+    expect(searchSemantic(null)).toBe(true);
+    const same = configSaveBody(saved, structuredClone(saved));
+    expect(same).not.toHaveProperty("search");
+    expect(same.llm).toEqual(saved.llm);
+    expect(same.refine).toEqual(saved.refine);
+    expect(same.capture).toEqual(saved.capture);
+    const off = configSaveBody(saved, { ...saved, search: { semantic: false } });
+    expect(off.search).toEqual({ semantic: false });
+    expect(off.llm).toEqual(saved.llm);
+    expect(off.topics).toEqual(saved.topics);
+    const back = configSaveBody({ ...saved, search: { semantic: false } }, saved);
+    expect(back.search).toEqual({ semantic: true });
+    const modelOnly = configSaveBody(saved, { ...saved, llm: { ...saved.llm, model: "deepseek-flash" } });
+    expect(modelOnly).not.toHaveProperty("search");
+    expect(modelOnly.llm.model).toBe("deepseek-flash");
   });
 
   test("appearance patch writes ui onto the saved config and leaves the draft alone", () => {

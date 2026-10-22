@@ -66,12 +66,16 @@ describe("search filters", () => {
 });
 
 describe("search notices and hits", () => {
-  test("joins keyword, stale, and unique warnings into one line", () => {
+  test("joins a model fallback, stale index, and unique warnings into one line", () => {
     const lines = searchNoticeLines(
       {
         indexStatus: "stale",
         searchMode: "keyword",
-        warnings: [{ message: "嵌入模型还没就绪" }, { message: "  " }, { message: "嵌入模型还没就绪" }],
+        warnings: [
+          { code: "MODEL_UNAVAILABLE_KEYWORD_FALLBACK", message: "嵌入模型还没就绪" },
+          { message: "  " },
+          { code: "MODEL_UNAVAILABLE_KEYWORD_FALLBACK", message: "嵌入模型还没就绪" },
+        ],
       },
       { keyword: "关键词", stale: "过期" },
     );
@@ -83,6 +87,25 @@ describe("search notices and hits", () => {
         { keyword: "关键词", stale: "过期" },
       ),
     ).toEqual([]);
+  });
+
+  test("does not call a chosen keyword search a failure", () => {
+    expect(
+      searchNoticeLines(
+        { indexStatus: "fresh", searchMode: "keyword", warnings: [] },
+        { keyword: "关键词", stale: "过期" },
+      ),
+    ).toEqual([]);
+    expect(
+      searchNoticeLines(
+        {
+          indexStatus: "fresh",
+          searchMode: "keyword",
+          warnings: [{ code: "PARTIAL", message: "有一份原文没编进索引" }],
+        },
+        { keyword: "关键词", stale: "过期" },
+      ),
+    ).toEqual(["有一份原文没编进索引"]);
   });
 
   test("maps the mock scores onto three cells", () => {

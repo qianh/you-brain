@@ -201,18 +201,23 @@ describe("search view", () => {
       {
         indexStatus: "stale",
         searchMode: "keyword",
-        warnings: [{ code: "PARTIAL", message: "有一份原文没编进索引" }],
+        warnings: [
+          { code: "MODEL_UNAVAILABLE_KEYWORD_FALLBACK", message: "Embedding model is unavailable" },
+          { code: "PARTIAL", message: "有一份原文没编进索引" },
+        ],
       },
       "zh",
     );
     expect(notices.map((notice) => notice.text)).toEqual([
       "搜索索引已过期，结果可能不全。",
       "语义搜索不可用，已降级为关键词搜索。",
+      "Embedding model is unavailable",
       "有一份原文没编进索引",
     ]);
     expect(searchNotices({ indexStatus: "fresh", searchMode: "semantic", warnings: [] }, "en")).toEqual(
       [],
     );
+    expect(searchNotices({ indexStatus: "fresh", searchMode: "keyword", warnings: [] }, "zh")).toEqual([]);
   });
 
   test("uses the first line as a title only when the excerpt continues", () => {

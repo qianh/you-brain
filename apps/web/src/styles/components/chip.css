@@ -18,6 +18,8 @@
 
 button.chip, button.pill { cursor: pointer; font: inherit; }
 button.chip:hover, button.pill:hover, .chip.is-hover { background: var(--surface-3); }
+button.chip:active, button.pill:active { background: var(--pressed); }
+button.chip:focus-visible, button.pill:focus-visible { outline-offset: 2px; }
 button.chip:disabled, .chip.is-disabled { opacity: 0.45; cursor: not-allowed; }
 
 .chip.accent, .pill.on, .chip[data-tone="accent"] {
