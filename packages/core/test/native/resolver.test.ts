@@ -1,10 +1,13 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 
-import { exportTarget, resolveVendorEntry } from "../../src/native/resolver.js";
+import { DESKTOP_PRODUCT_NAME } from "../../src/native/layout.js";
+import { exportTarget, resolveVendorEntry, vendorNodeModulesDir } from "../../src/native/resolver.js";
 
 describe("vendor package entry", () => {
   it("prefers package.json main, and the node export over the web build", async () => {
@@ -67,5 +70,46 @@ describe("vendor package entry", () => {
     expect(resolveVendorEntry(join(root, "node_modules"), "@huggingface/transformers")).toBe(
       join(pkg, "dist", "transformers.node.cjs"),
     );
+  });
+});
+
+const roots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+describe("vendor directory", () => {
+  it("reads productName from tauri.conf.json", () => {
+    const configPath = fileURLToPath(
+      new URL("../../../../apps/desktop/src-tauri/tauri.conf.json", import.meta.url),
+    );
+    const config = JSON.parse(readFileSync(configPath, "utf8")) as { productName: string };
+    expect(DESKTOP_PRODUCT_NAME).toBe(config.productName);
+    expect(DESKTOP_PRODUCT_NAME).toBe("you-brain");
+  });
+
+  it("finds Linux usr/lib/<productName>/vendor/node_modules", async () => {
+    const root = await mkdtemp(join(tmpdir(), "you-brain-vendor-linux-"));
+    roots.push(root);
+    const execPath = join(root, "usr", "bin", "you-brain");
+    const linux = join(root, "usr", "lib", "you-brain", "vendor", "node_modules");
+    const sibling = join(root, "usr", "bin", "vendor", "node_modules");
+    await mkdir(linux, { recursive: true });
+    expect(vendorNodeModulesDir(execPath)).toBe(linux);
+
+    await mkdir(sibling, { recursive: true });
+    expect(vendorNodeModulesDir(execPath)).toBe(sibling);
+  });
+
+  it("prefers macOS Resources over the Linux layout", async () => {
+    const root = await mkdtemp(join(tmpdir(), "you-brain-vendor-mac-"));
+    roots.push(root);
+    const execPath = join(root, "App.app", "Contents", "MacOS", "you-brain");
+    const resources = join(root, "App.app", "Contents", "Resources", "vendor", "node_modules");
+    const linux = join(root, "App.app", "Contents", "lib", "you-brain", "vendor", "node_modules");
+    await mkdir(resources, { recursive: true });
+    await mkdir(linux, { recursive: true });
+    expect(vendorNodeModulesDir(execPath)).toBe(resources);
   });
 });

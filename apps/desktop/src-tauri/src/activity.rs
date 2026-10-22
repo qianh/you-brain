@@ -6,6 +6,11 @@ pub const ACTIVITY_INTERVAL: Duration = Duration::from_secs(30);
 /// `HIDIdleTime` is nanoseconds. Strictly below 60 seconds counts as activity.
 pub const ACTIVE_IDLE_LIMIT_NS: u64 = 60 * 1_000_000_000;
 
+/// `xprintidle` prints idle milliseconds. One millisecond is 1_000_000 nanoseconds.
+/// Used by the Linux reader. macOS `cargo check` does not compile that reader.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+const XPRINTIDLE_NS_PER_MS: u64 = 1_000_000;
+
 /// `true` when the user was active and the last successful post is outside the interval.
 pub fn should_post_activity(idle_ns: Option<u64>, since_last_post: Option<Duration>) -> bool {
     let Some(idle_ns) = idle_ns else {
@@ -43,6 +48,19 @@ fn hid_idle_on_line(line: &str) -> Option<u64> {
     number.parse().ok()
 }
 
+/// `xprintidle` prints one integer, idle time in milliseconds. Empty, padded
+/// with a newline, or non-numeric output is `None`.
+/// The Linux reader calls this. Unit tests call it on every host.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn parse_xprintidle_ns(output: &str) -> Option<u64> {
+    let text = output.trim();
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let millis: u64 = text.parse().ok()?;
+    millis.checked_mul(XPRINTIDLE_NS_PER_MS)
+}
+
 /// macOS reads `HIDIdleTime` via `ioreg -c IOHIDSystem -d 4`.
 /// `/usr/sbin/ioreg` is used first so a launchd PATH that omits `/usr/sbin` still works.
 #[cfg(target_os = "macos")]
@@ -68,8 +86,19 @@ fn ioreg_command(program: &str, args: &[&str]) -> std::process::Command {
     command
 }
 
-/// 非 macOS 没有 IOHIDSystem。留空：不读取输入设备，也不上报活动。
-#[cfg(not(target_os = "macos"))]
+/// Linux：`xprintidle` 输出空闲毫秒数。命令不存在或输出不是整数时不上报。
+#[cfg(target_os = "linux")]
+pub fn read_hid_idle_ns() -> Option<u64> {
+    let output = std::process::Command::new("xprintidle")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_xprintidle_ns(&text)
+}
+
+/// 其他系统没有 IOHIDSystem，也不读 xprintidle。留空：不上报活动。
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn read_hid_idle_ns() -> Option<u64> {
     None
 }
@@ -115,6 +144,23 @@ mod tests {
   }
 "#;
         assert_eq!(parse_hid_idle_ns(output), Some(42));
+    }
+
+    #[test]
+    fn parses_xprintidle_milliseconds_including_a_trailing_newline() {
+        assert_eq!(parse_xprintidle_ns("1500\n"), Some(1_500_000_000));
+        assert_eq!(parse_xprintidle_ns("0"), Some(0));
+        assert_eq!(parse_xprintidle_ns("42\r\n"), Some(42_000_000));
+    }
+
+    #[test]
+    fn xprintidle_empty_or_non_numeric_output_is_none() {
+        assert_eq!(parse_xprintidle_ns(""), None);
+        assert_eq!(parse_xprintidle_ns("\n"), None);
+        assert_eq!(parse_xprintidle_ns("   \n"), None);
+        assert_eq!(parse_xprintidle_ns("nope"), None);
+        assert_eq!(parse_xprintidle_ns("12abc\n"), None);
+        assert_eq!(parse_xprintidle_ns("-5\n"), None);
     }
 
     #[test]

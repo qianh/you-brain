@@ -6,7 +6,9 @@
   "scripts": {
     "tauri": "tauri",
     "bundle": "sh scripts/bundle.sh",
+    "bundle:linux": "sh scripts/bundle-linux.sh",
     "test:bundle": "sh scripts/test/bundle.test.sh",
+    "test:bundle:linux": "sh scripts/test/bundle-linux.test.sh",
     "check": "cargo check --manifest-path src-tauri/Cargo.toml",
     "test": "cargo test --lib --manifest-path src-tauri/Cargo.toml"
   },

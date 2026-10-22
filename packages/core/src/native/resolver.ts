@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from "node:fs";
 import Module, { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 
+import { linuxBundlePath } from "./layout.js";
+
 interface PackageJson {
   main?: string;
   exports?: unknown;
@@ -126,8 +128,9 @@ function findPackageWalking(request: string, fromFile: string): string | null {
 }
 
 /**
- * `node_modules` shipped beside a compiled binary, or inside a Tauri
- * `Contents/Resources` directory. Source runs return null.
+ * `node_modules` shipped beside a compiled binary, inside a Tauri
+ * `Contents/Resources` directory, or in a Linux bundle at
+ * `../lib/<productName>/vendor/node_modules`. Source runs return null.
  */
 export function vendorNodeModulesDir(execPath = process.execPath): string | null {
   const execDir = dirname(execPath);
@@ -135,6 +138,8 @@ export function vendorNodeModulesDir(execPath = process.execPath): string | null
   if (existsSync(sibling)) return sibling;
   const resources = resolve(execDir, "..", "Resources", "vendor", "node_modules");
   if (existsSync(resources)) return resources;
+  const linux = linuxBundlePath(execDir, "vendor", "node_modules");
+  if (existsSync(linux)) return linux;
   return null;
 }
 

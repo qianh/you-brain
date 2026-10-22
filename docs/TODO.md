@@ -34,7 +34,7 @@
 - [x] **B5 网页会话处理设备**：`webProcessor` 角色真正生效——被指定设备负责处理网页版 AI 会话的提炼；角色切换的行为与状态展示
 - [x] **B6 服务器模式**：生成并安装 launchd / systemd 单元（`you-brain service install|uninstall|status`），与 `maintenance.ts` 的卸载清理对齐，使无界面机器可担任主设备
 - [x] **B7 虚拟设备协议**：`docs/protocol/` 协议文档，注册虚拟设备（`kind: virtual`）与对外发布所需的 API / 校验
-- [ ] **B8 Linux 桌面打包**：`tauri.bundle.conf.json` 与构建脚本增加 linux 三元组资源（此机为 macOS，无法实机验证，只做配置与可编译性检查，验证项留待 Linux 机器）
+- [x] **B8 Linux 桌面打包**：`bundle-linux.sh`（运行时生成按 triple 的配置）、`web-dir`/`resolver` 的 `../lib/you-brain` 兜底（`native/layout.ts`）、托盘无 rect 时面板右上角降级、`xprintidle` 空闲读取、`workflow_dispatch` 工作流 `desktop-linux.yml`。未在真实 Linux 上出包：待手动触发工作流验证（arm runner 需账号开通）
 - [ ] **B9 设备移除传播**：`ProtocolSync` 目前不处理 `changes.removedIds`，移除虚拟设备后另一台设备本地设备行仍在（B7 遗留，见 docs/protocol/02-devices-and-roles.md）；让设备记录文件被删除/移入回收站时，其他设备拉取后同步移除本地行
 
 ## C. P2

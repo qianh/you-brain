@@ -45,6 +45,24 @@ pub fn panel_origin(icon: PxRect, panel: PxSize, work_area: PxRect, gap: f64) ->
     PxPoint { x, y }
 }
 
+/// Top-right of the work area. Used when the tray icon rect is missing or all zeros
+/// (Linux AppIndicator). Y grows downward. A panel wider than the area stays on its left edge.
+pub fn fallback_origin(panel: PxSize, work_area: PxRect) -> PxPoint {
+    let raw_x = work_area.x + work_area.width - panel.width;
+    let x = if raw_x < work_area.x {
+        work_area.x
+    } else {
+        raw_x
+    };
+    PxPoint { x, y: work_area.y }
+}
+
+/// AppIndicator reports a rect of all zeros when it has no icon geometry.
+/// An icon sitting at the origin still has a non-zero size.
+pub fn tray_rect_usable(icon: PxRect) -> bool {
+    !(icon.x == 0.0 && icon.y == 0.0 && icon.width == 0.0 && icon.height == 0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,5 +190,57 @@ mod tests {
                 y: 30.0
             }
         );
+    }
+
+    #[test]
+    fn fallback_sits_at_the_top_right_of_the_work_area() {
+        let panel = PxSize {
+            width: 380.0,
+            height: 560.0,
+        };
+        assert_eq!(
+            fallback_origin(panel, work(0.0, 25.0, 1440.0, 800.0)),
+            PxPoint { x: 1060.0, y: 25.0 }
+        );
+        assert_eq!(
+            fallback_origin(panel, work(-1920.0, 40.0, 1920.0, 1080.0)),
+            PxPoint { x: -380.0, y: 40.0 }
+        );
+    }
+
+    #[test]
+    fn fallback_pins_a_wide_panel_to_the_left_edge() {
+        assert_eq!(
+            fallback_origin(
+                PxSize {
+                    width: 380.0,
+                    height: 560.0,
+                },
+                work(10.0, 20.0, 100.0, 100.0),
+            ),
+            PxPoint { x: 10.0, y: 20.0 }
+        );
+    }
+
+    #[test]
+    fn a_zero_tray_rect_is_not_usable() {
+        assert!(!tray_rect_usable(PxRect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        }));
+        assert!(tray_rect_usable(PxRect {
+            x: 0.0,
+            y: 0.0,
+            width: 24.0,
+            height: 24.0,
+        }));
+        assert!(tray_rect_usable(PxRect {
+            x: -20.0,
+            y: 4.0,
+            width: 16.0,
+            height: 16.0,
+        }));
     }
 }

@@ -249,9 +249,8 @@ fn ensure_daemon(
     }
     let child_alive = launching_pid(app).is_some_and(daemon::process_is_alive);
     if daemon::supervise_action(state, child_alive) == daemon::SuperviseAction::Poll {
-        return wait_healthy(data_dir, DAEMON_WAIT).ok_or_else(|| {
-            "daemon 进程已在，HTTP 尚未就绪".to_string()
-        });
+        return wait_healthy(data_dir, DAEMON_WAIT)
+            .ok_or_else(|| "daemon 进程已在，HTTP 尚未就绪".to_string());
     }
     let sequence = locate_launch(app)?;
     let attempt = app
@@ -551,9 +550,7 @@ fn toggle_panel(app: &tauri::AppHandle, anchor: Option<tauri::Rect>, toggle: boo
         let _ = window.hide();
         return;
     }
-    if let Some(rect) = anchor {
-        position_panel(app, &window, rect);
-    }
+    position_panel(app, &window, anchor.as_ref());
     let _ = window.show();
     let _ = window.set_focus();
 }
@@ -727,14 +724,38 @@ fn daemon_origin(target: &str) -> Option<String> {
     Some(format!("http://{host}:{port}"))
 }
 
-fn position_panel(app: &tauri::AppHandle, window: &WebviewWindow, rect: tauri::Rect) {
-    let physical = physical_origin(&rect, window.scale_factor().unwrap_or(1.0));
+fn position_panel(app: &tauri::AppHandle, window: &WebviewWindow, rect: Option<&tauri::Rect>) {
+    let origin = match rect {
+        Some(rect) if tray_anchor_usable(rect) => anchored_panel_origin(app, window, rect),
+        // No rect, or an all-zero AppIndicator rect: pin to the current work area.
+        _ => geometry::fallback_origin(panel_size(), current_work_area(app)),
+    };
+    let _ = window.set_position(tauri::LogicalPosition::new(origin.x, origin.y));
+}
+
+fn tray_anchor_usable(rect: &tauri::Rect) -> bool {
+    geometry::tray_rect_usable(logical_rect(rect, 1.0))
+}
+
+fn panel_size() -> geometry::PxSize {
+    geometry::PxSize {
+        width: PANEL_WIDTH,
+        height: PANEL_HEIGHT,
+    }
+}
+
+fn anchored_panel_origin(
+    app: &tauri::AppHandle,
+    window: &WebviewWindow,
+    rect: &tauri::Rect,
+) -> geometry::PxPoint {
+    let physical = physical_origin(rect, window.scale_factor().unwrap_or(1.0));
     let monitor = monitor_at(app, physical.0, physical.1);
     let scale = monitor
         .as_ref()
         .map(tauri::Monitor::scale_factor)
         .unwrap_or_else(|| window.scale_factor().unwrap_or(1.0));
-    let icon = logical_rect(&rect, scale);
+    let icon = logical_rect(rect, scale);
     let work_area = monitor
         .as_ref()
         .map(|monitor| logical_physical_rect(monitor.work_area(), scale))
@@ -744,16 +765,26 @@ fn position_panel(app: &tauri::AppHandle, window: &WebviewWindow, rect: tauri::R
             width: 1440.0,
             height: 900.0,
         });
-    let origin = geometry::panel_origin(
-        icon,
-        geometry::PxSize {
-            width: PANEL_WIDTH,
-            height: PANEL_HEIGHT,
-        },
-        work_area,
-        PANEL_GAP,
-    );
-    let _ = window.set_position(tauri::LogicalPosition::new(origin.x, origin.y));
+    geometry::panel_origin(icon, panel_size(), work_area, PANEL_GAP)
+}
+
+/// Monitor under the pointer, then the primary monitor. A missing tray rect
+/// has no icon to search from.
+fn current_work_area(app: &tauri::AppHandle) -> geometry::PxRect {
+    if let Ok(cursor) = app.cursor_position() {
+        if let Some(monitor) = monitor_at(app, cursor.x, cursor.y) {
+            return logical_physical_rect(monitor.work_area(), monitor.scale_factor());
+        }
+    }
+    if let Ok(Some(monitor)) = app.primary_monitor() {
+        return logical_physical_rect(monitor.work_area(), monitor.scale_factor());
+    }
+    geometry::PxRect {
+        x: 0.0,
+        y: 0.0,
+        width: 1440.0,
+        height: 900.0,
+    }
 }
 
 fn monitor_at(app: &tauri::AppHandle, x: f64, y: f64) -> Option<tauri::Monitor> {

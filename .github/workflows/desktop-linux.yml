@@ -1,0 +1,62 @@
+name: desktop-linux
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install Linux build packages
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libxdo-dev libssl-dev xvfb
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install JavaScript dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the web UI
+        run: bun run --cwd apps/web build
+
+      - name: Build the daemon
+        run: bun run build:daemon
+
+      - name: Bundle deb and AppImage
+        run: sh apps/desktop/scripts/bundle-linux.sh
+
+      - name: Verify the deb contains vendor, web, and the sidecar
+        shell: sh
+        run: |
+          set -eu
+          deb=$(find dist/app.noindex -name '*.deb' -type f | head -n 1)
+          test -n "$deb"
+          image=$(find dist/app.noindex -name '*.AppImage' -type f | head -n 1)
+          test -n "$image"
+          listing=$(dpkg-deb -c "$deb")
+          printf '%s\n' "$listing"
+          printf '%s\n' "$listing" | grep -F 'usr/lib/you-brain/vendor'
+          printf '%s\n' "$listing" | grep -F 'usr/lib/you-brain/web'
+          printf '%s\n' "$listing" | grep -E '(^| )(\./)?usr/bin/you-brain$'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: you-brain-linux-${{ matrix.arch }}
+          path: |
+            dist/app.noindex/*.deb
+            dist/app.noindex/*.AppImage
+          if-no-files-found: error

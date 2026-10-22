@@ -75,4 +75,25 @@ describe("resolveWebDir", () => {
       await resolveWebDir(input(root, { YOU_BRAIN_WEB_DIR: join(root, "nope") }, join(root, "you-brain"))),
     ).toBeNull();
   });
+
+  it("uses the Linux bundle web directory after env and Resources", async () => {
+    const root = await tempRoot();
+    const web = join(root, "usr", "lib", "you-brain", "web");
+    await mkdir(web, { recursive: true });
+    const execPath = join(root, "usr", "bin", "you-brain");
+    expect(await resolveWebDir(input(root, {}, execPath))).toBe(web);
+
+    const fromEnv = join(root, "from-env");
+    await mkdir(fromEnv, { recursive: true });
+    expect(await resolveWebDir(input(root, { YOU_BRAIN_WEB_DIR: fromEnv }, execPath))).toBe(
+      fromEnv,
+    );
+
+    const macExec = join(root, "App.app", "Contents", "MacOS", "you-brain");
+    const macWeb = join(root, "App.app", "Contents", "Resources", "web");
+    const macLinux = join(root, "App.app", "Contents", "lib", "you-brain", "web");
+    await mkdir(macWeb, { recursive: true });
+    await mkdir(macLinux, { recursive: true });
+    expect(await resolveWebDir(input(root, {}, macExec))).toBe(macWeb);
+  });
 });
