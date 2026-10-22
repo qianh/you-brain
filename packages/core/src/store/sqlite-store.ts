@@ -714,6 +714,20 @@ export class SqliteStore {
       .run(key, value, new Date().toISOString());
   }
 
+  /** Keys that start with `prefix`, ordered by key. The match is case-sensitive. */
+  listCursors(prefix: string): Array<{ key: string; value: string }> {
+    const rows = this.#db
+      .query<{ key: string; value: string }, [string, string]>(
+        `
+        SELECT key, value FROM cursors
+        WHERE substr(key, 1, length(?)) = ?
+        ORDER BY key
+      `,
+      )
+      .all(prefix, prefix);
+    return rows.map((row) => ({ key: row.key, value: row.value }));
+  }
+
   upsertDevice(record: DeviceRecord): DeviceRecord {
     const parsed = parseDeviceRecord(record);
     this.#db

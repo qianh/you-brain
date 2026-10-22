@@ -321,6 +321,13 @@ export interface StatusResponse {
       finishedAt: string;
     };
   };
+  web: {
+    /** Resolved processor: `webProcessor`, otherwise `mainDevice`. */
+    processor: string | null;
+    isLocalProcessor: boolean;
+    /** Unrefined web sessions. Computed only on the processor; otherwise 0. */
+    pending: number;
+  };
   warnings: Array<{ code: string; message: string }>;
 }
 

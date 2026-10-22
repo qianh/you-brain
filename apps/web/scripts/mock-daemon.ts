@@ -722,6 +722,11 @@ function consolidationStatus(): {
   return { enabled: false, lastFinishedAt: null, stale: false, status: "disabled" };
 }
 
+function webStatus(): { processor: string | null; isLocalProcessor: boolean; pending: number } {
+  if (scenario === "rich") return { processor: MAC, isLocalProcessor: true, pending: 2 };
+  return { processor: null, isLocalProcessor: false, pending: 0 };
+}
+
 function statusBody(): unknown {
   if (scenario === "fresh") {
     return {
@@ -731,6 +736,7 @@ function statusBody(): unknown {
       search: { ready: false, documents: 0 },
       refine: { pending: 0, lastError: null },
       consolidation: consolidationStatus(),
+      web: webStatus(),
       warnings: [{ code: "LLM_NOT_CONFIGURED", message: "提炼模型还没配置" }],
       captures: [],
       logs: [],
@@ -749,6 +755,7 @@ function statusBody(): unknown {
       search: { ready: true, documents: 128 },
       refine: { pending: 0, lastError: null },
       consolidation: consolidationStatus(),
+      web: webStatus(),
       warnings: [],
       captures: [
         { source: "claude-code", lastCaptureAt: MORNING, error: null },
@@ -768,6 +775,7 @@ function statusBody(): unknown {
       search: { ready: false, documents: 0 },
       refine: { pending: 0, lastError: null },
       consolidation: consolidationStatus(),
+      web: webStatus(),
       warnings: [],
       captures: [],
       logs: [],
@@ -781,6 +789,7 @@ function statusBody(): unknown {
     search: { ready: healthy, documents: 128 },
     refine: { pending: healthy ? 0 : 2, lastError: null },
     consolidation: consolidationStatus(),
+    web: webStatus(),
     warnings: healthy
       ? []
       : [

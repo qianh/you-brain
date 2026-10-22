@@ -11,6 +11,7 @@ import {
   conversationKey,
   createDefaultRoles,
   createDefaultSharedConfig,
+  resolveWebProcessor,
   type Event,
   type EventOf,
   type EventType,
@@ -149,6 +150,15 @@ import {
   type TopicFilesResult,
 } from "../topic-files/sync.js";
 import { INTERVALS, intervalDue, pullInterval } from "./schedule.js";
+import {
+  WEB_SESSION_BATCH,
+  countUnrefinedWebSessions,
+  isWebInboxPath,
+  listWebInbox,
+  pendingWebSessions,
+  rememberWebInbox,
+} from "../web-sessions/index.js";
+import { frontmatter, parseWebSession } from "../web-sessions/parse.js";
 import { describeSyncFailure } from "./sync-error.js";
 import type { SecretStore } from "../auth/index.js";
 
@@ -358,6 +368,7 @@ export class YouBrainDaemon {
   #lastSearch: number | null = null;
   #lastReminders: number | null = null;
   #lastConsolidation: number | null = null;
+  #lastWebSessions: number | null = null;
   #consolidationState: ConsolidationState = emptyConsolidationState();
   /** Latest keyboard, pointer, or captured-session time. Not the heartbeat clock. */
   #lastActivityAt: string | null = null;
@@ -457,6 +468,7 @@ export class YouBrainDaemon {
     this.#lastFlush = startedAt;
     this.#lastHeartbeat = startedAt;
     this.#lastPull = startedAt;
+    this.#lastWebSessions = startedAt;
     this.#lastPortrait = startedAt;
     this.#lastSearch = startedAt;
     this.#started = true;
@@ -714,6 +726,14 @@ export class YouBrainDaemon {
       this.#restoreLocalActivity();
       this.#lastPull = this.#clock.nowMs();
     }
+    if (intervalDue(this.#lastWebSessions, now, INTERVALS.webSessionsMs)) {
+      try {
+        await this.#processWebSessions();
+      } catch {
+        // One bad pass must not stop the loop.
+      }
+      this.#lastWebSessions = this.#clock.nowMs();
+    }
     if (
       this.#portrait &&
       (this.#portraitSoon || intervalDue(this.#lastPortrait, now, INTERVALS.portraitMs))
@@ -847,14 +867,30 @@ export class YouBrainDaemon {
     if (!this.#llm || !this.#store || fileId.length === 0) return;
     const session = known ?? (await this.#materialize(live));
     if (!session) return;
-    const stored = this.#store.getSession(key);
+    await this.#runRefine({
+      key,
+      source: live.source,
+      fileId,
+      turns: session.turns.map((turn) => ({ role: turn.role, text: turn.text })),
+    });
+  }
+
+  /** Model call, copied events, and the shared retry / CLI-stall guard. */
+  async #runRefine(input: {
+    key: string;
+    source: string;
+    fileId: string;
+    turns: readonly { role: string; text: string }[];
+  }): Promise<void> {
+    if (!this.#llm || !this.#store || input.fileId.length === 0) return;
+    const stored = this.#store.getSession(input.key);
     const refinedUpTo = stored?.refinedUpTo ?? 0;
-    const messages = session.turns.slice(refinedUpTo).map((turn) => ({
+    const messages = input.turns.slice(refinedUpTo).map((turn) => ({
       role: turn.role,
       text: turn.text,
     }));
     if (messages.length === 0) {
-      this.#retry.succeed(key);
+      this.#retry.succeed(input.key);
       return;
     }
     if (this.#cliUnresponsive) return;
@@ -862,12 +898,12 @@ export class YouBrainDaemon {
       const result = await refineSession(
         this.#llm,
         {
-          sessionKey: key,
-          fileId,
-          source: live.source,
+          sessionKey: input.key,
+          fileId: input.fileId,
+          source: input.source,
           refinedUpTo,
           messages,
-          previous: this.#previous(key, stored),
+          previous: this.#previous(input.key, stored),
           topics: this.#candidateTopics(),
           openTodos: this.#openTodos(),
         },
@@ -882,20 +918,101 @@ export class YouBrainDaemon {
       );
       if (result.status === "skipped") {
         this.#cliSilentStreak = 0;
-        if (result.reason === "no_new_messages") this.#retry.succeed(key);
-        else this.#retry.fail(key, key, new Error(result.detail));
+        if (result.reason === "no_new_messages") this.#retry.succeed(input.key);
+        else this.#retry.fail(input.key, input.key, new Error(result.detail));
         return;
       }
       for (const event of result.events) await this.#emitCopied(event);
       this.#cliSilentStreak = 0;
-      this.#retry.succeed(key);
+      this.#retry.succeed(input.key);
     } catch (error) {
       if (isCliNoOutputTimeout(error)) this.#cliSilentStreak += 1;
       else this.#cliSilentStreak = 0;
       if (this.#cliSilentStreak >= 2) this.#cliUnresponsive = true;
-      this.#retry.fail(key, key, error);
+      this.#retry.fail(input.key, input.key, error);
       this.changes.publish("status", this.#clock.now().toISOString());
     }
+  }
+
+  #canProcessWebSessions(): boolean {
+    if (this.#cliUnresponsive || !this.#llm || !this.#drive || !this.#store) return false;
+    const processor = resolveWebProcessor(this.#roles);
+    return processor !== null && processor === this.#local.deviceId;
+  }
+
+  #webRetryBlocked(key: string, now: number): boolean {
+    const job = this.#retry.get(key);
+    if (!job) return false;
+    return job.exhausted || job.nextAttemptAt > now;
+  }
+
+  async #processWebSessions(): Promise<void> {
+    if (!this.#canProcessWebSessions()) return;
+    const store = this.#store;
+    const drive = this.#drive;
+    if (!store || !drive) return;
+    const now = this.#clock.nowMs();
+    const pending = pendingWebSessions({
+      indexed: listWebInbox(store),
+      sessions: store.listSessions(),
+      nowMs: now,
+      idleMs: this.#shared.refine.idleMinutes * 60_000,
+      blocked: (key) => this.#webRetryBlocked(key, now),
+    }).slice(0, WEB_SESSION_BATCH);
+    for (const item of pending) {
+      if (this.#stopped || !this.#canProcessWebSessions()) return;
+      try {
+        await this.#refineWebSession(item);
+      } catch {
+        // One bad session must not stop the batch.
+      }
+    }
+  }
+
+  async #refineWebSession(item: { sessionKey: string; fileId: string }): Promise<void> {
+    const drive = this.#drive;
+    const store = this.#store;
+    if (!drive || !store) return;
+    let markdown: string;
+    try {
+      const object = await drive.read(item.fileId);
+      markdown = object.bytes.toString("utf8");
+    } catch (error) {
+      this.#retry.fail(item.sessionKey, item.sessionKey, error);
+      this.changes.publish("status", this.#clock.now().toISOString());
+      return;
+    }
+    const parsed = parseWebSession(markdown);
+    if (!parsed) {
+      this.#retry.fail(
+        item.sessionKey,
+        item.sessionKey,
+        new LlmRequestError("client", "网页会话无法解析"),
+      );
+      this.changes.publish("status", this.#clock.now().toISOString());
+      return;
+    }
+    const stored = store.getSession(item.sessionKey);
+    const refinedUpTo = stored?.refinedUpTo ?? 0;
+    if (parsed.turns.length <= refinedUpTo) {
+      this.#retry.succeed(item.sessionKey);
+      store.upsertSession({
+        sessionKey: item.sessionKey,
+        source: parsed.source,
+        device: parsed.device || stored?.device || this.#local.displayName,
+        startedAt: parsed.startedAt,
+        updatedAt: parsed.updatedAt,
+        fileId: item.fileId,
+        msgCount: parsed.turns.length,
+      });
+      return;
+    }
+    await this.#runRefine({
+      key: item.sessionKey,
+      source: parsed.source,
+      fileId: item.fileId,
+      turns: parsed.turns,
+    });
   }
 
   async #retryIfDue(key: string, live: LiveSession, now: number): Promise<void> {
@@ -1072,20 +1189,33 @@ export class YouBrainDaemon {
   }
 
   async #indexInbox(files: readonly DriveEntry[]): Promise<void> {
-    if (!this.#drive || !this.#store) return;
+    const drive = this.#drive;
+    const store = this.#store;
+    if (!drive || !store) return;
     for (const file of files) {
       if (!file.path.startsWith("inbox/") || !file.path.endsWith(".md")) continue;
       try {
-        const object = await this.#drive.read(file.id);
+        const object = await drive.read(file.id);
         const fields = frontmatter(object.bytes.toString("utf8"));
         const source = fields.get("source");
         const conversationId = fields.get("conversation_id");
         const startedAt = fields.get("started_at");
-        const updatedAt = fields.get("updated_at");
+        const web = isWebInboxPath(file.path);
+        const updatedAt = fields.get("updated_at") || (web ? file.modifiedTime : "");
         if (!source || !conversationId || !startedAt || !updatedAt) continue;
-        const turnCount = Number(fields.get("turn_count") ?? "0");
-        this.#store.upsertSession({
-          sessionKey: conversationKey(source, conversationId),
+        const declared = Number(fields.get("turn_count") ?? "");
+        const text = object.bytes.toString("utf8");
+        // A browser plugin may omit turn_count. Count turns from the body so the session is not stuck at 0.
+        const turnCount =
+          Number.isInteger(declared) && declared >= 0 && fields.has("turn_count")
+            ? declared
+            : web
+              ? (parseWebSession(text)?.turnCount ?? 0)
+              : 0;
+        const sessionKey = conversationKey(source, conversationId);
+        const before = store.getSession(sessionKey);
+        store.upsertSession({
+          sessionKey,
           source,
           device: fields.get("device") || this.#local.displayName,
           startedAt,
@@ -1093,6 +1223,17 @@ export class YouBrainDaemon {
           fileId: file.id,
           msgCount: Number.isInteger(turnCount) && turnCount >= 0 ? turnCount : 0,
         });
+        if (!web) continue;
+        const after = store.getSession(sessionKey);
+        const identityChanged = rememberWebInbox(store, sessionKey, {
+          fileId: file.id,
+          path: file.path,
+        });
+        const bytesChanged =
+          before !== null &&
+          after !== null &&
+          (before.msgCount !== after.msgCount || before.updatedAt !== after.updatedAt);
+        if (identityChanged || bytesChanged) this.#retry.succeed(sessionKey);
       } catch {
         // Skip a malformed inbox file and keep pulling.
       }
@@ -1667,6 +1808,16 @@ export class YouBrainDaemon {
     if (consolidation.enabled && this.#consolidationState.lastRun && !this.#consolidationState.lastRun.ok) {
       warnings.push({ code: "CONSOLIDATION_FAILED", message: "每日沉淀没有完成" });
     }
+    const processor = resolveWebProcessor(this.#roles);
+    const isLocalProcessor = processor !== null && processor === this.#local.deviceId;
+    const indexed = this.#store ? listWebInbox(this.#store) : [];
+    if (indexed.length > 0 && processor === null) {
+      warnings.push({ code: "WEB_PROCESSOR_MISSING", message: "没有指定网页会话处理设备" });
+    }
+    const webPending =
+      isLocalProcessor && this.#store
+        ? countUnrefinedWebSessions(indexed, this.#store.listSessions())
+        : 0;
     return {
       deviceId: this.#local.deviceId,
       drive: {
@@ -1685,6 +1836,11 @@ export class YouBrainDaemon {
         lastError: pending[0]?.reason ?? null,
       },
       consolidation,
+      web: {
+        processor,
+        isLocalProcessor,
+        pending: webPending,
+      },
       warnings,
     };
   }
@@ -2084,17 +2240,6 @@ function assignMeta(live: LiveSession, meta: CaptureMeta): void {
   live.includeSubagents = meta.includeSubagents;
   live.keepToolCalls = meta.keepToolCalls;
   live.redact = meta.redact;
-}
-
-function frontmatter(markdown: string): Map<string, string> {
-  const match = /^---\n([\s\S]*?)\n---\n/u.exec(markdown);
-  const fields = new Map<string, string>();
-  for (const line of match?.[1]?.split("\n") ?? []) {
-    const index = line.indexOf(":");
-    if (index <= 0) continue;
-    fields.set(line.slice(0, index).trim(), line.slice(index + 1).trim());
-  }
-  return fields;
 }
 
 function asSearchDrive(drive: DrivePort): SearchDrive {

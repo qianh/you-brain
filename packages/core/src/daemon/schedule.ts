@@ -13,6 +13,8 @@ export const INTERVALS = {
   watchDebounceMs: 250,
   /** Quiet period after the last topic-book change before Drive topic files sync. */
   topicFilesDebounceMs: 5 * 60_000,
+  /** How often the web-session processor looks for idle `inbox/web-` sessions. */
+  webSessionsMs: 60_000,
 } as const;
 
 /** `last === null` means the job has never run and is due immediately. */

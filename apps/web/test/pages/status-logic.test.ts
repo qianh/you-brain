@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { translate } from "../../src/i18n/messages.js";
 import {
   attentionItems,
   captureTone,
@@ -15,6 +16,7 @@ import {
   statusScreen,
   syncLine,
   warningAction,
+  webSessionLine,
   withConsolidationWarning,
   type HeroInput,
 } from "../../src/pages/status/logic.js";
@@ -142,6 +144,35 @@ describe("connection tones", () => {
     expect(searchTone(false)).toBe("muted");
     expect(searchTone(false, 0)).toBe("muted");
     expect(searchTone(false, 128)).toBe("warn");
+  });
+});
+
+describe("web session line", () => {
+  test("shows a processor row and hides it on every other device", () => {
+    expect(webSessionLine(null)).toEqual({ visible: false });
+    expect(webSessionLine(undefined)).toEqual({ visible: false });
+    expect(webSessionLine({ isLocalProcessor: false, pending: 4 })).toEqual({ visible: false });
+    expect(webSessionLine({ isLocalProcessor: true, pending: 2 })).toEqual({
+      visible: true,
+      kind: "pending",
+      count: 2,
+    });
+    expect(webSessionLine({ isLocalProcessor: true, pending: 2.9 })).toEqual({
+      visible: true,
+      kind: "pending",
+      count: 2,
+    });
+    expect(webSessionLine({ isLocalProcessor: true, pending: 0 })).toEqual({ visible: true, kind: "done" });
+    expect(webSessionLine({ isLocalProcessor: true, pending: Number.NaN })).toEqual({
+      visible: true,
+      kind: "done",
+    });
+    expect(translate("zh", "statusWebTitle")).toBe("网页会话");
+    expect(translate("zh", "statusWebPending", { count: 2 })).toBe("待提炼 2 条");
+    expect(translate("zh", "statusWebDone")).toBe("已全部提炼");
+    expect(translate("en", "statusWebTitle")).toBe("Web sessions");
+    expect(translate("en", "statusWebPending", { count: 2 })).toBe("2 waiting to refine");
+    expect(translate("en", "statusWebDone")).toBe("All refined");
   });
 });
 

@@ -287,6 +287,14 @@ describe("sqlite store", () => {
       store.setCursor("capture", "1");
       store.setCursor("capture", "2");
       expect(store.getCursor("capture")).toBe("2");
+      store.setCursor("webinbox:bbb", "web-b");
+      store.setCursor("webinbox:aaa", "web-a");
+      store.setCursor("web-other", "no");
+      expect(store.listCursors("webinbox:")).toEqual([
+        { key: "webinbox:aaa", value: "web-a" },
+        { key: "webinbox:bbb", value: "web-b" },
+      ]);
+      expect(store.listCursors("missing")).toEqual([]);
 
       const device: DeviceRecord = {
         deviceId: "11111111-1111-4111-8111-111111111111",

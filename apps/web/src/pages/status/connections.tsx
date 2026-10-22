@@ -10,7 +10,7 @@ import { useRelativeTime } from "../../components/use-relative-time.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { consolidationView, type ConsolidationView } from "../../lib/copy.js";
 import { formatDateTime, type Language } from "../../lib/format.js";
-import { driveTone, refineTone, searchTone, type DotTone } from "./logic.js";
+import { driveTone, refineTone, searchTone, webSessionLine, type DotTone } from "./logic.js";
 
 export function Connections({
   status,
@@ -66,6 +66,7 @@ export function Connections({
           titleText={t("groupRefine")}
           subtitle={<DotText tone={refineTone(status.refine.pending, status.refine.lastError)} text={refine} />}
         />
+        <WebSessionRow status={status} t={t} />
         <ConsolidationRow
           at={status.consolidation.lastFinishedAt}
           view={view}
@@ -115,6 +116,30 @@ function ConsolidationRow({
           {enabled ? t("statusEnabled") : t("disabledLabel")}
         </Chip>
       }
+    />
+  );
+}
+
+function WebSessionRow({
+  status,
+  t,
+}: {
+  status: StatusResponse;
+  t: (key: MessageKey, vars?: Record<string, string | number>) => string;
+}) {
+  const line = webSessionLine(status.web);
+  if (!line.visible) return null;
+  const text = line.kind === "pending" ? t("statusWebPending", { count: line.count }) : t("statusWebDone");
+  return (
+    <Row
+      icon={
+        <Mark>
+          <Icon name="globe" />
+        </Mark>
+      }
+      title={t("statusWebTitle")}
+      titleText={t("statusWebTitle")}
+      subtitle={<DotText tone={line.kind === "pending" ? "warn" : "ok"} text={text} />}
     />
   );
 }

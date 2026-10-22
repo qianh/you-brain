@@ -132,6 +132,7 @@ async function withServer(
       stale: false,
       status: "disabled",
     },
+    web: { processor: null, isLocalProcessor: false, pending: 0 },
     warnings: [],
   };
   const device: DeviceRecord = {

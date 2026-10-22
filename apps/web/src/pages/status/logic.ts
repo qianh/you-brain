@@ -6,6 +6,23 @@ export type WarningAction = "model" | "sync" | "login" | "none";
 export type StatusScreen = "loading" | "offline" | "error" | "ready";
 export type DotTone = "ok" | "warn" | "bad" | "muted";
 
+export interface WebSessionLineInput {
+  isLocalProcessor: boolean;
+  pending: number;
+}
+
+export type WebSessionLine =
+  | { visible: false }
+  | { visible: true; kind: "pending"; count: number }
+  | { visible: true; kind: "done" };
+
+/** The status row is only for the device that refines web sessions. */
+export function webSessionLine(web: WebSessionLineInput | null | undefined): WebSessionLine {
+  if (!web?.isLocalProcessor) return { visible: false };
+  if (!Number.isFinite(web.pending) || web.pending <= 0) return { visible: true, kind: "done" };
+  return { visible: true, kind: "pending", count: Math.floor(web.pending) };
+}
+
 export interface HeroInput {
   loading: boolean;
   hasStatus: boolean;
