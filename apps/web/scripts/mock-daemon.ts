@@ -396,7 +396,7 @@ let config: Record<string, unknown> = {
 let roles: Record<string, unknown> = {
   mainDevice: MAC,
   webProcessor: null,
-  consolidation: { enabled: false, time: "03:00" },
+  consolidation: { enabled: scenario === "rich" || scenario === "error", time: "03:00" },
   timezone: "Asia/Shanghai",
 };
 
@@ -651,6 +651,41 @@ function today(): Response {
   });
 }
 
+function consolidationStatus(): {
+  enabled: boolean;
+  lastFinishedAt: string | null;
+  stale: boolean;
+  status: "disabled" | "ok" | "stale";
+  lastRun?: { day: string; ok: boolean; error?: string; finishedAt: string };
+} {
+  if (scenario === "rich") {
+    const finishedAt = ago(2 * HOUR);
+    return {
+      enabled: true,
+      lastFinishedAt: finishedAt,
+      stale: false,
+      status: "ok",
+      lastRun: { day: shanghaiToday(), ok: true, finishedAt },
+    };
+  }
+  if (scenario === "error") {
+    const finishedAt = ago(30 * HOUR);
+    return {
+      enabled: true,
+      lastFinishedAt: finishedAt,
+      stale: true,
+      status: "stale",
+      lastRun: {
+        day: "2026-10-22",
+        ok: false,
+        error: "部分话题概要没有写完",
+        finishedAt,
+      },
+    };
+  }
+  return { enabled: false, lastFinishedAt: null, stale: false, status: "disabled" };
+}
+
 function statusBody(): unknown {
   if (scenario === "fresh") {
     return {
@@ -659,7 +694,7 @@ function statusBody(): unknown {
       sync: { lastSyncAt: null, pendingOutbox: 0 },
       search: { ready: false, documents: 0 },
       refine: { pending: 0, lastError: null },
-      consolidation: { enabled: false, lastFinishedAt: null, stale: false, status: "disabled" },
+      consolidation: consolidationStatus(),
       warnings: [{ code: "LLM_NOT_CONFIGURED", message: "提炼模型还没配置" }],
       captures: [],
       logs: [],
@@ -677,7 +712,7 @@ function statusBody(): unknown {
       },
       search: { ready: true, documents: 128 },
       refine: { pending: 0, lastError: null },
-      consolidation: { enabled: false, lastFinishedAt: null, stale: false, status: "disabled" },
+      consolidation: consolidationStatus(),
       warnings: [],
       captures: [
         { source: "claude-code", lastCaptureAt: MORNING, error: null },
@@ -696,7 +731,7 @@ function statusBody(): unknown {
       sync: { lastSyncAt: null, pendingOutbox: 0 },
       search: { ready: false, documents: 0 },
       refine: { pending: 0, lastError: null },
-      consolidation: { enabled: false, lastFinishedAt: null, stale: false, status: "disabled" },
+      consolidation: consolidationStatus(),
       warnings: [],
       captures: [],
       logs: [],
@@ -709,7 +744,7 @@ function statusBody(): unknown {
     sync: { lastSyncAt: ago(4 * MINUTE), pendingOutbox: healthy ? 0 : 1 },
     search: { ready: healthy, documents: 128 },
     refine: { pending: healthy ? 0 : 2, lastError: null },
-    consolidation: { enabled: false, lastFinishedAt: null, stale: false, status: "disabled" },
+    consolidation: consolidationStatus(),
     warnings: healthy
       ? []
       : [
@@ -1032,6 +1067,17 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
   if (path === "/api/actions/reminder" && request.method === "POST") {
     return applyReminderAction(await request.json().catch(() => null));
   }
+  if (path === "/api/actions/consolidate" && request.method === "POST") {
+    return json({
+      day: shanghaiToday(),
+      ok: true,
+      steps: [
+        { id: "topic_summaries", ok: true },
+        { id: "merge_suggestions", ok: true },
+        { id: "portrait", ok: true },
+      ],
+    });
+  }
   if (path === "/api/actions/sync" && request.method === "POST") {
     publish("status");
     return json({ started: true, at: new Date().toISOString() });
@@ -1222,7 +1268,6 @@ Bun.serve({
     const url = new URL(request.url);
     if (url.pathname.startsWith("/api/")) {
       if (!authorized(request, url)) return fail(401, "UNAUTHORIZED", "缺少或无效的访问令牌");
-      if (scenario === "error") return fail(500, "INTERNAL", "后台暂时不可用");
       if (scenario === "slow") {
         const ms = 1500 + Math.floor(Math.random() * 1001);
         return new Promise((resolve) => {

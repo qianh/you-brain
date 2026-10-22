@@ -17,6 +17,11 @@ const MergeSchema = z.object({
   pairs: z.array(PairSchema),
 });
 
+const PortraitUpdateSchema = z.object({
+  changed: z.boolean(),
+  portrait: z.string(),
+});
+
 export interface TopicRewrite {
   summary: string;
   nextStep: string;
@@ -26,6 +31,17 @@ export interface MergePair {
   fromTopicId: string;
   intoTopicId: string;
   reason: string;
+}
+
+export interface PortraitUpdate {
+  changed: boolean;
+  portrait: string;
+}
+
+/** Keep the portrait text verbatim. Structure and whitespace are part of the document. */
+export function parsePortraitUpdate(input: unknown): PortraitUpdate {
+  const parsed = PortraitUpdateSchema.parse(input);
+  return { changed: parsed.changed, portrait: parsed.portrait };
 }
 
 export function parseTopicRewrite(input: unknown): TopicRewrite {

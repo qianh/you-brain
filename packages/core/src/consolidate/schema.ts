@@ -8,6 +8,16 @@ export const TOPIC_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
   },
 };
 
+export const PORTRAIT_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["changed", "portrait"],
+  properties: {
+    changed: { type: "boolean" },
+    portrait: { type: "string" },
+  },
+};
+
 export const MERGE_SUGGESTIONS_JSON_SCHEMA: Record<string, unknown> = {
   type: "object",
   additionalProperties: false,

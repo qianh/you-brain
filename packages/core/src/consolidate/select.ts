@@ -21,6 +21,22 @@ export function selectChangedTopics(input: {
   activeLimit: number;
   historyDays: number;
 }): ChangedTopic[] {
+  return selectTopicsChangedOnDay(input).filter((item) => {
+    const rewritten = latestRewriteMs(input.book, item.topic.topicId);
+    return rewritten === null || rewritten <= item.lastChangeMs;
+  });
+}
+
+/** Topics touched on `day`, including ones whose summary was already rewritten. */
+export function selectTopicsChangedOnDay(input: {
+  book: TopicBook;
+  sessionUpdatedAt: Readonly<Record<string, string>>;
+  day: string;
+  timeZone: string;
+  now: string;
+  activeLimit: number;
+  historyDays: number;
+}): ChangedTopic[] {
   const zoned = partitionTopics(input.book, {
     now: input.now,
     activeLimit: input.activeLimit,
@@ -33,8 +49,6 @@ export function selectChangedTopics(input: {
     if (topic.userLocked || topic.mergedInto !== null) continue;
     const lastChangeMs = lastChangeOnDay(input.book, topic.topicId, input);
     if (lastChangeMs === null) continue;
-    const rewritten = latestRewriteMs(input.book, topic.topicId);
-    if (rewritten !== null && rewritten > lastChangeMs) continue;
     changed.push({ topic, lastChangeMs });
   }
   changed.sort((left, right) => {

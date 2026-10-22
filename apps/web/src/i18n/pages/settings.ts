@@ -31,6 +31,13 @@ export const zh = {
   settingsSearch: "搜索",
   semanticSearch: "语义搜索",
   semanticSearchHint: "用本地小模型理解问题含义，让搜索更准。需要额外内存，约一分钟不用后自动释放；关闭后只用关键词匹配。",
+  consolidateNow: "立即沉淀",
+  consolidateDone: "沉淀已完成",
+  consolidateLastRun: "最近一次运行：{detail}",
+  consolidateSucceeded: "成功",
+  consolidateFailedRun: "失败",
+  consolidateNotMain: "只有主设备可以立即沉淀",
+  consolidateOff: "沉淀未启用",
 } as const;
 
 export const en = {
@@ -66,4 +73,11 @@ export const en = {
   settingsSearch: "Search",
   semanticSearch: "Semantic search",
   semanticSearchHint: "A small local model reads what the question means, so search is more accurate. It needs extra memory and unloads after about a minute idle. Turn it off to match keywords only.",
+  consolidateNow: "Consolidate now",
+  consolidateDone: "Consolidation finished",
+  consolidateLastRun: "Latest run: {detail}",
+  consolidateSucceeded: "succeeded",
+  consolidateFailedRun: "failed",
+  consolidateNotMain: "Only the main device can consolidate now",
+  consolidateOff: "Consolidation is off",
 } as const;

@@ -69,6 +69,7 @@ import { cliUnresponsiveWarning } from "../llm/setup-status.js";
 import { OutputService } from "../output/service.js";
 import {
   ConsolidationRejected,
+  createDrivePortrait,
   emptyConsolidationState,
   executeConsolidation,
   mergeSuggestionLines,
@@ -1609,6 +1610,7 @@ export class YouBrainDaemon {
             store?.setCursor(key, value);
           },
         },
+        ...this.#portraitRuntime(),
         readLease: async () => {
           if (!this.#drive) return null;
           return readConsolidateLease(this.#drive, (message) => {
@@ -1638,6 +1640,25 @@ export class YouBrainDaemon {
       steps: outcome.result.steps.map((step) =>
         step.error === undefined ? { id: step.id, ok: step.ok } : step,
       ),
+    };
+  }
+
+  #portraitRuntime(): { portrait: ReturnType<typeof createDrivePortrait> } | Record<string, never> {
+    const drive = this.#drive;
+    const service = this.#portrait;
+    const store = this.#store;
+    if (!drive || !service || !store) return {};
+    return {
+      portrait: createDrivePortrait({
+        drive,
+        service,
+        driveRoot: this.#local.driveRoot,
+        config: () => ({
+          variants: this.#shared.portrait.variants,
+          snapshotPattern: this.#shared.portrait.snapshotPattern,
+        }),
+        events: () => store.listEvents(),
+      }),
     };
   }
 

@@ -14,10 +14,28 @@ import {
   selectMergeCandidates,
 } from "./select.js";
 import { MERGE_SUGGESTIONS_CURSOR } from "./suggestions.js";
+import { portraitStep } from "./portrait.js";
 import { sameText } from "./text.js";
+
+export { portraitStep };
 
 const MAX_ATTEMPTS = 2;
 const TOPIC_CONCURRENCY = 2;
+
+export interface ConsolidationPortrait {
+  /** Read the current full variant. Missing file returns null. */
+  read(): Promise<{ text: string; etag: string; fileId: string } | null>;
+  /** Back up the old latest, write a snapshot, update latest with ifMatch, then refresh the local cache. */
+  save(input: {
+    text: string;
+    previous: string;
+    etag: string;
+    fileId: string;
+    day: string;
+  }): Promise<{ snapshot: string }>;
+  /** Pending full-variant corrections, oldest first. */
+  corrections(): Array<{ correctionId: string; section: string; text: string }>;
+}
 
 export interface ConsolidationContext {
   day: string;
@@ -35,6 +53,8 @@ export interface ConsolidationContext {
     get(key: string): string | null;
     set(key: string, value: string): void;
   };
+  /** Absent when Drive or the portrait service is not open. The step then succeeds. */
+  portrait?: ConsolidationPortrait;
 }
 
 export interface ConsolidationStep {
@@ -44,7 +64,7 @@ export interface ConsolidationStep {
   run(ctx: ConsolidationContext): Promise<void>;
 }
 
-/** Later stages (portrait, topic files) append themselves. Starts empty. */
+/** Later stages (topic files) append themselves. Starts empty. */
 const registeredSteps: ConsolidationStep[] = [];
 
 export function registerConsolidationStep(step: ConsolidationStep): void {
@@ -57,7 +77,7 @@ export function resetConsolidationSteps(): void {
 }
 
 export function consolidationSteps(): ConsolidationStep[] {
-  return [topicSummariesStep, mergeSuggestionsStep, ...registeredSteps];
+  return [topicSummariesStep, mergeSuggestionsStep, portraitStep, ...registeredSteps];
 }
 
 export const topicSummariesStep: ConsolidationStep = {

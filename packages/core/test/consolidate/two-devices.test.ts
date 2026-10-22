@@ -128,7 +128,11 @@ describe("consolidation across two devices", () => {
         force: true,
       });
       expect(forced.ok).toBe(true);
-      expect(forced.steps.map((step) => step.id)).toEqual(["topic_summaries", "merge_suggestions"]);
+      expect(forced.steps.map((step) => step.id)).toEqual([
+        "topic_summaries",
+        "merge_suggestions",
+        "portrait",
+      ]);
       expect(summaryCalls).toBe(callsAfterSync);
       expect(summaryEvents(dirsA)).toHaveLength(1);
       expect((await readStatus(daemonA)).consolidation.lastFinishedAt).not.toBe(finished);

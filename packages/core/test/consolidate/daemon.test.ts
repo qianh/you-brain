@@ -1,4 +1,5 @@
-import { rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 
 import { DRIVE_PATHS } from "@you-brain/protocol";
 import { afterEach, describe, expect, it } from "bun:test";
@@ -61,7 +62,11 @@ describe("consolidation daemon", () => {
     const first = await consolidate();
     expect(first.ok).toBe(true);
     expect(first.day).toBe("2026-10-18");
-    expect(first.steps.map((step) => step.id)).toEqual(["topic_summaries", "merge_suggestions"]);
+    expect(first.steps.map((step) => step.id)).toEqual([
+      "topic_summaries",
+      "merge_suggestions",
+      "portrait",
+    ]);
     expect(kinds).toEqual(["topics", "status"]);
     const finished = await leaseFinishedAt(drive);
     expect((await readStatus(daemon)).consolidation.lastFinishedAt).toBe(finished);
@@ -77,7 +82,7 @@ describe("consolidation daemon", () => {
     kinds.length = 0;
     const forced = await consolidate({ force: true });
     expect(forced.ok).toBe(true);
-    expect(forced.steps.map((step) => step.ok)).toEqual([true, true]);
+    expect(forced.steps.map((step) => step.ok)).toEqual([true, true, true]);
     expect(await leaseFinishedAt(drive)).not.toBe(finished);
     expect(kinds).toEqual(["topics", "status"]);
     unsubscribe();
@@ -266,6 +271,73 @@ describe("consolidation daemon", () => {
     );
     expect(topics.topics.some((topic) => topic.name === "发布流程")).toBe(true);
     expect(topics.topics.every((topic) => topic.summary === "")).toBe(true);
+  });
+
+  it("regenerates the full portrait during a manual run", async () => {
+    const dirs = await trackDirs();
+    const clock = testClock();
+    const drive = new MemoryDrive({ now: () => clock.now() });
+    const original = "# 数字分身\n\n## 工作\n保持原结构。\n";
+    const next = `${original}\n## 今天\n补上发布清单。\n`;
+    await drive.put({
+      path: "digital-twin/JOHN-DIGITAL-TWIN-latest.md",
+      bytes: Buffer.from(original, "utf8"),
+      mimeType: "text/markdown",
+    });
+    await writeClaudeSession(dirs.sourceDir, [
+      claudeLine("portrait-1", "user", "Plan the launch checklist", CLOCK_START.toISOString()),
+      claudeLine("portrait-1", "assistant", "先列一个清单。", CLOCK_START.toISOString()),
+    ]);
+    const daemon = await startTracked(
+      dirs,
+      clock,
+      drive,
+      fakeBackend(async (request) => {
+        if (request.system.includes("数字分身")) return JSON.stringify({ changed: true, portrait: next });
+        if (request.system.includes("话题概要")) {
+          return JSON.stringify({ summary: "发布清单已整理", nextStep: "" });
+        }
+        if (request.system.includes("合并建议")) return JSON.stringify({ pairs: [] });
+        return refineJson("讨论了分阶段发布");
+      }),
+    );
+    const id = (await readStatus(daemon)).deviceId;
+    expect(
+      (
+        await putRoles(daemon, {
+          mainDevice: id,
+          consolidation: { enabled: true, time: "23:00" },
+        })
+      ).status,
+    ).toBe(200);
+    const uploaded = await postJson<{ uploaded: number }>(daemon, "/api/actions/upload", {
+      backfill: true,
+    });
+    expect(uploaded.uploaded).toBeGreaterThan(0);
+
+    const response = await postConsolidate(daemon, {});
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as ConsolidateActionResult;
+    expect(body.day).toBe("2026-10-18");
+    expect(body.steps).toEqual([
+      { id: "topic_summaries", ok: true },
+      { id: "merge_suggestions", ok: true },
+      { id: "portrait", ok: true },
+    ]);
+    expect((await drive.readPath("digital-twin/JOHN-DIGITAL-TWIN-latest.md"))?.bytes.toString("utf8")).toBe(
+      next,
+    );
+    expect(
+      (
+        await drive.readPath("digital-twin/consolidate-backup/JOHN-DIGITAL-TWIN-latest-2026-10-18.md")
+      )?.bytes.toString("utf8"),
+    ).toBe(original);
+    expect(
+      (
+        await drive.readPath("digital-twin/JOHN-DIGITAL-TWIN-v1.0.0-2026-10-18.md")
+      )?.bytes.toString("utf8"),
+    ).toBe(next);
+    expect(await readFile(join(dirs.homeDir, "portrait", "full.md"), "utf8")).toBe(next);
   });
 });
 

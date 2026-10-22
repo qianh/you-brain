@@ -11,6 +11,7 @@ import type {
   SearchRequest,
   SearchResponse,
   StatusResponse,
+  ConsolidateActionResult,
   SyncActionResult,
   TodayResponse,
   TopicDetail,
@@ -55,12 +56,13 @@ export interface OauthSecretInput {
 
 export type ReminderActionName = "reactivate" | "done" | "snooze" | "mute" | "ignore";
 
-export interface BrowserDaemon extends Omit<DaemonClient, "reminderAction"> {
+export interface BrowserDaemon extends Omit<DaemonClient, "reminderAction" | "consolidate"> {
   putLlmKey(provider: string, apiKey: string): Promise<void>;
   putOauth(body: OauthSecretInput): Promise<void>;
   testLlm(body: { provider: string; model: string; baseUrl: string }): Promise<ActionMessage>;
   googleLogin(): Promise<ActionMessage>;
   reminderAction(reminderId: string, action: ReminderActionName, until?: string): Promise<ReminderView>;
+  consolidate(body?: { force?: boolean }): Promise<ConsolidateActionResult>;
 }
 
 export function readDaemonToken(): string {
@@ -132,6 +134,7 @@ export function createBrowserDaemon(options?: {
         action,
         ...(until === undefined ? {} : { until }),
       }),
+    consolidate: (body) => request<ConsolidateActionResult>("POST", "/api/actions/consolidate", body ?? {}),
     sync: () => request<SyncActionResult>("POST", "/api/actions/sync"),
     upload: (body) => request<UploadActionResult>("POST", "/api/actions/upload", body ?? {}),
     todo: (body) => request<ActionResponse>("POST", "/api/actions/todo", body),

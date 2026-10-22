@@ -4,6 +4,7 @@ import {
   recentTopicSessions,
   selectChangedTopics,
   selectMergeCandidates,
+  selectTopicsChangedOnDay,
 } from "../../src/consolidate/select.js";
 import type { ZonedTopic } from "../../src/topics/types.js";
 import {
@@ -134,6 +135,17 @@ describe("selectChangedTopics", () => {
       ),
     ];
     expect(changed(events)).toEqual([]);
+    expect(
+      selectTopicsChangedOnDay({
+        book: fold(events),
+        sessionUpdatedAt: {},
+        day: LOCAL_DAY,
+        timeZone: SHANGHAI,
+        now: LATER,
+        activeLimit: 10,
+        historyDays: 30,
+      }).map((item) => item.topic.topicId),
+    ).toEqual(["alpha"]);
     const earlierRewrite = [
       created("alpha", "甲", DAY_BEFORE),
       ev(

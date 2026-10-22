@@ -9,7 +9,12 @@ import {
   planConsolidationDays,
   type ConsolidationBlock,
 } from "./schedule.js";
-import { consolidationSteps, type ConsolidationContext, type ConsolidationStep } from "./steps.js";
+import {
+  consolidationSteps,
+  type ConsolidationContext,
+  type ConsolidationPortrait,
+  type ConsolidationStep,
+} from "./steps.js";
 
 export interface ConsolidationLastRun {
   day: string;
@@ -43,6 +48,7 @@ export interface ConsolidationRuntime {
   load: ConsolidationContext["load"];
   emit: ConsolidationContext["emit"];
   cursors: ConsolidationContext["cursors"];
+  portrait?: ConsolidationPortrait;
   readLease: () => Promise<ConsolidateLease | null>;
   writeLease: (lease: ConsolidateLease) => Promise<void>;
   steps?: readonly ConsolidationStep[];
@@ -147,6 +153,7 @@ export async function executeConsolidation(
       emit: runtime.emit,
       cursors: runtime.cursors,
       steps,
+      ...(runtime.portrait ? { portrait: runtime.portrait } : {}),
     });
     last = result;
     const finishedAt = runtime.clock.now().toISOString();

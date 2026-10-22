@@ -155,6 +155,7 @@
 .settings-inline-ok { color: var(--success-text); font-size: var(--fs-sm); line-height: var(--lh-sm); }
 .settings-inline-bad { color: var(--danger-text); font-size: var(--fs-sm); line-height: var(--lh-sm); }
 .settings-quiet { color: var(--text-3); font-size: var(--fs-sm); line-height: var(--lh-sm); }
+.settings-status { color: var(--text); font-size: var(--fs-sm); line-height: var(--lh-sm); white-space: nowrap; }
 
 .settings-saved { display: inline-flex; align-items: center; gap: var(--sp-2); width: auto; }
 
