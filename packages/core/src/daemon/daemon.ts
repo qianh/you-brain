@@ -126,6 +126,7 @@ import {
   writeJsonFile,
 } from "./local-state.js";
 import { INTERVALS, intervalDue, pullInterval } from "./schedule.js";
+import { describeSyncFailure } from "./sync-error.js";
 import type { SecretStore } from "../auth/index.js";
 
 const APP_VERSION = "0.1.0";
@@ -333,6 +334,7 @@ export class YouBrainDaemon {
   #lastPortrait: number | null = null;
   #lastSearch: number | null = null;
   #lastSyncAt: string | null = null;
+  #lastSyncError: { message: string; at: string } | null = null;
   #searchDirty = false;
   #portraitSoon = false;
   #scannedOnce = false;
@@ -659,10 +661,9 @@ export class YouBrainDaemon {
     ) {
       try {
         await this.#sync.pull();
-        this.#lastSyncAt = this.#clock.now().toISOString();
-        this.#driveReachable = true;
-      } catch {
-        this.#driveReachable = false;
+        this.#rememberSyncSuccess();
+      } catch (error) {
+        this.#rememberSyncFailure(error);
       }
       this.#lastPull = this.#clock.nowMs();
     }
@@ -1289,11 +1290,30 @@ export class YouBrainDaemon {
     const at = this.#clock.now().toISOString();
     if (!this.#sync) return { started: false, at };
     await this.#run(async () => {
-      await this.#sync?.pull();
-      this.#lastSyncAt = this.#clock.now().toISOString();
-      this.#lastPull = this.#clock.nowMs();
+      try {
+        await this.#sync?.pull();
+        this.#rememberSyncSuccess();
+        this.#lastPull = this.#clock.nowMs();
+      } catch (error) {
+        this.#rememberSyncFailure(error);
+        throw new Error(this.#lastSyncError?.message ?? "同步失败");
+      }
     });
     return { started: true, at: this.#lastSyncAt ?? at };
+  }
+
+  #rememberSyncSuccess(): void {
+    this.#lastSyncAt = this.#clock.now().toISOString();
+    this.#driveReachable = true;
+    this.#lastSyncError = null;
+  }
+
+  #rememberSyncFailure(error: unknown): void {
+    this.#driveReachable = false;
+    this.#lastSyncError = {
+      message: describeSyncFailure(error),
+      at: this.#clock.now().toISOString(),
+    };
   }
 
   async #uploadNow(input: UploadActionInput): Promise<UploadActionResult> {
@@ -1375,6 +1395,8 @@ export class YouBrainDaemon {
       sync: {
         lastSyncAt: this.#lastSyncAt,
         pendingOutbox: this.#store?.countOutbox() ?? 0,
+        lastError: this.#lastSyncError?.message ?? null,
+        lastErrorAt: this.#lastSyncError?.at ?? null,
       },
       search,
       refine: {

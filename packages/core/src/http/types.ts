@@ -250,6 +250,9 @@ export interface StatusResponse {
   sync: {
     lastSyncAt: string | null;
     pendingOutbox: number;
+    /** Set after a failed pull. Cleared by the next successful pull. Absent on older daemons. */
+    lastError?: string | null;
+    lastErrorAt?: string | null;
   };
   search: {
     ready: boolean;

@@ -564,6 +564,30 @@ function statusBody(): unknown {
       logs: [],
     };
   }
+  if (scenario === "syncfail") {
+    return {
+      deviceId: MAC,
+      drive: { reachable: true, accountEmail },
+      sync: {
+        lastSyncAt: ago(12 * MINUTE),
+        pendingOutbox: 0,
+        lastError: "同步失败：变更游标无效",
+        lastErrorAt: ago(2 * MINUTE),
+      },
+      search: { ready: true, documents: 128 },
+      refine: { pending: 0, lastError: null },
+      consolidation: { enabled: false, lastFinishedAt: null, stale: false, status: "disabled" },
+      warnings: [],
+      captures: [
+        { source: "claude-code", lastCaptureAt: MORNING, error: null },
+        { source: "codex", lastCaptureAt: AFTERNOON, error: null },
+        { source: "grok-build", lastCaptureAt: NOON, error: null },
+        { source: "cursor", lastCaptureAt: AFTERNOON, error: null },
+        { source: "gemini-cli", lastCaptureAt: ago(20 * HOUR), error: null },
+      ],
+      logs: [],
+    };
+  }
   if (scenario === "half") {
     return {
       deviceId: MAC,

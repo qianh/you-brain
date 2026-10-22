@@ -16,6 +16,28 @@ function text(value: string | null | undefined): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+export interface CapsuleStatus {
+  drive: { reachable: boolean | null };
+  refine: { lastError: string | null };
+  sync: { lastError?: string | null };
+  warnings: readonly unknown[];
+}
+
+/** Shared by the shell and the panel. A backlog is not part of this input. */
+export function capsuleFromStatus(
+  status: CapsuleStatus | null,
+  flags: { connected: boolean; syncing: boolean },
+): CapsuleKind {
+  return capsuleKind({
+    connected: flags.connected,
+    syncing: flags.syncing,
+    driveReachable: status?.drive.reachable ?? null,
+    refineError: status?.refine.lastError ?? null,
+    syncError: status?.sync.lastError ?? null,
+    warningCount: status?.warnings.length ?? 0,
+  });
+}
+
 /**
  * offline > loading > refine error > sync error > warnings > ok.
  * `driveReachable === null` is unknown, not a sync failure.

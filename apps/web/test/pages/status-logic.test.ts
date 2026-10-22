@@ -13,6 +13,7 @@ import {
   logsBesideWarnings,
   searchTone,
   statusScreen,
+  syncLine,
   warningAction,
   withConsolidationWarning,
   type HeroInput,
@@ -39,8 +40,42 @@ describe("heroKind", () => {
     expect(heroFault(hero({ driveReachable: false }))).toBe("sync");
     expect(heroKind(hero({ driveReachable: null, warningCount: 1 }))).toBe("warn");
     expect(heroKind(hero({ refineError: "   " }))).toBe("ok");
+    expect(heroKind(hero({ syncError: "  同步失败：请求超时  " }))).toBe("danger");
+    expect(heroFault(hero({ syncError: "同步失败：请求超时" }))).toBe("sync");
+    expect(heroFault(hero({ refineError: "解析失败", syncError: "同步失败" }))).toBe("refine");
+    expect(heroKind(hero({ syncError: "   " }))).toBe("ok");
     expect(heroKind(hero({}))).toBe("ok");
     expect(heroFault(hero({}))).toBeNull();
+  });
+});
+
+describe("sync line", () => {
+  test("shows a failure and its time, and treats never-synced and a backlog as not failed", () => {
+    expect(syncLine(null)).toEqual({ tone: "muted", message: null, at: null });
+    expect(syncLine({ lastSyncAt: null, pendingOutbox: 3 })).toEqual({ tone: "muted", message: null, at: null });
+    expect(syncLine({ lastSyncAt: "   ", pendingOutbox: 3 })).toEqual({ tone: "muted", message: null, at: null });
+    expect(syncLine({ lastSyncAt: "2026-10-18T16:08:00+08:00", pendingOutbox: 9 })).toEqual({
+      tone: "ok",
+      message: null,
+      at: "2026-10-18T16:08:00+08:00",
+    });
+    expect(
+      syncLine({
+        lastSyncAt: "2026-10-18T16:08:00+08:00",
+        pendingOutbox: 2,
+        lastError: "  同步失败：变更游标无效  ",
+        lastErrorAt: "2026-10-18T16:10:00+08:00",
+      }),
+    ).toEqual({
+      tone: "bad",
+      message: "同步失败：变更游标无效",
+      at: "2026-10-18T16:10:00+08:00",
+    });
+    expect(syncLine({ lastSyncAt: null, lastError: "同步失败", lastErrorAt: "  " })).toEqual({
+      tone: "bad",
+      message: "同步失败",
+      at: null,
+    });
   });
 });
 

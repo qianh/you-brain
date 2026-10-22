@@ -11,6 +11,8 @@ export interface HeroInput {
   hasStatus: boolean;
   driveReachable: boolean | null;
   refineError: string | null;
+  /** An explicit sync failure. Never-synced and a pending outbox are not one. */
+  syncError?: string | null;
   warningCount: number;
 }
 
@@ -24,6 +26,7 @@ export function heroKind(input: HeroInput): HeroKind {
   }
   if ((input.refineError ?? "").trim() !== "") return "danger";
   if (input.driveReachable === false) return "danger";
+  if ((input.syncError ?? "").trim() !== "") return "danger";
   if (input.warningCount > 0) return "warn";
   return "ok";
 }
@@ -99,6 +102,32 @@ export function statusScreen(input: {
   if (input.loading) return "loading";
   if (input.error && !isUnreachableError(input.error)) return "error";
   return "offline";
+}
+
+export interface SyncLineInput {
+  lastSyncAt?: string | null;
+  pendingOutbox?: number;
+  lastError?: string | null;
+  lastErrorAt?: string | null;
+}
+
+export interface SyncLine {
+  /** `bad` is a failed pull. `muted` is never synced. `ok` is a successful sync time. */
+  tone: "bad" | "muted" | "ok";
+  message: string | null;
+  at: string | null;
+}
+
+/** The status sync row. A backlog does not change the tone. */
+export function syncLine(sync: SyncLineInput | null | undefined): SyncLine {
+  const message = typeof sync?.lastError === "string" ? sync.lastError.trim() : "";
+  if (message !== "") {
+    const at = typeof sync?.lastErrorAt === "string" ? sync.lastErrorAt.trim() : "";
+    return { tone: "bad", message, at: at === "" ? null : at };
+  }
+  const at = typeof sync?.lastSyncAt === "string" ? sync.lastSyncAt.trim() : "";
+  if (at === "") return { tone: "muted", message: null, at: null };
+  return { tone: "ok", message: null, at };
 }
 
 export function driveTone(reachable: boolean | null): DotTone {

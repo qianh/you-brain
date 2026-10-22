@@ -12,7 +12,7 @@ import { useToast } from "./components/toast.js";
 import { Tooltip } from "./components/tooltip.js";
 import { useDaemon } from "./daemon-context.js";
 import { devOverlayAllowed } from "./lib/dev-overlay.js";
-import { capsuleKind, type CapsuleKind } from "./lib/health.js";
+import { capsuleFromStatus, type CapsuleKind, type CapsuleStatus } from "./lib/health.js";
 import { routeFadeAnimationEnded, useRouteEnter } from "./lib/route-fade.js";
 import { isPrimaryNavActive, readQuery, settingsHref } from "./lib/route.js";
 import { modLabel, shortcutMod } from "./lib/shortcuts.js";
@@ -42,6 +42,13 @@ function RouteFade({ pathname, children }: { pathname: string; children: ReactNo
       {children}
     </div>
   );
+}
+
+export function shellCapsuleKind(input: { loading: boolean; status: CapsuleStatus | null }): CapsuleKind {
+  return capsuleFromStatus(input.status, {
+    connected: input.status !== null,
+    syncing: input.loading && input.status === null,
+  });
 }
 
 function capsuleText(kind: CapsuleKind, count: number, t: (key: MessageKey, vars?: Record<string, string | number>) => string): string {
@@ -117,14 +124,7 @@ export function Shell({ children }: { children: ReactNode }) {
   useShortcuts(shortcuts);
 
   const current = TABS.find((tab) => isPrimaryNavActive(location.pathname, tab.href))?.href ?? "";
-  const kind = capsuleKind({
-    connected: status !== null,
-    syncing: loading && status === null,
-    driveReachable: status?.drive.reachable ?? null,
-    refineError: status?.refine.lastError ?? null,
-    syncError: null,
-    warningCount: status?.warnings.length ?? 0,
-  });
+  const kind = shellCapsuleKind({ loading, status });
 
   return (
     <div className="app">

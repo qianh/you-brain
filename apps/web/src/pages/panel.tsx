@@ -11,7 +11,7 @@ import { StatusCapsule } from "../components/status-capsule.js";
 import { useToast } from "../components/toast.js";
 import { useDelayed } from "../components/use-delayed.js";
 import { SourceTile } from "../components/tile.js";
-import { capsuleKind, type CapsuleKind } from "../lib/health.js";
+import { capsuleFromStatus, type CapsuleKind, type CapsuleStatus } from "../lib/health.js";
 import { formatCount } from "./today/model.js";
 import { formatDateTime } from "../lib/format.js";
 import { sortSessionsByTime } from "../lib/group.js";
@@ -24,6 +24,17 @@ import { guideSteps } from "./today/model.js";
 import { clockTime, countSessionsByTopic, panelShortcut, panelTopicSlice, takeWithRest, topicDotClass } from "./panel/model.js";
 import { openAppPath } from "./panel/open.js";
 import { isUnreachableError } from "./status/logic.js";
+
+export function panelCapsuleKind(input: {
+  loading: boolean;
+  error: string | null;
+  status: CapsuleStatus | null;
+}): CapsuleKind {
+  return capsuleFromStatus(input.status, {
+    connected: !(input.error && input.status === null),
+    syncing: input.loading && input.status === null,
+  });
+}
 
 export function PanelPage() {
   const { t, language, today, topics, status, reminders, error, loading, reload, timeZone, client } = useDaemon();
@@ -49,14 +60,7 @@ export function PanelPage() {
           sessionCount: sessions.length,
           lastSyncAt: status.sync.lastSyncAt,
         });
-  const kind = capsuleKind({
-    connected: !(error && status === null),
-    syncing: loading && status === null,
-    driveReachable: status?.drive.reachable ?? null,
-    refineError: status?.refine.lastError ?? null,
-    syncError: null,
-    warningCount: status?.warnings.length ?? 0,
-  });
+  const kind = panelCapsuleKind({ loading, error, status });
   const mod = shortcutMod(typeof navigator === "undefined" ? "" : navigator.platform);
   const chord = (key: string): string => `${modLabel(mod)}${mod === "meta" ? "" : "+"}${key}`;
 

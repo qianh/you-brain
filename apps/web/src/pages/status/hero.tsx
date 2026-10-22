@@ -10,6 +10,7 @@ export function StatusHero({
   syncValue,
   syncIso,
   syncAbsolute,
+  syncFault = null,
 }: {
   tone: HeroKind;
   title: string;
@@ -18,6 +19,7 @@ export function StatusHero({
   syncValue: string;
   syncIso: string | null;
   syncAbsolute: string;
+  syncFault?: string | null;
 }) {
   return (
     <section className={`status-hero tone-${tone}`} aria-live="polite">
@@ -34,7 +36,8 @@ export function StatusHero({
       </div>
       <div className="status-hero-sync">
         <span>{syncLabel}</span>
-        {syncIso ? <time dateTime={syncIso} title={syncAbsolute}>{syncValue}</time> : <strong>{syncValue}</strong>}
+        {syncFault ? <strong className="status-sync-fault">{syncFault}</strong> : null}
+        {syncIso ? <time dateTime={syncIso} title={syncAbsolute}>{syncValue}</time> : syncFault ? null : <strong>{syncValue}</strong>}
       </div>
     </section>
   );

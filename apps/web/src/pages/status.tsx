@@ -29,6 +29,7 @@ import {
   heroKind,
   logsBesideWarnings,
   statusScreen,
+  syncLine,
   withConsolidationWarning,
 } from "./status/logic.js";
 
@@ -41,11 +42,22 @@ export function StatusPage() {
   const [loginBusy, setLoginBusy] = useState(false);
   const screen = statusScreen({ loading, hasStatus: status !== null, error });
   const delayed = useDelayed(screen === "loading");
-  const syncIso = status?.sync.lastSyncAt ?? null;
+  const line = syncLine(status?.sync);
+  const syncIso = line.at;
   const finishedAt = status?.consolidation.lastFinishedAt ?? null;
   const syncRelative = useRelativeTime(syncIso, language, timeZone);
   const finishedRelative = useRelativeTime(finishedAt, language, timeZone);
   const syncAbsolute = formatDateTime(syncIso, language, timeZone);
+  const syncError = line.message;
+  const syncLabel = line.tone === "bad" ? t("statusSyncErrorLabel") : t("lastSync");
+  const syncValue =
+    line.tone === "bad"
+      ? line.at
+        ? t("statusSyncFailedAt", { time: syncRelative })
+        : ""
+      : line.tone === "ok"
+        ? syncRelative
+        : t("neverSynced");
 
   async function refresh() {
     setRefreshing(true);
@@ -99,6 +111,7 @@ export function StatusPage() {
     hasStatus: status !== null,
     driveReachable: status?.drive.reachable ?? null,
     refineError: status?.refine.lastError ?? null,
+    syncError,
     warningCount: items.length,
   });
   const fault = heroFault({
@@ -106,6 +119,7 @@ export function StatusPage() {
     hasStatus: status !== null,
     driveReachable: status?.drive.reachable ?? null,
     refineError: status?.refine.lastError ?? null,
+    syncError,
     warningCount: items.length,
   });
   const refineError = (status?.refine.lastError ?? "").trim();
@@ -123,7 +137,7 @@ export function StatusPage() {
       : kind === "danger" && fault === "refine"
         ? refineError || t("statusRefineBroken")
         : kind === "danger"
-          ? t("statusSyncBrokenBody")
+          ? syncError || t("statusSyncBrokenBody")
           : kind === "warn"
             ? t("statusNeedsWorkBody")
             : t("statusAllClearBody");
@@ -189,10 +203,11 @@ export function StatusPage() {
             tone={kind}
             title={heroTitle}
             body={heroBody}
-            syncLabel={t("lastSync")}
-            syncValue={syncIso ? syncRelative : t("neverSynced")}
-            syncIso={syncIso}
+            syncLabel={syncLabel}
+            syncValue={syncValue}
+            syncIso={line.tone === "muted" ? null : syncIso}
             syncAbsolute={syncAbsolute}
+            syncFault={syncError}
           />
           <AttentionList
             items={items}

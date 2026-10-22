@@ -35,6 +35,8 @@ export const zh = {
   statusModelSettings: "查看模型设置",
   statusGoLogin: "去登录",
   statusDrive: "Google Drive",
+  statusSyncErrorLabel: "最近一次同步失败",
+  statusSyncFailedAt: "失败于 {time}",
 } as const;
 
 export const en: { [K in keyof typeof zh]: string } = {
@@ -74,4 +76,6 @@ export const en: { [K in keyof typeof zh]: string } = {
   statusModelSettings: "Model settings",
   statusGoLogin: "Sign in",
   statusDrive: "Google Drive",
+  statusSyncErrorLabel: "Latest sync failure",
+  statusSyncFailedAt: "Failed · {time}",
 };

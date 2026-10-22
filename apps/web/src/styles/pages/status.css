@@ -111,6 +111,15 @@
   line-height: var(--lh-sm);
 }
 
+.status-hero-sync .status-sync-fault {
+  max-width: 16rem;
+  color: var(--danger);
+  font-weight: 600;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: inherit;
+}
+
 .status-banners {
   display: flex;
   flex-direction: column;
