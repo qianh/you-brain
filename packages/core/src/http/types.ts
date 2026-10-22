@@ -77,6 +77,7 @@ export interface TopicListItem {
   lastUserOpAt: string | null;
   userLocked: boolean;
   openTodoCount: number;
+  sessionCount?: number;
 }
 
 export interface TopicsQuery {

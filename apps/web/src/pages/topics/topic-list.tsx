@@ -10,7 +10,8 @@ import { Row } from "../../components/row.js";
 import { SkeletonRow } from "../../components/skeleton.js";
 import { useDaemon } from "../../daemon-context.js";
 import { topicHref } from "../../lib/route.js";
-import { STATUS_FILTERS, joinMeta, statusLabelKey, type StatusFilter } from "./logic.js";
+import { STATUS_FILTERS, statusLabelKey, type StatusFilter } from "./logic.js";
+import { listSessionCount } from "./session-count.js";
 import { RelativeTime } from "./relative-time.js";
 import { StatusDot } from "./status-dot.js";
 
@@ -85,7 +86,7 @@ export const TopicList = forwardRef<HTMLDivElement, {
         ) : (
           topics.map((topic) => {
             const selected = topic.topicId === highlighted;
-            const sessions = selected ? sessionCount : null;
+            const sessions = listSessionCount(topic, highlighted, sessionCount);
             return (
               <div key={topic.topicId} className={selected ? "topics-item is-selected" : "topics-item"} data-topic-id={topic.topicId} role="listitem">
                 <Row
@@ -98,7 +99,7 @@ export const TopicList = forwardRef<HTMLDivElement, {
                   subtitle={
                     <span className="topics-subline">
                       <span className="topics-sr">{t(statusLabelKey(topic.status))}</span>
-                      <span>{joinMeta([sessions !== null ? t("groupLabel", { count: sessions }) : null])}</span>
+                      {sessions !== null ? <span>{t("topicSessionCount", { count: sessions })}</span> : null}
                       {sessions !== null ? <span aria-hidden="true"> · </span> : null}
                       <RelativeTime iso={topic.lastActive} />
                     </span>

@@ -26,3 +26,9 @@ export {
   type SearchOutput,
   type SearchStatus,
 } from "./search-service.js";
+export {
+  assertSearchRange,
+  parseSearchRange,
+  updatedAtInRange,
+  type ParsedSearchRange,
+} from "./time-range.js";

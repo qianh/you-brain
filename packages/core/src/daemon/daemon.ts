@@ -81,10 +81,12 @@ import {
   E5_SMALL,
   ProcessEmbedder,
   SearchService,
+  assertSearchRange,
   embedWorkerCommand,
   type Embedder,
   type SearchDrive,
 } from "../search/index.js";
+import { withSessionCounts } from "./topic-session-count.js";
 import { SqliteStore } from "../store/sqlite-store.js";
 import { EventLog } from "../sync/event-log.js";
 import { ProtocolSync } from "../sync/service.js";
@@ -1204,7 +1206,10 @@ export class YouBrainDaemon {
     const readers = createStoreReaders(store, this.#zone);
     return {
       today: () => readers.today(),
-      topics: (query) => readers.topics(query),
+      topics: async (query) => {
+        const response = await readers.topics(query);
+        return { ...response, topics: withSessionCounts(response.topics, store.listSessions()) };
+      },
       topic: (id) => readers.topic(id),
       todo: (todoId) => readers.todo(todoId),
       portrait: (variant) => readPortraitFile(this.#paths.portraitDir, variant),
@@ -1229,6 +1234,7 @@ export class YouBrainDaemon {
   }
 
   async #searchLocal(query: SearchRequest) {
+    assertSearchRange(query);
     if (!this.#search) {
       return {
         query: query.query,

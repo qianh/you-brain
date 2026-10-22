@@ -4,6 +4,7 @@ import { useDaemon } from "../daemon-context.js";
 import { Banner } from "../components/banner.js";
 import { Button, IconButton } from "../components/button.js";
 import { Card } from "../components/card.js";
+import { EmptyState } from "../components/empty.js";
 import { BrandMark, Icon } from "../components/icons.js";
 import { SkeletonRow } from "../components/skeleton.js";
 import { StatusCapsule } from "../components/status-capsule.js";
@@ -22,6 +23,7 @@ import { StartGuide } from "./today/guide.js";
 import { guideSteps } from "./today/model.js";
 import { clockTime, countSessionsByTopic, panelShortcut, panelTopicSlice, takeWithRest, topicDotClass } from "./panel/model.js";
 import { openAppPath } from "./panel/open.js";
+import { isUnreachableError } from "./status/logic.js";
 
 export function PanelPage() {
   const { t, language, today, topics, status, reminders, error, loading, reload, timeZone, client } = useDaemon();
@@ -36,7 +38,8 @@ export function PanelPage() {
   const warnings = takeWithRest(status?.warnings ?? [], 2);
   const firstLoad = loading && today === null && status === null;
   const showSkeleton = useDelayed(firstLoad, 150);
-  const failed = Boolean(error) && today === null && status === null && !loading;
+  const offline = !loading && today === null && status === null && isUnreachableError(error);
+  const failed = Boolean(error) && today === null && status === null && !loading && !offline;
   const steps =
     status === null
       ? []
@@ -130,6 +133,18 @@ export function PanelPage() {
       </header>
       <PanelScroll>
         {showSkeleton ? <PanelSkeleton /> : null}
+        {offline ? (
+          <EmptyState
+            icon="activity"
+            title={t("statusOfflineTitle")}
+            description={t("statusOfflineBody")}
+            action={
+              <Button variant="primary" onClick={() => void refresh()}>
+                {t("statusReconnect")}
+              </Button>
+            }
+          />
+        ) : null}
         {failed ? (
           <Banner
             tone="danger"
@@ -142,7 +157,7 @@ export function PanelPage() {
             <span title={error ?? ""}>{t("panelLoadError")}</span>
           </Banner>
         ) : null}
-        {!firstLoad && !failed ? (
+        {!firstLoad && !failed && !offline ? (
           <>
             <StartGuide steps={steps} variant="mini" onOpen={(section) => openMain(settingsHref(section))} />
             <Card>

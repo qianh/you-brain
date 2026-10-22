@@ -73,6 +73,7 @@ export const zh = {
   conclusionAdded: "已追加结论",
   submitHint: "提交",
   listLabel: "话题列表",
+  topicSessionCount: "{count} 个会话",
 } as const;
 
 export const en = {
@@ -150,4 +151,5 @@ export const en = {
   conclusionAdded: "Conclusion added",
   submitHint: "Submit",
   listLabel: "Topic list",
+  topicSessionCount: "{count} sessions",
 } as const;

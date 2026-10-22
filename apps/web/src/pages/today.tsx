@@ -13,6 +13,7 @@ import { useDelayed } from "../components/use-delayed.js";
 import { useRelativeTime } from "../components/use-relative-time.js";
 import { settingsHref, topicHref } from "../lib/route.js";
 import { useRoute } from "../router.js";
+import { isUnreachableError } from "./status/logic.js";
 import { TodayGroups } from "./today/groups.js";
 import { StartGuide } from "./today/guide.js";
 import {
@@ -34,6 +35,7 @@ export function TodayPage() {
   const sessions = today?.sessions ?? [];
   const arrived = useArrived(sessions.map((session) => session.sessionKey));
   const showSkeleton = useDelayed(loading && today === null, 150);
+  const offline = !loading && today === null && isUnreachableError(error);
   const stats = summarizeToday(sessions);
   const syncedAt = status?.sync.lastSyncAt ?? null;
   const relativeSync = useRelativeTime(syncedAt, language, timeZone);
@@ -72,7 +74,19 @@ export function TodayPage() {
           }
         />
         {showSkeleton ? <TodaySkeleton /> : null}
-        {!today && !loading && !showSkeleton ? (
+        {offline ? (
+          <EmptyState
+            icon="activity"
+            title={t("statusOfflineTitle")}
+            description={t("statusOfflineBody")}
+            action={
+              <Button variant="primary" onClick={() => void reload("all")}>
+                {t("statusReconnect")}
+              </Button>
+            }
+          />
+        ) : null}
+        {!offline && !today && !loading && !showSkeleton ? (
           <Banner
             tone="danger"
             action={

@@ -13,8 +13,10 @@ import { Tooltip } from "./components/tooltip.js";
 import { useDaemon } from "./daemon-context.js";
 import { devOverlayAllowed } from "./lib/dev-overlay.js";
 import { capsuleKind, type CapsuleKind } from "./lib/health.js";
+import { routeFadeAnimationEnded, useRouteEnter } from "./lib/route-fade.js";
 import { isPrimaryNavActive, readQuery, settingsHref } from "./lib/route.js";
 import { modLabel, shortcutMod } from "./lib/shortcuts.js";
+import { isUnreachableError } from "./pages/status/logic.js";
 import { useRoute } from "./router.js";
 import type { MessageKey } from "./i18n/messages.js";
 
@@ -28,33 +30,13 @@ const TABS: ReadonlyArray<{ key: MessageKey; href: string; icon: IconName }> = [
 ];
 
 function RouteFade({ pathname, children }: { pathname: string; children: ReactNode }) {
-  const [path, setPath] = useState(pathname);
-  const [entering, setEntering] = useState(false);
-  if (path !== pathname) {
-    setPath(pathname);
-    setEntering(false);
-  }
-  useEffect(() => {
-    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    if (reduced || document.visibilityState === "hidden") return;
-    setEntering(true);
-    const stop = (): void => setEntering(false);
-    const timer = window.setTimeout(stop, 220);
-    const onHide = (): void => {
-      if (document.visibilityState === "hidden") stop();
-    };
-    document.addEventListener("visibilitychange", onHide);
-    return () => {
-      window.clearTimeout(timer);
-      document.removeEventListener("visibilitychange", onHide);
-    };
-  }, [pathname]);
+  const { entering, clear } = useRouteEnter(pathname);
   return (
     <div
       key={pathname}
       className={entering ? "route-fade is-entering" : "route-fade"}
       onAnimationEnd={(event) => {
-        if (event.target === event.currentTarget) setEntering(false);
+        if (routeFadeAnimationEnded(event.target, event.currentTarget)) clear();
       }}
     >
       {children}
@@ -77,6 +59,8 @@ export function Shell({ children }: { children: ReactNode }) {
   const { href, location, navigate } = useRoute();
   const [refreshing, setRefreshing] = useState(false);
   const overlay = devOverlayAllowed(location.pathname, import.meta.env.DEV);
+  const offlineHome =
+    (location.pathname === "/" || location.pathname === "/today") && status === null && isUnreachableError(error);
   const forceScrolled = overlay && readQuery(href, "scrolled") === "1";
   const [scrolled, setScrolled] = useState(forceScrolled);
   const requested = overlay ? readQuery(href, "open") : null;
@@ -210,12 +194,12 @@ export function Shell({ children }: { children: ReactNode }) {
         </div>
       </header>
       <main id="content" className="main">
-        {error ? (
+        {error && !offlineHome ? (
           <Banner tone="danger" action={<Button size="sm" onClick={() => void refresh()}>{t("retry")}</Button>}>
             {error}
           </Banner>
         ) : null}
-        {streamError ? <Banner tone="warn">{t("streamDown")}</Banner> : null}
+        {streamError && !offlineHome ? <Banner tone="warn">{t("streamDown")}</Banner> : null}
         <RouteFade pathname={location.pathname}>{children}</RouteFade>
       </main>
       <CommandPalette open={palette} onClose={() => setPalette(false)} initialQuery={preset} />

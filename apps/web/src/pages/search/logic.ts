@@ -67,7 +67,7 @@ export interface RangeBounds {
 /**
  * Map the time chip to inclusive `from` / `to` instants.
  * "今天" is the local calendar day. "近 7 天" / "近 30 天" include today and the previous 6 / 29 local days.
- * Instants are UTC ISO strings. The search API compares them as strings.
+ * Instants are UTC ISO strings. The search API compares them as timestamps.
  */
 export function rangeBounds(range: SearchRange, now: Date, timeZone: string): RangeBounds {
   if (range === "all") return {};

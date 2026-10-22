@@ -494,6 +494,7 @@ function listTopics(url: URL): Response {
       lastUserOpAt: topic.lastUserOpAt,
       userLocked: topic.userLocked,
       openTodoCount: openTodoCount(topic.topicId),
+      sessionCount: sessions.filter((session) => session.topicId === topic.topicId).length,
     }));
   return json({ topics: items });
 }
@@ -1101,6 +1102,9 @@ if (scenario === "half") {
   );
 }
 
+if (scenario === "offline") {
+  serveOffline(port);
+} else {
 Bun.serve({
   hostname: "127.0.0.1",
   port,
@@ -1108,7 +1112,6 @@ Bun.serve({
   fetch(request) {
     const url = new URL(request.url);
     if (url.pathname.startsWith("/api/")) {
-      if (scenario === "offline") return undefined as unknown as Response;
       if (!authorized(request, url)) return fail(401, "UNAUTHORIZED", "缺少或无效的访问令牌");
       if (scenario === "error") return fail(500, "INTERNAL", "后台暂时不可用");
       if (scenario === "slow") {
@@ -1122,5 +1125,143 @@ Bun.serve({
     return staticFile(url.pathname);
   },
 });
+}
 
 console.log(`mock daemon http://127.0.0.1:${port}/  token=${token}  scenario=${scenario}`);
+
+/**
+ * Offline means the page loads and every `/api` request fails to connect.
+ * `Bun.serve` rewrites a missing Response into HTTP 200, so this listener
+ * answers static files itself and resets the socket for API paths.
+ */
+interface OfflineSocket {
+  write(data: Uint8Array, byteOffset?: number, byteLength?: number): number;
+  end(data?: Uint8Array): number;
+}
+
+interface PendingWrite {
+  bytes: Uint8Array;
+  offset: number;
+}
+
+function serveOffline(listenPort: number): void {
+  const pending = new Map<unknown, Buffer>();
+  const handled = new WeakSet<object>();
+  const outbound = new Map<OfflineSocket, PendingWrite>();
+  const pump = (socket: OfflineSocket): void => {
+    const job = outbound.get(socket);
+    if (!job) return;
+    while (job.offset < job.bytes.byteLength) {
+      const end = Math.min(job.offset + 16_384, job.bytes.byteLength);
+      const wrote = socket.write(job.bytes.subarray(job.offset, end));
+      if (wrote < 0) {
+        outbound.delete(socket);
+        return;
+      }
+      if (wrote === 0) return;
+      job.offset += wrote;
+    }
+    outbound.delete(socket);
+    socket.end();
+  };
+  Bun.listen({
+    hostname: "127.0.0.1",
+    port: listenPort,
+    socket: {
+      open(socket) {
+        pending.set(socket, Buffer.alloc(0));
+      },
+      drain(socket) {
+        pump(socket);
+      },
+      data(socket, data) {
+        if (handled.has(socket)) return;
+        const prev = pending.get(socket) ?? Buffer.alloc(0);
+        const chunk = Buffer.from(data);
+        const buf = prev.byteLength === 0 ? chunk : Buffer.concat([prev, chunk]);
+        const headerEnd = buf.indexOf("\r\n\r\n");
+        if (headerEnd < 0) {
+          if (buf.byteLength > 65_536) socket.end();
+          else pending.set(socket, buf);
+          return;
+        }
+        handled.add(socket);
+        pending.delete(socket);
+        const head = buf.toString("latin1", 0, headerEnd);
+        const requestLine = head.split("\r\n", 1)[0] ?? "";
+        const match = /^(?:GET|HEAD|POST|PUT|DELETE|OPTIONS|PATCH)\s+(\S+)\s+HTTP\/1\.[01]$/iu.exec(requestLine);
+        const target = match?.[1];
+        if (target === undefined || !target.startsWith("/")) {
+          socket.end();
+          return;
+        }
+        const pathOnly = target.split("?")[0] ?? "/";
+        if (pathOnly === "/api" || pathOnly.startsWith("/api/")) {
+          socket.end();
+          return;
+        }
+        const method = requestLine.slice(0, requestLine.indexOf(" "));
+        void writeStatic(socket, pathOnly, method === "HEAD", outbound, pump);
+      },
+      close(socket) {
+        pending.delete(socket);
+        outbound.delete(socket);
+      },
+      error(socket) {
+        pending.delete(socket);
+        outbound.delete(socket);
+        socket.end();
+      },
+    },
+  });
+}
+
+function staticContentType(pathname: string, header: string | null): string {
+  if (header !== null && header.length > 0) return header;
+  switch (extname(pathname).toLowerCase()) {
+    case ".js":
+    case ".mjs":
+      return "text/javascript; charset=utf-8";
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".html":
+      return "text/html; charset=utf-8";
+    case ".svg":
+      return "image/svg+xml";
+    case ".json":
+      return "application/json; charset=utf-8";
+    case ".png":
+      return "image/png";
+    case ".woff2":
+      return "font/woff2";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+async function writeStatic(
+  socket: OfflineSocket,
+  pathname: string,
+  headOnly: boolean,
+  outbound: Map<OfflineSocket, PendingWrite>,
+  pump: (socket: OfflineSocket) => void,
+): Promise<void> {
+  try {
+    const response = staticFile(pathname);
+    const body = new Uint8Array(await response.arrayBuffer());
+    const headers = new Headers();
+    headers.set("content-type", staticContentType(pathname, response.headers.get("content-type")));
+    const cache = response.headers.get("cache-control");
+    if (cache !== null) headers.set("cache-control", cache);
+    headers.set("connection", "close");
+    headers.set("content-length", String(body.byteLength));
+    const reason = response.status === 200 ? "OK" : response.status === 404 ? "Not Found" : "OK";
+    const lines = [`HTTP/1.1 ${response.status} ${reason}`];
+    for (const [key, value] of headers) lines.push(`${key}: ${value}`);
+    const prefix = Buffer.from(`${lines.join("\r\n")}\r\n\r\n`, "latin1");
+    outbound.set(socket, { bytes: headOnly ? prefix : Buffer.concat([prefix, body]), offset: 0 });
+    pump(socket);
+  } catch {
+    socket.end();
+  }
+}

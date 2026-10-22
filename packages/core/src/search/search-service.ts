@@ -15,6 +15,7 @@ import {
 import { chunkKey, indexBody, keywordScores } from "./fts.js";
 import { redactText, type RedactionOptions } from "./redact.js";
 import { ensureSearchSchema, SEARCH_DRIVE_CURSOR } from "./schema.js";
+import { parseSearchRange, updatedAtInRange } from "./time-range.js";
 
 interface Frontmatter {
   source: string;
@@ -454,6 +455,10 @@ export class SearchService {
     indexStatus: SearchOutput["indexStatus"],
     warnings: SearchOutput["warnings"],
   ): Promise<SearchOutput> {
+    const rangeInput: { since?: string; until?: string } = {};
+    if (input.since !== undefined && input.since.length > 0) rangeInput.since = input.since;
+    if (input.until !== undefined && input.until.length > 0) rangeInput.until = input.until;
+    const range = parseSearchRange(rangeInput);
     ensureSearchSchema(this.#database);
     const rows = this.#database
       .prepare(
@@ -486,8 +491,7 @@ export class SearchService {
       .filter(
         (row) =>
           (!input.sources?.length || input.sources.includes(row.source)) &&
-          (!input.since || row.updated_at >= input.since) &&
-          (!input.until || row.updated_at <= input.until),
+          updatedAtInRange(row.updated_at, range),
       )
       .map((row) => {
         const keyword = lexical.get(chunkKey(row.drive_file_id, row.chunk_id)) ?? 0;
