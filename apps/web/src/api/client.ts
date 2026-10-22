@@ -6,6 +6,7 @@ import type {
   DevicesResponse,
   PortraitResponse,
   PortraitSnapshotsResponse,
+  ReminderView,
   RemindersResponse,
   SearchRequest,
   SearchResponse,
@@ -52,11 +53,14 @@ export interface OauthSecretInput {
   clientSecret?: string;
 }
 
-export interface BrowserDaemon extends DaemonClient {
+export type ReminderActionName = "reactivate" | "done" | "snooze" | "mute" | "ignore";
+
+export interface BrowserDaemon extends Omit<DaemonClient, "reminderAction"> {
   putLlmKey(provider: string, apiKey: string): Promise<void>;
   putOauth(body: OauthSecretInput): Promise<void>;
   testLlm(body: { provider: string; model: string; baseUrl: string }): Promise<ActionMessage>;
   googleLogin(): Promise<ActionMessage>;
+  reminderAction(reminderId: string, action: ReminderActionName, until?: string): Promise<ReminderView>;
 }
 
 export function readDaemonToken(): string {
@@ -122,6 +126,12 @@ export function createBrowserDaemon(options?: {
     updateConfig: (patch) => request<SharedConfig>("PUT", "/api/config", patch),
     status: () => request<StatusResponse>("GET", "/api/status"),
     reminders: () => request<RemindersResponse>("GET", "/api/reminders"),
+    reminderAction: (reminderId, action, until) =>
+      request<ReminderView>("POST", "/api/actions/reminder", {
+        reminderId,
+        action,
+        ...(until === undefined ? {} : { until }),
+      }),
     sync: () => request<SyncActionResult>("POST", "/api/actions/sync"),
     upload: (body) => request<UploadActionResult>("POST", "/api/actions/upload", body ?? {}),
     todo: (body) => request<ActionResponse>("POST", "/api/actions/todo", body),

@@ -9,7 +9,7 @@ import type { MessageKey } from "../../i18n/messages.js";
 import { capabilityLabel, kindLabel, platformLabel } from "../../lib/copy.js";
 import { formatDateTime, type Language } from "../../lib/format.js";
 import { useRelativeTime } from "../../components/use-relative-time.js";
-import { isDeviceOnline, showAddDeviceHint } from "./logic.js";
+import { hasRecordedActivity, isDeviceOnline, showAddDeviceHint } from "./logic.js";
 
 export function DeviceGrid({
   devices,
@@ -93,6 +93,7 @@ function DeviceCard({
 }) {
   const seen = useRelativeTime(device.lastSeenAt, language, timeZone);
   const active = useRelativeTime(device.lastActiveAt, language, timeZone);
+  const recorded = hasRecordedActivity(device.lastActiveAt);
   const online = isDeviceOnline(device.lastSeenAt);
   const seenAbsolute = formatDateTime(device.lastSeenAt, language, timeZone);
   const activeAbsolute = formatDateTime(device.lastActiveAt, language, timeZone);
@@ -134,10 +135,16 @@ function DeviceCard({
         </div>
       ) : null}
       <p className="devices-active">
-        {t("lastActive")}{" "}
-        <time dateTime={device.lastActiveAt} title={activeAbsolute}>
-          {active}
-        </time>
+        {recorded ? (
+          <>
+            {t("lastActive")}{" "}
+            <time dateTime={device.lastActiveAt} title={activeAbsolute}>
+              {active}
+            </time>
+          </>
+        ) : (
+          t("lastActiveNever")
+        )}
       </p>
     </Card>
   );

@@ -117,6 +117,7 @@ import {
   type DaemonClock,
   systemDaemonClock,
 } from "./clock.js";
+import { ACTIVITY_EPOCH, activityIsRecent, decideDelivery } from "../reminders/delivery.js";
 import { allocateCopied, appendCopied } from "./events.js";
 import { openGoogleDrive } from "./google.js";
 import { acquireDaemonLock } from "./lock.js";
@@ -336,6 +337,11 @@ export class YouBrainDaemon {
   #lastPortrait: number | null = null;
   #lastSearch: number | null = null;
   #lastReminders: number | null = null;
+  /** Latest keyboard, pointer, or captured-session time. Not the heartbeat clock. */
+  #lastActivityAt: string | null = null;
+  /** Device-table activity from before this process wrote a row. */
+  #preservedActivityAt: string | null = null;
+  #preservedLoaded = false;
   #lastSyncAt: string | null = null;
   #lastSyncError: { message: string; at: string } | null = null;
   #searchDirty = false;
@@ -507,6 +513,7 @@ export class YouBrainDaemon {
           } catch {
             this.#driveReachable = false;
           }
+          if (!this.#stopped) this.#rememberDevice();
         }
         if (!this.#stopped) {
           try {
@@ -674,6 +681,7 @@ export class YouBrainDaemon {
       } catch (error) {
         this.#rememberSyncFailure(error);
       }
+      this.#restoreLocalActivity();
       this.#lastPull = this.#clock.nowMs();
     }
     if (
@@ -914,6 +922,7 @@ export class YouBrainDaemon {
         (left, right) =>
           left.meta.updatedAt.localeCompare(right.meta.updatedAt) || left.index - right.index,
       );
+    let sessionActivity: string | null = null;
     for (const hit of ordered) {
       seen.add(hit.key);
       const previous = this.#live.get(hit.key);
@@ -921,11 +930,19 @@ export class YouBrainDaemon {
         assignMeta(previous, hit.meta);
         continue;
       }
+      const updatedAt = hit.meta.updatedAt;
+      if (
+        updatedAt &&
+        (sessionActivity === null || Date.parse(updatedAt) > Date.parse(sessionActivity))
+      ) {
+        sessionActivity = updatedAt;
+      }
       this.#live.set(hit.key, {
         ...hit.meta,
         schedule: noteActivity(previous?.schedule ?? emptySchedule(), now),
       });
     }
+    if (sessionActivity) this.#noteActivity(sessionActivity);
     for (const key of this.#live.keys()) {
       if (!seen.has(key)) this.#live.delete(key);
     }
@@ -1119,14 +1136,43 @@ export class YouBrainDaemon {
   }
 
   async #heartbeat(): Promise<void> {
-    this.#rememberDevice();
-    if (!this.#sync) return;
-    try {
-      await this.#sync.heartbeat({ active: true });
-      this.#driveReachable = true;
-    } catch {
-      this.#driveReachable = false;
+    if (this.#sync) {
+      try {
+        await this.#sync.heartbeat({
+          active: activityIsRecent(this.#lastActivityAt, this.#clock.nowMs()),
+        });
+        this.#driveReachable = true;
+      } catch {
+        this.#driveReachable = false;
+      }
     }
+    this.#rememberDevice();
+  }
+
+  #loadPreservedActivity(): void {
+    if (this.#preservedLoaded || !this.#store) return;
+    this.#preservedActivityAt = this.#store.getDevice(this.#local.deviceId)?.lastActiveAt ?? null;
+    this.#preservedLoaded = true;
+  }
+
+  /** Keep the newest real activity. Older session discoveries do not move it backward. */
+  #noteActivity(at: string): void {
+    const ms = Date.parse(at);
+    if (Number.isNaN(ms)) return;
+    this.#loadPreservedActivity();
+    const floor = this.#lastActivityAt ?? this.#preservedActivityAt;
+    if (floor !== null) {
+      const floorMs = Date.parse(floor);
+      if (!Number.isNaN(floorMs) && ms <= floorMs) return;
+    }
+    this.#lastActivityAt = new Date(ms).toISOString();
+    this.#rememberDevice();
+  }
+
+  #activityForDevice(): string {
+    if (this.#lastActivityAt) return this.#lastActivityAt;
+    this.#loadPreservedActivity();
+    return this.#preservedActivityAt ?? ACTIVITY_EPOCH;
   }
 
   #rememberDevice(): void {
@@ -1141,8 +1187,24 @@ export class YouBrainDaemon {
       protocolVersion: PROTOCOL_VERSION,
       capabilities: ["capture", "refine"],
       lastSeenAt: now,
-      lastActiveAt: now,
+      lastActiveAt: this.#activityForDevice(),
     });
+  }
+
+  /**
+   * Pull copies the Drive device row, whose `lastActiveAt` is only as precise
+   * as the boolean heartbeat. Put this device's real activity back.
+   */
+  #restoreLocalActivity(): void {
+    if (!this.#store) return;
+    const current = this.#store.getDevice(this.#local.deviceId);
+    const lastActiveAt = this.#activityForDevice();
+    if (!current) {
+      this.#rememberDevice();
+      return;
+    }
+    if (current.lastActiveAt === lastActiveAt) return;
+    this.#store.upsertDevice({ ...current, lastActiveAt });
   }
 
   #identity(): DeviceIdentity {
@@ -1274,8 +1336,24 @@ export class YouBrainDaemon {
       status: () => this.#status(),
       sync: () => this.#syncNow(),
       upload: (input) => this.#uploadNow(input),
-      reminders: (all) => readers.reminders(all),
+      reminders: async (all) => {
+        const body = await readers.reminders(all);
+        return {
+          ...body,
+          delivery: decideDelivery({
+            notifications: this.#shared.reminders.notifications,
+            deviceId: this.#local.deviceId,
+            lastActivityAt: this.#lastActivityAt,
+            devices: store.listDevices(),
+            now: this.#clock.now().toISOString(),
+          }),
+        };
+      },
       reminder: (id) => readers.reminder(id),
+      reportActivity: async (at) => {
+        this.#noteActivity(at);
+        return { at: this.#lastActivityAt ?? this.#activityForDevice() };
+      },
       now: () => this.#clock.now(),
       events: {
         emit: (type, data) => this.#emitUser(type, data),

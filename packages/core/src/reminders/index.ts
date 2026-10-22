@@ -1,4 +1,13 @@
+export { acceptActivityAt, ACTIVITY_FUTURE_SLACK_MS, ACTIVITY_PAST_LIMIT_MS } from "./activity.js";
 export { planReminderAction, type ReminderActionPlan } from "./action.js";
+export {
+  ACTIVITY_EPOCH,
+  ACTIVITY_WINDOW_MS,
+  activityIsRecent,
+  decideDelivery,
+  type DeliveryDevice,
+  type DeliveryInput,
+} from "./delivery.js";
 export {
   REMINDER_KIND,
   STALE_MS,

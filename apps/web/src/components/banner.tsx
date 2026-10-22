@@ -27,16 +27,18 @@ export function Banner({
   action,
   onDismiss,
   dismissLabel = "关闭",
+  className = "",
 }: {
   tone: BannerTone;
   children: ReactNode;
   action?: ReactNode;
   onDismiss?: () => void;
   dismissLabel?: string;
+  className?: string;
 }) {
   const mapped = TONE[tone];
   return (
-    <div className={`banner ${mapped}`} role={mapped === "danger" ? "alert" : "status"}>
+    <div className={["banner", mapped, className].filter(Boolean).join(" ")} role={mapped === "danger" ? "alert" : "status"}>
       <span className="banner-icon">
         <Icon name={ICONS[mapped]} />
       </span>

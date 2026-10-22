@@ -17,6 +17,44 @@
 .banner-text { flex: 1; min-width: 0; }
 .banner-actions { display: inline-flex; align-items: center; gap: var(--sp-1); flex: none; }
 
+.reminder-banner {
+  align-items: flex-start;
+  height: auto;
+  padding-top: var(--sp-2);
+  padding-bottom: var(--sp-2);
+}
+.reminder-banner .banner-icon { margin-top: 2px; }
+.reminder-banner .banner-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+.reminder-banner .banner-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  max-width: 100%;
+  padding-top: 1px;
+}
+.reminder-copy { white-space: pre-line; overflow-wrap: anywhere; }
+.reminder-copy.is-clamped {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reminder-expand {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.reminder-expand:hover { text-decoration: underline; }
+
 .banner.info, .banner-info { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 20%, transparent); }
 .banner.info .banner-icon { color: var(--accent); }
 .banner.success, .banner-ok {

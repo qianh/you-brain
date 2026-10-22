@@ -128,6 +128,7 @@ async function withHttp(
     upload: async () => ({ dryRun: true, scanned: 0, uploaded: 0, warnings: [] }),
     reminders: (all) => readers.reminders(all),
     reminder: (id) => readers.reminder(id),
+    reportActivity: async (at) => ({ at }),
     now: () => new Date(now.value),
     events: {
       emit<T extends EventType>(type: T, data: EventOf<T>["data"]) {

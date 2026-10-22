@@ -400,6 +400,58 @@ let roles: Record<string, unknown> = {
   timezone: "Asia/Shanghai",
 };
 
+interface MockReminder {
+  reminderId: string;
+  kind: string;
+  topicId: string | null;
+  text: string;
+  status: string;
+  until: string | null;
+  issuedAt: string;
+}
+
+const reminders: MockReminder[] =
+  scenario === "rich"
+    ? [
+        {
+          reminderId: "rem-stale",
+          kind: "stale",
+          topicId: "topic-trip",
+          text: "京都旅行已经三天没有新会话，返程车票还没订。",
+          status: "open",
+          until: null,
+          issuedAt: ago(2 * HOUR),
+        },
+        {
+          reminderId: "rem-history",
+          kind: "history",
+          topicId: "topic-tax",
+          text: "税务整理还在历史区，申报材料没有收尾。",
+          status: "open",
+          until: null,
+          issuedAt: ago(HOUR),
+        },
+        {
+          reminderId: "rem-morning",
+          kind: "morning_digest",
+          topicId: null,
+          text: "早报\n昨天有 4 段会话，2 个话题还开着。\n待办：订返程、补税务材料。",
+          status: "open",
+          until: null,
+          issuedAt: ago(30 * MINUTE),
+        },
+        {
+          reminderId: "rem-weekly",
+          kind: "weekly_review",
+          topicId: null,
+          text: "本周回顾\n京都旅行仍在跟进，税务整理停在历史区。\n界面重做本周没有新结论。",
+          status: "open",
+          until: null,
+          issuedAt: ago(20 * MINUTE),
+        },
+      ]
+    : [];
+
 const llmKeys = new Map<string, string>();
 let oauthSecret = "";
 let accountEmail: string | null = "john@example.com";
@@ -455,6 +507,55 @@ function merge(base: unknown, patch: unknown): unknown {
     merged[key] = isObject(current) && isObject(value) ? merge(current, value) : structuredClone(value);
   }
   return merged;
+}
+
+function visibleReminders(rows: readonly MockReminder[]): MockReminder[] {
+  const now = Date.now();
+  return rows.filter((item) => {
+    if (item.status === "open") return true;
+    if (item.status !== "snoozed" || item.until === null) return false;
+    const due = Date.parse(item.until);
+    return !Number.isNaN(due) && due <= now;
+  });
+}
+
+function applyReminderAction(body: unknown): Response {
+  if (!isObject(body) || typeof body.reminderId !== "string" || typeof body.action !== "string") {
+    return fail(400, "INVALID_INPUT", "提醒请求不完整");
+  }
+  const item = reminders.find((row) => row.reminderId === body.reminderId);
+  if (!item) return fail(404, "NOT_FOUND", "提醒不存在");
+  const action = body.action;
+  if (action !== "reactivate" && action !== "done" && action !== "snooze" && action !== "mute" && action !== "ignore") {
+    return fail(400, "INVALID_INPUT", "无效的提醒操作");
+  }
+  const digest = item.kind === "morning_digest" || item.kind === "weekly_review" || item.topicId === null;
+  if (digest && action !== "ignore") return fail(400, "INVALID_INPUT", "这条提醒只能关闭");
+  if (action === "snooze") {
+    item.status = "snoozed";
+    item.until = typeof body.until === "string" ? body.until : new Date(Date.now() + DAY).toISOString();
+  } else if (action === "mute") {
+    item.status = "muted";
+    item.until = null;
+  } else if (action === "ignore") {
+    item.status = "dismissed";
+    item.until = null;
+  } else {
+    item.status = "done";
+    item.until = null;
+    const topic = topics.find((row) => row.topicId === item.topicId);
+    if (topic) {
+      topic.status = action === "reactivate" ? "active" : "done";
+      topic.statusBy = "user";
+      topic.userLocked = true;
+    }
+  }
+  publish("status");
+  if (action === "reactivate" || action === "done") {
+    publish("topics");
+    publish("today");
+  }
+  return json(item);
 }
 
 function publish(kind: "topics" | "today" | "status"): void {
@@ -923,29 +1024,13 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
   }
   if (path === "/api/status" && request.method === "GET") return json(statusBody());
   if (path === "/api/reminders" && request.method === "GET") {
-    if (scenario === "fresh" || scenario === "healthy" || scenario === "half") return json({ reminders: [] });
     return json({
-      reminders: [
-        {
-          reminderId: "rem-train",
-          kind: "follow_up",
-          topicId: "topic-trip",
-          text: "订返程新干线，京都行程还差这一段。",
-          status: "open",
-          until: ago(-2 * DAY),
-          issuedAt: ago(2 * HOUR),
-        },
-        {
-          reminderId: "rem-ui",
-          kind: "digest",
-          topicId: "topic-ui",
-          text: "界面重做的验收清单还有几条没过。",
-          status: "open",
-          until: null,
-          issuedAt: ago(30 * MINUTE),
-        },
-      ],
+      reminders: visibleReminders(reminders),
+      delivery: { notify: true, reason: "ok" },
     });
+  }
+  if (path === "/api/actions/reminder" && request.method === "POST") {
+    return applyReminderAction(await request.json().catch(() => null));
   }
   if (path === "/api/actions/sync" && request.method === "POST") {
     publish("status");

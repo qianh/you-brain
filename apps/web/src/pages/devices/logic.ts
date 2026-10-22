@@ -13,6 +13,12 @@ export interface RoleDevice {
   capabilities: readonly string[];
 }
 
+/** Epoch and unreadable timestamps mean the device has never reported real use. */
+export function hasRecordedActivity(lastActiveAt: string): boolean {
+  const ms = Date.parse(lastActiveAt);
+  return Number.isFinite(ms) && ms > 0;
+}
+
 export function isDeviceOnline(lastSeenAt: string, now = Date.now()): boolean {
   const seen = Date.parse(lastSeenAt);
   if (Number.isNaN(seen)) return false;

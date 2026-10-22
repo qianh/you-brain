@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  hasRecordedActivity,
   isDeviceOnline,
   ONLINE_MS,
   orderDevices,
@@ -15,6 +16,14 @@ const NOW = Date.parse("2026-10-21T08:00:00.000Z");
 function device(id: string, capabilities: string[]): RoleDevice & { displayName: string } {
   return { deviceId: id, displayName: id, capabilities };
 }
+
+describe("hasRecordedActivity", () => {
+  test("treats the epoch timestamp as no recorded use", () => {
+    expect(hasRecordedActivity("1970-01-01T00:00:00.000Z")).toBe(false);
+    expect(hasRecordedActivity("1970-01-01T00:00:00.001Z")).toBe(true);
+    expect(hasRecordedActivity("not-a-time")).toBe(false);
+  });
+});
 
 describe("isDeviceOnline", () => {
   test("is online inside the 10 minute window and offline at the boundary", () => {

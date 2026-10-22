@@ -215,6 +215,7 @@ describe("local MCP services", () => {
       },
       reminders: async () => ({ reminders: [] }),
       reminder: async () => null,
+      reportActivity: async (at) => ({ at }),
       now: () => new Date(NOW),
       sync: async () => ({ started: true, at: NOW }),
       upload: async (input) => ({

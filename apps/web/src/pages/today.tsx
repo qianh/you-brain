@@ -13,6 +13,7 @@ import { useDelayed } from "../components/use-delayed.js";
 import { useRelativeTime } from "../components/use-relative-time.js";
 import { settingsHref, topicHref } from "../lib/route.js";
 import { useRoute } from "../router.js";
+import { ReminderList } from "./reminders/list.js";
 import { isUnreachableError } from "./status/logic.js";
 import { TodayGroups } from "./today/groups.js";
 import { StartGuide } from "./today/guide.js";
@@ -29,7 +30,7 @@ import {
 } from "./today/model.js";
 
 export function TodayPage() {
-  const { t, language, today, devices, timeZone, topics, status, reminders, error, loading, reload } = useDaemon();
+  const { t, language, today, devices, timeZone, topics, status, reminders, error, loading, reload, reminderAction } = useDaemon();
   const { navigate } = useRoute();
   const [mode, setMode] = useState<TodayMode>(() => readTodayMode(storage()));
   const sessions = today?.sessions ?? [];
@@ -137,27 +138,14 @@ export function TodayPage() {
             {reminders.length > 0 ? (
               <div className="today-reminders">
                 <p className="today-reminders-label">{t("reminders")}</p>
-                {reminders.map((reminder) => (
-                  <Banner
-                    key={reminder.reminderId}
-                    tone="info"
-                    {...(reminder.topicId
-                      ? {
-                          action: (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => navigate(topicHref(topicZone(topics, reminder.topicId ?? ""), reminder.topicId ?? ""))}
-                            >
-                              {t("todayViewTopic")}
-                            </Button>
-                          ),
-                        }
-                      : {})}
-                  >
-                    {reminder.text}
-                  </Banner>
-                ))}
+                <ReminderList
+                  reminders={reminders}
+                  layout="today"
+                  timeZone={timeZone}
+                  t={t}
+                  onAction={reminderAction}
+                  onOpenTopic={(topicId) => navigate(topicHref(topicZone(topics, topicId), topicId))}
+                />
               </div>
             ) : null}
             {sessions.length === 0 ? (

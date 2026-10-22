@@ -11,7 +11,12 @@ import {
 import type { ReminderView, StatusResponse, TodayResponse, TopicListItem } from "@you-brain/core/http/types.js";
 import type { DeviceRecord, Roles, SharedConfig } from "@you-brain/protocol";
 
-import { BrowserDaemonError, createBrowserDaemon, type BrowserDaemon } from "./api/client.js";
+import {
+  BrowserDaemonError,
+  createBrowserDaemon,
+  type BrowserDaemon,
+  type ReminderActionName,
+} from "./api/client.js";
 import type { Language } from "./lib/format.js";
 import { translate, type MessageKey } from "./i18n/messages.js";
 
@@ -36,6 +41,7 @@ interface DaemonValue extends DaemonSnapshot {
   timeZone: string;
   t: (key: MessageKey, vars?: Record<string, string | number>) => string;
   reload: (scope?: "today" | "topics" | "status" | "all") => Promise<boolean>;
+  reminderAction: (reminderId: string, action: ReminderActionName, until?: string) => Promise<void>;
   replaceConfig: (config: SharedConfig) => void;
   replaceRoles: (roles: Roles) => void;
 }
@@ -184,6 +190,14 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
     document.documentElement.lang = language === "zh" ? "zh-CN" : "en";
   }, [language]);
 
+  const reminderAction = useCallback(
+    async (reminderId: string, action: ReminderActionName, until?: string): Promise<void> => {
+      await client.reminderAction(reminderId, action, until);
+      await reload("status");
+    },
+    [client, reload],
+  );
+
   const timeZone = snapshot.roles?.timezone || snapshot.today?.timeZone || "Asia/Shanghai";
   const t = useCallback(
     (key: MessageKey, vars?: Record<string, string | number>) => translate(language, key, vars),
@@ -203,6 +217,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
       timeZone,
       t,
       reload,
+      reminderAction,
       replaceConfig: (config) => {
         applyLanguage(config);
         setSnapshot((current) => ({ ...current, config }));
@@ -221,6 +236,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
       timeZone,
       t,
       reload,
+      reminderAction,
       applyLanguage,
     ],
   );

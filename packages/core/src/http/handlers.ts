@@ -11,10 +11,12 @@ import { z } from "zod";
 
 import type { HttpDeps } from "./deps.js";
 import { YouBrainError } from "../domain/errors.js";
+import { acceptActivityAt } from "../reminders/activity.js";
 import { planReminderAction } from "../reminders/action.js";
 import { ChangeHub } from "./hub.js";
 import { assertPortraitVariant } from "./portrait-files.js";
 import {
+  ActivityBodySchema,
   ConclusionActionBodySchema,
   ReminderActionBodySchema,
   TodoActionBodySchema,
@@ -133,6 +135,7 @@ export async function handleApi(
   }
   if (path === "/api/status") return method(request, "GET", () => status(context));
   if (path === "/api/reminders") return method(request, "GET", () => reminders(url, context));
+  if (path === "/api/activity") return method(request, "POST", () => activity(request, context));
   if (path === "/api/actions/reminder") {
     return method(request, "POST", () => reminderAction(request, context));
   }
@@ -386,6 +389,13 @@ async function status(context: ApiContext): Promise<Response> {
 async function reminders(url: URL, context: ApiContext): Promise<Response> {
   const all = url.searchParams.get("all") === "1";
   return json(await context.deps.reminders(all));
+}
+
+async function activity(request: Request, context: ApiContext): Promise<Response> {
+  const body = ActivityBodySchema.parse(await readJson(request));
+  const accepted = acceptActivityAt({ at: body.at, now: context.deps.now().toISOString() });
+  if (!accepted.ok) throw new HttpError(400, "INVALID_INPUT", "活动时间超出允许范围");
+  return json(await context.deps.reportActivity(accepted.at));
 }
 
 async function reminderAction(request: Request, context: ApiContext): Promise<Response> {

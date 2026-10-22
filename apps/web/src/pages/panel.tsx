@@ -23,6 +23,7 @@ import { StartGuide } from "./today/guide.js";
 import { guideSteps } from "./today/model.js";
 import { clockTime, countSessionsByTopic, panelShortcut, panelTopicSlice, takeWithRest, topicDotClass } from "./panel/model.js";
 import { openAppPath } from "./panel/open.js";
+import { ReminderList } from "./reminders/list.js";
 import { isUnreachableError } from "./status/logic.js";
 
 export function panelCapsuleKind(input: {
@@ -37,7 +38,7 @@ export function panelCapsuleKind(input: {
 }
 
 export function PanelPage() {
-  const { t, language, today, topics, status, reminders, error, loading, reload, timeZone, client } = useDaemon();
+  const { t, language, today, topics, status, reminders, error, loading, reload, timeZone, client, reminderAction } = useDaemon();
   const { push } = useToast();
   const [refreshing, setRefreshing] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -247,34 +248,14 @@ export function PanelPage() {
             ) : null}
             {reminders.length > 0 ? (
               <div className="panel-alerts">
-                {reminders.map((reminder) => {
-                  const body = (
-                    <>
-                      <span className="banner-icon">
-                        <Icon name="info" />
-                      </span>
-                      <span className="banner-text">{reminder.text}</span>
-                    </>
-                  );
-                  if (!reminder.topicId) {
-                    return (
-                      <div key={reminder.reminderId} className="banner info" title={reminder.text}>
-                        {body}
-                      </div>
-                    );
-                  }
-                  return (
-                    <button
-                      key={reminder.reminderId}
-                      type="button"
-                      className="banner info"
-                      title={reminder.text}
-                      onClick={() => openMain(topicHref(topicZone(topics, reminder.topicId ?? ""), reminder.topicId ?? ""))}
-                    >
-                      {body}
-                    </button>
-                  );
-                })}
+                <ReminderList
+                  reminders={reminders}
+                  layout="panel"
+                  timeZone={timeZone}
+                  t={t}
+                  onAction={reminderAction}
+                  onOpenTopic={(topicId) => openMain(topicHref(topicZone(topics, topicId), topicId))}
+                />
               </div>
             ) : null}
           </>

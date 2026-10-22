@@ -20,7 +20,12 @@
 
 ## B. P1 功能（按依赖顺序）
 
-- [ ] **B1 提醒系统**：生成逻辑——停滞话题提醒、每日早报、每周回顾、历史话题每周提醒；系统通知只在「最近 10 分钟活跃的设备」弹出；`GET /api/reminders` 与 MCP `get_reminders` 返回真实数据；桌面角标与通知联动（外壳侧已有）。参考 技术方案、产品说明 §9
+- [~] **B1 提醒系统**（拆为五步，参考 技术方案 §12、产品说明 §6.6）
+  - [x] B1a 后端：生成（停滞 / 历史 / 早报 / 周回顾）、事件折叠落库、`GET /api/reminders`、`POST /api/actions/reminder`、MCP、`REMINDERS.md`
+  - [x] B1b daemon 活跃信号与投递判定（`POST /api/activity`、`delivery`）、今日页与面板的提醒操作
+  - [ ] B1c 桌面外壳：上报键鼠活动、按 `delivery.notify` 弹系统通知（通知正文用提醒文案、已通知的不重复）、角标
+  - [ ] B1d 同步层：设备记录的 `lastActiveAt` 写入真实活动时间（目前 Drive 上仍写成「现在」，会让其他设备误判这台正在使用）
+  - [ ] B1e 提醒相关的多设备端到端验证（两个 daemon 共用内存 Drive：只生成一次、只在一台设备 `notify`）
 - [ ] **B2 每日全局沉淀**：`packages/core/src/consolidate` 实现技术方案第 11 节流程；主设备租约 `leases/consolidate.json` 的写入与续约；沉淀开关与过期提示（读取侧已完成）联动真实结果
 - [ ] **B3 Drive 话题总览与详情文件**：把话题册写成 Drive 上 `topics/TOPICS-latest.md` 及各话题详情文件（路径见 `packages/protocol/src/paths.ts`），随沉淀与话题变更更新，设备 B 可读
 - [ ] **B4 数字分身纠正**：`portrait.correction` / `portrait.correction_applied` 事件的折叠与应用（`topics/fold.ts` 目前忽略）；界面纠正入口（替换「纠正会在后续版本开放」）；MCP 暴露

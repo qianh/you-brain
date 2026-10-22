@@ -36,6 +36,8 @@ export interface HttpDeps {
   status(): Promise<StatusResponse>;
   reminders(all: boolean): Promise<RemindersResponse>;
   reminder(id: string): Promise<ReminderView | null>;
+  /** Record keyboard, pointer, or other local activity. `at` is already bounded. */
+  reportActivity(at: string): Promise<{ at: string }>;
   now(): Date;
   sync(): Promise<SyncActionResult>;
   upload(input: UploadActionInput): Promise<UploadActionResult>;

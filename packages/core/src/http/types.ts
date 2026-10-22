@@ -206,6 +206,12 @@ export const ReminderActionBodySchema = z.object({
 
 export type ReminderActionBody = z.infer<typeof ReminderActionBodySchema>;
 
+export const ActivityBodySchema = z.object({
+  at: IsoTimestampSchema.optional(),
+});
+
+export type ActivityBody = z.infer<typeof ActivityBodySchema>;
+
 export interface PortraitResponse {
   variant: string;
   content: string;
@@ -294,8 +300,15 @@ export interface ReminderView {
   issuedAt: string;
 }
 
+export interface ReminderDelivery {
+  notify: boolean;
+  reason: "ok" | "disabled" | "inactive" | "other-device";
+}
+
 export interface RemindersResponse {
   reminders: ReminderView[];
+  /** Daemon HTTP only. MCP `get_reminders` omits this. */
+  delivery?: ReminderDelivery;
 }
 
 export const UploadActionBodySchema = z.object({

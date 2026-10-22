@@ -191,6 +191,7 @@ async function withServer(
     status: async () => status,
     reminders: async () => ({ reminders: [] }),
     reminder: async () => null,
+    reportActivity: async (at) => ({ at }),
     now: () => new Date("2026-07-20T00:00:00.000Z"),
     sync: async () => {
       calls.sync += 1;

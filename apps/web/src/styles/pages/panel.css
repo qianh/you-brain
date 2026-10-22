@@ -183,5 +183,10 @@ button.panel-more-link:focus-visible { outline-offset: -2px; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.panel-page .reminder-banner .banner-text {
+  overflow: visible;
+  text-overflow: unset;
+  white-space: normal;
+}
 .panel-page .empty-state.sm { padding: var(--sp-4) var(--sp-3); }
 .panel-skel-line { display: block; width: 40%; height: var(--fs-base); }
