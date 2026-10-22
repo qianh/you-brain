@@ -35,7 +35,7 @@
 - [x] **B6 服务器模式**：生成并安装 launchd / systemd 单元（`you-brain service install|uninstall|status`），与 `maintenance.ts` 的卸载清理对齐，使无界面机器可担任主设备
 - [x] **B7 虚拟设备协议**：`docs/protocol/` 协议文档，注册虚拟设备（`kind: virtual`）与对外发布所需的 API / 校验
 - [x] **B8 Linux 桌面打包**：`bundle-linux.sh`（运行时生成按 triple 的配置）、`web-dir`/`resolver` 的 `../lib/you-brain` 兜底（`native/layout.ts`）、托盘无 rect 时面板右上角降级、`xprintidle` 空闲读取、`workflow_dispatch` 工作流 `desktop-linux.yml`。未在真实 Linux 上出包：待手动触发工作流验证（arm runner 需账号开通）
-- [ ] **B9 设备移除传播**：`ProtocolSync` 目前不处理 `changes.removedIds`，移除虚拟设备后另一台设备本地设备行仍在（B7 遗留，见 docs/protocol/02-devices-and-roles.md）；让设备记录文件被删除/移入回收站时，其他设备拉取后同步移除本地行
+- [x] **B9 设备移除传播**：拉取（首次，或任一页 `removedIds` 非空）后用 `devices/` 列表对账，删本地已不存在的虚拟设备行（物理设备/本机不动），list 失败则 pull 失败游标不推进；有删除时 daemon 发 `devices` SSE。已知：GoogleDrive 遇文件夹变更返回 reset 且 removedIds 为空时，当次不对账，下次带 removedIds 的拉取补上
 
 ## C. P2
 

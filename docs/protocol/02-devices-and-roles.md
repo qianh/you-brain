@@ -34,7 +34,7 @@ Schema：[`schemas/device.json`](schemas/device.json)、[`schemas/roles.json`](s
 
 桌面心跳间隔是 `DEFAULT_HEARTBEAT_MINUTES`（5 分钟），对应 `HEARTBEAT_INTERVAL_MS`。虚拟设备自己周期重写 `you-brain/devices/<自己的 id>.json` 时要遵守同一条 `lastActiveAt` 规则。界面把等于纪元的 `lastActiveAt` 显示成还没有使用记录（`hasRecordedActivity` 要求时刻晚于纪元）。
 
-从别的设备拉下来的记录原样 `upsertDevice`。增量同步只处理变更列表里的 `entries`。`trash` 产生的 id 在 `removedIds` 里，`ProtocolSync` 的拉取不读这个数组，所以一台设备被移除后，其他设备本地的 `devices` 行还在，直到它们有别的理由删掉该行。移除方自己会 `deleteDevice`，并 `trash` Drive 上的文件；`findByPath` 不再返回已进回收站的对象。
+从别的设备拉下来的记录原样 `upsertDevice`。`removedIds` 只有文件 id、没有路径，拉取不按 id 删行。首次拉取，以及增量拉取里任一页的 `removedIds` 非空时，在 `#consume` 之后、写入同步游标之前，用 `list({ prefix: "you-brain/devices/" })` 做一次设备对账：本地 `kind === "virtual"`、`deviceId` 不是本机、且不在远端设备文件名集合里的行会被 `deleteDevice`。物理设备行不会因为这次对账被删除。对账的 `list` 抛错则本次拉取抛错，游标不前进。有行被删时，`onConfigChanged` 收到 `removedDevices`（设备 id 列表）；没有删除则不发空更新。移除方自己会 `deleteDevice`，并 `trash` Drive 上的文件；`findByPath` 不再返回已进回收站的对象。
 
 `DELETE /api/devices/:id` 只移除虚拟设备。该 id 等于 `roles.mainDevice` 或 `roles.webProcessor`（按字段本身，不把空的 `webProcessor` 回落到 `mainDevice`）时返回 409 `DEVICE_IN_USE`。不是虚拟设备返回 409 `NOT_VIRTUAL`。本地列表里没有返回 404。Drive 未连接返回 503 `DRIVE_UNAVAILABLE`。
 

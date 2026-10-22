@@ -57,6 +57,7 @@ const JSON_MIME = "application/json";
 const YOU_BRAIN_PREFIX = `${DRIVE_PATHS.youBrain}/`;
 const INBOX_PREFIX = `${DRIVE_PATHS.inbox}/`;
 const TWIN_PREFIX = `${DRIVE_PATHS.digitalTwin}/`;
+const DEVICES_PREFIX = `${DRIVE_PATHS.devicesDir}/`;
 const CHANGE_PREFIXES = [YOU_BRAIN_PREFIX, INBOX_PREFIX, TWIN_PREFIX] as const;
 
 interface ClassifiedChanges {
@@ -79,6 +80,13 @@ interface DayWrite {
   entry: DriveEntry;
   included: Event[];
   eventCount: number;
+}
+
+function deviceIdFromPath(path: string): string | null {
+  if (!path.startsWith(DEVICES_PREFIX) || !path.endsWith(".json")) return null;
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const deviceId = name.slice(0, -".json".length);
+  return deviceId.length > 0 ? deviceId : null;
 }
 
 function dedupeEntries(entries: readonly DriveEntry[]): DriveEntry[] {
@@ -265,7 +273,7 @@ export class ProtocolSync {
     return this.#store.upsertDevice(result.value);
   }
 
-  /** Trash a virtual device file and drop the local row. Other devices are left alone. */
+  /** Trash a virtual device file and drop the local row. Peers drop it on the next pull. */
   async removeDevice(deviceId: string): Promise<void> {
     const path = deviceRecordPath(deviceId);
     const remote = await this.#drive.findByPath(path);
@@ -388,6 +396,7 @@ export class ProtocolSync {
       ...(await this.#drive.list({ prefix: TWIN_PREFIX })),
     ]);
     const body = await this.#consume(entries, true);
+    await this.#emitRemovedDevices(await this.#reconcileDevices());
     const token = await this.#drive.startPageToken();
     this.#store.setCursor(SYNC_DRIVE_CURSOR, token);
     return { initial: true, ...body };
@@ -404,8 +413,40 @@ export class ProtocolSync {
     }
     const entries = dedupeEntries(pages.flatMap((page) => page.entries));
     const body = await this.#consume(entries, false);
+    if (pages.some((page) => page.removedIds.length > 0)) {
+      await this.#emitRemovedDevices(await this.#reconcileDevices());
+    }
     this.#store.setCursor(SYNC_DRIVE_CURSOR, primary.cursor);
     return { initial: false, ...body };
+  }
+
+  /**
+   * `removedIds` are file ids without paths. List device files and drop virtual
+   * rows that are gone. Physical rows stay, so a bad list cannot erase them.
+   * Runs before the sync cursor advances; a list error fails the pull.
+   */
+  async #reconcileDevices(): Promise<string[]> {
+    const remote = new Set<string>();
+    for (const entry of await this.#drive.list({ prefix: DEVICES_PREFIX })) {
+      const deviceId = deviceIdFromPath(entry.path);
+      if (deviceId) remote.add(deviceId);
+    }
+    const removed: string[] = [];
+    for (const device of this.#store.listDevices()) {
+      if (device.kind !== "virtual") continue;
+      if (device.deviceId === this.#device.deviceId) continue;
+      if (remote.has(device.deviceId)) continue;
+      removed.push(device.deviceId);
+    }
+    removed.sort();
+    for (const deviceId of removed) this.#store.deleteDevice(deviceId);
+    return removed;
+  }
+
+  async #emitRemovedDevices(deviceIds: readonly string[]): Promise<void> {
+    if (deviceIds.length === 0) return;
+    const update: SyncConfigUpdate = { removedDevices: [...deviceIds] };
+    if (this.#configHasFields(update)) await this.#emitConfig(update);
   }
 
   async #consume(
@@ -561,7 +602,8 @@ export class ProtocolSync {
       update.shared !== undefined ||
       update.roles !== undefined ||
       update.protocol !== undefined ||
-      update.devices !== undefined
+      update.devices !== undefined ||
+      (update.removedDevices?.length ?? 0) > 0
     );
   }
 

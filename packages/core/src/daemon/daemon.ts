@@ -1396,6 +1396,7 @@ export class YouBrainDaemon {
   async #onConfigChanged(update: {
     shared?: SharedConfig;
     roles?: Roles;
+    removedDevices?: string[];
   }): Promise<void> {
     if (update.shared) {
       this.#shared = preferLocalLlm(update.shared, this.#shared);
@@ -1419,6 +1420,7 @@ export class YouBrainDaemon {
       this.#mountOutput();
     }
     this.changes.publish("status", this.#clock.now().toISOString());
+    if (update.removedDevices?.length) this.changes.publish("devices", this.#clock.now().toISOString());
   }
 
   async #heartbeat(): Promise<void> {

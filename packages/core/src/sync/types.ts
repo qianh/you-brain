@@ -22,6 +22,7 @@ export interface SyncStore extends TopicBookPersistence {
   upsertDevice(record: DeviceRecord): DeviceRecord;
   getDevice(deviceId: string): DeviceRecord | null;
   deleteDevice(deviceId: string): void;
+  listDevices(): DeviceRecord[];
   listEvents(): Event[];
 }
 
@@ -45,6 +46,8 @@ export interface SyncConfigUpdate {
   roles?: Roles;
   protocol?: ProtocolFile;
   devices?: DeviceRecord[];
+  /** Virtual device ids dropped because their Drive files are gone. */
+  removedDevices?: string[];
 }
 
 export interface SyncListener {
