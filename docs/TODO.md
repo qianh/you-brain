@@ -16,7 +16,7 @@
 - [x] **A3 界面遗留小项**：①路由淡入偶发停在半透明的确认与修复（快速连续切换、窗口失焦、`prefers-reduced-motion`）；②话题列表项补「N 个会话」（接口缺会话数时在前端用已有数据或扩展接口）；③`ShowMore` 展开后键盘 ↑↓ 覆盖全部行；④搜索 `from/to` 改为时间比较；⑤mock `offline` 场景核实运行时行为
 - [x] **A4 同步状态与超时显示**：面板「同步」圆点依赖的 sync 字段（目前只有 ok / muted 两态）补全 warn / bad 判定；`daemon.ts` 的 `llmTimeoutMs` 显示修正
 - [x] **A5 打包稳健性**：`bundle.sh` 在 DMG 步骤失败（Finder AppleScript 超时）时自动回退为只产 `.app`，并清理 `rw.*.dmg` 残留；产物统一落 `dist/app.noindex/`
-- [ ] **A6 测试与类型检查加固**：①代理环境变量（`HTTP_PROXY` 等）下 `openai-compatible.test.ts`、`mcp/local.test.ts` 不再失败（测试内清理代理变量）；②`bun run typecheck` 覆盖 `apps/web`；③为 `apps/desktop`（Rust）补可运行的 `cargo test`/`cargo check` 脚本；④`llm/cli.test.ts` 偶发超时查因
+- [x] **A6 测试与类型检查加固**：①代理环境变量（`HTTP_PROXY` 等）下 `openai-compatible.test.ts`、`mcp/local.test.ts` 不再失败（测试内清理代理变量）；②`bun run typecheck` 覆盖 `apps/web`；③为 `apps/desktop`（Rust）补可运行的 `cargo test`/`cargo check` 脚本；④`llm/cli.test.ts` 偶发超时查因
 
 ## B. P1 功能（按依赖顺序）
 

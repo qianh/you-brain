@@ -238,8 +238,34 @@ if (log) appendFileSync(log, JSON.stringify({ event: "end", at: Date.now() }) + 
 `;
 
 async function installFake(root: string): Promise<string> {
+  const script = join(root, "fake-cli.js");
+  await writeFile(script, FAKE_SCRIPT, { mode: 0o755 });
+  // Timeout modes stay in the shell. A bun shebang can take longer than the
+  // no-output window to start, so the timer would fire before the script runs.
   const path = join(root, "fake-cli");
-  await writeFile(path, FAKE_SCRIPT, { mode: 0o755 });
+  const wrapper = `#!/bin/sh
+mode="\${FAKE_MODE:-ok}"
+# \`--version\` is the startup probe. It must stay on the fast bun path.
+for arg in "$@"; do
+  if [ "$arg" = "--version" ] || [ "$arg" = "-v" ]; then
+    exec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"
+  fi
+done
+if [ "$mode" = "timeout" ] || [ "$mode" = "timeout-output" ]; then
+  if [ "$mode" = "timeout-output" ]; then
+    printf '%s\\n' "still working" >&2
+  fi
+  sleep 30 &
+  child=$!
+  if [ -n "\${FAKE_MARKER:-}" ]; then
+    printf '%s\\n%s\\n' "$$" "$child" > "$FAKE_MARKER"
+  fi
+  wait
+  exit 0
+fi
+exec ${JSON.stringify(process.execPath)} ${JSON.stringify(script)} "$@"
+`;
+  await writeFile(path, wrapper, { mode: 0o755 });
   return path;
 }
 
@@ -379,6 +405,15 @@ function alive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+async function waitUntilDead(pid: number): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < 3_000) {
+    if (!alive(pid)) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`pid ${pid} still alive after SIGTERM/SIGKILL`);
 }
 
 async function waitForFile(path: string): Promise<void> {
@@ -537,15 +572,14 @@ describe("subscription cli backends", () => {
       expect((timeout as LlmRequestError).message).toBe(
         `${item.driver} 在 1 秒内没有响应。可能是服务暂时不可用，或需要重新登录（请运行 ${item.login}）。可稍后重试。`,
       );
-      await new Promise((resolve) => setTimeout(resolve, 800));
       const [parent, child] = readFileSync(marker, "utf8")
         .trim()
         .split("\n")
         .map((value) => Number(value));
       expect(parent).toBeGreaterThan(0);
       expect(child).toBeGreaterThan(0);
-      expect(alive(parent ?? 0)).toBe(false);
-      expect(alive(child ?? 0)).toBe(false);
+      await waitUntilDead(parent ?? 0);
+      await waitUntilDead(child ?? 0);
     }, 15_000);
   }
 
