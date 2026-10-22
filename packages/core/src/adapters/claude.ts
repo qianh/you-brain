@@ -12,7 +12,7 @@ import {
   visibleTurnContent,
 } from "./content.js";
 import { globFiles } from "./glob.js";
-import { asRecord, asString, readJsonLines } from "./jsonl.js";
+import { asRecord, asString, forEachJsonLine } from "./jsonl.js";
 import { resolveContinuation } from "./continuation.js";
 import {
   adapterOptions,
@@ -32,37 +32,45 @@ export async function parseClaudeSession(
   if (isDedicatedCapturePath(path, workDir, claudeProjectKey)) {
     return { session: null, skippedSubagent: false, malformedLines: 0 };
   }
-  const [{ records, malformedLines }, fileStat] = await Promise.all([
-    readJsonLines(path, options.signal),
-    stat(path),
-  ]);
-  const objects = records.map(asRecord).filter((value) => value !== null);
-  const isSidechain = objects.some((record) => record.isSidechain === true);
-  if (isSidechain && !options.includeSubagents) {
-    return { session: null, skippedSubagent: true, malformedLines };
-  }
-
   const turns: Turn[] = [];
   const timestamps: Array<string | null> = [];
   let conversationId: string | null = null;
+  let sidechain = false;
   const keepTools = options.keepToolCalls === true;
   const maxChars = toolCallLimit(options);
-  for (const record of objects) {
-    conversationId ??= asString(record.sessionId);
-    timestamps.push(asString(record.timestamp));
-    if (record.type !== "user" && record.type !== "assistant") continue;
-    const message = asRecord(record.message);
-    if (!message) continue;
-    const role = message?.role;
-    if (role !== "user" && role !== "assistant") continue;
-    const turn = keepTools
-      ? mergeToolText(
-          visibleTurnContent(role, message.content),
-          role,
-          toolTextFromContent(message.content, maxChars),
-        )
-      : visibleTurnContent(role, message.content);
-    if (turn) turns.push(turn);
+  const [{ malformedLines }, fileStat] = await Promise.all([
+    forEachJsonLine(
+      path,
+      (value) => {
+        const record = asRecord(value);
+        if (!record) return;
+        if (record.isSidechain === true) sidechain = true;
+        conversationId ??= asString(record.sessionId);
+        timestamps.push(asString(record.timestamp));
+        if (sidechain && !options.includeSubagents) {
+          turns.length = 0;
+          return;
+        }
+        if (record.type !== "user" && record.type !== "assistant") return;
+        const message = asRecord(record.message);
+        if (!message) return;
+        const role = message.role;
+        if (role !== "user" && role !== "assistant") return;
+        const turn = keepTools
+          ? mergeToolText(
+              visibleTurnContent(role, message.content),
+              role,
+              toolTextFromContent(message.content, maxChars),
+            )
+          : visibleTurnContent(role, message.content);
+        if (turn) turns.push(turn);
+      },
+      options.signal,
+    ),
+    stat(path),
+  ]);
+  if (sidechain && !options.includeSubagents) {
+    return { session: null, skippedSubagent: true, malformedLines };
   }
 
   if (!conversationId || turns.length === 0) {

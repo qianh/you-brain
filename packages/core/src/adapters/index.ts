@@ -10,7 +10,13 @@ import { parseCursorSession } from "./cursor.js";
 import { parseGeminiSession } from "./gemini.js";
 import { globFiles } from "./glob.js";
 import { parseGrokSession } from "./grok.js";
-import type { AdapterResult, DiscoveryOptions, DiscoveryResult, DiscoveryStatus } from "./types.js";
+import type {
+  AdapterOptions,
+  AdapterResult,
+  DiscoveryOptions,
+  DiscoveryResult,
+  DiscoveryStatus,
+} from "./types.js";
 
 export { parseClaudeSession, claudeAdapter } from "./claude.js";
 export { parseCodexSession, codexAdapter } from "./codex.js";
@@ -238,9 +244,11 @@ export async function discoverSessions(
     );
   }
 
+  const retainSessions = options.retainSessions !== false;
   for (const item of work) {
     if (stopped()) break;
     try {
+      if (options.skipFile && (await options.skipFile(item.path))) continue;
       let result = await item.parse();
       if (result.session && options.redact !== undefined) {
         const redacted = applyCaptureRedaction(result.session, {
@@ -255,10 +263,9 @@ export async function discoverSessions(
         status[item.name].skippedSubagents += 1;
         output.skippedSubagents += 1;
       }
-      if (result.session) {
-        status[item.name].captured += 1;
-        output.sessions.push(result.session);
-      }
+      if (result.session) status[item.name].captured += 1;
+      if (options.onParsed) await options.onParsed(item.path, result.session);
+      if (result.session && retainSessions) output.sessions.push(result.session);
     } catch (error) {
       if (stopped() || isAbortError(error)) break;
       status[item.name].errors += 1;
@@ -272,4 +279,23 @@ export async function discoverSessions(
     left.updatedAt.localeCompare(right.updatedAt),
   );
   return output;
+}
+
+export async function parseSourceFile(
+  source: SessionSource,
+  path: string,
+  options: AdapterOptions,
+): Promise<AdapterResult> {
+  switch (source) {
+    case "claude-code":
+      return parseClaudeSession(path, options);
+    case "codex":
+      return parseCodexSession(path, options);
+    case "grok-build":
+      return parseGrokSession(path, options);
+    case "cursor":
+      return parseCursorSession(path, options);
+    case "gemini-cli":
+      return parseGeminiSession(path, options);
+  }
 }

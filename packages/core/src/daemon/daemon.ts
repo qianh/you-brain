@@ -1,6 +1,5 @@
-import { createHash } from "node:crypto";
 import { watch, type FSWatcher } from "node:fs";
-import { access } from "node:fs/promises";
+import { access, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -19,7 +18,11 @@ import {
   type SharedConfig,
 } from "@you-brain/protocol";
 
-import { captureSourceFilters, discoverSessions, getAdapter } from "../adapters/index.js";
+import {
+  captureSourceFilters,
+  getAdapter,
+  parseSourceFile,
+} from "../adapters/index.js";
 import { getLlmApiKey } from "../auth/index.js";
 import { applyCaptureRedaction } from "../capture/redact.js";
 import { renderSessionMarkdown } from "../capture/normalize.js";
@@ -97,6 +100,16 @@ import {
 import { UploadService } from "../upload/upload-service.js";
 import type { UploadIndex } from "../upload/types.js";
 import {
+  captureGeneration,
+  captureWorkerBinary,
+  collectCaptureHits,
+  sessionHash,
+  type CaptureCursorInput,
+  type CaptureHit,
+  type CaptureMeta,
+  type CaptureScanRequest,
+} from "./capture-scan.js";
+import {
   type DaemonClock,
   systemDaemonClock,
 } from "./clock.js";
@@ -140,9 +153,24 @@ export interface DaemonOptions {
 }
 
 interface LiveSession {
-  session: NormalizedSession;
+  source: SessionSource;
+  conversationId: string;
+  device: string;
+  startedAt: string;
+  updatedAt: string;
+  sourcePath: string;
+  turnCount: number;
   hash: string;
   schedule: ScheduleState;
+  includeSubagents: boolean;
+  keepToolCalls: boolean;
+  redact: boolean;
+}
+
+interface CaptureFileCursor {
+  stamp: string;
+  key: string | null;
+  generation: string;
 }
 
 class LazyEmbedder implements Embedder {
@@ -209,6 +237,11 @@ export function resolveDaemonEmbedder(options: {
 }
 
 export async function startDaemon(options: DaemonOptions = {}): Promise<YouBrainDaemon> {
+  if (process.env.YOU_BRAIN_CAPTURE_WORKER === "1") {
+    const { runCaptureWorker } = await import("./capture-scan.js");
+    await runCaptureWorker();
+    process.exit(0);
+  }
   const daemon = new YouBrainDaemon(options);
   try {
     await daemon.start();
@@ -267,6 +300,7 @@ export class YouBrainDaemon {
   #http: DaemonHttpServer | null = null;
   #lockRelease: (() => Promise<void>) | null = null;
   #live = new Map<string, LiveSession>();
+  #files = new Map<string, CaptureFileCursor>();
   #watchers: FSWatcher[] = [];
   #watchTimer: ReturnType<typeof setTimeout> | null = null;
   #timer: { cancel(): void } | null = null;
@@ -589,7 +623,7 @@ export class YouBrainDaemon {
     const activeIntervalMs = DEFAULT_UPLOAD_ACTIVE_INTERVAL_MINUTES * 60_000;
     let uploaded = 0;
     const sessions = [...this.#live.entries()].filter(([, live]) =>
-      options?.sources ? options.sources.includes(live.session.source) : true,
+      options?.sources ? options.sources.includes(live.source) : true,
     );
     for (const [key, live] of sessions) {
       if (this.#stopped) return { scanned: sessions.length, uploaded };
@@ -614,7 +648,16 @@ export class YouBrainDaemon {
   async #uploadOne(key: string, live: LiveSession, refine: boolean): Promise<boolean> {
     if (!this.#uploader) return false;
     const before = live.hash;
-    const result = await this.#uploader.upload(this.#uploadable(live));
+    const session = await this.#materialize(live);
+    if (!session) return false;
+    const hash = sessionHash(session);
+    if (hash !== live.hash) {
+      live.hash = hash;
+      live.turnCount = session.turns.length;
+      live.startedAt = session.startedAt;
+      live.updatedAt = session.updatedAt;
+    }
+    const result = await this.#uploader.upload(this.#renderUpload(live, session));
     this.#rememberUpload(live, result.fileId, result.key);
     this.#searchDirty = true;
     const now = this.#clock.nowMs();
@@ -626,7 +669,7 @@ export class YouBrainDaemon {
         current.hash === before
           ? noteUpload(current.schedule, now)
           : noteActivity(noteUpload(current.schedule, now), now);
-      await this.#refine(key, current, result.fileId);
+      await this.#refine(key, current, result.fileId, session);
     } else {
       current.schedule = {
         lastActivityAt: current.hash === before ? current.schedule.lastActivityAt : now,
@@ -637,11 +680,18 @@ export class YouBrainDaemon {
     return true;
   }
 
-  async #refine(key: string, live: LiveSession, fileId: string): Promise<void> {
+  async #refine(
+    key: string,
+    live: LiveSession,
+    fileId: string,
+    known?: NormalizedSession,
+  ): Promise<void> {
     if (!this.#llm || !this.#store || fileId.length === 0) return;
+    const session = known ?? (await this.#materialize(live));
+    if (!session) return;
     const stored = this.#store.getSession(key);
     const refinedUpTo = stored?.refinedUpTo ?? 0;
-    const messages = live.session.turns.slice(refinedUpTo).map((turn) => ({
+    const messages = session.turns.slice(refinedUpTo).map((turn) => ({
       role: turn.role,
       text: turn.text,
     }));
@@ -656,7 +706,7 @@ export class YouBrainDaemon {
         {
           sessionKey: key,
           fileId,
-          source: live.session.source,
+          source: live.source,
           refinedUpTo,
           messages,
           previous: this.#previous(key, stored),
@@ -711,14 +761,18 @@ export class YouBrainDaemon {
       return;
     }
     const capture = this.#shared.capture;
-    const discovered = await discoverSessions({
+    const includeSubagents = extra?.includeSubagents ?? capture.includeSubagents;
+    const keepToolCalls = capture.keepToolCalls;
+    const redact = capture.redact;
+    const generation = captureGeneration({ includeSubagents, keepToolCalls, redact });
+    const request: CaptureScanRequest = {
       device: this.#local.displayName,
-      includeSubagents: extra?.includeSubagents ?? capture.includeSubagents,
-      keepToolCalls: capture.keepToolCalls,
-      redact: capture.redact,
-      sourceFilters: captureSourceFilters(capture.sources),
+      includeSubagents,
+      keepToolCalls,
+      redact,
+      generation,
       sources,
-      signal: this.#abort.signal,
+      sourceFilters: captureSourceFilters(capture.sources),
       paths: {
         claude: roots["claude-code"],
         codex: roots.codex,
@@ -726,32 +780,128 @@ export class YouBrainDaemon {
         cursor: roots.cursor,
         gemini: roots["gemini-cli"],
       },
-    });
+      cursors: this.#captureCursors(),
+    };
+    let hits: CaptureHit[];
+    try {
+      hits = captureWorkerBinary()
+        ? await this.#scanInWorker(request)
+        : await collectCaptureHits(request, this.#abort.signal);
+    } catch (error) {
+      if (this.#stopped || this.#abort.signal.aborted) {
+        this.#scannedOnce = true;
+        return;
+      }
+      throw error;
+    }
     if (this.#stopped || this.#abort.signal.aborted) {
       this.#scannedOnce = true;
       return;
     }
+    const snapshots = new Map<string, CaptureMeta>();
+    for (const hit of hits) {
+      if (!hit.unchanged || !hit.key) continue;
+      const existing = this.#live.get(hit.key);
+      if (existing && existing.sourcePath === hit.path) snapshots.set(hit.path, metaFrom(existing));
+    }
     const seen = new Set<string>();
     const now = this.#clock.nowMs();
-    for (const session of discovered.sessions) {
-      const key = conversationKey(session.source, session.conversationId);
-      seen.add(key);
-      const hash = sessionHash(session);
-      const previous = this.#live.get(key);
-      if (previous && previous.hash === hash) {
-        previous.session = session;
+    const ordered = hits
+      .map((hit) => {
+        const meta = hit.meta ?? snapshots.get(hit.path) ?? null;
+        return meta && hit.key ? { ...hit, key: hit.key, meta } : null;
+      })
+      .filter((hit): hit is CaptureHit & { key: string; meta: CaptureMeta } => hit !== null)
+      .sort(
+        (left, right) =>
+          left.meta.updatedAt.localeCompare(right.meta.updatedAt) || left.index - right.index,
+      );
+    for (const hit of ordered) {
+      seen.add(hit.key);
+      const previous = this.#live.get(hit.key);
+      if (previous && previous.hash === hit.meta.hash) {
+        assignMeta(previous, hit.meta);
         continue;
       }
-      this.#live.set(key, {
-        session,
-        hash,
+      this.#live.set(hit.key, {
+        ...hit.meta,
         schedule: noteActivity(previous?.schedule ?? emptySchedule(), now),
       });
     }
     for (const key of this.#live.keys()) {
       if (!seen.has(key)) this.#live.delete(key);
     }
+    const visited = new Set(hits.map((hit) => hit.path));
+    for (const hit of hits) {
+      this.#files.set(hit.path, { stamp: hit.stamp, key: hit.key, generation });
+    }
+    for (const path of this.#files.keys()) {
+      if (!visited.has(path)) this.#files.delete(path);
+    }
     this.#scannedOnce = true;
+  }
+
+  #captureCursors(): Record<string, CaptureCursorInput> {
+    const cursors: Record<string, CaptureCursorInput> = {};
+    for (const [path, cursor] of this.#files) {
+      const live = cursor.key ? this.#live.get(cursor.key) : undefined;
+      cursors[path] = {
+        stamp: cursor.stamp,
+        key: cursor.key,
+        generation: cursor.generation,
+        sourcePath: live?.sourcePath ?? null,
+      };
+    }
+    return cursors;
+  }
+
+  async #scanInWorker(request: CaptureScanRequest): Promise<CaptureHit[]> {
+    const directory = this.#paths.dataDir;
+    const requestPath = join(directory, "capture-request.json");
+    const resultPath = join(directory, "capture-result.json");
+    await Bun.write(requestPath, JSON.stringify(request));
+    let child: ReturnType<typeof Bun.spawn> | null = null;
+    try {
+      child = Bun.spawn([process.execPath, "daemon"], {
+        env: {
+          ...this.#env,
+          YOU_BRAIN_CAPTURE_WORKER: "1",
+          YOU_BRAIN_CAPTURE_REQUEST: requestPath,
+          YOU_BRAIN_CAPTURE_RESULT: resultPath,
+        },
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "pipe",
+        signal: this.#abort.signal,
+      });
+      const stderrStream = child.stderr;
+      const stderr =
+        stderrStream && typeof stderrStream !== "number"
+          ? await new Response(stderrStream).text()
+          : "";
+      const code = await child.exited;
+      if (code !== 0) {
+        throw new Error(stderr.trim() || `capture worker exited ${code}`);
+      }
+      return JSON.parse(await Bun.file(resultPath).text()) as CaptureHit[];
+    } finally {
+      await unlink(requestPath).catch(() => undefined);
+      await unlink(resultPath).catch(() => undefined);
+    }
+  }
+
+  async #materialize(live: LiveSession): Promise<NormalizedSession | null> {
+    const parsed = await parseSourceFile(live.source, live.sourcePath, {
+      device: live.device,
+      includeSubagents: live.includeSubagents,
+      keepToolCalls: live.keepToolCalls,
+      signal: this.#abort.signal,
+    });
+    if (!parsed.session) return null;
+    return applyCaptureRedaction(parsed.session, {
+      redact: live.redact,
+      redaction: {},
+    }).session;
   }
 
   async #indexInbox(files: readonly DriveEntry[]): Promise<void> {
@@ -1071,7 +1221,7 @@ export class YouBrainDaemon {
     );
     if (input.dryRun) {
       const scanned = [...this.#live.values()].filter((live) =>
-        input.sources ? input.sources.includes(live.session.source) : true,
+        input.sources ? input.sources.includes(live.source) : true,
       ).length;
       return { dryRun: true, scanned, uploaded: 0, warnings: [] };
     }
@@ -1200,14 +1350,14 @@ export class YouBrainDaemon {
       record: (key, fileId, meta) => {
         const live = this.#live.get(key);
         const existing = this.#store?.getSession(key);
-        const source = existing?.source ?? live?.session.source;
-        const device = existing?.device ?? live?.session.device;
+        const source = existing?.source ?? live?.source;
+        const device = existing?.device ?? live?.device;
         if (!source || !device || !this.#store) return;
         this.#store.upsertSession({
           sessionKey: key,
           source,
           device,
-          startedAt: existing?.startedAt ?? live?.session.startedAt ?? meta.updatedAt,
+          startedAt: existing?.startedAt ?? live?.startedAt ?? meta.updatedAt,
           updatedAt: existing?.updatedAt ?? meta.updatedAt,
           fileId,
           msgCount: meta.messageCount,
@@ -1221,17 +1371,17 @@ export class YouBrainDaemon {
     const existing = this.#store.getSession(key);
     this.#store.upsertSession({
       sessionKey: key,
-      source: live.session.source,
-      device: live.session.device,
-      startedAt: existing?.startedAt ?? live.session.startedAt,
-      updatedAt: live.session.updatedAt,
+      source: live.source,
+      device: live.device,
+      startedAt: existing?.startedAt ?? live.startedAt,
+      updatedAt: live.updatedAt,
       fileId,
-      msgCount: live.session.turns.length,
+      msgCount: live.turnCount,
     });
   }
 
-  #uploadable(live: LiveSession) {
-    const redacted = applyCaptureRedaction(live.session, {
+  #renderUpload(live: LiveSession, session: NormalizedSession) {
+    const redacted = applyCaptureRedaction(session, {
       redact: this.#shared.capture.redact,
       redaction: {},
     });
@@ -1240,17 +1390,15 @@ export class YouBrainDaemon {
       redactionCount: redacted.count,
       imageReferences: new Map(),
     });
-    const stored = this.#store?.getSession(
-      conversationKey(live.session.source, live.session.conversationId),
-    );
+    const stored = this.#store?.getSession(conversationKey(live.source, live.conversationId));
     return {
-      source: live.session.source,
-      conversationId: live.session.conversationId,
-      device: live.session.device,
+      source: live.source,
+      conversationId: live.conversationId,
+      device: live.device,
       ...(stored?.title ? { title: stored.title } : {}),
-      startedAt: live.session.startedAt,
-      updatedAt: live.session.updatedAt,
-      messageCount: live.session.turns.length,
+      startedAt: session.startedAt,
+      updatedAt: session.updatedAt,
+      messageCount: session.turns.length,
       markdown: rendered.markdown,
       contentSha256: rendered.contentSha256,
     };
@@ -1413,15 +1561,34 @@ function delay(ms: number): Promise<void> {
   });
 }
 
-function sessionHash(session: NormalizedSession): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify({
-        updatedAt: session.updatedAt,
-        turns: session.turns.map((turn) => [turn.role, turn.text]),
-      }),
-    )
-    .digest("hex");
+function metaFrom(live: LiveSession): CaptureMeta {
+  return {
+    source: live.source,
+    conversationId: live.conversationId,
+    device: live.device,
+    startedAt: live.startedAt,
+    updatedAt: live.updatedAt,
+    sourcePath: live.sourcePath,
+    turnCount: live.turnCount,
+    hash: live.hash,
+    includeSubagents: live.includeSubagents,
+    keepToolCalls: live.keepToolCalls,
+    redact: live.redact,
+  };
+}
+
+function assignMeta(live: LiveSession, meta: CaptureMeta): void {
+  live.source = meta.source;
+  live.conversationId = meta.conversationId;
+  live.device = meta.device;
+  live.startedAt = meta.startedAt;
+  live.updatedAt = meta.updatedAt;
+  live.sourcePath = meta.sourcePath;
+  live.turnCount = meta.turnCount;
+  live.hash = meta.hash;
+  live.includeSubagents = meta.includeSubagents;
+  live.keepToolCalls = meta.keepToolCalls;
+  live.redact = meta.redact;
 }
 
 function frontmatter(markdown: string): Map<string, string> {

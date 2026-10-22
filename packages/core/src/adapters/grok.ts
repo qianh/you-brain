@@ -13,7 +13,7 @@ import {
   visibleTurnContent,
 } from "./content.js";
 import { globFiles } from "./glob.js";
-import { asRecord, asString, readJsonLines } from "./jsonl.js";
+import { asRecord, asString, forEachJsonLine } from "./jsonl.js";
 import {
   adapterOptions,
   resolveCaptureOptions,
@@ -37,35 +37,35 @@ export async function parseGrokSession(
     return { session: null, skippedSubagent: false, malformedLines: 0 };
   }
   const historyPath = join(sessionDir, "chat_history.jsonl");
-  const [{ records, malformedLines }, summaryText, fileStat] =
-    await Promise.all([
-      readJsonLines(historyPath, options.signal),
-      options.signal
-        ? readFile(join(sessionDir, "summary.json"), { encoding: "utf8", signal: options.signal })
-        : readFile(join(sessionDir, "summary.json"), "utf8"),
-      stat(historyPath),
-    ]);
+  const turns: Turn[] = [];
+  const keepTools = options.keepToolCalls === true;
+  const maxChars = toolCallLimit(options);
+  const [{ malformedLines }, summaryText, fileStat] = await Promise.all([
+    forEachJsonLine(
+      historyPath,
+      (value) => {
+        const record = asRecord(value);
+        if (!record || (record.type !== "user" && record.type !== "assistant")) return;
+        const turn = keepTools
+          ? mergeToolText(
+              visibleTurnContent(record.type, record.content),
+              record.type,
+              toolTextFromCalls(record.tool_calls, maxChars),
+            )
+          : visibleTurnContent(record.type, record.content);
+        if (turn) turns.push(turn);
+      },
+      options.signal,
+    ),
+    options.signal
+      ? readFile(join(sessionDir, "summary.json"), { encoding: "utf8", signal: options.signal })
+      : readFile(join(sessionDir, "summary.json"), "utf8"),
+    stat(historyPath),
+  ]);
   const summary = asRecord(JSON.parse(summaryText) as unknown);
   const isSubagent = summary?.session_kind === "subagent";
   if (isSubagent && !options.includeSubagents) {
     return { session: null, skippedSubagent: true, malformedLines };
-  }
-
-  const turns: Turn[] = [];
-  const keepTools = options.keepToolCalls === true;
-  const maxChars = toolCallLimit(options);
-  for (const value of records) {
-    const record = asRecord(value);
-    if (!record || (record.type !== "user" && record.type !== "assistant"))
-      continue;
-    const turn = keepTools
-      ? mergeToolText(
-          visibleTurnContent(record.type, record.content),
-          record.type,
-          toolTextFromCalls(record.tool_calls, maxChars),
-        )
-      : visibleTurnContent(record.type, record.content);
-    if (turn) turns.push(turn);
   }
   if (turns.length === 0) {
     return { session: null, skippedSubagent: false, malformedLines };

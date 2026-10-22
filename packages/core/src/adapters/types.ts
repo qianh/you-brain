@@ -104,6 +104,19 @@ export interface DiscoveryOptions {
   sourceFilters?: Partial<Record<SessionSource, CapturePathFilter>>;
   /** Aborts directory walks and session reads. Already-aborted returns no sessions. */
   signal?: AbortSignal;
+  /**
+   * When false, parsed sessions are not stored on the result.
+   * Callers that only need `onParsed` use this to avoid retaining every session.
+   * Default true.
+   */
+  retainSessions?: boolean;
+  /** Return true to leave this path unread. It still counts as discovered. */
+  skipFile?: (path: string) => boolean | Promise<boolean>;
+  /** Fired after a file is parsed, including files that yield no session. */
+  onParsed?: (
+    path: string,
+    session: NormalizedSession | null,
+  ) => void | Promise<void>;
 }
 
 export interface DiscoveryStatus {

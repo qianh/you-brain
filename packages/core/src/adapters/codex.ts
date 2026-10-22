@@ -12,7 +12,7 @@ import {
   visibleTurnContent,
 } from "./content.js";
 import { globFiles } from "./glob.js";
-import { asRecord, asString, readJsonLines } from "./jsonl.js";
+import { asRecord, asString, forEachJsonLine } from "./jsonl.js";
 import {
   adapterOptions,
   resolveCaptureOptions,
@@ -27,49 +27,55 @@ export async function parseCodexSession(
   path: string,
   options: AdapterOptions,
 ): Promise<AdapterResult> {
-  const [{ records, malformedLines }, fileStat] = await Promise.all([
-    readJsonLines(path, options.signal),
+  const turns: Turn[] = [];
+  const timestamps: Array<string | null> = [];
+  const meta = { payload: null as Record<string, unknown> | null };
+  const keepTools = options.keepToolCalls === true;
+  const maxChars = toolCallLimit(options);
+  const [{ malformedLines }, fileStat] = await Promise.all([
+    forEachJsonLine(
+      path,
+      (value) => {
+        const record = asRecord(value);
+        if (!record) return;
+        timestamps.push(asString(record.timestamp));
+        if (record.type === "session_meta" && !meta.payload) {
+          meta.payload = asRecord(record.payload);
+        }
+        if (record.type !== "response_item") return;
+        const payload = asRecord(record.payload);
+        if (keepTools && payload?.type === "function_call") {
+          const line = formatToolCall(
+            asString(payload.name) ?? "tool",
+            payload.arguments ?? payload.input ?? payload.args,
+            maxChars,
+          );
+          if (!line) return;
+          const previous = turns.at(-1);
+          if (previous?.role === "assistant") {
+            previous.text = previous.text.length > 0 ? `${previous.text}\n\n${line}` : line;
+          } else {
+            turns.push({ role: "assistant", text: line, images: [] });
+          }
+          return;
+        }
+        if (payload?.type !== "message") return;
+        const role = payload.role;
+        if (role !== "user" && role !== "assistant") return;
+        const turn = visibleTurnContent(role, payload.content);
+        if (turn) turns.push(turn);
+      },
+      options.signal,
+    ),
     stat(path),
   ]);
-  const objects = records.map(asRecord).filter((value) => value !== null);
-  const metadata = objects.find((record) => record.type === "session_meta");
-  const metaPayload = asRecord(metadata?.payload);
+  const metaPayload = meta.payload;
   const isSubagent = asRecord(metaPayload?.source)?.subagent !== undefined;
   if (isSubagent && !options.includeSubagents) {
     return { session: null, skippedSubagent: true, malformedLines };
   }
   if (isDedicatedCwd(asString(metaPayload?.cwd), options.llmCliWorkDir ?? llmCliWorkDir())) {
     return { session: null, skippedSubagent: false, malformedLines };
-  }
-
-  const turns: Turn[] = [];
-  const timestamps: Array<string | null> = [];
-  const keepTools = options.keepToolCalls === true;
-  const maxChars = toolCallLimit(options);
-  for (const record of objects) {
-    timestamps.push(asString(record.timestamp));
-    if (record.type !== "response_item") continue;
-    const payload = asRecord(record.payload);
-    if (keepTools && payload?.type === "function_call") {
-      const line = formatToolCall(
-        asString(payload.name) ?? "tool",
-        payload.arguments ?? payload.input ?? payload.args,
-        maxChars,
-      );
-      if (!line) continue;
-      const previous = turns.at(-1);
-      if (previous?.role === "assistant") {
-        previous.text = previous.text.length > 0 ? `${previous.text}\n\n${line}` : line;
-      } else {
-        turns.push({ role: "assistant", text: line, images: [] });
-      }
-      continue;
-    }
-    if (payload?.type !== "message") continue;
-    const role = payload.role;
-    if (role !== "user" && role !== "assistant") continue;
-    const turn = visibleTurnContent(role, payload.content);
-    if (turn) turns.push(turn);
   }
 
   const conversationId = asString(metaPayload?.id) ?? basename(path, ".jsonl");

@@ -3,24 +3,38 @@ import { createHash } from "node:crypto";
 import type { NormalizedSession } from "../domain/session.js";
 import { loadPackage } from "../native/resolver.js";
 
-type SharpFile = (input: Buffer) => {
+type SharpFile = ((input: Buffer) => {
   rotate: () => {
     webp: (options: { quality: number }) => { toBuffer: () => Promise<Buffer> };
   };
+}) & {
+  cache?: (value: boolean) => void;
+  concurrency?: (value: number) => void;
 };
+
+let sharpConfigured = false;
+
+function configureSharp(sharp: SharpFile): void {
+  if (sharpConfigured) return;
+  sharp.cache?.(false);
+  sharp.concurrency?.(1);
+  sharpConfigured = true;
+}
 
 async function loadSharp(): Promise<SharpFile> {
   const loaded = await loadPackage<unknown>("sharp", () => import("sharp"));
-  if (typeof loaded === "function") return loaded as SharpFile;
-  if (
-    loaded &&
-    typeof loaded === "object" &&
-    "default" in loaded &&
-    typeof loaded.default === "function"
-  ) {
-    return loaded.default as SharpFile;
-  }
-  throw new Error("无法加载 sharp");
+  const sharp =
+    typeof loaded === "function"
+      ? (loaded as SharpFile)
+      : loaded &&
+          typeof loaded === "object" &&
+          "default" in loaded &&
+          typeof loaded.default === "function"
+        ? (loaded.default as SharpFile)
+        : null;
+  if (!sharp) throw new Error("无法加载 sharp");
+  configureSharp(sharp);
+  return sharp;
 }
 
 export interface ImageArtifact {

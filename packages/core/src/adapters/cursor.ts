@@ -12,7 +12,7 @@ import {
   visibleTurnContent,
 } from "./content.js";
 import { globFiles } from "./glob.js";
-import { asRecord, asString, readJsonLines } from "./jsonl.js";
+import { asRecord, asString, forEachJsonLine } from "./jsonl.js";
 import {
   adapterOptions,
   resolveCaptureOptions,
@@ -52,35 +52,32 @@ export async function parseCursorSession(
   path: string,
   options: AdapterOptions,
 ): Promise<AdapterResult> {
-  const [{ records, malformedLines }, fileStat] = await Promise.all([
-    readJsonLines(path, options.signal),
-    stat(path),
-  ]);
   const turns: Turn[] = [];
   const keepTools = options.keepToolCalls === true;
   const maxChars = toolCallLimit(options);
-  for (const value of records) {
-    const record = asRecord(value);
-    if (!record) continue;
-    const role = asString(record.role);
-    if (role !== "user" && role !== "assistant") continue;
-    const message = asRecord(record.message);
-    if (!message) continue;
-    const content =
-      role === "user"
-        ? visibleUserQueryContent(message.content)
-        : message.content;
-    if (!content && !keepTools) continue;
-    const visible = content ? visibleTurnContent(role, content) : null;
-    const turn = keepTools
-      ? mergeToolText(
-          visible,
-          role,
-          toolTextFromContent(message.content, maxChars),
-        )
-      : visible;
-    if (turn) turns.push(turn);
-  }
+  const [{ malformedLines }, fileStat] = await Promise.all([
+    forEachJsonLine(
+      path,
+      (value) => {
+        const record = asRecord(value);
+        if (!record) return;
+        const role = asString(record.role);
+        if (role !== "user" && role !== "assistant") return;
+        const message = asRecord(record.message);
+        if (!message) return;
+        const content =
+          role === "user" ? visibleUserQueryContent(message.content) : message.content;
+        if (!content && !keepTools) return;
+        const visible = content ? visibleTurnContent(role, content) : null;
+        const turn = keepTools
+          ? mergeToolText(visible, role, toolTextFromContent(message.content, maxChars))
+          : visible;
+        if (turn) turns.push(turn);
+      },
+      options.signal,
+    ),
+    stat(path),
+  ]);
 
   if (turns.length === 0) {
     return { session: null, skippedSubagent: false, malformedLines };

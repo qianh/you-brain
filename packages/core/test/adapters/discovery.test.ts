@@ -1,4 +1,4 @@
-import { cp, mkdtemp, mkdir, utimes } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -138,4 +138,71 @@ describe("session discovery", () => {
     expect(result.sessions).toEqual([]);
     expect(result.status.claude.discovered).toBe(0);
   });
+
+  it("reports the same sessions through onParsed without retaining them", async () => {
+    const root = await mkdtemp(join(tmpdir(), "brainhub-discovery-stream-"));
+    const older = join(root, "older.jsonl");
+    const newer = join(root, "newer.jsonl");
+    await mkdir(root, { recursive: true });
+    await writeDiscoverySession(older, "older", "2026-07-18T01:00:00.000Z");
+    await writeDiscoverySession(newer, "newer", "2026-07-18T02:00:00.000Z");
+    const options = {
+      device: "test",
+      includeSubagents: false,
+      keepToolCalls: false,
+      redact: true,
+      sources: ["claude-code"] as const,
+      paths: { claude: [root], codex: [], grok: [], cursor: [] },
+    };
+    const full = await discoverSessions({ ...options, sources: [...options.sources] });
+    const seen: typeof full.sessions = [];
+    const streamed = await discoverSessions({
+      ...options,
+      sources: [...options.sources],
+      retainSessions: false,
+      onParsed: (_path, session) => {
+        if (session) seen.push(session);
+      },
+    });
+    const byIdentity = (left: (typeof full.sessions)[number], right: (typeof full.sessions)[number]) =>
+      left.updatedAt.localeCompare(right.updatedAt) ||
+      left.conversationId.localeCompare(right.conversationId) ||
+      left.sourcePath.localeCompare(right.sourcePath);
+    expect(streamed.sessions).toEqual([]);
+    expect(streamed.malformed).toBe(full.malformed);
+    expect(streamed.skippedSubagents).toBe(full.skippedSubagents);
+    expect([...seen].sort(byIdentity)).toEqual([...full.sessions].sort(byIdentity));
+  });
+
+  it("leaves a skipped file unread and uncaptured", async () => {
+    const root = await mkdtemp(join(tmpdir(), "brainhub-discovery-skip-"));
+    const path = join(root, "session.jsonl");
+    await mkdir(root, { recursive: true });
+    await writeDiscoverySession(path, "skipped", "2026-07-18T01:00:00.000Z");
+    let parsed = 0;
+    const result = await discoverSessions({
+      device: "test",
+      includeSubagents: false,
+      sources: ["claude-code"],
+      paths: { claude: [root], codex: [], grok: [], cursor: [] },
+      skipFile: () => true,
+      onParsed: () => {
+        parsed += 1;
+      },
+    });
+    expect(parsed).toBe(0);
+    expect(result.sessions).toEqual([]);
+    expect(result.status.claude).toMatchObject({ discovered: 1, captured: 0 });
+  });
 });
+
+async function writeDiscoverySession(path: string, id: string, timestamp: string): Promise<void> {
+  const line = JSON.stringify({
+    type: "user",
+    isSidechain: false,
+    sessionId: id,
+    timestamp,
+    message: { role: "user", content: `hello ${id}` },
+  });
+  await writeFile(path, `${line}\n`);
+}

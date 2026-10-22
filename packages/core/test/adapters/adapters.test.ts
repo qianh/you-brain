@@ -1,4 +1,5 @@
 import { cp, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { JSONL_READ_CHUNK_BYTES } from "../../src/adapters/jsonl.js";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -57,6 +58,57 @@ describe("source adapters", () => {
       },
     );
     expect(result.session?.conversationId).toBe("codex-1");
+    expect(result.session?.turns.map((turn) => turn.text)).toEqual([
+      "Find the release issue",
+      "Pin the release version.",
+    ]);
+  });
+
+  it("keeps Codex messages that sit beside a tool call larger than one read", async () => {
+    const root = await mkdtemp(join(tmpdir(), "you-brain-codex-huge-"));
+    const path = join(root, "rollout-huge.jsonl");
+    const lines = [
+      JSON.stringify({
+        timestamp: "2026-07-18T11:00:00.000Z",
+        type: "session_meta",
+        payload: { id: "codex-huge", timestamp: "2026-07-18T11:00:00.000Z", source: "cli" },
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-18T11:00:01.000Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Find the release issue" }],
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-18T11:02:00.000Z",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "shell",
+          arguments: "x".repeat(JSONL_READ_CHUNK_BYTES + 4096),
+        },
+      }),
+      JSON.stringify({
+        timestamp: "2026-07-18T11:03:00.000Z",
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Pin the release version." }],
+        },
+      }),
+    ];
+    await writeFile(path, `${lines.join("\n")}\n`);
+    const result = await parseCodexSession(path, {
+      device: "test-device",
+      includeSubagents: false,
+      keepToolCalls: false,
+    });
+    expect(result.malformedLines).toBe(0);
+    expect(result.session?.conversationId).toBe("codex-huge");
     expect(result.session?.turns.map((turn) => turn.text)).toEqual([
       "Find the release issue",
       "Pin the release version.",
