@@ -67,6 +67,7 @@ export {
   portraitStep,
   registerConsolidationStep,
   resetConsolidationSteps,
+  topicFilesStep,
   topicSummariesStep,
   type ConsolidationContext,
   type ConsolidationPortrait,

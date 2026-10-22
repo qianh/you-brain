@@ -11,6 +11,8 @@ export const INTERVALS = {
   searchMs: 60_000,
   outputDebounceMs: 10_000,
   watchDebounceMs: 250,
+  /** Quiet period after the last topic-book change before Drive topic files sync. */
+  topicFilesDebounceMs: 5 * 60_000,
 } as const;
 
 /** `last === null` means the job has never run and is due immediately. */

@@ -132,6 +132,7 @@ describe("consolidation across two devices", () => {
         "topic_summaries",
         "merge_suggestions",
         "portrait",
+        "topic_files",
       ]);
       expect(summaryCalls).toBe(callsAfterSync);
       expect(summaryEvents(dirsA)).toHaveLength(1);

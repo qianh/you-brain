@@ -13,6 +13,7 @@ import {
   selectChangedTopics,
   selectMergeCandidates,
 } from "./select.js";
+import type { TopicFilesResult } from "../topic-files/sync.js";
 import { MERGE_SUGGESTIONS_CURSOR } from "./suggestions.js";
 import { portraitStep } from "./portrait.js";
 import { sameText } from "./text.js";
@@ -55,6 +56,11 @@ export interface ConsolidationContext {
   };
   /** Absent when Drive or the portrait service is not open. The step then succeeds. */
   portrait?: ConsolidationPortrait;
+  /**
+   * Absent when this device should not publish topic files.
+   * The step then succeeds without writing.
+   */
+  topicFiles?: () => Promise<TopicFilesResult>;
 }
 
 export interface ConsolidationStep {
@@ -64,7 +70,7 @@ export interface ConsolidationStep {
   run(ctx: ConsolidationContext): Promise<void>;
 }
 
-/** Later stages (topic files) append themselves. Starts empty. */
+/** Steps registered by tests. Built-in steps stay in {@link consolidationSteps}. */
 const registeredSteps: ConsolidationStep[] = [];
 
 export function registerConsolidationStep(step: ConsolidationStep): void {
@@ -77,7 +83,13 @@ export function resetConsolidationSteps(): void {
 }
 
 export function consolidationSteps(): ConsolidationStep[] {
-  return [topicSummariesStep, mergeSuggestionsStep, portraitStep, ...registeredSteps];
+  return [
+    topicSummariesStep,
+    mergeSuggestionsStep,
+    portraitStep,
+    topicFilesStep,
+    ...registeredSteps,
+  ];
 }
 
 export const topicSummariesStep: ConsolidationStep = {
@@ -111,6 +123,22 @@ export const topicSummariesStep: ConsolidationStep = {
       }
     }
     if (failed > 0) throw new Error("部分话题概要没有写完");
+  },
+};
+
+export const topicFilesStep: ConsolidationStep = {
+  id: "topic_files",
+  dependsOn: ["topic_summaries"],
+  async run(ctx) {
+    const write = ctx.topicFiles;
+    if (!write) return;
+    const result = await write();
+    for (const warning of result.warnings) ctx.warnings.push(warning);
+    if (result.failed > 0) {
+      const summary = `话题文件有 ${result.failed} 个没有写上`;
+      if (!ctx.warnings.includes(summary)) ctx.warnings.push(summary);
+      throw new Error("部分话题文件没有写完");
+    }
   },
 };
 

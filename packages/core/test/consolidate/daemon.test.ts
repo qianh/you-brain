@@ -66,6 +66,7 @@ describe("consolidation daemon", () => {
       "topic_summaries",
       "merge_suggestions",
       "portrait",
+      "topic_files",
     ]);
     expect(kinds).toEqual(["topics", "status"]);
     const finished = await leaseFinishedAt(drive);
@@ -82,7 +83,7 @@ describe("consolidation daemon", () => {
     kinds.length = 0;
     const forced = await consolidate({ force: true });
     expect(forced.ok).toBe(true);
-    expect(forced.steps.map((step) => step.ok)).toEqual([true, true, true]);
+    expect(forced.steps.map((step) => step.ok)).toEqual([true, true, true, true]);
     expect(await leaseFinishedAt(drive)).not.toBe(finished);
     expect(kinds).toEqual(["topics", "status"]);
     unsubscribe();
@@ -323,6 +324,7 @@ describe("consolidation daemon", () => {
       { id: "topic_summaries", ok: true },
       { id: "merge_suggestions", ok: true },
       { id: "portrait", ok: true },
+      { id: "topic_files", ok: true },
     ]);
     expect((await drive.readPath("digital-twin/JOHN-DIGITAL-TWIN-latest.md"))?.bytes.toString("utf8")).toBe(
       next,

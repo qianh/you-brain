@@ -141,6 +141,12 @@ import {
   readSharedFile,
   writeJsonFile,
 } from "./local-state.js";
+import {
+  TOPIC_FILES_MANIFEST,
+  emptyTopicFilesResult,
+  syncTopicFiles,
+  type TopicFilesResult,
+} from "../topic-files/sync.js";
 import { INTERVALS, intervalDue, pullInterval } from "./schedule.js";
 import { describeSyncFailure } from "./sync-error.js";
 import type { SecretStore } from "../auth/index.js";
@@ -361,6 +367,12 @@ export class YouBrainDaemon {
   #lastSyncError: { message: string; at: string } | null = null;
   #searchDirty = false;
   #portraitSoon = false;
+  /** Topic book changed while this device is allowed to publish topic files. */
+  #topicFilesDirty = false;
+  /** Epoch bumps on each change so an in-flight sync does not clear a newer edit. */
+  #topicFilesEpoch = 0;
+  #topicFilesQuietUntil: number | null = null;
+  #topicFilesLock: Promise<void> = Promise.resolve();
   #scannedOnce = false;
 
   constructor(options: DaemonOptions) {
@@ -741,6 +753,20 @@ export class YouBrainDaemon {
       }
       this.#lastConsolidation = this.#clock.nowMs();
     }
+    if (
+      this.#topicFilesDirty &&
+      this.#topicFilesQuietUntil !== null &&
+      now >= this.#topicFilesQuietUntil
+    ) {
+      if (this.#canWriteTopicFiles()) {
+        try {
+          await this.#writeTopicFiles();
+        } catch {
+          this.#topicFilesDirty = true;
+          this.#topicFilesQuietUntil = this.#clock.nowMs() + INTERVALS.topicFilesDebounceMs;
+        }
+      }
+    }
   }
 
   async #processDue(options?: {
@@ -1119,6 +1145,76 @@ export class YouBrainDaemon {
     this.changes.publish("topics", at);
     this.changes.publish("today", at);
     this.changes.publish("status", at);
+    this.#markTopicFilesDirty();
+  }
+
+  #canWriteTopicFiles(): boolean {
+    return (
+      this.#drive !== null &&
+      this.#roles.consolidation.enabled &&
+      this.#roles.mainDevice === this.#local.deviceId
+    );
+  }
+
+  #markTopicFilesDirty(): void {
+    if (!this.#canWriteTopicFiles()) return;
+    this.#topicFilesDirty = true;
+    this.#topicFilesEpoch += 1;
+    this.#topicFilesQuietUntil = this.#clock.nowMs() + INTERVALS.topicFilesDebounceMs;
+  }
+
+  /** One topic-file sync at a time. A later caller waits, then runs against the latest book. */
+  async #writeTopicFiles(): Promise<TopicFilesResult> {
+    const previous = this.#topicFilesLock;
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.#topicFilesLock = gate;
+    await previous;
+    try {
+      return await this.#writeTopicFilesBody();
+    } finally {
+      release();
+    }
+  }
+
+  async #writeTopicFilesBody(): Promise<TopicFilesResult> {
+    const drive = this.#drive;
+    const store = this.#store;
+    if (!drive || !store || !this.#canWriteTopicFiles()) return emptyTopicFilesResult();
+    const epoch = this.#topicFilesEpoch;
+    const view = this.#consolidationView();
+    const result = await syncTopicFiles({
+      drive,
+      book: view.book,
+      language: this.#shared.ui.language,
+      timeZone: this.#roles.timezone,
+      zone: {
+        now: this.#clock.now().toISOString(),
+        activeLimit: this.#shared.topics.activeLimit,
+        historyDays: this.#shared.topics.historyDays,
+        ...(Object.keys(view.sessionUpdatedAt).length > 0
+          ? { sessionUpdatedAt: view.sessionUpdatedAt }
+          : {}),
+      },
+      manifest: {
+        get: () => store.getCursor(TOPIC_FILES_MANIFEST),
+        set: (value) => {
+          store.setCursor(TOPIC_FILES_MANIFEST, value);
+        },
+      },
+    });
+    if (result.failed > 0) {
+      this.#topicFilesDirty = true;
+      this.#topicFilesQuietUntil = this.#clock.nowMs() + INTERVALS.topicFilesDebounceMs;
+      return result;
+    }
+    if (this.#topicFilesEpoch === epoch) {
+      this.#topicFilesDirty = false;
+      this.#topicFilesQuietUntil = null;
+    }
+    return result;
   }
 
   async #issueReminders(): Promise<void> {
@@ -1611,6 +1707,7 @@ export class YouBrainDaemon {
           },
         },
         ...this.#portraitRuntime(),
+        topicFiles: () => this.#writeTopicFiles(),
         readLease: async () => {
           if (!this.#drive) return null;
           return readConsolidateLease(this.#drive, (message) => {

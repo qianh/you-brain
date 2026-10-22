@@ -25,8 +25,10 @@ export interface OutputCopy {
   history: string;
   status: string;
   next: string;
+  aliases: string;
   todos: string;
   conclusions: string;
+  allConclusions: string;
   sessions: string;
   remindersEmpty: string;
   remindersFollow: string;
@@ -75,8 +77,10 @@ const ZH: OutputCopy = {
   history: "历史",
   status: "状态",
   next: "下一步",
+  aliases: "别名",
   todos: "未完成待办",
   conclusions: "最近结论",
+  allConclusions: "全部结论",
   sessions: "相关会话",
   remindersEmpty: "暂无提醒",
   remindersFollow: "待跟进话题",
@@ -110,8 +114,10 @@ const EN: OutputCopy = {
   history: "History",
   status: "Status",
   next: "Next step",
+  aliases: "Aliases",
   todos: "Open todos",
   conclusions: "Recent conclusions",
+  allConclusions: "All conclusions",
   sessions: "Sessions",
   remindersEmpty: "No reminders yet",
   remindersFollow: "Topics to follow up",

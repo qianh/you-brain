@@ -49,6 +49,7 @@ export interface ConsolidationRuntime {
   emit: ConsolidationContext["emit"];
   cursors: ConsolidationContext["cursors"];
   portrait?: ConsolidationPortrait;
+  topicFiles?: ConsolidationContext["topicFiles"];
   readLease: () => Promise<ConsolidateLease | null>;
   writeLease: (lease: ConsolidateLease) => Promise<void>;
   steps?: readonly ConsolidationStep[];
@@ -154,6 +155,7 @@ export async function executeConsolidation(
       cursors: runtime.cursors,
       steps,
       ...(runtime.portrait ? { portrait: runtime.portrait } : {}),
+      ...(runtime.topicFiles ? { topicFiles: runtime.topicFiles } : {}),
     });
     last = result;
     const finishedAt = runtime.clock.now().toISOString();

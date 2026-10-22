@@ -419,9 +419,11 @@ describe("merge suggestions", () => {
       "topic_summaries",
       "merge_suggestions",
       "portrait",
+      "topic_files",
     ]);
     expect(result.steps[1]?.ok).toBe(true);
     expect(result.steps[2]).toEqual({ id: "portrait", ok: false, error: "依赖步骤失败" });
+    expect(result.steps[3]).toEqual({ id: "topic_files", ok: false, error: "依赖步骤失败" });
     expect(rewritten(events, "a")).toEqual([]);
     expect(JSON.parse(cursors.get(MERGE_SUGGESTIONS_CURSOR) ?? "").pairs).toEqual([
       { fromTopicId: "a", intoTopicId: "b", reason: "同一件事" },
@@ -484,13 +486,13 @@ describe("step runner", () => {
   it("starts with the built-in steps and appends a registered step", async () => {
     let ran = false;
     registerConsolidationStep({
-      id: "topic_files",
+      id: "extra_step",
       async run() {
         ran = true;
       },
     });
     registerConsolidationStep({
-      id: "topic_files",
+      id: "extra_step",
       async run() {
         throw new Error("duplicate");
       },
@@ -500,6 +502,7 @@ describe("step runner", () => {
       "merge_suggestions",
       "portrait",
       "topic_files",
+      "extra_step",
     ]);
     const { result } = await settle({
       events: [],
@@ -513,6 +516,7 @@ describe("step runner", () => {
       "topic_summaries",
       "merge_suggestions",
       "portrait",
+      "topic_files",
     ]);
   });
 });
