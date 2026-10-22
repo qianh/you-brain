@@ -15,6 +15,12 @@
 # disk, keep the .app and exit 0. rw.*.dmg leftovers and /Volumes/you-brain*
 # mounts are removed on the way out (success or failure).
 #
+# tauri.bundle.conf.json sets macOS signingIdentity to "-" (ad-hoc) and turns
+# hardened runtime off. Tauri signs the .app before it builds the DMG. If that
+# signature still fails `codesign --verify --deep --strict`, this script
+# re-signs the .app with `codesign --force --deep --sign -` and replaces any
+# product DMG so the disk image contains that signed .app.
+#
 # ROOT, REPO, and VOLUMES_ROOT may be set by tests. Unset, ROOT is this app
 # directory, REPO is the repository root, and VOLUMES_ROOT is /Volumes.
 set -eu
@@ -124,6 +130,71 @@ cleanup_residues() {
   return 0
 }
 
+collect_product_dmgs() {
+  dir=$1
+  if [ ! -d "$dir" ]; then
+    return 0
+  fi
+  find "$dir" -maxdepth 1 -name '*.dmg' -type f | while IFS= read -r dmg; do
+    base=$(basename "$dmg")
+    case "$base" in
+      rw.*.dmg) ;;
+      *) printf '%s\n' "$dmg" ;;
+    esac
+  done
+}
+
+# Product DMGs were copied from the pre-resign .app. Drop them and write one
+# disk image from the signed bundle. A failed create still leaves no stale DMG.
+replace_product_dmgs() {
+  app=$1
+  bundle_dir=$2
+  list=$(mktemp "${TMPDIR:-/tmp}/you-brain-dmg-list.XXXXXX")
+  collect_product_dmgs "$bundle_dir" >>"$list"
+  collect_product_dmgs "$bundle_dir/dmg" >>"$list"
+  collect_product_dmgs "$bundle_dir/macos" >>"$list"
+  if [ ! -s "$list" ]; then
+    rm -f "$list"
+    return 0
+  fi
+  first=$(sed -n '1p' "$list")
+  while IFS= read -r dmg; do
+    [ -n "$dmg" ] || continue
+    rm -f "$dmg"
+  done <"$list"
+  rm -f "$list"
+  if ! command -v hdiutil >/dev/null 2>&1; then
+    echo "you-brain: hdiutil 不在 PATH，已丢弃重签前的 DMG" >&2
+    return 0
+  fi
+  mkdir -p "$(dirname "$first")"
+  if ! hdiutil create -volname you-brain -srcfolder "$app" -ov -format UDZO "$first"; then
+    echo "you-brain: 重签后的 DMG 生成失败，已丢弃旧 DMG" >&2
+    rm -f "$first"
+  fi
+}
+
+# Tauri's ad-hoc signature does not individually sign Mach-O under Resources.
+# When --deep --strict fails, re-sign the whole bundle in place.
+ensure_adhoc_signature() {
+  app=$1
+  bundle_dir=$2
+  if ! command -v codesign >/dev/null 2>&1; then
+    echo "you-brain: codesign 不在 PATH，跳过整包签名复查" >&2
+    return 0
+  fi
+  if codesign --verify --deep --strict "$app" >/dev/null 2>&1; then
+    return 0
+  fi
+  echo "you-brain: Tauri 签名未通过 codesign --verify --deep --strict，改为整包 ad-hoc 重签" >&2
+  if command -v xattr >/dev/null 2>&1; then
+    xattr -cr "$app" || true
+  fi
+  codesign --force --deep --sign - "$app"
+  codesign --verify --deep --strict "$app"
+  replace_product_dmgs "$app" "$bundle_dir"
+}
+
 trap cleanup_residues EXIT
 
 built_target=$TARGET_TRIPLE
@@ -187,6 +258,8 @@ else
   echo "you-brain: tauri build did not produce $APP_NAME" >&2
   exit 1
 fi
+
+ensure_adhoc_signature "$APP_SRC" "$BUNDLE_DIR"
 
 mkdir -p "$DEST_DIR"
 # Move stale dmgs first. The bundle just produced is last, so its dmg wins.

@@ -44,7 +44,7 @@
 ## D. 验收与文档
 
 - [x] **D1 M0 六项验证记录**：`scripts/m0/*`（`bun scripts/m0/<项>.ts`）；1/2/6 本机已跑（onnxruntime/sharp 在 vendor 与编译产物中可加载；.app 为 ad-hoc 签名且 `codesign --verify` 失败），3/5 需真实 Drive、4 需真实 CLI 额度，脚本已备未跑，结论写入 进度.md
-- [ ] **D3 .app 整包 ad-hoc 签名**：D1 发现 `dist/app.noindex/you-brain.app` 只有链接器 ad-hoc 签名（Sealed Resources=none，`codesign --verify --deep --strict` 失败）；在 `bundle.sh` 末尾对整包 `codesign --force --deep -s -`，并让 `scripts/m0/desktop-package.ts` 通过（不做公证）
+- [x] **D3 .app 整包 ad-hoc 签名**：`tauri.bundle.conf.json` 设 macOS `signingIdentity: "-"`，Tauri 先签 `.app` 再打 DMG，`codesign --verify --deep --strict` 通过，DMG 内的包 CDHash 与外面一致；`bundle.sh` 留有复查失败时整包重签并重建 DMG 的兜底。未公证，`spctl` 拒绝是预期；未启动应用验证 sidecar 加载 vendor
 - [x] **D2 进度文档更新**：`进度.md`、`产品说明.md`、`技术方案.md` 的状态按现状更新（2026-10-23）；此后每完成一项仍同步更新对应行
 
 ## 需要你决定或配合（不进自动队列）

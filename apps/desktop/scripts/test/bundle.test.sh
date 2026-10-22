@@ -14,6 +14,7 @@ REPORT=
 OUT=
 ERR=
 HDIUTIL_LOG=
+CODESIGN_LOG=
 rc=0
 passed=0
 
@@ -30,6 +31,10 @@ fail() {
   if [ -n "${HDIUTIL_LOG:-}" ] && [ -f "$HDIUTIL_LOG" ]; then
     echo "--- hdiutil ---" >&2
     cat "$HDIUTIL_LOG" >&2
+  fi
+  if [ -n "${CODESIGN_LOG:-}" ] && [ -f "$CODESIGN_LOG" ]; then
+    echo "--- codesign ---" >&2
+    cat "$CODESIGN_LOG" >&2
   fi
   exit 1
 }
@@ -62,6 +67,7 @@ setup() {
   OUT=$WORK/out
   ERR=$WORK/err
   HDIUTIL_LOG=$WORK/hdiutil.log
+  CODESIGN_LOG=$WORK/codesign.log
   bin=$WORK/bin
   mkdir -p \
     "$REPO/dist/daemon/aarch64-apple-darwin/vendor" \
@@ -78,6 +84,8 @@ setup() {
   echo keep > "$REPO/dist/app.noindex/keep.dmg"
   echo note > "$REPO/dist/app.noindex/rw.notdmg.txt"
   : > "$HDIUTIL_LOG"
+  : > "$CODESIGN_LOG"
+  CODESIGN_MODE=verify-ok
 
   cat > "$bin/bunx" << 'EOF'
 #!/bin/sh
@@ -163,8 +171,34 @@ EOF
 printf '%s\n' "$*" >> "$HDIUTIL_LOG"
 exit 1
 EOF
-  chmod +x "$bin/bunx" "$bin/hdiutil"
-  export ROOT REPO VOLUMES_ROOT HDIUTIL_LOG BUNX_REPORT="$REPORT"
+
+  cat > "$bin/codesign" << 'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "${CODESIGN_LOG:?}"
+case "${1:-}" in
+  --verify)
+    if [ "${CODESIGN_MODE:-verify-ok}" = "verify-always-fail" ]; then
+      echo "fake verify failed" >&2
+      exit 1
+    fi
+    if [ "${CODESIGN_MODE:-verify-ok}" = "verify-fail" ] && [ ! -f "${CODESIGN_LOG}.did-fail" ]; then
+      : > "${CODESIGN_LOG}.did-fail"
+      echo "fake verify failed" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  --force)
+    exit 0
+    ;;
+  *)
+    echo "unexpected codesign args: $*" >&2
+    exit 97
+    ;;
+esac
+EOF
+  chmod +x "$bin/bunx" "$bin/hdiutil" "$bin/codesign"
+  export ROOT REPO VOLUMES_ROOT HDIUTIL_LOG CODESIGN_LOG CODESIGN_MODE BUNX_REPORT="$REPORT"
   export PATH="$bin:$ORIG_PATH"
 }
 
@@ -240,6 +274,22 @@ assert_no_fallback_warning() {
   fi
 }
 
+assert_no_resign() {
+  if grep -F -- "--force" "$CODESIGN_LOG" >/dev/null; then
+    fail "$1: codesign --force ran"
+  fi
+  if grep -F "整包 ad-hoc 重签" "$ERR" >/dev/null; then
+    fail "$1: re-sign warning was printed"
+  fi
+}
+
+assert_verified_once() {
+  app_at_sign="$ROOT/src-tauri/target/$1/release/bundle/macos/you-brain.app"
+  if ! grep -F -x -- "--verify --deep --strict $app_at_sign" "$CODESIGN_LOG" >/dev/null; then
+    fail "$2: missing codesign --verify for $app_at_sign"
+  fi
+}
+
 assert_empty_stdout() {
   if [ -s "$OUT" ]; then
     fail "$1: expected empty stdout"
@@ -268,6 +318,11 @@ fi
 if ! grep -F -- "--target aarch64-apple-darwin" "$REPORT/args" >/dev/null; then
   fail "success: default target was not injected"
 fi
+assert_verified_once aarch64-apple-darwin "success"
+assert_no_resign "success"
+if grep -F -- " -srcfolder " "$HDIUTIL_LOG" >/dev/null; then
+  fail "success: hdiutil create ran without a re-sign"
+fi
 pass "success"
 
 # 2. DMG step fails after a new .app exists.
@@ -282,6 +337,8 @@ assert_kept_noise "dmg-fail"
 if ! grep -F -x "you-brain: DMG 打包失败，已回退为仅 .app" "$ERR" >/dev/null; then
   fail "dmg-fail: missing fallback warning"
 fi
+assert_verified_once aarch64-apple-darwin "dmg-fail"
+assert_no_resign "dmg-fail"
 pass "dmg fallback"
 
 # 3. Build fails and no .app was produced.
@@ -298,6 +355,9 @@ if ! grep -F -x "you-brain: tauri build did not produce you-brain.app" "$ERR" >/
   fail "fail: missing missing-app error"
 fi
 [ ! -d "$REPO/dist/app.noindex/you-brain.app" ] || fail "fail: dest app exists"
+if [ -s "$CODESIGN_LOG" ]; then
+  fail "fail: codesign ran without an app"
+fi
 pass "hard failure"
 
 # 4. Only a pre-existing .app. remove_stale_apps deletes it; an older mtime
@@ -330,6 +390,9 @@ fi
 [ ! -d "$old_other" ] || fail "stale: nested .app was not removed"
 [ ! -d "$old_dist" ] || fail "stale: dist .app was not removed"
 [ ! -d "$REPO/dist/app.noindex/you-brain.app" ] || fail "stale: old app was published"
+if [ -s "$CODESIGN_LOG" ]; then
+  fail "stale: codesign ran for an unpublished app"
+fi
 pass "stale app"
 
 # 5. --bundles app: a failed build is not a DMG fallback, even with a new .app.
@@ -347,6 +410,9 @@ fresh_left="$ROOT/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/you
 if ! grep -F -- "--bundles app" "$REPORT/args" >/dev/null; then
   fail "bundles app: flag was not forwarded"
 fi
+if [ -s "$CODESIGN_LOG" ]; then
+  fail "bundles app: codesign ran for an unpublished app"
+fi
 pass "--bundles app"
 
 # 6. --bundles=app still publishes when the build itself succeeds.
@@ -360,6 +426,8 @@ assert_no_fallback_warning "bundles=app"
 if ! grep -F -- "--bundles=app" "$REPORT/args" >/dev/null; then
   fail "bundles=app: flag was not forwarded"
 fi
+assert_verified_once aarch64-apple-darwin "bundles=app"
+assert_no_resign "bundles=app"
 pass "--bundles=app success"
 
 # 7. An explicit --target is kept and not replaced by the default triple.
@@ -374,6 +442,91 @@ fi
 if grep -F -- "--target aarch64-apple-darwin" "$REPORT/args" >/dev/null; then
   fail "custom target: default target was also injected"
 fi
+assert_verified_once x86_64-apple-darwin "custom target"
+assert_no_resign "custom target"
 pass "explicit --target"
+
+# 8. The macOS bundle config asks Tauri for an ad-hoc signature.
+CONF=$(CDPATH= cd -- "$HERE/../.." && pwd)/src-tauri/tauri.bundle.conf.json
+if ! grep -F -- '"signingIdentity": "-"' "$CONF" >/dev/null; then
+  fail "config: signingIdentity is not ad-hoc \"-\""
+fi
+if ! grep -F -- '"hardenedRuntime": false' "$CONF" >/dev/null; then
+  fail "config: hardenedRuntime is not false"
+fi
+pass "signingIdentity config"
+
+# 9. A failed deep verify re-signs in place and does not publish the old DMG.
+setup
+export BUNX_MODE=success
+export CODESIGN_MODE=verify-fail
+run_bundle
+[ "$rc" -eq 0 ] || fail "re-sign: exit $rc"
+assert_final_lines "re-sign"
+assert_no_rw "re-sign"
+assert_volumes "re-sign"
+assert_kept_noise "re-sign"
+assert_no_fallback_warning "re-sign"
+signed="$ROOT/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/you-brain.app"
+if ! grep -F -x -- "--force --deep --sign - $signed" "$CODESIGN_LOG" >/dev/null; then
+  fail "re-sign: missing codesign --force --deep --sign -"
+fi
+verify_count=$(grep -F -c -x -- "--verify --deep --strict $signed" "$CODESIGN_LOG" || true)
+if [ "$verify_count" -ne 2 ]; then
+  fail "re-sign: expected 2 verify calls, got $verify_count"
+fi
+if ! grep -F -x "you-brain: Tauri 签名未通过 codesign --verify --deep --strict，改为整包 ad-hoc 重签" "$ERR" >/dev/null; then
+  fail "re-sign: missing re-sign warning"
+fi
+if ! grep -F -- "-srcfolder $signed" "$HDIUTIL_LOG" >/dev/null; then
+  fail "re-sign: hdiutil create did not use the signed app"
+fi
+if ! grep -F -- "-format UDZO" "$HDIUTIL_LOG" >/dev/null; then
+  fail "re-sign: hdiutil create did not request UDZO"
+fi
+if ! grep -F -x "you-brain: 重签后的 DMG 生成失败，已丢弃旧 DMG" "$ERR" >/dev/null; then
+  fail "re-sign: missing dmg refresh failure warning"
+fi
+[ ! -f "$REPO/dist/app.noindex/you-brain_0.1.0_aarch64.dmg" ] || fail "re-sign: stale product dmg was published"
+[ ! -f "$ROOT/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/you-brain_0.1.0_aarch64.dmg" ] || fail "re-sign: stale product dmg left in the bundle dir"
+pass "re-sign drops stale dmg"
+
+# 10. DMG fallback still re-signs, and does not invent a disk image.
+setup
+export BUNX_MODE=dmg-fail
+export CODESIGN_MODE=verify-fail
+run_bundle
+[ "$rc" -eq 0 ] || fail "dmg-fail re-sign: exit $rc"
+assert_final_lines "dmg-fail re-sign"
+assert_no_rw "dmg-fail re-sign"
+signed="$ROOT/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/you-brain.app"
+if ! grep -F -x -- "--force --deep --sign - $signed" "$CODESIGN_LOG" >/dev/null; then
+  fail "dmg-fail re-sign: missing codesign --force"
+fi
+if grep -F -- " -srcfolder " "$HDIUTIL_LOG" >/dev/null; then
+  fail "dmg-fail re-sign: hdiutil create ran without a product dmg"
+fi
+if ! grep -F -x "you-brain: DMG 打包失败，已回退为仅 .app" "$ERR" >/dev/null; then
+  fail "dmg-fail re-sign: missing fallback warning"
+fi
+pass "dmg fallback re-sign"
+
+# 11. A re-sign that still fails verify does not publish the .app.
+setup
+export BUNX_MODE=success
+export CODESIGN_MODE=verify-always-fail
+run_bundle
+[ "$rc" -ne 0 ] || fail "verify still failing: expected non-zero exit"
+assert_empty_stdout "verify still failing"
+assert_no_rw "verify still failing"
+[ ! -d "$REPO/dist/app.noindex/you-brain.app" ] || fail "verify still failing: dest app exists"
+signed="$ROOT/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/you-brain.app"
+if ! grep -F -x -- "--force --deep --sign - $signed" "$CODESIGN_LOG" >/dev/null; then
+  fail "verify still failing: missing codesign --force"
+fi
+if grep -F -- " -srcfolder " "$HDIUTIL_LOG" >/dev/null; then
+  fail "verify still failing: dmg was refreshed before verify passed"
+fi
+pass "re-sign verify failure"
 
 echo "bundle.test.sh: $passed passed, 0 failed"
