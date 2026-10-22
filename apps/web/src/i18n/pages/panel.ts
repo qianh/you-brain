@@ -6,7 +6,13 @@ export const zh = {
   panelTopicsLabel: "话题",
   panelMoreWarnings: "还有 {count} 项",
   panelEmptyBody: "打开 AI 工具开始使用",
+  panelEmptyAction: "去接入",
   panelLoadError: "没能读取面板数据",
+  panelAllTopics: "查看全部 {count} 个话题",
+  panelGuideDone: "已完成 {done}/{total} · {names}",
+  panelGuideDrive: "Google Drive",
+  panelGuideModel: "模型",
+  panelGuideCapture: "采集",
 } as const;
 
 export const en: { [K in keyof typeof zh]: string } = {
@@ -17,5 +23,11 @@ export const en: { [K in keyof typeof zh]: string } = {
   panelTopicsLabel: "Topics",
   panelMoreWarnings: "{count} more",
   panelEmptyBody: "Open an AI tool to get started",
+  panelEmptyAction: "Connect",
   panelLoadError: "Couldn’t load the panel",
+  panelAllTopics: "View all {count} topics",
+  panelGuideDone: "{done}/{total} done · {names}",
+  panelGuideDrive: "Google Drive",
+  panelGuideModel: "Model",
+  panelGuideCapture: "Capture",
 };

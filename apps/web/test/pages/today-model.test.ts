@@ -6,7 +6,9 @@ import {
   formatTodayHeading,
   groupSessionsByHour,
   guideSteps,
+  foldGuideSteps,
   guideSummary,
+  joinGuideNames,
   readTodayMode,
   summarizeToday,
   topicZone,
@@ -128,6 +130,33 @@ describe("guideSteps", () => {
       lastSyncAt: "2026-10-21T08:00:00+08:00",
     });
     expect(done.every((step) => step.done)).toBe(true);
+    expect(guideSummary(done).visible).toBe(false);
+  });
+
+  test("collapses finished steps into a summary while one step is still open", () => {
+    const fresh = guideSteps({
+      driveReachable: null,
+      warnings: [{ code: "LLM_NOT_CONFIGURED" }],
+      sessionCount: 0,
+      lastSyncAt: null,
+    });
+    expect(foldGuideSteps(fresh)).toEqual({ done: [], pending: fresh, collapsed: false });
+
+    const half = guideSteps({
+      driveReachable: true,
+      warnings: [],
+      sessionCount: 0,
+      lastSyncAt: null,
+    });
+    const fold = foldGuideSteps(half);
+    expect(fold.collapsed).toBe(true);
+    expect(fold.done.map((step) => step.id)).toEqual(["drive", "model"]);
+    expect(fold.pending.map((step) => step.id)).toEqual(["capture"]);
+    expect(joinGuideNames(["Google Drive", "模型"], "、")).toBe("Google Drive、模型");
+    expect(joinGuideNames(["Google Drive", "Model"], ", ")).toBe("Google Drive, Model");
+
+    const done = half.map((step) => ({ ...step, done: true }));
+    expect(foldGuideSteps(done).collapsed).toBe(false);
     expect(guideSummary(done).visible).toBe(false);
   });
 });

@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { useDaemon } from "../daemon-context.js";
 import { Banner } from "../components/banner.js";
 import { Button, IconButton } from "../components/button.js";
 import { Card } from "../components/card.js";
-import { EmptyState } from "../components/empty.js";
 import { BrandMark, Icon } from "../components/icons.js";
 import { SkeletonRow } from "../components/skeleton.js";
 import { StatusCapsule } from "../components/status-capsule.js";
@@ -21,7 +20,7 @@ import { browserWindowBridge, quitShell } from "../lib/window.js";
 import type { MessageKey } from "../i18n/messages.js";
 import { StartGuide } from "./today/guide.js";
 import { guideSteps } from "./today/model.js";
-import { clockTime, countSessionsByTopic, panelShortcut, recentTopics, takeWithRest, topicDotClass } from "./panel/model.js";
+import { clockTime, countSessionsByTopic, panelShortcut, panelTopicSlice, takeWithRest, topicDotClass } from "./panel/model.js";
 import { openAppPath } from "./panel/open.js";
 
 export function PanelPage() {
@@ -32,7 +31,7 @@ export function PanelPage() {
   const sessions = today?.sessions ?? [];
   const ordered = useMemo(() => sortSessionsByTime(sessions), [sessions]);
   const todaySlice = takeWithRest(ordered, 4);
-  const topicSlice = recentTopics(topics, 3);
+  const topicSlice = panelTopicSlice(topics);
   const counts = countSessionsByTopic(sessions);
   const warnings = takeWithRest(status?.warnings ?? [], 2);
   const firstLoad = loading && today === null && status === null;
@@ -129,7 +128,7 @@ export function PanelPage() {
           </IconButton>
         </span>
       </header>
-      <div className="panel-scroll">
+      <PanelScroll>
         {showSkeleton ? <PanelSkeleton /> : null}
         {failed ? (
           <Banner
@@ -154,7 +153,17 @@ export function PanelPage() {
                 </Button>
               </div>
               {sessions.length === 0 ? (
-                <EmptyState size="sm" icon="sparkles" title={t("todayEmptyTitle")} description={t("panelEmptyBody")} />
+                <div className="panel-empty">
+                  <span className="panel-empty-icon" aria-hidden="true">
+                    <Icon name="sparkles" size={16} />
+                  </span>
+                  <span className="panel-empty-text" title={`${t("todayEmptyTitle")}。${t("panelEmptyBody")}`}>
+                    {t("todayEmptyTitle")}
+                  </span>
+                  <Button size="sm" variant="ghost" onClick={() => openMain(settingsHref("integrations"))}>
+                    {t("panelEmptyAction")}
+                  </Button>
+                </div>
               ) : (
                 todaySlice.visible.map((session) => (
                   <div key={session.sessionKey} className="panel-session" title={session.title}>
@@ -168,18 +177,19 @@ export function PanelPage() {
               )}
               {todaySlice.rest > 0 ? <p className="panel-more">{t("panelMoreSessions", { count: todaySlice.rest })}</p> : null}
             </Card>
-            {topicSlice.length > 0 ? (
+            {topicSlice.total > 0 ? (
               <Card>
                 <div className="panel-card-head">
                   <p className="panel-card-name">{t("panelTopicsLabel")}</p>
                 </div>
-                {topicSlice.map((topic) => {
+                {topicSlice.visible.map((topic) => {
                   const count = counts.get(topic.topicId) ?? 0;
                   return (
                     <button
                       key={topic.topicId}
                       type="button"
                       className="panel-topic"
+                      title={topic.name}
                       onClick={() => openMain(topicHref(topic.zone, topic.topicId))}
                     >
                       <i className={`dot ${topicDotClass(topic.status)}`} aria-hidden="true" />
@@ -190,6 +200,11 @@ export function PanelPage() {
                     </button>
                   );
                 })}
+                {topicSlice.rest > 0 ? (
+                  <button type="button" className="panel-more panel-more-link" onClick={() => openMain("/topics")}>
+                    {t("panelAllTopics", { count: topicSlice.total })}
+                  </button>
+                ) : null}
               </Card>
             ) : null}
             {warnings.visible.length > 0 ? (
@@ -245,7 +260,7 @@ export function PanelPage() {
             ) : null}
           </>
         ) : null}
-      </div>
+      </PanelScroll>
       <footer className="panel-footer">
         <Button size="sm" variant="ghost" icon={<Icon name="refresh" />} loading={syncing} onClick={() => void sync()}>
           {t("cmdSync")}
@@ -265,6 +280,41 @@ export function PanelPage() {
           </Button>
         </div>
       </footer>
+    </div>
+  );
+}
+
+function PanelScroll({ children }: { children: ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [fade, setFade] = useState(false);
+  const measure = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    const overflow = el.scrollHeight - el.clientHeight > 1;
+    const atEnd = el.scrollTop + el.clientHeight >= el.scrollHeight - 2;
+    setFade(overflow && !atEnd);
+  }, []);
+  useLayoutEffect(() => {
+    measure();
+  });
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    measure();
+    el.addEventListener("scroll", measure, { passive: true });
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => {
+      el.removeEventListener("scroll", measure);
+      observer.disconnect();
+    };
+  }, [measure]);
+  return (
+    <div className="panel-scroll-host">
+      <div className="panel-scroll" ref={ref}>
+        {children}
+      </div>
+      {fade ? <div className="panel-scroll-fade" aria-hidden="true" /> : null}
     </div>
   );
 }

@@ -563,6 +563,19 @@ function statusBody(): unknown {
       logs: [],
     };
   }
+  if (scenario === "half") {
+    return {
+      deviceId: MAC,
+      drive: { reachable: true, accountEmail },
+      sync: { lastSyncAt: null, pendingOutbox: 0 },
+      search: { ready: false, documents: 0 },
+      refine: { pending: 0, lastError: null },
+      consolidation: { enabled: false, lastFinishedAt: null, stale: false, status: "disabled" },
+      warnings: [],
+      captures: [],
+      logs: [],
+    };
+  }
   const healthy = scenario === "healthy";
   return {
     deviceId: MAC,
@@ -885,7 +898,7 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
   }
   if (path === "/api/status" && request.method === "GET") return json(statusBody());
   if (path === "/api/reminders" && request.method === "GET") {
-    if (scenario === "fresh" || scenario === "healthy") return json({ reminders: [] });
+    if (scenario === "fresh" || scenario === "healthy" || scenario === "half") return json({ reminders: [] });
     return json({
       reminders: [
         {
@@ -1002,6 +1015,90 @@ if (scenario === "fresh") {
   conclusions.length = 0;
   todos.length = 0;
   accountEmail = null;
+}
+
+if (scenario === "half") {
+  sessions.length = 0;
+  conclusions.length = 0;
+  todos.length = 0;
+  topics.length = 0;
+  topics.push(
+    {
+      topicId: "topic-ws",
+      name: "dzg-hl-platform-front WebSocket 连接失败",
+      aliases: [],
+      status: "active",
+      statusBy: "auto",
+      summary: "前端连不上网关。",
+      nextStep: "核对网关地址。",
+      lastActive: AFTERNOON,
+      zone: "active",
+      mergedInto: null,
+      createdTs: ago(1 * DAY),
+      lastUserOpAt: null,
+      userLocked: false,
+    },
+    {
+      topicId: "topic-design",
+      name: "you-brain 设计",
+      aliases: [],
+      status: "active",
+      statusBy: "user",
+      summary: "菜单栏面板。",
+      nextStep: "",
+      lastActive: NOON,
+      zone: "active",
+      mergedInto: null,
+      createdTs: ago(3 * DAY),
+      lastUserOpAt: MORNING,
+      userLocked: true,
+    },
+    {
+      topicId: "topic-trip",
+      name: "京都旅行",
+      aliases: [],
+      status: "follow_up",
+      statusBy: "auto",
+      summary: "四天行程。",
+      nextStep: "订返程。",
+      lastActive: MORNING,
+      zone: "active",
+      mergedInto: null,
+      createdTs: ago(4 * DAY),
+      lastUserOpAt: null,
+      userLocked: false,
+    },
+    {
+      topicId: "topic-tax",
+      name: "税务整理",
+      aliases: [],
+      status: "parked",
+      statusBy: "user",
+      summary: "差三张发票。",
+      nextStep: "",
+      lastActive: "2026-08-02T10:40:00+08:00",
+      zone: "history",
+      mergedInto: null,
+      createdTs: "2026-07-20T09:00:00+08:00",
+      lastUserOpAt: "2026-08-03T09:00:00+08:00",
+      userLocked: true,
+    },
+    {
+      topicId: "topic-books",
+      name: "读书笔记",
+      aliases: [],
+      status: "done",
+      statusBy: "user",
+      summary: "笔记已收进数字分身。",
+      nextStep: "",
+      lastActive: "2026-05-01T18:00:00+08:00",
+      zone: "history",
+      mergedInto: null,
+      createdTs: "2026-04-02T12:00:00+08:00",
+      lastUserOpAt: "2026-05-02T09:00:00+08:00",
+      userLocked: true,
+    },
+  );
 }
 
 Bun.serve({

@@ -3,7 +3,9 @@ import { describe, expect, test } from "bun:test";
 import {
   clockTime,
   countSessionsByTopic,
+  PANEL_TOPIC_LIMIT,
   panelShortcut,
+  panelTopicSlice,
   recentTopics,
   takeWithRest,
   topicDotClass,
@@ -34,6 +36,29 @@ describe("countSessionsByTopic", () => {
     ]);
     expect(counts.get("a")).toBe(2);
     expect(counts.has("null")).toBe(false);
+  });
+});
+
+describe("panelTopicSlice", () => {
+  test("shows three topics and counts the rest", () => {
+    const slice = panelTopicSlice(
+      [
+        { topicId: "long", name: "dzg-hl-platform-front WebSocket 连接失败", lastActive: "2026-10-22T16:00:00+08:00" },
+        { topicId: "a", name: "甲", lastActive: "2026-10-22T12:00:00+08:00" },
+        { topicId: "b", name: "乙", lastActive: "2026-10-22T09:00:00+08:00" },
+        { topicId: "c", name: "丙", lastActive: "2026-08-02T10:00:00+08:00" },
+        { topicId: "d", name: "丁", lastActive: "2026-05-01T18:00:00+08:00" },
+      ],
+      PANEL_TOPIC_LIMIT,
+    );
+    expect(slice.visible.map((topic) => topic.topicId)).toEqual(["long", "a", "b"]);
+    expect(slice.rest).toBe(2);
+    expect(slice.total).toBe(5);
+    expect(panelTopicSlice([{ topicId: "only", name: "仅此", lastActive: null }])).toEqual({
+      visible: [{ topicId: "only", name: "仅此", lastActive: null }],
+      rest: 0,
+      total: 1,
+    });
   });
 });
 

@@ -248,3 +248,28 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.today-guide.is-mini .today-guide-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: var(--h-row-compact);
+  padding: 0 var(--sp-3);
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.today-guide.is-mini .today-guide-summary-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+}
+.today-guide.is-mini .today-guide-summary > svg { flex: none; color: var(--text-3); }
+.today-guide.is-mini .today-guide-summary:hover { background: var(--hover); }
+.today-guide.is-mini .today-guide-summary:focus-visible { outline-offset: -2px; }

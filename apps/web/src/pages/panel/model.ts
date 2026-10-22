@@ -8,7 +8,9 @@ export interface RankedTopic {
   lastActive: string | null;
 }
 
-export function recentTopics<T extends RankedTopic>(topics: readonly T[], limit = 3): T[] {
+export const PANEL_TOPIC_LIMIT = 3;
+
+export function recentTopics<T extends RankedTopic>(topics: readonly T[], limit = PANEL_TOPIC_LIMIT): T[] {
   return [...topics]
     .sort((left, right) => {
       const delta = sessionStamp(right.lastActive) - sessionStamp(left.lastActive);
@@ -30,6 +32,16 @@ export function countSessionsByTopic(sessions: readonly { topicId: string | null
 export function takeWithRest<T>(items: readonly T[], limit: number): { visible: T[]; rest: number } {
   const cap = Math.max(0, limit);
   return { visible: items.slice(0, cap), rest: Math.max(0, items.length - cap) };
+}
+
+/** Most recent topics for the panel, plus how many the "view all" line must cover. */
+export function panelTopicSlice<T extends RankedTopic>(
+  topics: readonly T[],
+  limit = PANEL_TOPIC_LIMIT,
+): { visible: T[]; rest: number; total: number } {
+  const ranked = recentTopics(topics, topics.length);
+  const slice = takeWithRest(ranked, limit);
+  return { ...slice, total: topics.length };
 }
 
 export function clockTime(iso: string | null, timeZone: string): string {

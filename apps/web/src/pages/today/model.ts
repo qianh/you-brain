@@ -121,6 +121,25 @@ export function guideSummary(steps: readonly { done: boolean }[]): { done: numbe
   return { done, total: steps.length, visible: done < steps.length };
 }
 
+/** Completed steps collapse into one summary only while unfinished steps remain. */
+export function foldGuideSteps<T extends { done: boolean }>(steps: readonly T[]): {
+  done: T[];
+  pending: T[];
+  collapsed: boolean;
+} {
+  const done: T[] = [];
+  const pending: T[] = [];
+  for (const step of steps) {
+    if (step.done) done.push(step);
+    else pending.push(step);
+  }
+  return { done, pending, collapsed: done.length > 0 && pending.length > 0 };
+}
+
+export function joinGuideNames(names: readonly string[], separator: string): string {
+  return names.filter((name) => name !== "").join(separator);
+}
+
 export interface TimedSession {
   sessionKey: string;
   updatedAt: string | null;
