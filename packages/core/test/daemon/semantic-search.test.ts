@@ -154,8 +154,9 @@ function start(
     watch: false,
     signals: false,
     ...extra,
-  }).then((daemon) => {
+  }).then(async (daemon) => {
     started.push(daemon);
+    await daemon.settled();
     return daemon;
   });
 }

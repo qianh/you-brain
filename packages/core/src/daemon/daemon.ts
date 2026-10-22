@@ -116,6 +116,7 @@ import {
 import { allocateCopied, appendCopied } from "./events.js";
 import { openGoogleDrive } from "./google.js";
 import { acquireDaemonLock } from "./lock.js";
+import { createStartupLog, type StartupLog } from "./startup-log.js";
 import {
   preferLocalLlm,
   readRolesFile,
@@ -127,6 +128,10 @@ import type { SecretStore } from "../auth/index.js";
 
 const APP_VERSION = "0.1.0";
 const BACKFILL_CURSOR = "capture.backfill";
+/** A stuck Drive read must not hold `/api/status` longer than the shell's read timeout. */
+const STATUS_DRIVE_WAIT_MS = 1_000;
+/** Stop proceeds even if Drive or the model probe is still hanging. */
+const BACKGROUND_STOP_MS = 3_000;
 
 export interface DaemonOptions {
   homeDir?: string;
@@ -308,6 +313,14 @@ export class YouBrainDaemon {
   #stopped = false;
   #abort = new AbortController();
   #started = false;
+  /** False until Drive open/register has finished. Status reports reachable `null`. */
+  #driveKnown = false;
+  /** False until LLM setup has finished. Status omits the setup warning. */
+  #llmKnown = false;
+  /** Drive and model setup. Stop does not wait on this past {@link BACKGROUND_STOP_MS}. */
+  #online: Promise<void> = Promise.resolve();
+  /** `#online` plus the first scan. `settled()` waits for this. */
+  #services: Promise<void> = Promise.resolve();
   #stopPromise: Promise<void> | null = null;
   #resolveClosed: () => void = () => undefined;
   #onSignal: (() => void) | null = null;
@@ -344,28 +357,28 @@ export class YouBrainDaemon {
   }
 
   async start(): Promise<void> {
-    const loaded = await loadLocalConfig({
-      homeDir: this.#homeDir,
-      platform: this.#platform,
-      env: this.#env,
-      ...(this.#options.hostname ? { hostname: this.#options.hostname } : {}),
-    });
+    const log = createStartupLog();
+    const loaded = await log.time("loadLocalConfig", () =>
+      loadLocalConfig({
+        homeDir: this.#homeDir,
+        platform: this.#platform,
+        env: this.#env,
+        ...(this.#options.hostname ? { hostname: this.#options.hostname } : {}),
+      }),
+    );
     this.#local = loaded.config;
     this.#paths = loaded.paths;
     this.#configFile = loaded.configFile;
-    const lock = await acquireDaemonLock(this.#paths.lockFile);
+    const lock = await log.time("acquireDaemonLock", () => acquireDaemonLock(this.#paths.lockFile));
     this.#lockRelease = lock.release;
-    this.#shared = await readSharedFile(
-      join(this.#paths.dataDir, "shared.json"),
-      createDefaultSharedConfig(),
+    this.#shared = await log.time("readShared", () =>
+      readSharedFile(join(this.#paths.dataDir, "shared.json"), createDefaultSharedConfig()),
     );
-    this.#roles = await readRolesFile(
-      join(this.#paths.dataDir, "roles.json"),
-      createDefaultRoles(),
+    this.#roles = await log.time("readRoles", () =>
+      readRolesFile(join(this.#paths.dataDir, "roles.json"), createDefaultRoles()),
     );
     this.#applyZone();
-    this.#store = new SqliteStore(this.#paths.stateFile);
-    await this.#openDrive();
+    this.#store = await log.time("openStore", () => new SqliteStore(this.#paths.stateFile));
     this.#log = new EventLog(this.#store, this.#local.deviceId, {
       now: () => this.#clock.now(),
     });
@@ -377,60 +390,23 @@ export class YouBrainDaemon {
       consent,
       codingPath: () => this.#codingVariantPath(),
     });
-    if (this.#drive) {
-      this.#sync = new ProtocolSync({
-        drive: this.#drive,
-        store: this.#store,
-        device: this.#identity(),
-        listener: {
-          onTopicsChanged: () => {
-            this.#onTopicsChanged();
-          },
-          onInboxChanged: (files) => this.#indexInbox(files),
-          onDigitalTwinChanged: () => {
-            this.#portraitSoon = true;
-          },
-          onConfigChanged: (update) => this.#onConfigChanged(update),
-        },
-        now: () => this.#clock.now(),
-      });
-      this.#uploader = new UploadService({
-        drive: this.#drive,
-        index: this.#uploadIndex(),
-        deviceId: this.#local.deviceId,
-        clock: { now: () => this.#clock.nowMs() },
-      });
-      await this.#mountSearch();
-      this.#portrait = new PortraitService({
-        drive: this.#drive,
-        store: this.#store,
-        paths: this.#paths,
-        config: {
-          variants: this.#shared.portrait.variants,
-          snapshotPattern: this.#shared.portrait.snapshotPattern,
-        },
-        driveRoot: this.#local.driveRoot,
-        consent,
-        homeDir: this.#homeDir,
-        managedStatePath,
-      });
-      try {
-        await this.#sync.register();
-      } catch {
-        this.#driveReachable = false;
-      }
+    if (this.#llmOverride !== undefined) {
+      this.#llm = this.#llmOverride;
+      this.#llmKnown = true;
     }
-    this.#llm =
-      this.#llmOverride !== undefined ? this.#llmOverride : await this.#createLlm();
-    this.#mountOutput();
-    this.#rememberDevice();
-    const http = await startDaemonHttp({
-      dataDir: this.#paths.dataDir,
-      deps: this.#deps(),
-      hub: this.changes,
-      ...(this.#options.port !== undefined ? { port: this.#options.port } : {}),
-      ...(this.#options.staticDir ? { staticDir: this.#options.staticDir } : {}),
+    await log.time("mountOutput", () => {
+      this.#mountOutput();
     });
+    this.#rememberDevice();
+    const http = await log.time("http", () =>
+      startDaemonHttp({
+        dataDir: this.#paths.dataDir,
+        deps: this.#deps(),
+        hub: this.changes,
+        ...(this.#options.port !== undefined ? { port: this.#options.port } : {}),
+        ...(this.#options.staticDir ? { staticDir: this.#options.staticDir } : {}),
+      }),
+    );
     this.#http = http;
     this.port = http.port;
     this.token = http.token;
@@ -450,12 +426,109 @@ export class YouBrainDaemon {
       process.on("SIGINT", this.#onSignal);
       process.on("SIGTERM", this.#onSignal);
     }
-    await this.#rewatch();
+    this.#online = this.#openServices(log, consent, managedStatePath);
+    this.#services = this.#online.then(async () => {
+      if (this.#stopped) return;
+      this.#arm();
+      if (this.#stopped) return;
+      await log.time("scan", () => this.scan().catch(() => undefined));
+    });
+  }
+
+  /**
+   * Drive, search, model probe, watchers, and coding injection.
+   * Failures are logged and do not stop the HTTP server.
+   */
+  async #openServices(
+    log: StartupLog,
+    consent: FilePortraitConsentStore,
+    managedStatePath: string,
+  ): Promise<void> {
+    try {
+      if (this.#stopped) return;
+      await log.time("openDrive", () => this.#openDrive());
+      if (this.#stopped) return;
+      if (this.#drive && this.#store) {
+        this.#sync = new ProtocolSync({
+          drive: this.#drive,
+          store: this.#store,
+          device: this.#identity(),
+          listener: {
+            onTopicsChanged: () => {
+              this.#onTopicsChanged();
+            },
+            onInboxChanged: (files) => this.#indexInbox(files),
+            onDigitalTwinChanged: () => {
+              this.#portraitSoon = true;
+            },
+            onConfigChanged: (update) => this.#onConfigChanged(update),
+          },
+          now: () => this.#clock.now(),
+        });
+        this.#uploader = new UploadService({
+          drive: this.#drive,
+          index: this.#uploadIndex(),
+          deviceId: this.#local.deviceId,
+          clock: { now: () => this.#clock.nowMs() },
+        });
+        this.#portrait = new PortraitService({
+          drive: this.#drive,
+          store: this.#store,
+          paths: this.#paths,
+          config: {
+            variants: this.#shared.portrait.variants,
+            snapshotPattern: this.#shared.portrait.snapshotPattern,
+          },
+          driveRoot: this.#local.driveRoot,
+          consent,
+          homeDir: this.#homeDir,
+          managedStatePath,
+        });
+        const sync = this.#sync;
+        if (!sync) {
+          this.#driveReachable = false;
+        } else {
+          try {
+            await log.time("syncRegister", () => sync.register());
+            if (!this.#stopped) this.#driveReachable = true;
+          } catch {
+            this.#driveReachable = false;
+          }
+        }
+        if (!this.#stopped) {
+          try {
+            await log.time("mountSearch", () => this.#mountSearch());
+          } catch {
+            this.#search = null;
+          }
+        }
+      } else {
+        this.#driveReachable = false;
+      }
+    } catch (error) {
+      this.#driveReachable = false;
+      const message = error instanceof Error ? error.message : "failed";
+      console.error(`startup: background ${message}`);
+    } finally {
+      this.#driveKnown = true;
+    }
     if (this.#stopped) return;
-    await this.#ensureCoding();
+    if (!this.#llmKnown) {
+      try {
+        this.#llm = await log.time("createLlm", () => this.#createLlm());
+      } catch {
+        this.#llm = null;
+      }
+      this.#llmKnown = true;
+    }
     if (this.#stopped) return;
-    this.#arm();
-    if (!this.#stopped) void this.scan();
+    try {
+      await log.time("rewatch", () => this.#rewatch());
+    } catch {
+      // A missing source directory is skipped inside #rewatch.
+    }
+    if (this.#stopped) return;
+    await log.time("ensureCoding", () => this.#ensureCoding());
   }
 
   scan(extra?: { includeSubagents?: boolean }): Promise<void> {
@@ -466,6 +539,7 @@ export class YouBrainDaemon {
   }
 
   async settled(): Promise<void> {
+    await this.#services;
     await this.#chain;
     await this.#output?.whenIdle();
   }
@@ -478,6 +552,10 @@ export class YouBrainDaemon {
   async #stopBody(): Promise<void> {
     this.#stopped = true;
     this.#abort.abort();
+    await Promise.race([
+      this.#online.catch(() => undefined),
+      delay(BACKGROUND_STOP_MS),
+    ]);
     this.#timer?.cancel();
     this.#timer = null;
     if (this.#watchTimer) {
@@ -1242,13 +1320,13 @@ export class YouBrainDaemon {
   async #status(): Promise<StatusResponse> {
     const pending = this.#retry.pending();
     const warnings: StatusResponse["warnings"] = [];
-    if (!this.#drive) {
+    if (this.#driveKnown && !this.#drive) {
       warnings.push({
         code: "AUTH_REQUIRED",
         message: "尚未登录 Google Drive，本地 API 可用，上传和同步会在登录后继续",
       });
     }
-    if (!this.#llm) {
+    if (this.#llmKnown && !this.#llm) {
       warnings.push(
         this.#llmWarning ?? {
           code: "LLM_NOT_CONFIGURED",
@@ -1285,7 +1363,7 @@ export class YouBrainDaemon {
     return {
       deviceId: this.#local.deviceId,
       drive: {
-        reachable: this.#drive ? this.#driveReachable : false,
+        reachable: this.#driveKnown ? (this.#drive ? this.#driveReachable : false) : null,
         accountEmail: this.#local.account.email || null,
       },
       sync: {
@@ -1312,9 +1390,13 @@ export class YouBrainDaemon {
       stale: false,
       status: "ok",
     } as const;
-    if (!this.#drive) return idle;
+    if (!this.#drive || !this.#driveKnown || !this.#driveReachable) return idle;
     try {
-      const object = await this.#drive.readPath(DRIVE_PATHS.consolidateLease);
+      const read = this.#drive.readPath(DRIVE_PATHS.consolidateLease).catch(() => null);
+      const object = await Promise.race([
+        read,
+        delay(STATUS_DRIVE_WAIT_MS).then(() => undefined),
+      ]);
       if (!object) return idle;
       const parsed = JSON.parse(object.bytes.toString("utf8")) as { finishedAt?: unknown };
       const finished = typeof parsed.finishedAt === "string" ? parsed.finishedAt : null;

@@ -42,6 +42,8 @@ struct ShellState {
     panel_target: Mutex<Option<String>>,
     main_target: Mutex<Option<String>>,
     launch_attempt: Mutex<u32>,
+    /// Pid of the daemon process this shell started and has not yet seen go healthy.
+    launching: Mutex<Option<u32>>,
 }
 
 static BLUR_GUARD_UNTIL: AtomicU64 = AtomicU64::new(0);
@@ -85,6 +87,7 @@ pub fn run() {
                 panel_target: Mutex::new(None),
                 main_target: Mutex::new(None),
                 launch_attempt: Mutex::new(0),
+                launching: Mutex::new(None),
             });
             install_tray(app)?;
             let data_dir = current_data_dir();
@@ -166,6 +169,11 @@ fn supervise(app: tauri::AppHandle) {
             }
             Err(message) => {
                 eprintln!("you-brain: {message}");
+                // A process that is still booting is not "后台没有运行".
+                if daemon_is_starting(&app, &data_dir) {
+                    thread::sleep(Duration::from_secs(5));
+                    continue;
+                }
                 set_endpoint(&app, None);
                 show_tray(&app, status_view::disconnected());
                 if !announced_failure {
@@ -183,15 +191,41 @@ fn recv_poll(rx: &Receiver<()>) {
     while rx.try_recv().is_ok() {}
 }
 
+fn launching_pid(app: &tauri::AppHandle) -> Option<u32> {
+    app.state::<ShellState>()
+        .launching
+        .lock()
+        .ok()
+        .and_then(|guard| *guard)
+}
+
+fn daemon_is_starting(app: &tauri::AppHandle, data_dir: &std::path::Path) -> bool {
+    if launching_pid(app).is_some_and(daemon::process_is_alive) {
+        return true;
+    }
+    let (state, _) = inspect_daemon(data_dir);
+    state == daemon::EndpointState::Unreachable
+}
+
 fn ensure_daemon(
     app: &tauri::AppHandle,
     data_dir: &std::path::Path,
 ) -> Result<DaemonEndpoint, String> {
-    if let Some(endpoint) = read_healthy(data_dir) {
+    let (state, endpoint) = inspect_daemon(data_dir);
+    if let Some(endpoint) = endpoint.filter(|_| !daemon::should_launch(state)) {
         if let Ok(mut attempt) = app.state::<ShellState>().launch_attempt.lock() {
             *attempt = 0;
         }
+        if let Ok(mut launching) = app.state::<ShellState>().launching.lock() {
+            *launching = None;
+        }
         return Ok(endpoint);
+    }
+    let child_alive = launching_pid(app).is_some_and(daemon::process_is_alive);
+    if daemon::supervise_action(state, child_alive) == daemon::SuperviseAction::Poll {
+        return wait_healthy(data_dir, DAEMON_WAIT).ok_or_else(|| {
+            "daemon 进程已在，HTTP 尚未就绪".to_string()
+        });
     }
     let sequence = locate_launch(app)?;
     let attempt = app
@@ -202,8 +236,11 @@ fn ensure_daemon(
         .unwrap_or(0);
     let spec = spec_for_attempt(&sequence, attempt);
     let resources = app.path().resource_dir().ok();
-    daemon::spawn_detached(spec, data_dir, resources.as_deref())
+    let pid = daemon::spawn_detached(spec, data_dir, resources.as_deref())
         .map_err(|error| format!("拉起 daemon 失败：{error}"))?;
+    if let Ok(mut launching) = app.state::<ShellState>().launching.lock() {
+        *launching = Some(pid);
+    }
     if let Ok(mut guard) = app.state::<ShellState>().launch_attempt.lock() {
         *guard = attempt.saturating_add(1);
     }

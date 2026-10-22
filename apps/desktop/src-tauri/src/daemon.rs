@@ -140,6 +140,25 @@ pub fn should_launch(state: EndpointState) -> bool {
     !matches!(state, EndpointState::Healthy)
 }
 
+/// What the shell should do on the next supervise pass.
+/// A live process is polled, not started again, so a slow boot cannot fork a second daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuperviseAction {
+    Ready,
+    Poll,
+    Spawn,
+}
+
+pub fn supervise_action(state: EndpointState, child_alive: bool) -> SuperviseAction {
+    if state == EndpointState::Healthy {
+        return SuperviseAction::Ready;
+    }
+    if child_alive || state == EndpointState::Unreachable {
+        return SuperviseAction::Poll;
+    }
+    SuperviseAction::Spawn
+}
+
 pub fn status_is_healthy(http_status: Option<u16>) -> bool {
     matches!(http_status, Some(code) if (200..300).contains(&code))
 }
@@ -290,7 +309,7 @@ pub fn spawn_detached(
     spec: &LaunchSpec,
     data_dir: &Path,
     resource_dir: Option<&Path>,
-) -> std::io::Result<()> {
+) -> std::io::Result<u32> {
     let mut command = match spec {
         LaunchSpec::Sidecar(path) => {
             let mut command = Command::new(path);
@@ -317,8 +336,14 @@ pub fn spawn_detached(
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
-    let _child = command.spawn()?;
-    Ok(())
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    // Reap the child. A dropped Child stays a zombie, and kill(pid, 0) still succeeds,
+    // so the shell would treat a dead daemon as still starting and never relaunch it.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(pid)
 }
 
 pub fn process_is_alive(pid: u32) -> bool {
@@ -557,6 +582,42 @@ mod tests {
         assert!(status_is_healthy(Some(204)));
         assert!(!status_is_healthy(Some(401)));
         assert!(!status_is_healthy(None));
+    }
+
+    #[test]
+    fn a_live_daemon_is_not_started_twice() {
+        assert_eq!(
+            supervise_action(EndpointState::Healthy, false),
+            SuperviseAction::Ready
+        );
+        assert_eq!(
+            supervise_action(EndpointState::Healthy, true),
+            SuperviseAction::Ready
+        );
+        assert_eq!(
+            supervise_action(EndpointState::Missing, true),
+            SuperviseAction::Poll
+        );
+        assert_eq!(
+            supervise_action(EndpointState::Unreachable, false),
+            SuperviseAction::Poll
+        );
+        assert_eq!(
+            supervise_action(EndpointState::Unreachable, true),
+            SuperviseAction::Poll
+        );
+        assert_eq!(
+            supervise_action(EndpointState::Missing, false),
+            SuperviseAction::Spawn
+        );
+        assert_eq!(
+            supervise_action(EndpointState::Dead, false),
+            SuperviseAction::Spawn
+        );
+        assert_eq!(
+            supervise_action(EndpointState::Invalid, false),
+            SuperviseAction::Spawn
+        );
     }
 
     #[test]
