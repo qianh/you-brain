@@ -1,128 +1,132 @@
-import { useState } from "react";
+import { useRef } from "react";
+import type { Roles } from "@you-brain/protocol";
 
-import { useDaemon } from "../daemon-context.js";
-import { BrowserDaemonError } from "../api/client.js";
-import { Card } from "../components/card.js";
+import { useDelayed } from "../components/use-delayed.js";
+import { Button } from "../components/button.js";
 import { EmptyState } from "../components/empty.js";
-import { Icon } from "../components/icons.js";
-import { Pill } from "../components/pill.js";
-import { Row } from "../components/row.js";
-import { capabilityLabel, kindLabel, platformLabel } from "../lib/copy.js";
-import { formatDateTime } from "../lib/format.js";
+import { PageHeader } from "../components/page.js";
+import { Section } from "../components/card.js";
+import { useToast } from "../components/toast.js";
+import { useDaemon } from "../daemon-context.js";
+import { deviceLabel } from "../lib/format.js";
+import { DeviceGrid, DevicesSkeleton } from "./devices/device-grid.js";
+import { orderDevices, resolvedWebDevice } from "./devices/logic.js";
+import { RoleSection } from "./devices/role-section.js";
+
+type RolePatch = { mainDevice?: string | null; webProcessor?: string | null };
 
 export function DevicesPage() {
-  const { t, language, devices, roles, status, client, replaceRoles, timeZone } = useDaemon();
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
+  const { t, language, devices, roles, status, client, replaceRoles, timeZone, loading, error, reload } = useDaemon();
+  const { push } = useToast();
+  const rolesRef = useRef(roles);
+  rolesRef.current = roles;
+  const generation = useRef(0);
+  const ordered = orderDevices(devices, status?.deviceId ?? null);
+  const waiting = loading && devices.length === 0 && roles === null;
+  const delayed = useDelayed(waiting);
+  const failed = !waiting && devices.length === 0 && roles === null && error !== null;
   const mainId = roles?.mainDevice ?? null;
   const webId = roles?.webProcessor ?? null;
 
-  async function save(patch: { mainDevice?: string | null; webProcessor?: string | null }, key: string) {
-    setBusy(key);
-    setError(null);
+  async function save(patch: RolePatch, message: string, undoable: boolean) {
+    const previous = rolesRef.current;
+    if (!previous) return;
+    const id = generation.current + 1;
+    generation.current = id;
+    replaceRoles({ ...previous, ...patch });
     try {
-      const next = await client.updateRoles(patch);
-      replaceRoles(next);
-    } catch (caught) {
-      setError(caught instanceof BrowserDaemonError ? caught.message : t("actionFailed"));
-    } finally {
-      setBusy(null);
+      const saved = await client.updateRoles(patch);
+      if (generation.current !== id) return;
+      replaceRoles(saved);
+      const undo = undoPatch(previous, patch);
+      push({
+        message,
+        tone: "success",
+        ...(undoable
+          ? {
+              action: {
+                label: t("undo"),
+                onClick: () => {
+                  void save(undo, t("roleUndone"), false);
+                },
+              },
+            }
+          : {}),
+      });
+    } catch {
+      if (generation.current !== id) return;
+      replaceRoles(previous);
+      push({ message: t("roleReverted"), tone: "danger" });
     }
   }
 
   return (
-    <div className="page">
-      <header className="page-head">
-        <div>
-          <h1>{t("devices")}</h1>
-          <p>{t("devicesHint")}</p>
-        </div>
-      </header>
-      <p className="muted">
-        {mainId
-          ? `${t("mainBadge")} · ${devices.find((device) => device.deviceId === mainId)?.displayName ?? mainId}`
-          : t("noMain")}
-        {" · "}
-        {webId
-          ? `${t("webBadge")} · ${devices.find((device) => device.deviceId === webId)?.displayName ?? webId}`
-          : t("webFollowsMain")}
-      </p>
-      {error ? <p className="form-error">{error}</p> : null}
-      {devices.length === 0 ? <EmptyState title={t("emptyDevices")} icon="laptop" /> : null}
-      {devices.length > 0 ? (
-        <Card>
-          {devices.map((device) => {
-            const isMain = device.deviceId === mainId;
-            const isWeb = webId === null ? isMain : device.deviceId === webId;
-            const here = status?.deviceId === device.deviceId;
-            return (
-              <Row
-                key={device.deviceId}
-                className="stack-narrow"
-                icon={<Icon name={device.kind === "server" ? "server" : "laptop"} />}
-                title={
-                  <span className="pill-row">
-                    <span>{device.displayName}</span>
-                    {here ? <Pill>{t("thisDevice")}</Pill> : null}
-                    {isMain ? <Pill pressed>{t("mainBadge")}</Pill> : null}
-                    {isWeb ? <Pill>{t("webBadge")}</Pill> : null}
-                  </span>
-                }
-                subtitle={
-                  <>
-                    <i className={here ? "dot dot-ok" : "dot dot-muted"} />
-                    <span>
-                      {kindLabel(device.kind, language)} · {platformLabel(device.platform, language)}
-                    </span>
-                    <span>
-                      {" · "}
-                      {t("lastSeen")} {formatDateTime(device.lastSeenAt, language, timeZone)}
-                    </span>
-                    <span>
-                      {" · "}
-                      {t("lastActive")} {formatDateTime(device.lastActiveAt, language, timeZone)}
-                    </span>
-                    <span>
-                      {" · "}
-                      {device.capabilities.map((item) => capabilityLabel(item, language)).join(" · ")}
-                    </span>
-                  </>
-                }
-                trailing={
-                  <>
-                    <button
-                      type="button"
-                      className="btn small"
-                      disabled={busy !== null || isMain}
-                      onClick={() => void save({ mainDevice: device.deviceId }, `main-${device.deviceId}`)}
-                    >
-                      {busy === `main-${device.deviceId}` ? t("working") : t("setMain")}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn small"
-                      disabled={busy !== null || (webId !== null && device.deviceId === webId)}
-                      onClick={() => void save({ webProcessor: device.deviceId }, `web-${device.deviceId}`)}
-                    >
-                      {busy === `web-${device.deviceId}` ? t("working") : t("setWeb")}
-                    </button>
-                  </>
-                }
-              />
-            );
-          })}
-        </Card>
+    <div className="devices-page">
+      <PageHeader title={t("devices")} description={t("devicesLead")} />
+      {waiting ? (
+        delayed ? (
+          <DevicesSkeleton />
+        ) : (
+          <div className="devices-hold" aria-busy="true" />
+        )
       ) : null}
-      {webId !== null ? (
-        <button
-          type="button"
-          className="btn quiet"
-          disabled={busy !== null}
-          onClick={() => void save({ webProcessor: null }, "web-clear")}
-        >
-          {t("clearWeb")}
-        </button>
+      {failed ? (
+        <EmptyState
+          icon="laptop"
+          title={t("devicesUnavailable")}
+          description={t("devicesUnavailableBody")}
+          action={
+            <Button variant="primary" onClick={() => void reload("all")}>
+              {t("retry")}
+            </Button>
+          }
+        />
+      ) : null}
+      {!waiting && !failed ? (
+        <div className="devices-stack">
+          {roles ? (
+            <RoleSection
+              devices={ordered}
+              mainId={mainId}
+              webId={webId}
+              t={t}
+              onMain={(deviceId) => {
+                void save({ mainDevice: deviceId }, t("roleMainSet", { name: deviceLabel(deviceId, ordered) }), true);
+              }}
+              onWeb={(deviceId) => {
+                const name = deviceId === null ? "" : deviceLabel(deviceId, ordered);
+                const message = deviceId === null ? t("roleWebCleared") : t("roleWebSet", { name });
+                void save({ webProcessor: deviceId }, message, true);
+              }}
+            />
+          ) : null}
+          <Section
+            title={t("devices")}
+            {...(ordered.length > 0 ? { hint: t("devicesCount", { count: ordered.length }) } : {})}
+          >
+            {ordered.length === 0 ? (
+              <EmptyState icon="laptop" title={t("emptyDevices")} description={t("devicesEmptyBody")} />
+            ) : (
+              <DeviceGrid
+                devices={ordered}
+                localId={status?.deviceId ?? null}
+                mainId={mainId}
+                webId={resolvedWebDevice(mainId, webId)}
+                language={language}
+                timeZone={timeZone}
+                t={t}
+              />
+            )}
+          </Section>
+        </div>
       ) : null}
     </div>
   );
+}
+
+function undoPatch(previous: Roles, patch: RolePatch): RolePatch {
+  const undo: RolePatch = {};
+  if ("mainDevice" in patch) undo.mainDevice = previous.mainDevice;
+  if ("webProcessor" in patch) undo.webProcessor = previous.webProcessor;
+  return undo;
 }

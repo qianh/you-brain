@@ -1,158 +1,323 @@
-import { useDaemon } from "../daemon-context.js";
-import { Banner } from "../components/ui.js";
-import { Card } from "../components/card.js";
+import { useState } from "react";
+import type { SharedConfig } from "@you-brain/protocol";
+
+import { BrowserDaemonError } from "../api/client.js";
+import { Button } from "../components/button.js";
+import { Card, Section } from "../components/card.js";
 import { EmptyState } from "../components/empty.js";
-import { SourceMark } from "../components/tile.js";
+import { Icon } from "../components/icons.js";
+import { PageHeader } from "../components/page.js";
 import { Row } from "../components/row.js";
+import { SkeletonStat } from "../components/skeleton.js";
 import { StatBlock, StatGrid } from "../components/stat.js";
-import { consolidationView, readCaptures, readLogs } from "../lib/copy.js";
-import { formatDateTime, sourceLabel } from "../lib/format.js";
+import { useToast } from "../components/toast.js";
+import { useDelayed } from "../components/use-delayed.js";
+import { useRelativeTime } from "../components/use-relative-time.js";
+import { useDaemon } from "../daemon-context.js";
+import { consolidationView, readLogs } from "../lib/copy.js";
+import { formatDateTime } from "../lib/format.js";
+import { settingsHref } from "../lib/route.js";
+import { useRoute } from "../router.js";
+import { AttentionList } from "./status/attention.js";
+import { CaptureGrid } from "./status/captures.js";
+import { Connections } from "./status/connections.js";
+import { StatusHero } from "./status/hero.js";
+import {
+  attentionItems,
+  captureViews,
+  heroFault,
+  heroKind,
+  logsBesideWarnings,
+  statusScreen,
+  withConsolidationWarning,
+} from "./status/logic.js";
 
 export function StatusPage() {
-  const { t, language, status, timeZone } = useDaemon();
-  const captures = readCaptures(status);
-  const extraLogs = readLogs(status);
-  const warnings = status?.warnings ?? [];
-  const consolidation = consolidationView(status?.consolidation);
-  const logs = [
-    ...extraLogs,
-    ...warnings
-      .filter((warning) => warning.message.trim() !== "")
-      .map((warning) => ({ at: null as string | null, message: `${warning.code}: ${warning.message}` })),
-  ];
-  const pending = status?.sync.pendingOutbox ?? 0;
-  const retries = status?.refine.pending ?? 0;
-  const documents = status?.search.documents ?? 0;
-  const syncAt = formatDateTime(status?.sync.lastSyncAt ?? null, language, timeZone);
-  const consolidationValue =
-    consolidation === "disabled"
-      ? t("disabledLabel")
-      : status?.consolidation.lastFinishedAt
-        ? formatDateTime(status.consolidation.lastFinishedAt, language, timeZone)
-        : t("consolidationNever");
+  const { t, language, status, config, timeZone, loading, error, reload, client } = useDaemon();
+  const { navigate } = useRoute();
+  const { push } = useToast();
+  const [syncing, setSyncing] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loginBusy, setLoginBusy] = useState(false);
+  const screen = statusScreen({ loading, hasStatus: status !== null, error });
+  const delayed = useDelayed(screen === "loading");
+  const syncIso = status?.sync.lastSyncAt ?? null;
+  const finishedAt = status?.consolidation.lastFinishedAt ?? null;
+  const syncRelative = useRelativeTime(syncIso, language, timeZone);
+  const finishedRelative = useRelativeTime(finishedAt, language, timeZone);
+  const syncAbsolute = formatDateTime(syncIso, language, timeZone);
+
+  async function refresh() {
+    setRefreshing(true);
+    const ok = await reload("all");
+    setRefreshing(false);
+    if (!ok) push({ message: t("refreshFailed"), tone: "danger" });
+  }
+
+  async function sync() {
+    if (syncing) return;
+    setSyncing(true);
+    try {
+      const result = await client.sync();
+      if (!result.started) {
+        push({ message: t("syncFailed"), tone: "danger" });
+        return;
+      }
+      push({ message: t("syncStarted"), tone: "success" });
+      await reload("status");
+    } catch {
+      push({ message: t("syncFailed"), tone: "danger" });
+    } finally {
+      setSyncing(false);
+    }
+  }
+
+  async function login() {
+    if (loginBusy) return;
+    setLoginBusy(true);
+    try {
+      const result = await client.googleLogin();
+      push({ message: result.message || t("loginStarted"), tone: "success" });
+      await reload("status");
+    } catch (caught) {
+      const message = caught instanceof BrowserDaemonError && caught.message !== "" ? caught.message : t("actionFailed");
+      push({ message, tone: "danger" });
+    } finally {
+      setLoginBusy(false);
+    }
+  }
+
+  const view = consolidationView(status?.consolidation);
+  const warnings = withConsolidationWarning(
+    status?.warnings ?? [],
+    view === "stale",
+    t("consolidationStale"),
+  );
+  const items = attentionItems(warnings);
+  const kind = heroKind({
+    loading: screen === "loading",
+    hasStatus: status !== null,
+    driveReachable: status?.drive.reachable ?? null,
+    refineError: status?.refine.lastError ?? null,
+    warningCount: items.length,
+  });
+  const fault = heroFault({
+    loading: screen === "loading",
+    hasStatus: status !== null,
+    driveReachable: status?.drive.reachable ?? null,
+    refineError: status?.refine.lastError ?? null,
+    warningCount: items.length,
+  });
+  const refineError = (status?.refine.lastError ?? "").trim();
+  const heroTitle =
+    kind === "loading"
+      ? t("statusLoadingTitle")
+      : kind === "danger"
+        ? t(fault === "refine" ? "statusRefineBroken" : "statusSyncBroken")
+        : kind === "warn"
+          ? t("statusNeedsWork", { count: items.length })
+          : t("statusAllClear");
+  const heroBody =
+    kind === "loading"
+      ? t("statusLoadingBody")
+      : kind === "danger" && fault === "refine"
+        ? refineError || t("statusRefineBroken")
+        : kind === "danger"
+          ? t("statusSyncBrokenBody")
+          : kind === "warn"
+            ? t("statusNeedsWorkBody")
+            : t("statusAllClearBody");
+  const logs = logsBesideWarnings(readLogs(status), warnings);
+
   return (
-    <div className="page">
-      <header className="page-head">
-        <div>
-          <h1>{t("statusPage")}</h1>
-          <p>{t("statusHint")}</p>
+    <div className="status-page">
+      <PageHeader
+        title={t("statusPage")}
+        description={t("statusLead")}
+        actions={
+          screen === "ready" ? (
+            <>
+              <Button
+                variant="secondary"
+                icon={<Icon name="refresh" />}
+                loading={refreshing}
+                onClick={() => void refresh()}
+              >
+                {t("reload")}
+              </Button>
+              <Button variant="primary" icon={<Icon name="refresh" />} loading={syncing} onClick={() => void sync()}>
+                {t("cmdSync")}
+              </Button>
+            </>
+          ) : null
+        }
+      />
+      {screen === "loading" ? (
+        delayed ? (
+          <StatusSkeleton />
+        ) : (
+          <div className="status-hold" aria-busy="true" />
+        )
+      ) : null}
+      {screen === "offline" ? (
+        <EmptyState
+          icon="activity"
+          title={t("statusOfflineTitle")}
+          description={t("statusOfflineBody")}
+          action={
+            <Button variant="primary" loading={refreshing} onClick={() => void refresh()}>
+              {t("statusReconnect")}
+            </Button>
+          }
+        />
+      ) : null}
+      {screen === "error" ? (
+        <EmptyState
+          icon="alert-circle"
+          title={t("statusUnavailable")}
+          description={t("statusUnavailableBody")}
+          action={
+            <Button variant="primary" loading={refreshing} onClick={() => void refresh()}>
+              {t("retry")}
+            </Button>
+          }
+        />
+      ) : null}
+      {screen === "ready" && status ? (
+        <div className="status-stack">
+          <StatusHero
+            tone={kind}
+            title={heroTitle}
+            body={heroBody}
+            syncLabel={t("lastSync")}
+            syncValue={syncIso ? syncRelative : t("neverSynced")}
+            syncIso={syncIso}
+            syncAbsolute={syncAbsolute}
+          />
+          <AttentionList
+            items={items}
+            syncing={syncing}
+            loginBusy={loginBusy}
+            t={t}
+            onSync={() => void sync()}
+            onModel={() => navigate(settingsHref("model"))}
+            onLogin={() => void login()}
+          />
+          <Card>
+            <StatGrid>
+              <StatBlock
+                value={String(status.sync.pendingOutbox)}
+                label={t("statPending")}
+                hint={status.sync.pendingOutbox === 0 ? t("statusAllSynced") : t("outboxLine", { count: status.sync.pendingOutbox })}
+                english={language === "en"}
+              />
+              <StatBlock
+                value={String(status.search.documents)}
+                label={t("statusStatDocs")}
+                hint={status.search.ready ? t("statusIndexReady") : t("notReady")}
+                english={language === "en"}
+              />
+              <StatBlock
+                value={String(status.refine.pending)}
+                label={t("statusStatRefine")}
+                hint={status.refine.pending === 0 ? t("statusNoBacklog") : t("statusRefineBusy", { count: status.refine.pending })}
+                english={language === "en"}
+              />
+              <StatBlock
+                value={view === "disabled" || view === "unknown" ? t("disabledLabel") : t("statusEnabled")}
+                compact={(view === "disabled" || view === "unknown" ? t("disabledLabel") : t("statusEnabled")).length > 4}
+                label={t("statusStatDaily")}
+                hint={consolidationHint(view, finishedAt, finishedRelative, t)}
+                english={language === "en"}
+              />
+            </StatGrid>
+          </Card>
+          <Connections status={status} language={language} timeZone={timeZone} t={t} />
+          <CaptureGrid
+            rows={captureViews(status, sourceEnabled(config))}
+            language={language}
+            timeZone={timeZone}
+            t={t}
+            onSettings={() => navigate(settingsHref("capture"))}
+          />
+          {logs.length > 0 ? (
+            <Section title={t("errorLog")}>
+              <Card>
+                {logs.map((row, index) => (
+                  <LogRow key={`${row.at ?? "log"}-${index}`} at={row.at} message={row.message} language={language} timeZone={timeZone} fallback={t("noneYet")} />
+                ))}
+              </Card>
+            </Section>
+          ) : null}
         </div>
-      </header>
-      {status?.drive.reachable === false ? <Banner tone="bad">{t("driveDown")}</Banner> : null}
-      {status?.refine.lastError ? <Banner tone="warn">{status.refine.lastError}</Banner> : null}
-      {warnings.map((warning) =>
-        warning.message.trim() === "" ? null : (
-          <Banner key={`${warning.code}-${warning.message}`} tone="warn">
-            {warning.message}
-          </Banner>
-        ),
-      )}
-      {consolidation === "stale" ? <Banner tone="warn">{t("consolidationStale")}</Banner> : null}
+      ) : null}
+    </div>
+  );
+}
+
+function consolidationHint(
+  view: ReturnType<typeof consolidationView>,
+  at: string | null,
+  relative: string,
+  t: (key: "statusConsolidationOff" | "statusLastRun" | "consolidationNever" | "consolidationStale", vars?: Record<string, string | number>) => string,
+): string {
+  if (view === "disabled" || view === "unknown") return t("statusConsolidationOff");
+  if (view === "stale") return t("consolidationStale");
+  if (at) return t("statusLastRun", { time: relative });
+  return t("consolidationNever");
+}
+
+function sourceEnabled(config: SharedConfig | null): Record<string, boolean> | null {
+  if (!config) return null;
+  const sources = config.capture.sources;
+  return {
+    "claude-code": sources["claude-code"].enabled,
+    codex: sources.codex.enabled,
+    "grok-build": sources["grok-build"].enabled,
+    cursor: sources.cursor.enabled,
+    "gemini-cli": sources["gemini-cli"].enabled,
+  };
+}
+
+function LogRow({
+  at,
+  message,
+  language,
+  timeZone,
+  fallback,
+}: {
+  at: string | null;
+  message: string;
+  language: "zh" | "en";
+  timeZone: string;
+  fallback: string;
+}) {
+  const relative = useRelativeTime(at, language, timeZone);
+  const absolute = formatDateTime(at, language, timeZone);
+  return (
+    <Row
+      icon={<i className="dot dot-warn" aria-hidden="true" />}
+      title={message}
+      titleText={message}
+      subtitle={at ? <time dateTime={at} title={absolute}>{relative}</time> : fallback}
+    />
+  );
+}
+
+function StatusSkeleton() {
+  return (
+    <div className="status-stack" aria-hidden="true">
+      <div className="status-hero tone-loading">
+        <span className="status-hero-badge" />
+      </div>
       <Card>
         <StatGrid>
-          <StatBlock
-            value={String(pending)}
-            label={t("statPending")}
-            hint={status?.sync.lastSyncAt ? `${t("lastSync")} · ${syncAt}` : t("neverSynced")}
-          />
-          <StatBlock
-            value={String(documents)}
-            label={t("statDocuments")}
-            hint={status?.search.ready ? t("ready") : t("notReady")}
-          />
-          <StatBlock
-            value={String(retries)}
-            label={t("statRetries")}
-            hint={retries === 0 ? t("queueIdle") : t("refineLine", { count: retries })}
-          />
-          <StatBlock
-            value={consolidationValue}
-            compact={consolidationValue.length > 6}
-            label={t("consolidation")}
-            hint={
-              consolidation === "disabled"
-                ? t("consolidationDisabled")
-                : consolidation === "stale"
-                  ? t("consolidationStale")
-                  : t("healthy")
-            }
-          />
+          <SkeletonStat />
+          <SkeletonStat />
+          <SkeletonStat />
+          <SkeletonStat />
         </StatGrid>
       </Card>
-      <Card>
-        <Row
-          title={t("reachable")}
-          subtitle={
-            <>
-              <i
-                className={
-                  status?.drive.reachable === true
-                    ? "dot dot-ok"
-                    : status?.drive.reachable === false
-                      ? "dot dot-bad"
-                      : "dot dot-muted"
-                }
-              />
-              <span>
-                {status?.drive.reachable === true
-                  ? t("driveOk")
-                  : status?.drive.reachable === false
-                    ? t("driveDown")
-                    : t("driveUnknown")}
-              </span>
-              <span>{" · "}{status?.drive.accountEmail || t("notSignedIn")}</span>
-            </>
-          }
-          trailing={<span>{pending === 0 ? t("queueIdle") : t("outboxLine", { count: pending })}</span>}
-        />
-      </Card>
-      <section className="stack">
-        <h2 className="group-label">
-          <span>{t("captures")}</span>
-        </h2>
-        {captures.length === 0 ? <EmptyState title={t("emptyCaptures")} icon="inbox" /> : null}
-        {captures.length > 0 ? (
-          <Card>
-            {captures.map((row) => (
-              <Row
-                key={row.source}
-                icon={<SourceMark source={row.source} />}
-                title={sourceLabel(row.source)}
-                subtitle={
-                  <>
-                    <i className={row.error ? "dot dot-bad" : row.lastCaptureAt ? "dot dot-ok" : "dot dot-muted"} />
-                    <span>
-                      {row.lastCaptureAt
-                        ? formatDateTime(row.lastCaptureAt, language, timeZone)
-                        : t("capturedNever")}
-                    </span>
-                    {row.error ? <span>{" · "}{row.error}</span> : null}
-                  </>
-                }
-                {...(row.error ? {} : { trailing: <span>{t("noneYet")}</span> })}
-              />
-            ))}
-          </Card>
-        ) : null}
-      </section>
-      <section className="stack">
-        <h2 className="group-label">
-          <span>{t("errorLog")}</span>
-        </h2>
-        {logs.length === 0 ? <EmptyState title={t("emptyLogs")} icon="inbox" /> : null}
-        {logs.length > 0 ? (
-          <Card>
-            {logs.map((row, index) => (
-              <Row
-                key={`${row.at ?? "log"}-${index}`}
-                icon={<i className="dot dot-warn" />}
-                title={row.message}
-                subtitle={row.at ? formatDateTime(row.at, language, timeZone) : t("noneYet")}
-              />
-            ))}
-          </Card>
-        ) : null}
-      </section>
     </div>
   );
 }
