@@ -10,15 +10,37 @@
 # Publish a single you-brain.app at $REPO/dist/app.noindex/. The .noindex suffix
 # keeps Spotlight from indexing the build tree. Nothing under target/ is left
 # as an .app, and this script never writes /Applications.
+#
+# DMG packaging shells out to Finder. If that step fails after a new .app is on
+# disk, keep the .app and exit 0. rw.*.dmg leftovers and /Volumes/you-brain*
+# mounts are removed on the way out (success or failure).
+#
+# ROOT, REPO, and VOLUMES_ROOT may be set by tests. Unset, ROOT is this app
+# directory, REPO is the repository root, and VOLUMES_ROOT is /Volumes.
 set -eu
-ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-REPO=$(CDPATH= cd -- "$ROOT/../.." && pwd)
+
+if [ -n "${ROOT:-}" ]; then
+  ROOT=$(CDPATH= cd -- "$ROOT" && pwd)
+else
+  ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+fi
+if [ -n "${REPO:-}" ]; then
+  REPO=$(CDPATH= cd -- "$REPO" && pwd)
+else
+  REPO=$(CDPATH= cd -- "$ROOT/../.." && pwd)
+fi
+export ROOT REPO
+
 VENDOR="$REPO/dist/daemon/aarch64-apple-darwin/vendor"
 WEB="$REPO/dist/daemon/aarch64-apple-darwin/web"
 TARGET_TRIPLE=aarch64-apple-darwin
 APP_NAME=you-brain.app
 DEST_DIR="$REPO/dist/app.noindex"
 TARGET_ROOT="$ROOT/src-tauri/target"
+VOLUMES_ROOT="${VOLUMES_ROOT:-/Volumes}"
+# Second resolution. A bundle written during this run is strictly newer.
+SCRIPT_START=$(date +%s)
+export SCRIPT_START
 cd "$ROOT"
 
 remove_tree() {
@@ -54,18 +76,75 @@ move_bundle_dmgs() {
   move_dmgs "$bundle_dir/macos"
 }
 
+is_fresh_app() {
+  [ -d "$1" ] || return 1
+  mtime=$(stat -f %m "$1" 2>/dev/null) || return 1
+  [ "$mtime" -gt "$SCRIPT_START" ]
+}
+
+remove_matching_rw() {
+  dir=$1
+  depth=$2
+  if [ ! -d "$dir" ]; then
+    return 0
+  fi
+  if [ "$depth" = "1" ]; then
+    find "$dir" -maxdepth 1 -name 'rw.*.dmg' -type f -exec rm -f {} \; || true
+  else
+    find "$dir" -name 'rw.*.dmg' -type f -exec rm -f {} \; || true
+  fi
+}
+
+detach_you_brain_volumes() {
+  uname_s=$(uname -s 2>/dev/null || true)
+  if [ "$uname_s" != "Darwin" ]; then
+    return 0
+  fi
+  if [ ! -d "$VOLUMES_ROOT" ]; then
+    return 0
+  fi
+  if ! command -v hdiutil >/dev/null 2>&1; then
+    return 0
+  fi
+  for vol in "$VOLUMES_ROOT"/you-brain*; do
+    [ -d "$vol" ] || continue
+    base=$(basename "$vol")
+    case "$base" in
+      you-brain*) ;;
+      *) continue ;;
+    esac
+    hdiutil detach -force "$vol" >/dev/null 2>&1 || true
+  done
+}
+
+cleanup_residues() {
+  remove_matching_rw "$DEST_DIR" 1
+  remove_matching_rw "$TARGET_ROOT" all
+  detach_you_brain_volumes || true
+  return 0
+}
+
+trap cleanup_residues EXIT
+
 built_target=$TARGET_TRIPLE
 has_target=0
+bundles_app_only=0
 prev=
 for arg in "$@"; do
   if [ "$prev" = "--target" ]; then
     built_target=$arg
     has_target=1
   fi
+  if [ "$prev" = "--bundles" ] && [ "$arg" = "app" ]; then
+    bundles_app_only=1
+  fi
   case "$arg" in
     --target=*)
       built_target=${arg#--target=}
       has_target=1
+      ;;
+    --bundles=app)
+      bundles_app_only=1
       ;;
   esac
   prev=$arg
@@ -76,15 +155,28 @@ fi
 
 remove_stale_apps
 
+build_status=0
 if [ -d "$VENDOR" ] && [ -d "$WEB" ]; then
-  bunx tauri build --config src-tauri/tauri.bundle.conf.json "$@"
+  bunx tauri build --config src-tauri/tauri.bundle.conf.json "$@" || build_status=$?
 else
   echo "you-brain: $VENDOR or $WEB is missing; bundling without those resources" >&2
-  bunx tauri build "$@"
+  bunx tauri build "$@" || build_status=$?
 fi
 
 APP_TRIPLE="$TARGET_ROOT/$built_target/release/bundle/macos/$APP_NAME"
 APP_HOST="$TARGET_ROOT/release/bundle/macos/$APP_NAME"
+
+if [ "$build_status" -ne 0 ]; then
+  if [ "$bundles_app_only" -eq 0 ] && { is_fresh_app "$APP_TRIPLE" || is_fresh_app "$APP_HOST"; }; then
+    echo "you-brain: DMG 打包失败，已回退为仅 .app" >&2
+  else
+    if ! is_fresh_app "$APP_TRIPLE" && ! is_fresh_app "$APP_HOST"; then
+      echo "you-brain: tauri build did not produce $APP_NAME" >&2
+    fi
+    exit "$build_status"
+  fi
+fi
+
 if [ -d "$APP_TRIPLE" ]; then
   APP_SRC=$APP_TRIPLE
   BUNDLE_DIR="$TARGET_ROOT/$built_target/release/bundle"
