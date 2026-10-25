@@ -1929,6 +1929,8 @@ export class YouBrainDaemon {
       this.#retryConfigPush();
     }
     this.#rememberDevice();
+    // Open pages only learn the new lastSeenAt from this event. Without it they show this device offline.
+    this.changes.publish("devices", this.#clock.now().toISOString());
   }
 
   #loadPreservedActivity(): void {

@@ -33,6 +33,20 @@ afterEach(async () => {
 });
 
 describe("device activity", () => {
+  it("announces the heartbeat so open pages refresh lastSeenAt", async () => {
+    const dirs = await trackDirs();
+    const clock = testClock();
+    const daemon = await startTracked(dirs, clock, new MemoryDrive({ now: () => clock.now() }));
+    await daemon.settled();
+    const kinds: string[] = [];
+    daemon.changes.subscribe((event) => kinds.push(event.kind));
+
+    await clock.advance(INTERVALS.heartbeatMs);
+    await daemon.settled();
+
+    expect(kinds).toContain("devices");
+  }, 30_000);
+
   it("keeps lastActiveAt off the heartbeat clock until a real signal arrives", async () => {
     const dirs = await trackDirs();
     const clock = testClock();
