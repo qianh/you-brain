@@ -11,7 +11,6 @@ import {
   deepEqual,
   isSettingsDirty,
   llmKeyPayload,
-  oauthPayload,
   providerOptions,
   sectionFromHref,
   shortcutGlyph,
@@ -27,7 +26,6 @@ function dirtyInput(patch?: {
   config?: SharedConfig;
   roles?: Roles;
   apiKey?: string;
-  oauthDirty?: boolean;
 }) {
   const savedConfig = createDefaultSharedConfig();
   const savedRoles = createDefaultRoles();
@@ -37,7 +35,6 @@ function dirtyInput(patch?: {
     roles: patch?.roles ?? savedRoles,
     savedRoles,
     apiKey: patch?.apiKey ?? "",
-    oauthDirty: patch?.oauthDirty ?? false,
   };
 }
 
@@ -46,24 +43,13 @@ function legacyPlan(input: {
   config: SharedConfig;
   roles: Roles;
   apiKey: string;
-  oauthMode: "official" | "custom";
-  clientId: string;
-  clientSecret: string;
-  oauthDirty: boolean;
   savedProvider: string;
 }) {
   const secret = input.apiKey.trim();
-  const oauth = input.oauthDirty
-    ? {
-        mode: input.oauthMode,
-        clientId: input.clientId.trim(),
-        ...(input.clientSecret.trim() ? { clientSecret: input.clientSecret.trim() } : {}),
-      }
-    : null;
   const llmKey = secret !== "" && !input.savedProvider.endsWith("-cli")
     ? { provider: input.savedProvider, apiKey: secret }
     : null;
-  return { config: input.config, roles: input.roles, llmKey, oauth };
+  return { config: input.config, roles: input.roles, llmKey };
 }
 
 describe("settings draft", () => {
@@ -73,14 +59,13 @@ describe("settings draft", () => {
     expect(isSettingsDirty(dirtyInput({ apiKey: "   " }))).toBe(false);
   });
 
-  test("config, roles, a typed key, or a touched oauth form each make the draft dirty", () => {
+  test("config, roles, or a typed key each make the draft dirty", () => {
     const saved = createDefaultSharedConfig();
     const changed = { ...saved, llm: { ...saved.llm, model: "deepseek-flash" } };
     expect(isSettingsDirty(dirtyInput({ config: changed }))).toBe(true);
     const roles = createDefaultRoles();
     expect(isSettingsDirty(dirtyInput({ roles: { ...roles, timezone: "UTC" } }))).toBe(true);
     expect(isSettingsDirty(dirtyInput({ apiKey: "sk-test" }))).toBe(true);
-    expect(isSettingsDirty(dirtyInput({ oauthDirty: true }))).toBe(true);
   });
 
   test("deepEqual ignores key order and notices nested edits", () => {
@@ -91,7 +76,7 @@ describe("settings draft", () => {
 });
 
 describe("settings save payload", () => {
-  test("matches the previous page for config, roles, key, and oauth", () => {
+  test("matches the previous page for config, roles, and key", () => {
     const saved = createDefaultSharedConfig();
     const config: SharedConfig = {
       ...saved,
@@ -101,10 +86,10 @@ describe("settings save payload", () => {
     };
     const roles = { ...createDefaultRoles(), timezone: "Asia/Shanghai" };
     const cases = [
-      { apiKey: "  sk-test  ", oauthMode: "custom" as const, clientId: " id ", clientSecret: " sec ", oauthDirty: true },
-      { apiKey: "", oauthMode: "official" as const, clientId: "", clientSecret: "", oauthDirty: false },
-      { apiKey: "sk-test", oauthMode: "custom" as const, clientId: "id", clientSecret: "   ", oauthDirty: true },
-      { apiKey: "sk-test", oauthMode: "official" as const, clientId: "id", clientSecret: "sec", oauthDirty: false },
+      { apiKey: "  sk-test  " },
+      { apiKey: "" },
+      { apiKey: "   " },
+      { apiKey: "sk-test" },
     ];
     for (const item of cases) {
       const input = { config, roles, ...item, savedProvider: config.llm.provider };
@@ -119,10 +104,6 @@ describe("settings save payload", () => {
       config,
       roles: createDefaultRoles(),
       apiKey: "",
-      oauthMode: "official",
-      clientId: "",
-      clientSecret: "",
-      oauthDirty: false,
     });
     expect(plan.config).toEqual(config);
     expect(plan.config.capture).toEqual(saved.capture);
@@ -131,26 +112,19 @@ describe("settings save payload", () => {
     expect(plan.config.reminders).toEqual(saved.reminders);
     expect(plan.config.ui).toEqual(saved.ui);
     expect(plan.llmKey).toBeNull();
-    expect(plan.oauth).toBeNull();
   });
 
-  test("never puts a key or client secret into config or roles", () => {
+  test("never puts a key into config or roles", () => {
     const config = createDefaultSharedConfig();
     const roles = createDefaultRoles();
     const plan = buildSavePlan({
       config,
       roles,
       apiKey: "sk-live-secret",
-      oauthMode: "custom",
-      clientId: "client-id",
-      clientSecret: "client-secret-value",
-      oauthDirty: true,
     });
     const stored = JSON.stringify({ config: plan.config, roles: plan.roles });
     expect(stored).not.toContain("sk-live-secret");
-    expect(stored).not.toContain("client-secret-value");
     expect(plan.llmKey).toEqual({ provider: "deepseek", apiKey: "sk-live-secret" });
-    expect(plan.oauth).toEqual({ mode: "custom", clientId: "client-id", clientSecret: "client-secret-value" });
   });
 
   test("uses the provider the server confirmed, and skips keys for a local CLI", () => {
@@ -161,21 +135,9 @@ describe("settings save payload", () => {
       config: { ...createDefaultSharedConfig(), llm: { ...createDefaultSharedConfig().llm, provider: "grok-cli" } },
       roles: createDefaultRoles(),
       apiKey: "sk-test",
-      oauthMode: "official",
-      clientId: "",
-      clientSecret: "",
-      oauthDirty: false,
       savedProvider: "claude-cli",
     });
     expect(plan.llmKey).toBeNull();
-  });
-
-  test("omits an empty client secret but still posts the mode and client id", () => {
-    expect(oauthPayload({ dirty: false, mode: "custom", clientId: "id", clientSecret: "sec" })).toBeNull();
-    expect(oauthPayload({ dirty: true, mode: "custom", clientId: " id ", clientSecret: "  " })).toEqual({
-      mode: "custom",
-      clientId: "id",
-    });
   });
 
   test("semantic search defaults to on and is omitted from the save body until it changes", () => {

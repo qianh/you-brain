@@ -9,6 +9,7 @@ import { Tile } from "../../components/tile.js";
 import { useRelativeTime } from "../../components/use-relative-time.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { consolidationView, type ConsolidationView } from "../../lib/copy.js";
+import { driveEmail, driveState } from "../../lib/drive-state.js";
 import { formatDateTime, type Language } from "../../lib/format.js";
 import { driveTone, refineTone, searchTone, webSessionLine, type DotTone } from "./logic.js";
 
@@ -44,7 +45,7 @@ export function Connections({
           icon={<Mark letter="G" />}
           title={t("statusDrive")}
           titleText={t("statusDrive")}
-          subtitle={<DotText tone={driveTone(status.drive.reachable)} text={drive} />}
+          subtitle={<DotText tone={driveTone(status.drive)} text={drive} />}
         />
         <Row
           icon={
@@ -148,12 +149,12 @@ function driveLine(
   status: StatusResponse,
   t: (key: MessageKey, vars?: Record<string, string | number>) => string,
 ): string {
-  if (status.drive.reachable === true) {
-    const who = status.drive.accountEmail?.trim() || t("notSignedIn");
-    return `${t("statusDriveReachable")} · ${who}`;
-  }
-  if (status.drive.reachable === false) return t("driveDown");
-  return t("driveUnknown");
+  const state = driveState(status.drive);
+  const email = driveEmail(status.drive);
+  if (state === "connected") return email === "" ? t("driveOk") : `${t("driveOk")} · ${email}`;
+  if (state === "offline") return `${t("driveDown")} · ${email}`;
+  if (state === "signedOut") return t("driveSignedOutLine");
+  return t("driveCheckingLine");
 }
 
 function Mark({ children, letter }: { children?: ReactNode; letter?: string }) {

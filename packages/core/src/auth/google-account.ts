@@ -133,6 +133,38 @@ export function applyGoogleConnection(
   };
 }
 
+const FILL_ACCOUNT_TIMEOUT_MS = 5_000;
+
+/**
+ * A sign-in from an older build can leave the account blank while Drive works.
+ * Asks Google once who is signed in. Returns null when nothing needs filling or
+ * Google cannot answer in time, so opening Drive never waits on this.
+ */
+export async function fillMissingAccount(
+  config: LocalConfig,
+  client: DriveIdentityClient,
+  options: { timeoutMs?: number } = {},
+): Promise<LocalConfig | null> {
+  if (config.account.email.trim() !== "") return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const account = await Promise.race([
+      readGoogleDriveAccount(client),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("account lookup timed out")),
+          options.timeoutMs ?? FILL_ACCOUNT_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    return { ...config, account };
+  } catch {
+    return null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export function clearGoogleConnection(config: LocalConfig): LocalConfig {
   return {
     ...config,

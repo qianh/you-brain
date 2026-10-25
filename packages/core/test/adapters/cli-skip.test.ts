@@ -77,6 +77,20 @@ describe("subscription CLI sessions are not captured", () => {
     expect(dropped.skippedSubagent).toBe(false);
   });
 
+  test("codex matches the dedicated cwd by its text, in logical or physical form", async () => {
+    const { root, workDir } = await layout();
+    const logical = join(root, "rollout-logical.jsonl");
+    await writeFile(
+      logical,
+      [
+        `{"timestamp":"2026-07-18T11:00:00.000Z","type":"session_meta","payload":{"id":"codex-2","timestamp":"2026-07-18T11:00:00.000Z","cwd":${JSON.stringify(workDir + "/")},"source":"cli"}}`,
+        '{"timestamp":"2026-07-18T11:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Find the release issue"}]}}',
+        "",
+      ].join("\n"),
+    );
+    expect((await parseCodexSession(logical, options(workDir))).session).toBeNull();
+  });
+
   test("grok keeps a normal session directory and skips the encoded cwd", async () => {
     const { root, workDir } = await layout();
     const physical = physicalPath(workDir);

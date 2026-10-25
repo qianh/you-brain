@@ -55,6 +55,7 @@ describe("consolidation daemon", () => {
     expect((await putRoles(daemon, { consolidation: { enabled: true, time: "23:00" } })).status).toBe(
       200,
     );
+    await daemon.settleConfigPush();
     const kinds: string[] = [];
     const unsubscribe = daemon.changes.subscribe((event) => {
       kinds.push(event.kind);

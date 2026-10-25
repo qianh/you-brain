@@ -115,3 +115,7 @@
   .search-trigger span, .search-trigger .kbd { display: none; }
   .brand span { display: none; }
 }
+
+/* macOS shell: the native title bar is overlaid, so the top bar shares the
+   row with the traffic lights and doubles as the drag handle. */
+.shell-overlay .topbar { padding-left: 84px; }

@@ -1,6 +1,8 @@
+import type { MessageKey } from "../../i18n/messages.js";
 import type { Language } from "../../lib/format.js";
 import { formatDay, zonedParts, type ZonedParts } from "../../lib/format.js";
 import { sessionStamp } from "../../lib/group.js";
+import { driveEmail, driveState, type DriveState } from "../../lib/drive-state.js";
 
 export type TodayMode = "topic" | "time";
 
@@ -95,6 +97,7 @@ export type GuideSection = "account" | "model" | "integrations";
 
 export interface GuideInput {
   driveReachable: boolean | null;
+  accountEmail: string | null;
   warnings: readonly { code: string }[];
   sessionCount: number;
   lastSyncAt: string | null;
@@ -104,16 +107,71 @@ export interface GuideStep {
   id: GuideId;
   done: boolean;
   section: GuideSection;
+  /** Only the drive step has more than done or open. */
+  drive?: { state: DriveState; email: string };
 }
 
 export function guideSteps(input: GuideInput): GuideStep[] {
   const modelDone = !input.warnings.some((warning) => warning.code.startsWith("LLM_"));
   const captureDone = input.sessionCount > 0 || input.lastSyncAt !== null;
+  const drive = {
+    state: driveState({ reachable: input.driveReachable, accountEmail: input.accountEmail }),
+    email: driveEmail({ accountEmail: input.accountEmail }),
+  };
   return [
-    { id: "drive", done: input.driveReachable === true, section: "account" },
+    { id: "drive", done: drive.state === "connected", section: "account", drive },
     { id: "model", done: modelDone, section: "model" },
     { id: "capture", done: captureDone, section: "integrations" },
   ];
+}
+
+export interface GuideCopy {
+  title: MessageKey;
+  hint: MessageKey;
+  /** Only a step the user can act on has an action. A checking drive has none. A connected one opens account management. */
+  action: MessageKey | null;
+  vars?: Record<string, string>;
+}
+
+/** The copy for one step in its current state. */
+export function guideCopy(step: GuideStep): GuideCopy {
+  if (step.id === "model") {
+    return step.done
+      ? { title: "todayGuideModelDone", hint: "todayGuideModelDoneHint", action: null }
+      : { title: "todayGuideModel", hint: "todayGuideModelHint", action: "todayGuideModelAction" };
+  }
+  if (step.id === "capture") {
+    return step.done
+      ? { title: "todayGuideCaptureDone", hint: "todayGuideCaptureDoneHint", action: null }
+      : { title: "todayGuideCapture", hint: "todayGuideCaptureHint", action: "todayGuideCaptureAction" };
+  }
+  const drive = step.drive ?? { state: "checking" as const, email: "" };
+  switch (drive.state) {
+    case "connected":
+      return drive.email === ""
+        ? { title: "todayGuideDriveConnected", hint: "todayGuideDriveConnectedNoEmailHint", action: "todayGuideDriveConnectedAction" }
+        : { title: "todayGuideDriveConnected", hint: "todayGuideDriveConnectedHint", action: "todayGuideDriveConnectedAction", vars: { email: drive.email } };
+    case "offline":
+      return {
+        title: "todayGuideDriveOffline",
+        hint: "todayGuideDriveOfflineHint",
+        action: "todayGuideDriveOfflineAction",
+        vars: { email: drive.email },
+      };
+    case "checking":
+      return { title: "todayGuideDriveChecking", hint: "todayGuideDriveCheckingHint", action: null };
+    case "signedOut":
+      return { title: "todayGuideDrive", hint: "todayGuideDriveHint", action: "todayGuideDriveAction" };
+  }
+}
+
+/**
+ * Which empty copy a session-less today or panel shows. Only a known, unfinished
+ * capture step means setup. Without steps (status not loaded) keep the connected copy.
+ */
+export function emptyCaptureView(steps: readonly Pick<GuideStep, "id" | "done">[]): "setup" | "connected" {
+  const capture = steps.find((step) => step.id === "capture");
+  return capture && !capture.done ? "setup" : "connected";
 }
 
 export function guideSummary(steps: readonly { done: boolean }[]): { done: number; total: number; visible: boolean } {

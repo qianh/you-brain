@@ -6,6 +6,7 @@ import {
   connectGoogleAccount,
   createConfigSecretStore,
   createOAuthClientSecretStore,
+  fillMissingAccount,
   GoogleOAuth,
   isInvalidGrant,
   type DriveIdentityClient,
@@ -25,7 +26,11 @@ export interface OpenGoogleDriveOptions {
   secrets?: SecretStore;
   /** Passed through when resolving the official OAuth client. */
   env?: NodeJS.ProcessEnv;
+  /** Aborting cancels an interactive login that is waiting for the browser. */
+  signal?: AbortSignal;
 }
+
+const DRIVE_REQUEST_TIMEOUT_MS = 120_000;
 
 const NETWORK_CODES = new Set([
   "ENOTFOUND",
@@ -141,8 +146,12 @@ export async function openGoogleDrive(
       : official;
   try {
     const oauth = new GoogleOAuth(oauthOptions, secrets);
-    const client = await oauth.getClient({ interactive: options.interactive });
-    const gdrive = google.drive({ version: "v3", auth: client });
+    const client = await oauth.getClient({
+      interactive: options.interactive,
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    // Without a timeout one stalled request holds the daemon's whole work queue.
+    const gdrive = google.drive({ version: "v3", auth: client, timeout: DRIVE_REQUEST_TIMEOUT_MS });
     let config = options.local;
     if (!config.driveRootId) {
       const connection = await connectGoogleAccount({
@@ -157,6 +166,11 @@ export async function openGoogleDrive(
     if (!config.driveRootId) {
       if (!options.interactive) return null;
       throw new YouBrainError("DRIVE_ROOT_REQUIRED", "Google 登录失败：未能确定 Drive 根目录");
+    }
+    const filled = await fillMissingAccount(config, gdrive as unknown as DriveIdentityClient);
+    if (filled) {
+      config = filled;
+      await writeLocalConfig(options.configFile, config);
     }
     return {
       drive: new GoogleDrive({ client: gdrive, rootFolderId: config.driveRootId }),

@@ -85,4 +85,21 @@ describe("OAuth loopback callback", () => {
       await loopback.close();
     }
   });
+
+  it("cancels a pending authorize when its signal aborts", async () => {
+    const controller = new AbortController();
+    const loopback = await startOAuthLoopback("expected-state", {
+      openUrl: async () => undefined,
+      printUrl: () => undefined,
+      timeoutMs: 60_000,
+      signal: controller.signal,
+    });
+    try {
+      const pending = capture(loopback.authorize("https://accounts.example/authorize"));
+      controller.abort();
+      await expect(pending).rejects.toThrow(/cancelled/);
+    } finally {
+      await loopback.close();
+    }
+  });
 });

@@ -24,6 +24,8 @@ import {
   ActivityBodySchema,
   ConsolidateActionBodySchema,
   ConclusionActionBodySchema,
+  LlmKeyPutSchema,
+  LlmTestBodySchema,
   PortraitCorrectionBodySchema,
   ReminderActionBodySchema,
   TodoActionBodySchema,
@@ -36,7 +38,11 @@ import {
   type ActionResponse,
   type ApiErrorBody,
   type DaemonChangeKind,
+  type GoogleLoginResult,
+  type GoogleLogoutResult,
+  type LlmTestResult,
   type PortraitCorrectionResult,
+  type SecretStoredResponse,
   type SearchRequest,
   type TopicDetail,
   type TopicMutationResponse,
@@ -169,6 +175,21 @@ export async function handleApi(
     if (request.method === "GET") return readWebhook(context);
     if (request.method === "PUT") return writeWebhook(request, context);
     return methodNotAllowed("GET, PUT");
+  }
+  if (path === "/api/secrets/llm") {
+    return method(request, "PUT", () => writeLlmSecret(request, context));
+  }
+  if (path === "/api/actions/llm-test") {
+    return method(request, "POST", () => testLlm(request, context));
+  }
+  if (path === "/api/actions/google-login") {
+    return method(request, "POST", () => googleLogin(context));
+  }
+  if (path === "/api/actions/google-logout") {
+    return method(request, "POST", () => googleLogout(context));
+  }
+  if (path === "/api/actions/google-switch") {
+    return method(request, "POST", () => googleSwitch(context));
   }
   if (path === "/api/status") return method(request, "GET", () => status(context));
   if (path === "/api/reminders") return method(request, "GET", () => reminders(url, context));
@@ -510,6 +531,44 @@ async function writeWebhook(request: Request, context: ApiContext): Promise<Resp
 async function sendWebhookTest(context: ApiContext): Promise<Response> {
   if (!context.deps.testWebhook) throw new HttpError(500, "INTERNAL_ERROR", "webhook 未接入");
   return json(WebhookTestResultSchema.parse(await context.deps.testWebhook()));
+}
+
+function notSupported(): never {
+  throw new HttpError(503, "NOT_SUPPORTED", "当前 daemon 不支持这个接口");
+}
+
+async function writeLlmSecret(request: Request, context: ApiContext): Promise<Response> {
+  if (!context.deps.writeLlmKey) notSupported();
+  const body = LlmKeyPutSchema.parse(await readJson(request));
+  await context.deps.writeLlmKey(body);
+  const response: SecretStoredResponse = { stored: true, echoed: false, hasSecret: true };
+  return json(response);
+}
+
+async function testLlm(request: Request, context: ApiContext): Promise<Response> {
+  if (!context.deps.testLlm) notSupported();
+  const body = LlmTestBodySchema.parse(await readJson(request));
+  const result: LlmTestResult = await context.deps.testLlm(body);
+  return json(result);
+}
+
+/** Blocks until the browser flow ends. The daemon owns the 409 and 503 cases. */
+async function googleLogin(context: ApiContext): Promise<Response> {
+  if (!context.deps.googleLogin) notSupported();
+  const result: GoogleLoginResult = await context.deps.googleLogin();
+  return json(result);
+}
+
+async function googleLogout(context: ApiContext): Promise<Response> {
+  if (!context.deps.googleLogout) notSupported();
+  const result: GoogleLogoutResult = await context.deps.googleLogout();
+  return json(result);
+}
+
+async function googleSwitch(context: ApiContext): Promise<Response> {
+  if (!context.deps.googleSwitch) notSupported();
+  const result: GoogleLogoutResult = await context.deps.googleSwitch();
+  return json(result);
 }
 
 async function config(context: ApiContext): Promise<Response> {

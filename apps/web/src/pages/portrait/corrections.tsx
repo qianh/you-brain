@@ -72,7 +72,7 @@ export function PortraitCorrections({
         section: section.trim(),
         text: text.trim(),
       });
-      push({ message: t("correctionSaved"), tone: "success" });
+      push({ message: t(hint === "on" ? "correctionSaved" : "correctionSavedOff"), tone: "success" });
       setSection("");
       setText("");
       setOpen(false);

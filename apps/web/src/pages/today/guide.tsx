@@ -3,13 +3,7 @@ import { useState } from "react";
 import { useDaemon } from "../../daemon-context.js";
 import { Button } from "../../components/button.js";
 import { Icon } from "../../components/icons.js";
-import { foldGuideSteps, guideSummary, joinGuideNames, type GuideStep } from "./model.js";
-
-const COPY = {
-  drive: { title: "todayGuideDrive", hint: "todayGuideDriveHint", action: "todayGuideDriveAction" },
-  model: { title: "todayGuideModel", hint: "todayGuideModelHint", action: "todayGuideModelAction" },
-  capture: { title: "todayGuideCapture", hint: "todayGuideCaptureHint", action: "todayGuideCaptureAction" },
-} as const;
+import { foldGuideSteps, guideCopy, guideSummary, joinGuideNames, type GuideStep } from "./model.js";
 
 export function StartGuide({
   steps,
@@ -28,22 +22,23 @@ export function StartGuide({
 
   const renderStep = (step: GuideStep) => {
     const index = steps.findIndex((item) => item.id === step.id);
-    const text = COPY[step.id];
+    const copy = guideCopy(step);
     const body = (
       <>
         <span className={step.done ? "today-guide-index is-done" : "today-guide-index"} aria-hidden="true">
           {step.done ? <Icon name="check" size={12} /> : index + 1}
         </span>
         <span className="today-guide-copy">
-          <span className="today-guide-label">{t(text.title)}</span>
-          <span className="today-guide-hint" title={t(text.hint)}>{t(text.hint)}</span>
+          <span className="today-guide-label">{t(copy.title)}</span>
+          <span className="today-guide-hint" title={t(copy.hint, copy.vars)}>{t(copy.hint, copy.vars)}</span>
         </span>
       </>
     );
     if (variant === "mini") {
-      if (step.done) {
+      // A step with no action (checking, connected, done) is only a row, not a button.
+      if (copy.action === null) {
         return (
-          <li key={step.id} className="is-done">
+          <li key={step.id} className={step.done ? "is-done" : undefined}>
             <div className="today-guide-row">{body}</div>
           </li>
         );
@@ -60,9 +55,9 @@ export function StartGuide({
     return (
       <li key={step.id} className={step.done ? "is-done" : ""}>
         {body}
-        {step.done ? null : (
+        {copy.action === null ? null : (
           <Button size="sm" variant="secondary" onClick={() => onOpen(step.section)}>
-            {t(text.action)}
+            {t(copy.action)}
           </Button>
         )}
       </li>

@@ -22,6 +22,11 @@ import type {
   WebhookPublic,
   WebhookPutBody,
   WebhookTestResult,
+  LlmKeyPutBody,
+  LlmTestBody,
+  LlmTestResult,
+  GoogleLoginResult,
+  GoogleLogoutResult,
 } from "./types.js";
 
 /** Read and write ports for the local API. The daemon supplies the implementations. */
@@ -56,5 +61,14 @@ export interface HttpDeps {
   readWebhook?(): Promise<WebhookPublic>;
   writeWebhook?(body: WebhookPutBody): Promise<WebhookPublic>;
   testWebhook?(): Promise<WebhookTestResult>;
+  /** Optional so older test doubles keep compiling. The daemon always supplies it. */
+  writeLlmKey?(body: LlmKeyPutBody): Promise<void>;
+  /** Optional so older test doubles keep compiling. The daemon always supplies it. */
+  testLlm?(body: LlmTestBody): Promise<LlmTestResult>;
+  /** Optional so older test doubles keep compiling. The daemon always supplies it. */
+  googleLogin?(): Promise<GoogleLoginResult>;
+  /** Optional so older test doubles keep compiling. The daemon always supplies both. */
+  googleLogout?(): Promise<GoogleLogoutResult>;
+  googleSwitch?(): Promise<GoogleLogoutResult>;
   events: EventSink;
 }

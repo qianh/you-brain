@@ -298,7 +298,7 @@ export function SearchPage() {
               <EmptyState
                 icon="search-x"
                 title={t("searchNoneTitle", { query: query.trim() })}
-                description={t("searchNoneBody")}
+                description={t(filtered ? "searchNoneBody" : "searchNoneKeywordBody")}
                 action={
                   filtered ? (
                     <Button variant="secondary" onClick={clearFilters}>

@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 
+import { BRAND_LOGO_SRC } from "./brand-logo.js";
+
 export const ICON_NAMES = [
   "calendar",
   "book",
@@ -154,37 +156,17 @@ export function Icon({ name, size = 16 }: { name: IconName; size?: number }): Re
   );
 }
 
-/** Lucide `brain` (ISC, see apps/desktop/assets/NOTICE-lucide.txt) plus two thought dots. */
+/** The app logo tile. It carries its own background, so it reads on light and dark themes. */
 export function BrandMark({ size = 22 }: { size?: number }) {
   return (
-    <svg
+    <img
       className="brand-mark"
+      src={BRAND_LOGO_SRC}
       width={size}
       height={size}
-      viewBox="0 0 24 24"
-      fill="none"
+      alt=""
       aria-hidden="true"
-    >
-      <g
-        transform="translate(-0.2 1.85) scale(0.86)"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M12 18V5" />
-        <path d="M15 13a4.17 4.17 0 01-3-4 4.17 4.17 0 01-3 4" />
-        <path d="M17.707 6.294A3 3 0 1012 5a3 3 0 10-5.707 1.294" />
-        <path d="M17.996 5.125a4 4 0 012.526 5.77" />
-        <path d="M18 18a4 4 0 002-7.465" />
-        <path d="M19.967 17.482a4 4 0 11-7.967.517 4 4 0 11-7.967-.517" />
-        <path d="M6 18a4 4 0 01-2-7.465" />
-        <path d="M6.004 5.125a4 4 0 00-2.526 5.77" />
-      </g>
-      <g fill="currentColor">
-        <circle cx="19.4" cy="4.35" r="0.7" />
-        <circle cx="21.9" cy="1.85" r="1.02" />
-      </g>
-    </svg>
+      draggable={false}
+    />
   );
 }

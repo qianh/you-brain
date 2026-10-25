@@ -12,7 +12,7 @@ import { useToast } from "./components/toast.js";
 import { Tooltip } from "./components/tooltip.js";
 import { useDaemon } from "./daemon-context.js";
 import { devOverlayAllowed } from "./lib/dev-overlay.js";
-import { capsuleFromStatus, type CapsuleKind, type CapsuleStatus } from "./lib/health.js";
+import { capsuleFromStatus, capsuleWarningCount, type CapsuleKind, type CapsuleStatus } from "./lib/health.js";
 import { routeFadeAnimationEnded, useRouteEnter } from "./lib/route-fade.js";
 import { isPrimaryNavActive, readQuery, settingsHref } from "./lib/route.js";
 import { modLabel, shortcutMod } from "./lib/shortcuts.js";
@@ -74,6 +74,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const [palette, setPalette] = useState(requested === "palette");
   const preset = requested === "palette" ? (readQuery(href, "pq") ?? "") : "";
   const settings = location.pathname === "/settings";
+  const overlayTitlebar = typeof window !== "undefined" && window.__TAURI__ !== undefined && /Mac/.test(navigator.platform);
   const mod = shortcutMod(typeof navigator === "undefined" ? "" : navigator.platform);
   const chord = (key: string): string => `${modLabel(mod)}${mod === "meta" ? "" : "+"}${key}`;
 
@@ -90,6 +91,11 @@ export function Shell({ children }: { children: ReactNode }) {
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, [forceScrolled]);
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("shell-overlay", overlayTitlebar);
+    return () => document.documentElement.classList.remove("shell-overlay");
+  }, [overlayTitlebar]);
 
   useEffect(() => {
     window.scrollTo(0, 0);
@@ -131,7 +137,7 @@ export function Shell({ children }: { children: ReactNode }) {
       <a className="skip" href="#content">
         {t("skip")}
       </a>
-      <header className={scrolled ? "topbar is-scrolled" : "topbar"}>
+      <header className={scrolled ? "topbar is-scrolled" : "topbar"} {...(overlayTitlebar ? { "data-tauri-drag-region": "" } : {})}>
         <a
           className="brand"
           href="/today"
@@ -143,7 +149,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <BrandMark size={20} />
           <span>{t("brand")}</span>
         </a>
-        <div className="top-nav">
+        <div className="top-nav" {...(overlayTitlebar ? { "data-tauri-drag-region": "" } : {})}>
           <div className="nav-fade">
             <Segmented
               className="nav-tabs"
@@ -158,7 +164,7 @@ export function Shell({ children }: { children: ReactNode }) {
             />
           </div>
         </div>
-        <div className="top-actions">
+        <div className="top-actions" {...(overlayTitlebar ? { "data-tauri-drag-region": "" } : {})}>
           <Tooltip content={t("searchTrigger")} shortcut={chord("K")}>
             <button type="button" className="search-trigger" aria-label={t("openPalette")} onClick={() => setPalette(true)}>
               <Icon name="search" />
@@ -166,7 +172,7 @@ export function Shell({ children }: { children: ReactNode }) {
               <Kbd>{chord("K")}</Kbd>
             </button>
           </Tooltip>
-          <StatusCapsule kind={kind} label={capsuleText(kind, status?.warnings.length ?? 0, t)} onClick={() => navigate("/status")} />
+          <StatusCapsule kind={kind} label={capsuleText(kind, capsuleWarningCount(status), t)} onClick={() => navigate("/status")} />
           <Tooltip content={t("reload")} shortcut={chord("R")}>
             <button
               type="button"

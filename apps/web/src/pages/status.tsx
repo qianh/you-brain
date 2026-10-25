@@ -15,6 +15,7 @@ import { useDelayed } from "../components/use-delayed.js";
 import { useRelativeTime } from "../components/use-relative-time.js";
 import { useDaemon } from "../daemon-context.js";
 import { consolidationView, readLogs } from "../lib/copy.js";
+import { driveState, needsDriveLogin } from "../lib/drive-state.js";
 import { formatDateTime } from "../lib/format.js";
 import { settingsHref } from "../lib/route.js";
 import { useRoute } from "../router.js";
@@ -31,6 +32,7 @@ import {
   statusScreen,
   syncLine,
   withConsolidationWarning,
+  withDriveSignedOutWarning,
 } from "./status/logic.js";
 
 export function StatusPage() {
@@ -100,16 +102,17 @@ export function StatusPage() {
   }
 
   const view = consolidationView(status?.consolidation);
-  const warnings = withConsolidationWarning(
-    status?.warnings ?? [],
-    view === "stale",
-    t("consolidationStale"),
+  const warnings = withDriveSignedOutWarning(
+    withConsolidationWarning(status?.warnings ?? [], view === "stale", t("consolidationStale")),
+    needsDriveLogin(driveState(status?.drive), status?.warnings ?? []),
+    t("statusDriveSignedOut"),
   );
   const items = attentionItems(warnings);
   const kind = heroKind({
     loading: screen === "loading",
     hasStatus: status !== null,
     driveReachable: status?.drive.reachable ?? null,
+    driveEmail: status?.drive.accountEmail ?? null,
     refineError: status?.refine.lastError ?? null,
     syncError,
     warningCount: items.length,
@@ -118,6 +121,7 @@ export function StatusPage() {
     loading: screen === "loading",
     hasStatus: status !== null,
     driveReachable: status?.drive.reachable ?? null,
+    driveEmail: status?.drive.accountEmail ?? null,
     refineError: status?.refine.lastError ?? null,
     syncError,
     warningCount: items.length,
@@ -127,7 +131,7 @@ export function StatusPage() {
     kind === "loading"
       ? t("statusLoadingTitle")
       : kind === "danger"
-        ? t(fault === "refine" ? "statusRefineBroken" : "statusSyncBroken")
+        ? t(fault === "refine" ? "statusRefineBroken" : fault === "drive" ? "statusDriveOffline" : "statusSyncBroken")
         : kind === "warn"
           ? t("statusNeedsWork", { count: items.length })
           : t("statusAllClear");
@@ -136,11 +140,13 @@ export function StatusPage() {
       ? t("statusLoadingBody")
       : kind === "danger" && fault === "refine"
         ? refineError || t("statusRefineBroken")
-        : kind === "danger"
-          ? syncError || t("statusSyncBrokenBody")
-          : kind === "warn"
-            ? t("statusNeedsWorkBody")
-            : t("statusAllClearBody");
+        : kind === "danger" && fault === "drive"
+          ? t("statusDriveOfflineBody")
+          : kind === "danger"
+            ? syncError || t("statusSyncBrokenBody")
+            : kind === "warn"
+              ? t("statusNeedsWorkBody")
+              : t("statusAllClearBody");
   const logs = logsBesideWarnings(readLogs(status), warnings);
 
   return (
@@ -240,7 +246,7 @@ export function StatusPage() {
               />
               <StatBlock
                 value={view === "disabled" || view === "unknown" ? t("disabledLabel") : t("statusEnabled")}
-                compact={(view === "disabled" || view === "unknown" ? t("disabledLabel") : t("statusEnabled")).length > 4}
+                compact
                 label={t("statusStatDaily")}
                 hint={consolidationHint(view, finishedAt, finishedRelative, t)}
                 english={language === "en"}

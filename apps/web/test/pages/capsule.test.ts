@@ -1,17 +1,21 @@
 import { describe, expect, test } from "bun:test";
 
-import type { CapsuleStatus } from "../../src/lib/health.js";
+import { capsuleWarningCount, type CapsuleStatus } from "../../src/lib/health.js";
 import { panelCapsuleKind } from "../../src/pages/panel.js";
 import { shellCapsuleKind } from "../../src/shell.js";
 
 function status(patch: {
   lastError?: string | null;
   reachable?: boolean | null;
+  accountEmail?: string | null;
   refineError?: string | null;
-  warnings?: readonly unknown[];
+  warnings?: readonly { code: string }[];
 }): CapsuleStatus {
   return {
-    drive: { reachable: patch.reachable === undefined ? true : patch.reachable },
+    drive: {
+      reachable: patch.reachable === undefined ? true : patch.reachable,
+      accountEmail: patch.accountEmail === undefined ? "john@example.com" : patch.accountEmail,
+    },
     refine: { lastError: patch.refineError ?? null },
     sync: { lastError: patch.lastError ?? null },
     warnings: patch.warnings ?? [],
@@ -41,5 +45,18 @@ describe("shell and panel capsules", () => {
     const down = status({ reachable: false });
     expect(shellCapsuleKind({ loading: false, status: down })).toBe("sync-error");
     expect(panelCapsuleKind({ loading: false, error: null, status: down })).toBe("sync-error");
+  });
+
+  test("a signed-out drive is a warning that counts one item, not a sync error", () => {
+    const signedOut = status({ reachable: false, accountEmail: "" });
+    expect(capsuleWarningCount(signedOut)).toBe(1);
+    expect(shellCapsuleKind({ loading: false, status: signedOut })).toBe("warn");
+    expect(panelCapsuleKind({ loading: false, error: null, status: signedOut })).toBe("warn");
+
+    const withLogin = status({ reachable: false, accountEmail: "", warnings: [{ code: "AUTH_REQUIRED" }] });
+    expect(capsuleWarningCount(withLogin)).toBe(1);
+    const warned = status({ reachable: false, accountEmail: "", warnings: [{ code: "SEARCH_STALE" }] });
+    expect(capsuleWarningCount(warned)).toBe(2);
+    expect(capsuleWarningCount(null)).toBe(0);
   });
 });

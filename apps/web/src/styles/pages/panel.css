@@ -5,6 +5,8 @@
   width: 100%;
   max-width: 100%;
   overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-panel);
 }
 .panel-page .panel-top,
 .panel-page .panel-footer { flex: none; min-width: 0; user-select: none; }
@@ -62,7 +64,7 @@
   text-overflow: ellipsis;
 }
 .panel-page .panel-footer {
-  padding: var(--sp-2) var(--sp-3);
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
   border-top: 1px solid var(--border);
 }
 .panel-page .panel-actions { justify-content: flex-end; flex: none; }

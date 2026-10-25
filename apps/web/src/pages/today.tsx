@@ -11,6 +11,7 @@ import { SkeletonRow, SkeletonStat } from "../components/skeleton.js";
 import { StatBlock, StatGrid } from "../components/stat.js";
 import { useDelayed } from "../components/use-delayed.js";
 import { useRelativeTime } from "../components/use-relative-time.js";
+import { driveState, type DriveInput } from "../lib/drive-state.js";
 import { settingsHref, topicHref } from "../lib/route.js";
 import { useRoute } from "../router.js";
 import { ReminderList } from "./reminders/list.js";
@@ -19,6 +20,7 @@ import { TodayGroups } from "./today/groups.js";
 import { StartGuide } from "./today/guide.js";
 import {
   arrivedKeys,
+  emptyCaptureView,
   formatCount,
   formatTodayHeading,
   guideSteps,
@@ -46,10 +48,12 @@ export function TodayPage() {
       ? []
       : guideSteps({
           driveReachable: status.drive.reachable,
+          accountEmail: status.drive.accountEmail,
           warnings: status.warnings,
           sessionCount: sessions.length,
           lastSyncAt: status.sync.lastSyncAt,
         });
+  const setup = emptyCaptureView(steps) === "setup";
   const changeMode = (value: string): void => {
     const next: TodayMode = value === "time" ? "time" : "topic";
     setMode(next);
@@ -128,9 +132,9 @@ export function TodayPage() {
                 <StatBlock
                   value={syncValue}
                   label={t("todayStatSync")}
-                  hint={driveHint(status?.drive.reachable, t)}
+                  hint={driveHint(status?.drive, t)}
                   zero={!syncedAt}
-                  compact={syncValue.length > 6}
+                  compact={!/^\d+$/.test(syncValue)}
                   english={language === "en"}
                 />
               </StatGrid>
@@ -152,16 +156,24 @@ export function TodayPage() {
               <EmptyState
                 icon="sparkles"
                 title={t("todayEmptyTitle")}
-                description={t("todayEmptyBody")}
+                description={setup ? t("todayEmptySetupBody") : t("todayEmptyBody")}
                 action={
-                  <Button variant="primary" onClick={() => navigate("/status")}>
-                    {t("todayViewStatus")}
-                  </Button>
+                  setup ? (
+                    <Button variant="primary" onClick={() => navigate(settingsHref("integrations"))}>
+                      {t("todaySetupCapture")}
+                    </Button>
+                  ) : (
+                    <Button variant="primary" onClick={() => navigate("/status")}>
+                      {t("todayViewStatus")}
+                    </Button>
+                  )
                 }
                 secondary={
-                  <Button variant="ghost" onClick={() => navigate(settingsHref("integrations"))}>
-                    {t("todaySetupCapture")}
-                  </Button>
+                  setup ? null : (
+                    <Button variant="ghost" onClick={() => navigate(settingsHref("integrations"))}>
+                      {t("todaySetupCapture")}
+                    </Button>
+                  )
                 }
               />
             ) : (
@@ -203,12 +215,14 @@ function TodaySkeleton() {
 }
 
 function driveHint(
-  reachable: boolean | null | undefined,
-  t: (key: "driveOk" | "driveDown" | "driveUnknown") => string,
+  drive: DriveInput | null | undefined,
+  t: (key: "driveOk" | "driveDown" | "driveSignedOut" | "driveChecking") => string,
 ): string {
-  if (reachable === true) return t("driveOk");
-  if (reachable === false) return t("driveDown");
-  return t("driveUnknown");
+  const state = driveState(drive);
+  if (state === "connected") return t("driveOk");
+  if (state === "offline") return t("driveDown");
+  if (state === "signedOut") return t("driveSignedOut");
+  return t("driveChecking");
 }
 
 function storage(): Storage | null {

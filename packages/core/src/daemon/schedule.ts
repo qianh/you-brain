@@ -1,6 +1,10 @@
 export const INTERVALS = {
   tickMs: 1_000,
   flushMs: 30_000,
+  /** One tick uploads for at most this long, so flush, pull, and search still run between passes. */
+  uploadBudgetMs: 20_000,
+  /** One tick indexes queued inbox files for at most this long. The rest wait for the next tick. */
+  inboxBudgetMs: 15_000,
   heartbeatMs: 5 * 60_000,
   pullMs: 60_000,
   fastPullMs: 5_000,

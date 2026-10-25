@@ -534,8 +534,8 @@ const reminders: MockReminder[] =
     : [];
 
 const llmKeys = new Map<string, string>();
-let oauthSecret = "";
-let accountEmail: string | null = "john@example.com";
+// Starts signed out, like a fresh daemon. Google login sets the account.
+let accountEmail: string | null = null;
 let nextId = 1;
 
 const portraits: Record<string, string> = {
@@ -808,6 +808,11 @@ function webStatus(): { processor: string | null; isLocalProcessor: boolean; pen
   return { processor: null, isLocalProcessor: false, pending: 0 };
 }
 
+/** The daemon's drive block: signed out is unreachable with no email, signed in is reachable with one. */
+function driveStatus(): { reachable: boolean; accountEmail: string } {
+  return accountEmail === null ? { reachable: false, accountEmail: "" } : { reachable: true, accountEmail };
+}
+
 function statusBody(): unknown {
   if (scenario === "fresh") {
     return {
@@ -826,7 +831,7 @@ function statusBody(): unknown {
   if (scenario === "syncfail") {
     return {
       deviceId: MAC,
-      drive: { reachable: true, accountEmail },
+      drive: driveStatus(),
       sync: {
         lastSyncAt: ago(12 * MINUTE),
         pendingOutbox: 0,
@@ -851,7 +856,7 @@ function statusBody(): unknown {
   if (scenario === "half") {
     return {
       deviceId: MAC,
-      drive: { reachable: true, accountEmail },
+      drive: driveStatus(),
       sync: { lastSyncAt: null, pendingOutbox: 0 },
       search: { ready: false, documents: 0 },
       refine: { pending: 0, lastError: null },
@@ -865,7 +870,7 @@ function statusBody(): unknown {
   const healthy = scenario === "healthy";
   return {
     deviceId: MAC,
-    drive: { reachable: accountEmail !== null, accountEmail },
+    drive: driveStatus(),
     sync: { lastSyncAt: ago(4 * MINUTE), pendingOutbox: healthy ? 0 : 1 },
     search: { ready: healthy, documents: 128 },
     refine: { pending: healthy ? 0 : 2, lastError: null },
@@ -1347,12 +1352,6 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
     llmKeys.set(body.provider, apiKey);
     return json({ stored: true });
   }
-  if (path === "/api/secrets/oauth" && request.method === "PUT") {
-    const body: unknown = await request.json().catch(() => null);
-    if (!isObject(body)) return fail(400, "INVALID_INPUT", "请求体必须是 JSON 对象");
-    if (typeof body.clientSecret === "string") oauthSecret = body.clientSecret;
-    return json({ stored: true, echoed: false, hasSecret: oauthSecret !== "" });
-  }
   if (path === "/api/actions/llm-test" && request.method === "POST") {
     const body: unknown = await request.json().catch(() => null);
     const provider = isObject(body) && typeof body.provider === "string" ? body.provider : "";
@@ -1365,6 +1364,17 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
     accountEmail = "john@example.com";
     publish("status");
     return json({ ok: true, message: "已使用 john@example.com 登录。" });
+  }
+  if (path === "/api/actions/google-logout" && request.method === "POST") {
+    const email = accountEmail;
+    accountEmail = "";
+    publish("status");
+    return json({ ok: true, message: email ? `已退出 ${email}，本机数据已保留` : "当前没有登录的 Google 账号" });
+  }
+  if (path === "/api/actions/google-switch" && request.method === "POST") {
+    accountEmail = "";
+    publish("status");
+    return json({ ok: true, message: "已退出，本机数据已备份。后台正在重启，请稍后重新登录并选择账号" });
   }
   const topicMatch = /^\/api\/topics\/([^/]+)$/u.exec(path);
   if (topicMatch) {

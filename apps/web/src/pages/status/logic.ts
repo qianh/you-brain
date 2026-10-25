@@ -1,7 +1,8 @@
 import { readCaptures } from "../../lib/copy.js";
+import { driveState, type DriveInput } from "../../lib/drive-state.js";
 
 export type HeroKind = "loading" | "ok" | "warn" | "danger";
-export type HeroFault = "refine" | "sync";
+export type HeroFault = "refine" | "sync" | "drive";
 export type WarningAction = "model" | "sync" | "login" | "none";
 export type StatusScreen = "loading" | "offline" | "error" | "ready";
 export type DotTone = "ok" | "warn" | "bad" | "muted";
@@ -27,6 +28,8 @@ export interface HeroInput {
   loading: boolean;
   hasStatus: boolean;
   driveReachable: boolean | null;
+  /** Needed to tell an offline drive (a failure) from a signed-out one (a warning). */
+  driveEmail?: string | null;
   refineError: string | null;
   /** An explicit sync failure. Never-synced and a pending outbox are not one. */
   syncError?: string | null;
@@ -42,15 +45,23 @@ export function heroKind(input: HeroInput): HeroKind {
     if (!input.hasStatus) return "loading";
   }
   if ((input.refineError ?? "").trim() !== "") return "danger";
-  if (input.driveReachable === false) return "danger";
+  // Signed out is a warning: the login row is counted in warningCount.
+  if (driveState({ reachable: input.driveReachable, accountEmail: input.driveEmail ?? null }) === "offline") {
+    return "danger";
+  }
   if ((input.syncError ?? "").trim() !== "") return "danger";
   if (input.warningCount > 0) return "warn";
   return "ok";
 }
 
+/** Which danger the hero names. Refine and sync errors win. An offline Drive is named only when nothing else failed. */
 export function heroFault(input: HeroInput): HeroFault | null {
   if (heroKind(input) !== "danger") return null;
   if ((input.refineError ?? "").trim() !== "") return "refine";
+  if ((input.syncError ?? "").trim() !== "") return "sync";
+  if (driveState({ reachable: input.driveReachable, accountEmail: input.driveEmail ?? null }) === "offline") {
+    return "drive";
+  }
   return "sync";
 }
 
@@ -89,6 +100,16 @@ export function attentionItems(
     items.push({ key, code, message, action: warningAction(code) });
   }
   return items;
+}
+
+/** A signed-out Drive gets a login row, unless the daemon already reports one (see needsDriveLogin). */
+export function withDriveSignedOutWarning(
+  warnings: readonly { code: string; message: string }[],
+  needsLogin: boolean,
+  message: string,
+): { code: string; message: string }[] {
+  if (!needsLogin || message.trim() === "") return [...warnings];
+  return [...warnings, { code: "DRIVE_SIGNED_OUT", message }];
 }
 
 /** A stale consolidation that the daemon did not already emit still needs a row. */
@@ -147,9 +168,11 @@ export function syncLine(sync: SyncLineInput | null | undefined): SyncLine {
   return { tone: "ok", message: null, at };
 }
 
-export function driveTone(reachable: boolean | null): DotTone {
-  if (reachable === true) return "ok";
-  if (reachable === false) return "bad";
+export function driveTone(drive: DriveInput | null | undefined): DotTone {
+  const state = driveState(drive);
+  if (state === "connected") return "ok";
+  if (state === "offline") return "bad";
+  if (state === "signedOut") return "warn";
   return "muted";
 }
 

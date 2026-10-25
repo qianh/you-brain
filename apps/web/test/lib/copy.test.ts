@@ -113,7 +113,7 @@ describe("panel status", () => {
 
   test("lists drive, consolidation, refine, and warning text", () => {
     const status = {
-      drive: { reachable: false as boolean | null },
+      drive: { reachable: false as boolean | null, accountEmail: "john@example.com" },
       refine: { lastError: "模型没有返回 JSON" },
       consolidation: { enabled: true, stale: true, status: "stale" as const },
       warnings: [{ message: "搜索索引过期" }],
@@ -133,6 +133,19 @@ describe("panel status", () => {
         ["慢"],
       ),
     ).toBe("warn");
+  });
+
+  test("a signed-out drive is a warning with its own problem line, not a bad state", () => {
+    const signedOut = {
+      drive: { reachable: false as boolean | null, accountEmail: null as string | null },
+      refine: { lastError: null as string | null },
+      consolidation: { enabled: true, stale: false, status: "ok" as const },
+      warnings: [],
+    };
+    const problems = panelProblems(signedOut, "zh");
+    expect(problems).toEqual(["尚未登录 Google"]);
+    expect(attentionLevel(signedOut, problems)).toBe("warn");
+    expect(attentionLevel({ ...signedOut, drive: { reachable: false, accountEmail: "john@example.com" } }, [])).toBe("bad");
   });
 
   test("treats a disabled consolidation role as off, even if stale is set", () => {

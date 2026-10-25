@@ -17,8 +17,17 @@ import type {
   DriveUpdateOptions,
 } from "./drive-port.js";
 
+/** Folders listed at the same time while walking a tree. */
+const WALK_CONCURRENCY = 8;
 const folderMimeType = "application/vnd.google-apps.folder";
 const googleDocumentMimeType = "application/vnd.google-apps.document";
+/** Other devices can rename or move folders, so cached levels expire on their own too. */
+const FOLDER_CACHE_TTL_MS = 60_000;
+/**
+ * gaxios aborts the request, but on Bun a body that stalls after the headers
+ * still never settles. Cap every resource call so one hang cannot block the tick.
+ */
+const DEFAULT_REQUEST_DEADLINE_MS = 120_000;
 const fileFields =
   "id,name,mimeType,parents,size,createdTime,modifiedTime,md5Checksum,appProperties,version,trashed";
 
@@ -53,24 +62,115 @@ function isMissingOrOutsideRoot(error: unknown): boolean {
   );
 }
 
+function folderSignature(file: drive_v3.Schema$File): string {
+  return `${file.name ?? ""}\u0000${file.parents?.[0] ?? ""}`;
+}
+
 function asBuffer(content: Buffer | string): Buffer {
   return typeof content === "string" ? Buffer.from(content, "utf8") : Buffer.from(content);
+}
+
+export class DriveRequestTimeoutError extends Error {
+  readonly code = "DRIVE_REQUEST_TIMEOUT" as const;
+
+  constructor(method: string) {
+    super(`Google Drive request timed out: ${method}`);
+    this.name = "DriveRequestTimeoutError";
+  }
+}
+
+function isPromiseLike(value: unknown): value is Promise<unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === "function"
+  );
+}
+
+function raceDeadline<T>(pending: Promise<T>, method: string, deadlineMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new DriveRequestTimeoutError(method));
+    }, deadlineMs);
+    timer.unref();
+  });
+  return Promise.race([pending, timeout]).finally(() => {
+    clearTimeout(timer);
+  });
+}
+
+const DEADLINE_RESOURCES = ["files", "changes", "about"] as const;
+
+function methodNames(resource: object): string[] {
+  const names = new Set<string>();
+  for (let node: object | null = resource; node && node !== Object.prototype; node = Object.getPrototypeOf(node)) {
+    for (const name of Object.getOwnPropertyNames(node)) {
+      if (name !== "constructor" && typeof (resource as Record<string, unknown>)[name] === "function") {
+        names.add(name);
+      }
+    }
+  }
+  return [...names];
+}
+
+/**
+ * Gives every promise method of the Drive resources a deadline. Methods are wrapped one by
+ * one; a `Proxy` would break on googleapis resources, which have frozen properties.
+ */
+function withRequestDeadlines<T extends object>(client: T, deadlineMs: number): T {
+  const wrapped = Object.create(client) as Record<string, unknown>;
+  for (const key of DEADLINE_RESOURCES) {
+    const resource = (client as Record<string, unknown>)[key];
+    if (resource === null || typeof resource !== "object") continue;
+    const guarded: Record<string, unknown> = {};
+    for (const name of methodNames(resource)) {
+      guarded[name] = (...args: unknown[]) => {
+        const result = ((resource as Record<string, (...args: unknown[]) => unknown>)[name] as (...args: unknown[]) => unknown).apply(resource, args);
+        return isPromiseLike(result) ? raceDeadline(result, `${key}.${name}`, deadlineMs) : result;
+      };
+    }
+    Object.defineProperty(wrapped, key, { value: guarded, enumerable: true });
+  }
+  return wrapped as T;
 }
 
 export class GoogleDrive implements DrivePort {
   readonly #client: drive_v3.Drive;
   readonly #rootFolderId: string;
   readonly #folderCreations = new Map<string, Promise<string>>();
+  readonly #now: () => number;
+  /** Folder ids per intermediate directory path. The last path segment is never cached. */
+  readonly #folderCache = new Map<string, { ids: string[]; at: number }>();
+  /** Name and parent per folder id, so resolving a path costs a request per new folder, not per file. */
+  readonly #folderInfo = new Map<string, { name: string | null; parents: string[]; at: number }>();
+  /**
+   * Name and parent each folder last had, from walks and from the change feed. A folder
+   * shows up in the feed whenever a file is added to it, so only a different name or
+   * parent means the tree changed.
+   */
+  readonly #folderSeen = new Map<string, string>();
+  /** Bumped on every folder change so a resolve that started earlier does not refill the cache. */
+  #folderGeneration = 0;
 
-  constructor(options: { client: drive_v3.Drive; rootFolderId: string }) {
+  constructor(options: {
+    client: drive_v3.Drive;
+    rootFolderId: string;
+    now?: () => number;
+    requestDeadlineMs?: number;
+  }) {
     if (!options.rootFolderId) {
       throw new YouBrainError(
         "DRIVE_ROOT_REQUIRED",
         "Drive root folder is not configured",
       );
     }
-    this.#client = options.client;
+    this.#client = withRequestDeadlines(
+      options.client,
+      options.requestDeadlineMs ?? DEFAULT_REQUEST_DEADLINE_MS,
+    );
     this.#rootFolderId = options.rootFolderId;
+    this.#now = options.now ?? Date.now;
   }
 
   static async openMyDrive(client: drive_v3.Drive): Promise<GoogleDrive> {
@@ -134,13 +234,26 @@ export class GoogleDrive implements DrivePort {
     return (await this.#metadataResponse(id)).data;
   }
 
+  /** Name and parent of an ancestor folder. Cached briefly: other devices can rename or move it. */
+  async #ancestor(id: string): Promise<{ name?: string | null; parents?: string[] | null }> {
+    const cached = this.#folderInfo.get(id);
+    if (cached && this.#now() - cached.at < FOLDER_CACHE_TTL_MS) return cached;
+    const generation = this.#folderGeneration;
+    const file = await this.#metadata(id);
+    const info = { name: file.name ?? null, parents: file.parents ?? [], at: this.#now() };
+    if (generation === this.#folderGeneration) this.#folderInfo.set(id, info);
+    return info;
+  }
+
   async #assertDescendant(id: string): Promise<void> {
     let current = id;
     const visited = new Set<string>();
     while (current !== this.#rootFolderId) {
       if (visited.has(current)) throw new Error("Drive parent cycle detected");
+      const first = visited.size === 0;
       visited.add(current);
-      const metadata = await this.#metadata(current);
+      // The object itself is read fresh; only the folders above it come from the cache.
+      const metadata = first ? await this.#metadata(current) : await this.#ancestor(current);
       const parent = metadata.parents?.[0];
       if (!parent) {
         throw new YouBrainError(
@@ -197,15 +310,24 @@ export class GoogleDrive implements DrivePort {
 
   async #resolveAll(path: string): Promise<drive_v3.Schema$File[]> {
     const segments = safePath(path).split("/");
+    const generation = this.#folderGeneration;
     let parentIds = [this.#rootFolderId];
     let found: drive_v3.Schema$File[] = [];
+    let prefix = "";
     for (const [index, segment] of segments.entries()) {
+      prefix = prefix ? `${prefix}/${segment}` : segment;
+      const intermediate = index < segments.length - 1;
+      const cached = intermediate ? this.#cachedFolders(prefix) : undefined;
+      if (cached) {
+        parentIds = cached;
+        continue;
+      }
       found = (
         await Promise.all(
           parentIds.map((parentId) => this.#namedChildren(parentId, segment)),
         )
       ).flat();
-      if (index < segments.length - 1) {
+      if (intermediate) {
         found = found.filter((file) => file.mimeType === folderMimeType);
       }
       const unique = new Map(
@@ -214,8 +336,28 @@ export class GoogleDrive implements DrivePort {
       found = [...unique.values()];
       parentIds = [...unique.keys()];
       if (parentIds.length === 0) return [];
+      if (intermediate && generation === this.#folderGeneration) {
+        this.#folderCache.set(prefix, { ids: parentIds, at: this.#now() });
+      }
     }
     return found;
+  }
+
+  #cachedFolders(prefix: string): string[] | undefined {
+    const entry = this.#folderCache.get(prefix);
+    if (!entry) return undefined;
+    if (this.#now() - entry.at >= FOLDER_CACHE_TTL_MS) {
+      this.#folderCache.delete(prefix);
+      return undefined;
+    }
+    return entry.ids;
+  }
+
+  /** Any folder create, rename, move, or trash clears every cached level. */
+  #forgetFolders(): void {
+    this.#folderGeneration += 1;
+    this.#folderCache.clear();
+    this.#folderInfo.clear();
   }
 
   async ensureFolder(path: string): Promise<string> {
@@ -259,6 +401,7 @@ export class GoogleDrive implements DrivePort {
     if (!created.data.id) {
       throw new Error("Google Drive did not return a folder ID");
     }
+    this.#forgetFolders();
     return created.data.id;
   }
 
@@ -290,18 +433,28 @@ export class GoogleDrive implements DrivePort {
     rootPath: string,
   ): Promise<Array<{ file: drive_v3.Schema$File; path: string }>> {
     const output: Array<{ file: drive_v3.Schema$File; path: string }> = [];
-    const queue: Array<{ id: string; path: string }> = [
-      { id: rootId, path: rootPath },
-    ];
-    while (queue.length > 0) {
-      const current = queue.shift();
-      if (!current) break;
-      for (const file of await this.#children(current.id)) {
-        if (!file.id || !file.name) continue;
-        const path = current.path ? `${current.path}/${file.name}` : file.name;
-        if (file.mimeType === folderMimeType) queue.push({ id: file.id, path });
-        else output.push({ file, path });
+    // Level by level, a few folders at a time. A tree of hundreds of folders costs one
+    // round trip per folder, so a serial walk takes minutes. Result order is unchanged.
+    let level: Array<{ id: string; path: string }> = [{ id: rootId, path: rootPath }];
+    while (level.length > 0) {
+      const next: Array<{ id: string; path: string }> = [];
+      for (let start = 0; start < level.length; start += WALK_CONCURRENCY) {
+        const batch = level.slice(start, start + WALK_CONCURRENCY);
+        const listed = await Promise.all(
+          batch.map(async (current) => ({ current, children: await this.#children(current.id) })),
+        );
+        for (const { current, children } of listed) {
+          for (const file of children) {
+            if (!file.id || !file.name) continue;
+            const path = current.path ? `${current.path}/${file.name}` : file.name;
+            if (file.mimeType === folderMimeType) {
+              this.#folderSeen.set(file.id, folderSignature(file));
+              next.push({ id: file.id, path });
+            } else output.push({ file, path });
+          }
+        }
       }
+      level = next;
     }
     return output;
   }
@@ -313,20 +466,9 @@ export class GoogleDrive implements DrivePort {
   async list(query: DriveListQuery): Promise<DriveEntry[]> {
     if (query.prefix) safePath(query.prefix.replace(/\/$/u, "") || "invalid");
     let files: Array<{ file: drive_v3.Schema$File; path: string }>;
-    if (query.prefix) {
-      const prefix = query.prefix.replace(/\/$/u, "");
-      const roots = await this.#resolveAll(prefix);
-      if (roots.length === 0) return [];
-      files = (
-        await Promise.all(
-          roots.map((root) =>
-            root.id && root.mimeType === folderMimeType
-              ? this.#walkFrom(root.id, prefix)
-              : Promise.resolve([{ file: root, path: prefix }]),
-          ),
-        )
-      ).flat();
-    } else if (query.appProperty) {
+    // One query finds the matches; the prefix filter below keeps only those under it.
+    // Walking the prefix tree instead costs a request per folder on every call.
+    if (query.appProperty) {
       const { key, value } = query.appProperty;
       const response = await this.#client.files.list({
         q: `appProperties has { key='${escapeQuery(key)}' and value='${escapeQuery(value)}' } and trashed = false`,
@@ -346,6 +488,19 @@ export class GoogleDrive implements DrivePort {
         }
         files.push({ file, path: await this.#pathFor(file.id) });
       }
+    } else if (query.prefix) {
+      const prefix = query.prefix.replace(/\/$/u, "");
+      const roots = await this.#resolveAll(prefix);
+      if (roots.length === 0) return [];
+      files = (
+        await Promise.all(
+          roots.map((root) =>
+            root.id && root.mimeType === folderMimeType
+              ? this.#walkFrom(root.id, prefix)
+              : Promise.resolve([{ file: root, path: prefix }]),
+          ),
+        )
+      ).flat();
     } else {
       files = await this.#walk();
     }
@@ -410,7 +565,34 @@ export class GoogleDrive implements DrivePort {
           const id = change.fileId ?? change.file?.id;
           if (!id) continue;
           if (change.file?.mimeType === folderMimeType) {
-            requiresReset = true;
+            const folder = change.file;
+            if (change.removed || folder.trashed) {
+              requiresReset = true;
+              continue;
+            }
+            const signature = folderSignature(folder);
+            const known = this.#folderSeen.get(id);
+            if (known === signature) continue;
+            this.#folderSeen.set(id, signature);
+            if (known !== undefined) {
+              // Renamed or moved: every path under it changed.
+              requiresReset = true;
+              continue;
+            }
+            // Not seen before: created, or moved in from elsewhere. List just this subtree.
+            try {
+              const path = await this.#pathFor(id, folder);
+              if (`${path}/`.startsWith(normalizedPrefix)) {
+                for (const found of await this.#walkFrom(id, path)) {
+                  entries.set(found.file.id ?? "", this.#entry(found.file, found.path));
+                  removedIds.delete(found.file.id ?? "");
+                }
+              } else if (normalizedPrefix.startsWith(`${path}/`)) {
+                requiresReset = true;
+              }
+            } catch (error) {
+              if (!isMissingOrOutsideRoot(error)) throw error;
+            }
             continue;
           }
           if (change.removed || change.file?.trashed) {
@@ -419,7 +601,7 @@ export class GoogleDrive implements DrivePort {
             continue;
           }
           try {
-            const path = await this.#pathFor(id);
+            const path = await this.#pathFor(id, change.file ?? undefined);
             if (!path.startsWith(normalizedPrefix)) {
               entries.delete(id);
               removedIds.add(id);
@@ -461,19 +643,24 @@ export class GoogleDrive implements DrivePort {
     };
   }
 
-  async #pathFor(id: string): Promise<string> {
+  /** `known` is the object's own metadata when the caller already has it (a change feed entry). */
+  async #pathFor(id: string, known?: drive_v3.Schema$File): Promise<string> {
     const segments: string[] = [];
     let current = id;
+    let first = true;
     while (current !== this.#rootFolderId) {
-      const file = await this.#metadata(current);
-      if (!file.name || !file.parents?.[0]) {
+      const file = first ? (known ?? (await this.#metadata(current))) : await this.#ancestor(current);
+      const name = file.name;
+      const parent = file.parents?.[0];
+      if (!name || !parent) {
         throw new YouBrainError(
           "INVALID_INPUT",
           "Drive object is outside the BrainHub root",
         );
       }
-      segments.unshift(file.name);
-      current = file.parents[0];
+      segments.unshift(name);
+      current = parent;
+      first = false;
     }
     return segments.join("/");
   }
@@ -617,6 +804,7 @@ export class GoogleDrive implements DrivePort {
       fields: fileFields,
       supportsAllDrives: true,
     });
+    this.#forgetFolders();
     const path = await this.#pathFor(fileId);
     return this.#entry(response.data, path, headerValue(response.headers, "etag"));
   }
@@ -638,6 +826,7 @@ export class GoogleDrive implements DrivePort {
       fields: fileFields,
       supportsAllDrives: true,
     });
+    this.#forgetFolders();
     return this.#entry(response.data, path, headerValue(response.headers, "etag"));
   }
 
@@ -648,6 +837,7 @@ export class GoogleDrive implements DrivePort {
       requestBody: { trashed: true },
       supportsAllDrives: true,
     });
+    this.#forgetFolders();
   }
 
   async quota(): Promise<DriveQuota> {

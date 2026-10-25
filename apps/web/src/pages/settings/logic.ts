@@ -79,37 +79,15 @@ export function isSettingsDirty(input: {
   roles: Roles;
   savedRoles: Roles;
   apiKey: string;
-  oauthDirty: boolean;
 }): boolean {
   if (input.apiKey.trim() !== "") return true;
-  if (input.oauthDirty) return true;
   if (!deepEqual(input.config, input.savedConfig)) return true;
   return !deepEqual(input.roles, input.savedRoles);
-}
-
-export interface OauthPayload {
-  mode: "official" | "custom";
-  clientId: string;
-  clientSecret?: string;
 }
 
 export interface LlmKeyPayload {
   provider: string;
   apiKey: string;
-}
-
-/** Same shape the previous page posted. Secrets stay out of config and roles. */
-export function oauthPayload(input: {
-  dirty: boolean;
-  mode: "official" | "custom";
-  clientId: string;
-  clientSecret: string;
-}): OauthPayload | null {
-  if (!input.dirty) return null;
-  const secret = input.clientSecret.trim();
-  const body: OauthPayload = { mode: input.mode, clientId: input.clientId.trim() };
-  if (secret !== "") body.clientSecret = secret;
-  return body;
 }
 
 export function llmKeyPayload(provider: string, apiKey: string): LlmKeyPayload | null {
@@ -122,17 +100,12 @@ export interface SavePlan {
   config: SharedConfig;
   roles: Roles;
   llmKey: LlmKeyPayload | null;
-  oauth: OauthPayload | null;
 }
 
 export function buildSavePlan(input: {
   config: SharedConfig;
   roles: Roles;
   apiKey: string;
-  oauthMode: "official" | "custom";
-  clientId: string;
-  clientSecret: string;
-  oauthDirty: boolean;
   savedProvider?: string;
 }): SavePlan {
   const provider = input.savedProvider ?? input.config.llm.provider;
@@ -140,12 +113,6 @@ export function buildSavePlan(input: {
     config: input.config,
     roles: input.roles,
     llmKey: llmKeyPayload(provider, input.apiKey),
-    oauth: oauthPayload({
-      dirty: input.oauthDirty,
-      mode: input.oauthMode,
-      clientId: input.clientId,
-      clientSecret: input.clientSecret,
-    }),
   };
 }
 

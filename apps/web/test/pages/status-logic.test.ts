@@ -18,6 +18,7 @@ import {
   warningAction,
   webSessionLine,
   withConsolidationWarning,
+  withDriveSignedOutWarning,
   type HeroInput,
 } from "../../src/pages/status/logic.js";
 
@@ -38,8 +39,11 @@ describe("heroKind", () => {
     expect(heroKind(hero({ hasStatus: false }))).toBe("loading");
     expect(heroKind(hero({ loading: true, refineError: "bad", driveReachable: false, warningCount: 3 }))).toBe("danger");
     expect(heroFault(hero({ refineError: "  解析失败  ", driveReachable: false }))).toBe("refine");
-    expect(heroKind(hero({ driveReachable: false, warningCount: 2 }))).toBe("danger");
-    expect(heroFault(hero({ driveReachable: false }))).toBe("sync");
+    expect(heroKind(hero({ driveReachable: false, driveEmail: "john@example.com", warningCount: 2 }))).toBe("danger");
+    expect(heroFault(hero({ driveReachable: false, driveEmail: "john@example.com" }))).toBe("drive");
+    // Signed out is a warning. The login row is what the count holds.
+    expect(heroKind(hero({ driveReachable: false, driveEmail: null, warningCount: 1 }))).toBe("warn");
+    expect(heroFault(hero({ driveReachable: false, driveEmail: "" }))).toBeNull();
     expect(heroKind(hero({ driveReachable: null, warningCount: 1 }))).toBe("warn");
     expect(heroKind(hero({ refineError: "   " }))).toBe("ok");
     expect(heroKind(hero({ syncError: "  同步失败：请求超时  " }))).toBe("danger");
@@ -48,6 +52,33 @@ describe("heroKind", () => {
     expect(heroKind(hero({ syncError: "   " }))).toBe("ok");
     expect(heroKind(hero({}))).toBe("ok");
     expect(heroFault(hero({}))).toBeNull();
+  });
+});
+
+describe("heroFault for drive", () => {
+  test("names an offline drive only when no refine or sync error is set", () => {
+    const offline = { driveReachable: false, driveEmail: "john@example.com" };
+    expect(heroFault(hero(offline))).toBe("drive");
+    expect(heroFault(hero({ ...offline, syncError: "同步失败：请求超时" }))).toBe("sync");
+    expect(heroFault(hero({ ...offline, refineError: "解析失败" }))).toBe("refine");
+    expect(heroFault(hero({ ...offline, syncError: "   " }))).toBe("drive");
+    // Signed out is a warning, not a Drive failure, so the hero does not name Drive.
+    expect(heroFault(hero({ driveReachable: false, driveEmail: "" }))).toBeNull();
+    expect(heroFault(hero({ driveReachable: null, driveEmail: "john@example.com" }))).toBeNull();
+    expect(heroFault(hero({ driveReachable: true, driveEmail: "john@example.com", syncError: "同步失败" }))).toBe("sync");
+  });
+});
+
+describe("withDriveSignedOutWarning", () => {
+  test("adds one login row only when it is needed", () => {
+    const warnings = [{ code: "SEARCH_STALE", message: "索引过期" }];
+    expect(withDriveSignedOutWarning(warnings, true, "还没有登录 Google 账号")).toEqual([
+      ...warnings,
+      { code: "DRIVE_SIGNED_OUT", message: "还没有登录 Google 账号" },
+    ]);
+    expect(withDriveSignedOutWarning(warnings, false, "还没有登录 Google 账号")).toEqual(warnings);
+    expect(withDriveSignedOutWarning(warnings, true, "   ")).toEqual(warnings);
+    expect(warningAction("DRIVE_SIGNED_OUT")).toBe("login");
   });
 });
 
@@ -133,8 +164,10 @@ describe("status screen", () => {
 
 describe("connection tones", () => {
   test("uses color only as a backup for the words", () => {
-    expect(driveTone(true)).toBe("ok");
-    expect(driveTone(false)).toBe("bad");
+    expect(driveTone({ reachable: true, accountEmail: null })).toBe("ok");
+    expect(driveTone({ reachable: false, accountEmail: "john@example.com" })).toBe("bad");
+    expect(driveTone({ reachable: false, accountEmail: "" })).toBe("warn");
+    expect(driveTone({ reachable: null, accountEmail: null })).toBe("muted");
     expect(driveTone(null)).toBe("muted");
     expect(refineTone(0, null)).toBe("ok");
     expect(refineTone(2, "  ")).toBe("warn");

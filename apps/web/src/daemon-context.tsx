@@ -17,6 +17,7 @@ import {
   type BrowserDaemon,
   type ReminderActionName,
 } from "./api/client.js";
+import { driveStillChecking } from "./lib/drive-state.js";
 import type { Language } from "./lib/format.js";
 import { translate, type MessageKey } from "./i18n/messages.js";
 
@@ -69,6 +70,8 @@ async function pause(ms: number, signal: AbortSignal): Promise<void> {
     );
   });
 }
+
+const DRIVE_CHECK_POLL_MS = 3000;
 
 export function DaemonProvider({ children }: { children: ReactNode }) {
   const client = useMemo(() => createBrowserDaemon(), []);
@@ -191,6 +194,16 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
       controller.abort();
     };
   }, [client, reload]);
+
+  // The daemon announces when its Drive check ends. Polling covers a missed announcement.
+  const driveChecking = driveStillChecking(snapshot.status);
+  useEffect(() => {
+    if (!driveChecking) return;
+    const timer = setInterval(() => {
+      void reload("status");
+    }, DRIVE_CHECK_POLL_MS);
+    return () => clearInterval(timer);
+  }, [driveChecking, reload]);
 
   useEffect(() => {
     document.documentElement.lang = language === "zh" ? "zh-CN" : "en";

@@ -11,7 +11,7 @@ import { StatusCapsule } from "../components/status-capsule.js";
 import { useToast } from "../components/toast.js";
 import { useDelayed } from "../components/use-delayed.js";
 import { SourceTile } from "../components/tile.js";
-import { capsuleFromStatus, type CapsuleKind, type CapsuleStatus } from "../lib/health.js";
+import { capsuleFromStatus, capsuleWarningCount, type CapsuleKind, type CapsuleStatus } from "../lib/health.js";
 import { formatCount } from "./today/model.js";
 import { formatDateTime } from "../lib/format.js";
 import { sortSessionsByTime } from "../lib/group.js";
@@ -20,7 +20,7 @@ import { isTextEntry, modLabel, shortcutMod } from "../lib/shortcuts.js";
 import { browserWindowBridge, quitShell } from "../lib/window.js";
 import type { MessageKey } from "../i18n/messages.js";
 import { StartGuide } from "./today/guide.js";
-import { guideSteps } from "./today/model.js";
+import { emptyCaptureView, guideSteps } from "./today/model.js";
 import { clockTime, countSessionsByTopic, panelShortcut, panelTopicSlice, takeWithRest, topicDotClass } from "./panel/model.js";
 import { openAppPath } from "./panel/open.js";
 import { ReminderList } from "./reminders/list.js";
@@ -57,10 +57,12 @@ export function PanelPage() {
       ? []
       : guideSteps({
           driveReachable: status.drive.reachable,
+          accountEmail: status.drive.accountEmail,
           warnings: status.warnings,
           sessionCount: sessions.length,
           lastSyncAt: status.sync.lastSyncAt,
         });
+  const setup = emptyCaptureView(steps) === "setup";
   const kind = panelCapsuleKind({ loading, error, status });
   const mod = shortcutMod(typeof navigator === "undefined" ? "" : navigator.platform);
   const chord = (key: string): string => `${modLabel(mod)}${mod === "meta" ? "" : "+"}${key}`;
@@ -127,7 +129,7 @@ export function PanelPage() {
           <span>{t("brand")}</span>
         </span>
         <span className="panel-tools">
-          <StatusCapsule kind={kind} label={capsuleText(kind, status?.warnings.length ?? 0, t)} onClick={() => openMain("/status")} />
+          <StatusCapsule kind={kind} label={capsuleText(kind, capsuleWarningCount(status), t)} onClick={() => openMain("/status")} />
           <IconButton label={t("panelOpenMain")} shortcut={chord("O")} onClick={() => openMain("/")}>
             <Icon name="external-link" />
           </IconButton>
@@ -177,11 +179,11 @@ export function PanelPage() {
                   <span className="panel-empty-icon" aria-hidden="true">
                     <Icon name="sparkles" size={16} />
                   </span>
-                  <span className="panel-empty-text" title={`${t("todayEmptyTitle")}。${t("panelEmptyBody")}`}>
+                  <span className="panel-empty-text" title={`${t("todayEmptyTitle")}。${t(setup ? "panelEmptySetupBody" : "panelEmptyBody")}`}>
                     {t("todayEmptyTitle")}
                   </span>
                   <Button size="sm" variant="ghost" onClick={() => openMain(settingsHref("integrations"))}>
-                    {t("panelEmptyAction")}
+                    {t(setup ? "panelEmptyAction" : "panelEmptyConnectedAction")}
                   </Button>
                 </div>
               ) : (

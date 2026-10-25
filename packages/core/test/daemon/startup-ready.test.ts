@@ -60,6 +60,32 @@ describe("daemon HTTP readiness", () => {
     expect((await readStatus(daemon)).drive.reachable).toBe(true);
   }, 15_000);
 
+  it("publishes a status change when the Drive check settles, so open pages refresh", async () => {
+    const dirs = await trackDirs("you-brain-startup-notify-");
+    let release = (): void => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const daemon = await startTracked(dirs, holdFirstCall(new MemoryDrive(), gate));
+    expect((await readStatus(daemon)).drive.reachable).toBeNull();
+    const kinds: string[] = [];
+    daemon.changes.subscribe((event) => kinds.push(event.kind));
+    release();
+    await daemon.settled();
+    expect(kinds).toContain("status");
+    expect((await readStatus(daemon)).drive.reachable).toBe(true);
+  }, 15_000);
+
+  it("publishes a status change when the Drive check fails", async () => {
+    const dirs = await trackDirs("you-brain-startup-notify-fail-");
+    const daemon = await startTracked(dirs, failingDrive());
+    const kinds: string[] = [];
+    daemon.changes.subscribe((event) => kinds.push(event.kind));
+    await daemon.settled();
+    expect(kinds).toContain("status");
+    expect((await readStatus(daemon)).drive.reachable).toBe(false);
+  });
+
   it("keeps HTTP up when Drive setup fails", async () => {
     const dirs = await trackDirs("you-brain-startup-fail-");
     const startedAt = performance.now();

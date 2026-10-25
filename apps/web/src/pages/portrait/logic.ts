@@ -1,3 +1,25 @@
+import { consolidationView } from "../../lib/copy.js";
+import { isTimeOfDay } from "../settings/logic.js";
+
+export type PortraitEmptyCopy =
+  /** Daily consolidation is off, so nothing will be written until it is turned on. */
+  | { kind: "off" }
+  /** Consolidation is on and its time is known. */
+  | { kind: "scheduled"; time: string }
+  /** Status or time is unknown. Keep the original copy. */
+  | { kind: "default" };
+
+export function portraitEmptyCopy(input: {
+  consolidation: Parameters<typeof consolidationView>[0];
+  time: string | null | undefined;
+}): PortraitEmptyCopy {
+  const view = consolidationView(input.consolidation);
+  if (view === "disabled") return { kind: "off" };
+  const time = (input.time ?? "").trim();
+  if (view !== "unknown" && isTimeOfDay(time)) return { kind: "scheduled", time };
+  return { kind: "default" };
+}
+
 export function countReadingChars(source: string): number {
   const compact = source.replace(/\s+/gu, "");
   return [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(compact)].length;

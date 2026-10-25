@@ -20,7 +20,7 @@ describe("capsuleKind", () => {
     expect(capsuleKind(input({ syncing: true, refineError: "bad" }))).toBe("loading");
     expect(capsuleKind(input({ refineError: "  解析失败  ", syncError: "sync", warningCount: 3 }))).toBe("refine-error");
     expect(capsuleKind(input({ syncError: "cursor expired" }))).toBe("sync-error");
-    expect(capsuleKind(input({ driveReachable: false }))).toBe("sync-error");
+    expect(capsuleKind(input({ driveReachable: false, driveEmail: "john@example.com" }))).toBe("sync-error");
     expect(capsuleKind(input({ warningCount: 2 }))).toBe("warn");
     expect(capsuleKind(input({}))).toBe("ok");
   });
@@ -29,5 +29,12 @@ describe("capsuleKind", () => {
     expect(capsuleKind(input({ driveReachable: null }))).toBe("ok");
     expect(capsuleKind(input({ refineError: "   ", syncError: "" }))).toBe("ok");
     expect(capsuleKind(input({ driveReachable: null, warningCount: 1 }))).toBe("warn");
+  });
+
+  test("a signed-out drive is not a sync error; it is a warning when counted", () => {
+    expect(capsuleKind(input({ driveReachable: false, driveEmail: null }))).toBe("ok");
+    expect(capsuleKind(input({ driveReachable: false, driveEmail: "  " }))).toBe("ok");
+    expect(capsuleKind(input({ driveReachable: false, driveEmail: null, warningCount: 1 }))).toBe("warn");
+    expect(capsuleKind(input({ driveReachable: true, driveEmail: null }))).toBe("ok");
   });
 });

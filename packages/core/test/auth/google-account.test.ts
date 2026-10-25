@@ -4,6 +4,8 @@ import {
   applyGoogleConnection,
   clearGoogleConnection,
   connectGoogleAccount,
+  fillMissingAccount,
+  type DriveIdentityClient,
 } from "../../src/auth/google-account.js";
 import { createDefaultLocalConfig } from "../../src/domain/config.js";
 
@@ -89,5 +91,58 @@ describe("Google account binding", () => {
       }),
     ).rejects.toMatchObject({ code: "AUTH_ACCOUNT_UNAVAILABLE" });
     expect(rootCalls).toBe(0);
+  });
+});
+
+describe("fillMissingAccount", () => {
+  function identity(user: Record<string, string> | Error): DriveIdentityClient {
+    return {
+      about: {
+        get: async () => {
+          if (user instanceof Error) throw user;
+          return { data: { user } };
+        },
+      },
+      files: {
+        list: async () => ({ data: {} }),
+        create: async () => ({ data: {} }),
+      },
+    };
+  }
+  const person = {
+    emailAddress: "person@example.com",
+    displayName: "Person",
+    permissionId: "permission-1",
+  };
+
+  it("fills a blank account and keeps the rest of the config", async () => {
+    const original = { ...config(), driveRootId: "root-1" };
+    const filled = await fillMissingAccount(original, identity(person));
+    expect(filled?.account).toEqual({
+      email: "person@example.com",
+      displayName: "Person",
+      permissionId: "permission-1",
+    });
+    expect(filled?.driveRootId).toBe("root-1");
+    expect(original.account.email).toBe("");
+  });
+
+  it("leaves a config that already has an email alone and does not call Google", async () => {
+    const named = applyGoogleConnection(config(), {
+      account: { email: "kept@example.com", displayName: "Kept", permissionId: "p" },
+      rootFolderId: "root-1",
+    });
+    const client = identity(new Error("must not be called"));
+    expect(await fillMissingAccount(named, client)).toBeNull();
+  });
+
+  it("returns null when Google fails, answers incompletely, or is too slow", async () => {
+    expect(await fillMissingAccount(config(), identity(new Error("fetch failed")))).toBeNull();
+    expect(await fillMissingAccount(config(), identity({ emailAddress: "a@b.c" }))).toBeNull();
+    const slow: DriveIdentityClient = {
+      ...identity(person),
+      about: { get: () => new Promise(() => undefined) },
+    };
+    expect(await fillMissingAccount(config(), slow, { timeoutMs: 20 })).toBeNull();
   });
 });

@@ -59,6 +59,7 @@ export {
   applyGoogleConnection,
   clearGoogleConnection,
   connectGoogleAccount,
+  fillMissingAccount,
   ensureDriveRoot,
   readGoogleDriveAccount,
   type DriveIdentityClient,

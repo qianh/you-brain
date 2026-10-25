@@ -7,6 +7,9 @@ html, body, #root {
 
 html { background: var(--bg); }
 
+/* The menu-bar panel is a transparent window; its frame draws the rounded corners. */
+html:has(.panel-page), html:has(.panel-page) body { background: transparent; }
+
 body {
   margin: 0;
   font-family: var(--font);
@@ -300,7 +303,7 @@ h3 {
 @media (max-width: 759px) {
   :root { --page-pad: 16px; }
   .page-head { align-items: flex-start; flex-direction: column; }
-  h1 { font-size: 18px; }
+  h1 { font-size: 16px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

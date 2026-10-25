@@ -151,17 +151,7 @@ function SectionBody({
   if (!draft || !rolesDraft) return null;
   if (section === "account") {
     return (
-      <AccountSection
-        draft={draft}
-        issues={draftApi.issues}
-        oauthMode={draftApi.oauthMode}
-        clientId={draftApi.clientId}
-        clientSecret={draftApi.clientSecret}
-        onDraft={draftApi.editDraft}
-        onMode={draftApi.editOauthMode}
-        onClientId={draftApi.editClientId}
-        onSecret={draftApi.editClientSecret}
-      />
+      <AccountSection draft={draft} issues={draftApi.issues} onDraft={draftApi.editDraft} />
     );
   }
   if (section === "model") {

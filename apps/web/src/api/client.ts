@@ -57,19 +57,14 @@ export interface ActionMessage {
   message: string;
 }
 
-export interface OauthSecretInput {
-  mode: "official" | "custom";
-  clientId: string;
-  clientSecret?: string;
-}
-
 export type ReminderActionName = "reactivate" | "done" | "snooze" | "mute" | "ignore";
 
 export interface BrowserDaemon extends Omit<DaemonClient, "reminderAction" | "consolidate"> {
   putLlmKey(provider: string, apiKey: string): Promise<void>;
-  putOauth(body: OauthSecretInput): Promise<void>;
   testLlm(body: { provider: string; model: string; baseUrl: string }): Promise<ActionMessage>;
   googleLogin(): Promise<ActionMessage>;
+  googleLogout(): Promise<ActionMessage>;
+  googleSwitch(): Promise<ActionMessage>;
   webhook(): Promise<WebhookPublic>;
   updateWebhook(body: WebhookPutBody): Promise<WebhookPublic>;
   testWebhook(): Promise<WebhookTestResult>;
@@ -173,15 +168,10 @@ export function createBrowserDaemon(options?: {
     putLlmKey: async (provider, apiKey) => {
       await request("PUT", "/api/secrets/llm", { provider, apiKey });
     },
-    putOauth: async (body) => {
-      const payload: Record<string, string> = { mode: body.mode, clientId: body.clientId };
-      if (body.clientSecret !== undefined && body.clientSecret !== "") {
-        payload.clientSecret = body.clientSecret;
-      }
-      await request("PUT", "/api/secrets/oauth", payload);
-    },
     testLlm: (body) => request<ActionMessage>("POST", "/api/actions/llm-test", body),
     googleLogin: () => request<ActionMessage>("POST", "/api/actions/google-login"),
+    googleLogout: () => request<ActionMessage>("POST", "/api/actions/google-logout"),
+    googleSwitch: () => request<ActionMessage>("POST", "/api/actions/google-switch"),
     webhook: () => request<WebhookPublic>("GET", "/api/webhook"),
     updateWebhook: (body) => request<WebhookPublic>("PUT", "/api/webhook", body),
     testWebhook: () => request<WebhookTestResult>("POST", "/api/actions/webhook-test"),

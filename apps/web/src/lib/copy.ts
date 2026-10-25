@@ -1,5 +1,6 @@
 import type { Language } from "./format.js";
 import { translate, type MessageKey } from "../i18n/messages.js";
+import { driveState } from "./drive-state.js";
 
 export interface CaptureFlag {
   keepToolCalls: boolean;
@@ -105,7 +106,7 @@ export function consolidationView(
 }
 
 export interface PanelStatusInput {
-  drive: { reachable: boolean | null };
+  drive: { reachable: boolean | null; accountEmail?: string | null };
   refine: { lastError: string | null };
   consolidation: ConsolidationStatus;
   warnings: readonly { message: string }[];
@@ -115,7 +116,9 @@ export type Attention = "ok" | "warn" | "bad";
 
 export function panelProblems(status: PanelStatusInput, language: Language): string[] {
   const problems: string[] = [];
-  if (status.drive.reachable === false) problems.push(translate(language, "driveDown"));
+  const drive = driveState(status.drive);
+  if (drive === "offline") problems.push(translate(language, "driveDown"));
+  if (drive === "signedOut") problems.push(translate(language, "driveSignedOut"));
   if (consolidationView(status.consolidation) === "stale") {
     problems.push(translate(language, "consolidationStale"));
   }
@@ -127,7 +130,8 @@ export function panelProblems(status: PanelStatusInput, language: Language): str
 }
 
 export function attentionLevel(status: PanelStatusInput, problems: readonly string[]): Attention {
-  if (status.drive.reachable === false) return "bad";
+  // Signed out is a warning. Only an offline drive is bad.
+  if (driveState(status.drive) === "offline") return "bad";
   if (status.refine.lastError) return "bad";
   if (problems.length > 0 || consolidationView(status.consolidation) === "stale") return "warn";
   return "ok";

@@ -55,7 +55,10 @@ export interface GoogleOAuthDependencies {
     clientSecret: string,
     redirectUri?: string,
   ) => GoogleOAuthClient;
-  startLoopback?: (state: string) => Promise<OAuthLoopbackSession>;
+  startLoopback?: (
+    state: string,
+    options: { signal?: AbortSignal },
+  ) => Promise<OAuthLoopbackSession>;
   now?: () => number;
 }
 
@@ -269,20 +272,23 @@ export class GoogleOAuth {
     return this.#source.mode ?? "official";
   }
 
-  async getClient(options: { interactive: boolean }): Promise<GoogleOAuthClient> {
+  async getClient(options: {
+    interactive: boolean;
+    signal?: AbortSignal;
+  }): Promise<GoogleOAuthClient> {
     const config = await resolveOAuthClientConfig(this.#source);
     const stored = await this.secrets.get();
     if (!stored) {
       if (!options.interactive) {
         throw new YouBrainError("AUTH_REQUIRED", "Google Drive authentication is required");
       }
-      const staged = await this.#authorizeInteractive(config, null);
+      const staged = await this.#authorizeInteractive(config, null, options.signal);
       await staged.commit();
       return staged.client;
     }
     if (refreshTokenNeedsRelogin(stored, this.mode(), this.#now())) {
       if (!options.interactive) throw new ReloginRequiredError();
-      const staged = await this.#authorizeInteractive(config, stored);
+      const staged = await this.#authorizeInteractive(config, stored, options.signal);
       await staged.commit();
       return staged.client;
     }
@@ -296,7 +302,7 @@ export class GoogleOAuth {
       if (!options.interactive) {
         throw new YouBrainError("AUTH_REQUIRED", "Stored Google authentication is invalid");
       }
-      const staged = await this.#authorizeInteractive(config, stored);
+      const staged = await this.#authorizeInteractive(config, stored, options.signal);
       await staged.commit();
       return staged.client;
     }
@@ -311,7 +317,7 @@ export class GoogleOAuth {
       } else if (!options.interactive) {
         throw new YouBrainError("AUTH_REQUIRED", "Stored Google authentication is invalid");
       }
-      const staged = await this.#authorizeInteractive(config, stored);
+      const staged = await this.#authorizeInteractive(config, stored, options.signal);
       await staged.commit();
       return staged.client;
     }
@@ -337,6 +343,7 @@ export class GoogleOAuth {
   async #authorizeInteractive(
     config: OAuthClientConfig,
     previousCredential: string | null,
+    signal?: AbortSignal,
   ): Promise<StagedGoogleAuthorization> {
     await this.secrets.probe?.();
     let previousParsed: StoredGoogleCredentials | null = null;
@@ -348,7 +355,7 @@ export class GoogleOAuth {
       }
     }
     const state = randomBytes(24).toString("hex");
-    const loopback = await this.#startLoopback(state);
+    const loopback = await this.#startLoopback(state, signal ? { signal } : {});
     const client = this.#createClient(
       config.clientId,
       config.clientSecret,

@@ -31,7 +31,8 @@
 }
 
 .empty-state p {
-  max-width: 320px;
+  max-width: 480px;
+  text-wrap: balance;
   color: var(--text-2);
   font-size: var(--fs-base);
   line-height: var(--lh-zh);

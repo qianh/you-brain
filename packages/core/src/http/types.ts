@@ -1,6 +1,7 @@
 import {
   DeviceCapabilitySchema,
   IsoTimestampSchema,
+  LlmProviderSchema,
   ReminderActionSchema,
   SessionKeySchema,
   TodoStatusSchema,
@@ -447,6 +448,50 @@ export const WebhookTestResultSchema = z.object({
 });
 
 export type WebhookTestResult = z.infer<typeof WebhookTestResultSchema>;
+
+/** PUT /api/secrets/llm. The key goes to the OS keychain and is never echoed back. */
+export const LlmKeyPutSchema = z
+  .object({
+    provider: LlmProviderSchema,
+    apiKey: z.string().trim().min(1),
+  })
+  .strict();
+
+export type LlmKeyPutBody = z.infer<typeof LlmKeyPutSchema>;
+
+export const LlmTestBodySchema = z
+  .object({
+    provider: LlmProviderSchema,
+    model: z.string(),
+    baseUrl: z.string(),
+  })
+  .strict();
+
+export type LlmTestBody = z.infer<typeof LlmTestBodySchema>;
+
+/** Response for both secret PUTs. Carries no secret value. */
+export interface SecretStoredResponse {
+  stored: true;
+  echoed: false;
+  hasSecret: boolean;
+}
+
+export interface LlmTestResult {
+  ok: boolean;
+  message: string;
+}
+
+/** Response of POST /api/actions/google-login. `message` is shown to the user as-is. */
+export interface GoogleLoginResult {
+  ok: boolean;
+  message: string;
+}
+
+/** Response of POST /api/actions/google-logout and google-switch. `message` is shown as-is. */
+export interface GoogleLogoutResult {
+  ok: boolean;
+  message: string;
+}
 
 export type { WebhookEventKind };
 

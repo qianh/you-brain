@@ -26,6 +26,8 @@ use crate::daemon::{DaemonEndpoint, EndpointState, LaunchSequence};
 use crate::status_view::TrayPresentation;
 
 const PANEL: &str = "panel";
+#[cfg(target_os = "macos")]
+const TRAY_TITLE_FONT_SIZE: f64 = 11.0;
 const MAIN: &str = "main";
 const TRAY: &str = "main";
 const PANEL_WIDTH: f64 = 380.0;
@@ -855,6 +857,7 @@ fn build_panel(app: &tauri::AppHandle, url: WebviewUrl) -> tauri::Result<Webview
         .inner_size(PANEL_WIDTH, PANEL_HEIGHT)
         .resizable(false)
         .decorations(false)
+        .transparent(true)
         .visible(false)
         .skip_taskbar(true)
         .always_on_top(true)
@@ -877,13 +880,19 @@ fn build_panel(app: &tauri::AppHandle, url: WebviewUrl) -> tauri::Result<Webview
 }
 
 fn build_main(app: &tauri::AppHandle, url: WebviewUrl) -> tauri::Result<WebviewWindow> {
-    let window = WebviewWindowBuilder::new(app, MAIN, url)
+    let builder = WebviewWindowBuilder::new(app, MAIN, url)
         .title("you-brain")
         .inner_size(MAIN_WIDTH, MAIN_HEIGHT)
         .resizable(true)
         .visible(false)
-        .center()
-        .build()?;
+        .center();
+    // The Web UI's top bar shares the row with the traffic lights.
+    #[cfg(target_os = "macos")]
+    let builder = builder
+        .title_bar_style(tauri::TitleBarStyle::Overlay)
+        .hidden_title(true)
+        .traffic_light_position(tauri::LogicalPosition::new(16.0, 24.0));
+    let window = builder.build()?;
     let main = window.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
@@ -929,8 +938,26 @@ fn show_tray(app: &tauri::AppHandle, view: TrayPresentation) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
         if let Some(tray) = app.tray_by_id(TRAY) {
+            #[cfg(target_os = "macos")]
+            shrink_tray_title(&tray);
             let _ = tray.set_title(Some(view.title));
             let _ = tray.set_tooltip(Some(view.tooltip));
+        }
+    });
+}
+
+/// The default menu-bar title font (13pt) reads larger than the icon beside it.
+/// Set before every `set_title` so the item width is measured with this font.
+#[cfg(target_os = "macos")]
+fn shrink_tray_title(tray: &tauri::tray::TrayIcon) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSFont;
+    let _ = tray.with_inner_tray_icon(|inner| {
+        let (Some(item), Some(mtm)) = (inner.ns_status_item(), MainThreadMarker::new()) else {
+            return;
+        };
+        if let Some(button) = item.button(mtm) {
+            button.setFont(Some(&NSFont::menuBarFontOfSize(TRAY_TITLE_FONT_SIZE)));
         }
     });
 }

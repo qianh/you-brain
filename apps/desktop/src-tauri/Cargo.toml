@@ -23,7 +23,7 @@ libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 url = "2"
-tauri = { version = "=2.11.6", features = ["tray-icon", "image-png"] }
+tauri = { version = "=2.11.6", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-autostart = "=2.5.1"
 tauri-plugin-global-shortcut = "=2.3.2"
 tauri-plugin-notification = "=2.4.0"
@@ -38,6 +38,10 @@ tauri-runtime = "=2.11.3"
 tauri-runtime-wry = "=2.11.4"
 tauri-utils = "=2.9.3"
 uuid = "=1.26.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSFont", "NSControl", "NSButton", "NSStatusItem", "NSStatusBarButton", "NSResponder", "NSView"] }
 
 [features]
 default = []

@@ -2,9 +2,11 @@ import { describe, expect, test } from "bun:test";
 
 import {
   arrivedKeys,
+  emptyCaptureView,
   formatCount,
   formatTodayHeading,
   groupSessionsByHour,
+  guideCopy,
   guideSteps,
   foldGuideSteps,
   guideSummary,
@@ -93,10 +95,26 @@ describe("summarizeToday", () => {
   });
 });
 
+describe("emptyCaptureView", () => {
+  test("asks for setup only when the capture step is known and unfinished", () => {
+    const base = { driveReachable: true, accountEmail: "john@example.com", warnings: [], lastSyncAt: null };
+    const notConnected = guideSteps({ ...base, sessionCount: 0 });
+    expect(emptyCaptureView(notConnected)).toBe("setup");
+    const connected = guideSteps({ ...base, sessionCount: 0, lastSyncAt: "2026-10-22T09:00:00+08:00" });
+    expect(emptyCaptureView(connected)).toBe("connected");
+    // A session counts as connected even before the first sync.
+    expect(emptyCaptureView(guideSteps({ ...base, sessionCount: 2 }))).toBe("connected");
+    // Status not loaded yet: no steps, so keep the connected copy.
+    expect(emptyCaptureView([])).toBe("connected");
+    expect(emptyCaptureView([{ id: "drive", done: false }])).toBe("connected");
+  });
+});
+
 describe("guideSteps", () => {
   test("fresh install leaves every step open", () => {
     const steps = guideSteps({
       driveReachable: null,
+      accountEmail: null,
       warnings: [{ code: "LLM_NOT_CONFIGURED" }],
       sessionCount: 0,
       lastSyncAt: null,
@@ -107,16 +125,19 @@ describe("guideSteps", () => {
   });
 
   test("completes each step from status and today only", () => {
-    const driveDown = guideSteps({
+    const signedOut = guideSteps({
       driveReachable: false,
+      accountEmail: null,
       warnings: [{ code: "SEARCH_STALE" }],
       sessionCount: 0,
       lastSyncAt: "2026-10-21T08:00:00+08:00",
     });
-    expect(driveDown.map((step) => step.done)).toEqual([false, true, true]);
+    expect(signedOut.map((step) => step.done)).toEqual([false, true, true]);
+    expect(signedOut.map((step) => step.drive?.state)).toEqual(["signedOut", undefined, undefined]);
 
     const captured = guideSteps({
       driveReachable: true,
+      accountEmail: "john@example.com",
       warnings: [{ code: "LLM_OTHER" }],
       sessionCount: 2,
       lastSyncAt: null,
@@ -125,6 +146,7 @@ describe("guideSteps", () => {
 
     const done = guideSteps({
       driveReachable: true,
+      accountEmail: "john@example.com",
       warnings: [],
       sessionCount: 0,
       lastSyncAt: "2026-10-21T08:00:00+08:00",
@@ -136,6 +158,7 @@ describe("guideSteps", () => {
   test("collapses finished steps into a summary while one step is still open", () => {
     const fresh = guideSteps({
       driveReachable: null,
+      accountEmail: null,
       warnings: [{ code: "LLM_NOT_CONFIGURED" }],
       sessionCount: 0,
       lastSyncAt: null,
@@ -144,6 +167,7 @@ describe("guideSteps", () => {
 
     const half = guideSteps({
       driveReachable: true,
+      accountEmail: "john@example.com",
       warnings: [],
       sessionCount: 0,
       lastSyncAt: null,
@@ -199,5 +223,79 @@ describe("topicZone", () => {
   test("falls back to active", () => {
     expect(topicZone([{ topicId: "old", zone: "history" }], "old")).toBe("history");
     expect(topicZone([], "missing")).toBe("active");
+  });
+});
+
+describe("guideCopy", () => {
+  const drive = (state: "checking" | "signedOut" | "offline" | "connected", email = "") => ({
+    id: "drive" as const,
+    done: state === "connected",
+    section: "account" as const,
+    drive: { state, email },
+  });
+
+  test("drive step reads its own copy for each state", () => {
+    expect(guideCopy(drive("signedOut"))).toEqual({
+      title: "todayGuideDrive",
+      hint: "todayGuideDriveHint",
+      action: "todayGuideDriveAction",
+    });
+    expect(guideCopy(drive("offline", "john@example.com"))).toEqual({
+      title: "todayGuideDriveOffline",
+      hint: "todayGuideDriveOfflineHint",
+      action: "todayGuideDriveOfflineAction",
+      vars: { email: "john@example.com" },
+    });
+    expect(guideCopy(drive("checking"))).toEqual({
+      title: "todayGuideDriveChecking",
+      hint: "todayGuideDriveCheckingHint",
+      action: null,
+    });
+    expect(guideCopy(drive("connected", "john@example.com"))).toEqual({
+      title: "todayGuideDriveConnected",
+      hint: "todayGuideDriveConnectedHint",
+      action: "todayGuideDriveConnectedAction",
+      vars: { email: "john@example.com" },
+    });
+    expect(guideCopy(drive("connected"))).toEqual({
+      title: "todayGuideDriveConnected",
+      hint: "todayGuideDriveConnectedNoEmailHint",
+      action: "todayGuideDriveConnectedAction",
+    });
+  });
+
+  test("a drive step with no state falls back to checking", () => {
+    expect(guideCopy({ id: "drive", done: false, section: "account" }).title).toBe("todayGuideDriveChecking");
+  });
+
+  test("model and capture show a done copy once finished, and the open copy before", () => {
+    const model = { id: "model" as const, section: "model" as const };
+    expect(guideCopy({ ...model, done: false })).toEqual({
+      title: "todayGuideModel",
+      hint: "todayGuideModelHint",
+      action: "todayGuideModelAction",
+    });
+    expect(guideCopy({ ...model, done: true })).toEqual({
+      title: "todayGuideModelDone",
+      hint: "todayGuideModelDoneHint",
+      action: null,
+    });
+    const capture = { id: "capture" as const, section: "integrations" as const };
+    expect(guideCopy({ ...capture, done: false })).toEqual({
+      title: "todayGuideCapture",
+      hint: "todayGuideCaptureHint",
+      action: "todayGuideCaptureAction",
+    });
+    expect(guideCopy({ ...capture, done: true })).toEqual({
+      title: "todayGuideCaptureDone",
+      hint: "todayGuideCaptureDoneHint",
+      action: null,
+    });
+  });
+
+  test("checking has no action, and a connected drive opens account management", () => {
+    expect(guideCopy(drive("checking")).action).toBeNull();
+    expect(guideCopy(drive("connected", "john@example.com")).action).toBe("todayGuideDriveConnectedAction");
+    expect(guideCopy(drive("offline", "john@example.com")).action).not.toBeNull();
   });
 });

@@ -5361,6 +5361,8 @@ version = "0.1.0"
 dependencies = [
  "libc",
  "notify-rust",
+ "objc2",
+ "objc2-app-kit",
  "serde",
  "serde_json",
  "tauri",

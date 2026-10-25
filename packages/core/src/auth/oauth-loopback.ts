@@ -12,6 +12,8 @@ export interface OAuthLoopbackOptions {
   openUrl?: (url: string) => Promise<unknown>;
   printUrl?: (url: string) => void;
   timeoutMs?: number;
+  /** Aborting cancels a pending `authorize` so the callback server does not outlive its owner. */
+  signal?: AbortSignal;
 }
 
 export async function startOAuthLoopback(
@@ -77,6 +79,13 @@ export async function startOAuthLoopback(
   return {
     redirectUri,
     async authorize(authorizationUrl: string): Promise<string> {
+      const signal = options.signal;
+      const onAbort = (): void => {
+        if (timeout) clearTimeout(timeout);
+        settleError(new Error("OAuth authorization was cancelled"));
+      };
+      if (signal?.aborted) onAbort();
+      signal?.addEventListener("abort", onAbort, { once: true });
       (options.printUrl ?? printAuthorizationUrl)(authorizationUrl);
       await (options.openUrl ?? open)(authorizationUrl).catch(() => undefined);
       timeout = setTimeout(
@@ -86,6 +95,7 @@ export async function startOAuthLoopback(
       try {
         return await codePromise;
       } finally {
+        signal?.removeEventListener("abort", onAbort);
         clearTimeout(timeout);
         timeout = undefined;
       }

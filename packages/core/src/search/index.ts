@@ -22,6 +22,7 @@ export {
 export { redactText, type RedactionOptions, type RedactionResult } from "./redact.js";
 export { ensureSearchSchema, SEARCH_DRIVE_CURSOR } from "./schema.js";
 export {
+  BACKFILL_CHUNK_BATCH,
   SearchService,
   type SearchOutput,
   type SearchStatus,

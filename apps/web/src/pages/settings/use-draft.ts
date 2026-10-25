@@ -11,8 +11,6 @@ import {
   configSaveBody,
   isSettingsDirty,
   llmKeyPayload,
-  oauthPayload,
-  type OauthPayload,
 } from "./logic.js";
 
 export interface SettingsDraftApi {
@@ -20,9 +18,6 @@ export interface SettingsDraftApi {
   rolesDraft: Roles | null;
   issues: MessageKey[];
   apiKey: string;
-  oauthMode: "official" | "custom";
-  clientId: string;
-  clientSecret: string;
   replacingKey: boolean;
   storedKeys: ReadonlySet<string>;
   busy: boolean;
@@ -31,9 +26,6 @@ export interface SettingsDraftApi {
   editDraft: (next: SharedConfig) => void;
   editRoles: (next: Roles) => void;
   editApiKey: (value: string) => void;
-  editOauthMode: (mode: "official" | "custom") => void;
-  editClientId: (value: string) => void;
-  editClientSecret: (value: string) => void;
   setReplacingKey: (value: boolean) => void;
   markKeyStored: (provider: string) => void;
   revert: () => void;
@@ -52,10 +44,6 @@ export function useSettingsDraft(): SettingsDraftApi {
   const [draft, setDraft] = useState<SharedConfig | null>(null);
   const [rolesDraft, setRolesDraft] = useState<Roles | null>(null);
   const [apiKey, setApiKey] = useState("");
-  const [oauthMode, setOauthMode] = useState<"official" | "custom">("official");
-  const [clientId, setClientId] = useState("");
-  const [clientSecret, setClientSecret] = useState("");
-  const [oauthDirty, setOauthDirty] = useState(false);
   const [replacingKey, setReplacingKey] = useState(false);
   const [storedKeys, setStoredKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [busy, setBusy] = useState(false);
@@ -95,7 +83,6 @@ export function useSettingsDraft(): SettingsDraftApi {
         roles: rolesDraft,
         savedRoles: roles,
         apiKey,
-        oauthDirty,
       }),
   );
 
@@ -119,24 +106,6 @@ export function useSettingsDraft(): SettingsDraftApi {
     setApiKey(value);
   }, []);
 
-  const editOauthMode = useCallback((mode: "official" | "custom") => {
-    touch();
-    setOauthMode(mode);
-    setOauthDirty(true);
-  }, []);
-
-  const editClientId = useCallback((value: string) => {
-    touch();
-    setClientId(value);
-    setOauthDirty(true);
-  }, []);
-
-  const editClientSecret = useCallback((value: string) => {
-    touch();
-    setClientSecret(value);
-    setOauthDirty(true);
-  }, []);
-
   const markKeyStored = useCallback((provider: string) => {
     setStoredKeys((current) => {
       const next = new Set(current);
@@ -150,10 +119,6 @@ export function useSettingsDraft(): SettingsDraftApi {
     if (config) setDraft(structuredClone(config));
     if (roles) setRolesDraft(structuredClone(roles));
     setApiKey("");
-    setOauthMode("official");
-    setClientId("");
-    setClientSecret("");
-    setOauthDirty(false);
     setReplacingKey(false);
     setError(null);
     touched.current = false;
@@ -166,12 +131,6 @@ export function useSettingsDraft(): SettingsDraftApi {
       return false;
     }
     const secret = apiKey;
-    const oauth: OauthPayload | null = oauthPayload({
-      dirty: oauthDirty,
-      mode: oauthMode,
-      clientId,
-      clientSecret,
-    });
     setBusy(true);
     setError(null);
     try {
@@ -192,11 +151,6 @@ export function useSettingsDraft(): SettingsDraftApi {
           return next;
         });
       }
-      if (oauth) {
-        await client.putOauth(oauth);
-        setClientSecret("");
-        setOauthDirty(false);
-      }
       touched.current = false;
       toast.push({ message: t("settingsSaved"), tone: "success" });
       return true;
@@ -211,12 +165,8 @@ export function useSettingsDraft(): SettingsDraftApi {
     busy,
     client,
     config,
-    clientId,
-    clientSecret,
     draft,
     issues.length,
-    oauthDirty,
-    oauthMode,
     replaceConfig,
     replaceRoles,
     rolesDraft,
@@ -251,9 +201,6 @@ export function useSettingsDraft(): SettingsDraftApi {
     rolesDraft,
     issues,
     apiKey,
-    oauthMode,
-    clientId,
-    clientSecret,
     replacingKey,
     storedKeys,
     busy,
@@ -262,9 +209,6 @@ export function useSettingsDraft(): SettingsDraftApi {
     editDraft,
     editRoles,
     editApiKey,
-    editOauthMode,
-    editClientId,
-    editClientSecret,
     setReplacingKey,
     markKeyStored,
     revert,

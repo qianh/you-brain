@@ -25,7 +25,12 @@ import {
   getAdapter,
   parseSourceFile,
 } from "../adapters/index.js";
-import { getLlmApiKey } from "../auth/index.js";
+import {
+  clearGoogleConnection,
+  createConfigSecretStore,
+  getLlmApiKey,
+  setLlmApiKey,
+} from "../auth/index.js";
 import { applyCaptureRedaction } from "../capture/redact.js";
 import { renderSessionMarkdown } from "../capture/normalize.js";
 import {
@@ -33,6 +38,7 @@ import {
   YouBrainError,
   assertSupportedPlatform,
   loadLocalConfig,
+  writeLocalConfig,
   type LocalConfig,
   type NormalizedSession,
   type SessionSource,
@@ -52,6 +58,11 @@ import type {
   HttpDeps,
 } from "../http/deps.js";
 import type {
+  LlmKeyPutBody,
+  LlmTestBody,
+  GoogleLoginResult,
+  GoogleLogoutResult,
+  LlmTestResult,
   SearchRequest,
   StatusResponse,
   SyncActionResult,
@@ -64,6 +75,7 @@ import type {
 } from "../http/types.js";
 import { isCliNoOutputTimeout } from "../llm/cli/exec.js";
 import {
+  LLM_PRESETS,
   createLlmBackend,
   describeLlmSetupFailure,
   isCliProvider,
@@ -157,6 +169,7 @@ import {
 } from "./clock.js";
 import { ACTIVITY_EPOCH, decideDelivery } from "../reminders/delivery.js";
 import { allocateCopied, appendCopied } from "./events.js";
+import { moveStateAside, signOutGoogle } from "./account-switch.js";
 import { openGoogleDrive } from "./google.js";
 import { acquireDaemonLock } from "./lock.js";
 import { createStartupLog, type StartupLog } from "./startup-log.js";
@@ -189,6 +202,82 @@ const APP_VERSION = "0.1.0";
 const BACKFILL_CURSOR = "capture.backfill";
 /** A stuck Drive read must not hold `/api/status` longer than the shell's read timeout. */
 const STATUS_DRIVE_WAIT_MS = 1_000;
+/** Inbox files downloaded at the same time while draining the index queue. */
+const INBOX_READ_CONCURRENCY = 8;
+
+/** Cursor key remembering the modified time at which an inbox file was last indexed. */
+function inboxIndexedKey(fileId: string): string {
+  return `inbox.indexed.${fileId}`;
+}
+
+/**
+ * Inbox files still waiting to be indexed. Pull advances `sync.drive` before these
+ * are read, so the queue has to live in the store or a restart would skip them.
+ */
+const INBOX_PENDING_CURSOR = "inbox.pending";
+
+interface InboxPendingFile {
+  id: string;
+  path: string;
+  modifiedTime: string;
+  mimeType?: string;
+}
+
+function readInboxPending(store: SqliteStore): InboxPendingFile[] {
+  const raw = store.getCursor(INBOX_PENDING_CURSOR);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const files: InboxPendingFile[] = [];
+    for (const item of parsed) {
+      if (!item || typeof item !== "object") continue;
+      const row = item as Record<string, unknown>;
+      if (typeof row.id !== "string" || row.id.length === 0) continue;
+      if (typeof row.path !== "string" || typeof row.modifiedTime !== "string") continue;
+      const file: InboxPendingFile = {
+        id: row.id,
+        path: row.path,
+        modifiedTime: row.modifiedTime,
+      };
+      if (typeof row.mimeType === "string") file.mimeType = row.mimeType;
+      files.push(file);
+    }
+    return files;
+  } catch {
+    return [];
+  }
+}
+
+function writeInboxPending(store: SqliteStore, files: readonly InboxPendingFile[]): void {
+  const body = files.map((file) => {
+    const row: InboxPendingFile = {
+      id: file.id,
+      path: file.path,
+      modifiedTime: file.modifiedTime,
+    };
+    if (file.mimeType !== undefined) row.mimeType = file.mimeType;
+    return row;
+  });
+  store.setCursor(INBOX_PENDING_CURSOR, JSON.stringify(body));
+}
+
+function inboxPendingEntry(file: InboxPendingFile): DriveEntry {
+  return {
+    id: file.id,
+    path: file.path,
+    mimeType: file.mimeType ?? "text/markdown",
+    size: 0,
+    createdTime: file.modifiedTime,
+    modifiedTime: file.modifiedTime,
+    etag: "",
+    md5Checksum: "",
+    appProperties: {},
+  };
+}
+
+/** Cursor holding the Google account this device's local data belongs to, set at sign-out. */
+const DRIVE_ACCOUNT_CURSOR = "account.drive";
 /** Stop proceeds even if Drive or the model probe is still hanging. */
 const BACKGROUND_STOP_MS = 3_000;
 
@@ -216,6 +305,10 @@ export interface DaemonOptions {
   port?: number;
   /** Test injection. Defaults to the global fetch. Tests must not open a real connection. */
   webhookFetch?: WebhookFetch;
+  /** Test injection. Defaults to openGoogleDrive. Tests must not open a browser. */
+  googleOpen?: typeof openGoogleDrive;
+  /** Test injection. Defaults to the global fetch. Tests must not reach Google. */
+  revokeFetch?: typeof fetch;
 }
 
 interface LiveSession {
@@ -318,6 +411,52 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<YouBrain
   return daemon;
 }
 
+/**
+ * Background Drive push for one config file. Pushes run one at a time. A value that
+ * arrives during a push replaces the one still waiting, so only the newest is sent.
+ * A failed value stays waiting until `retry()`.
+ */
+class ConfigPush<T> {
+  #waiting: { value: T } | null = null;
+  #running: Promise<void> | null = null;
+
+  constructor(
+    private readonly send: (value: T) => Promise<void>,
+    private readonly outcome: (failure: { error: unknown } | null) => void,
+  ) {}
+
+  submit(value: T): void {
+    this.#waiting = { value };
+    this.retry();
+  }
+
+  /** Starts a push only when a value is waiting and none is running. */
+  retry(): void {
+    if (!this.#waiting || this.#running) return;
+    this.#running = this.#drain().finally(() => {
+      this.#running = null;
+    });
+  }
+
+  settled(): Promise<void> {
+    return this.#running ?? Promise.resolve();
+  }
+
+  async #drain(): Promise<void> {
+    for (let job = this.#waiting; job; job = this.#waiting) {
+      try {
+        await this.send(job.value);
+      } catch (error) {
+        this.outcome({ error });
+        return;
+      }
+      // A newer value may have arrived during the push. Keep it for the next loop turn.
+      if (this.#waiting === job) this.#waiting = null;
+      this.outcome(null);
+    }
+  }
+}
+
 export class YouBrainDaemon {
   readonly changes = new ChangeHub();
   readonly closed: Promise<void>;
@@ -376,6 +515,10 @@ export class YouBrainDaemon {
   #started = false;
   /** False until Drive open/register has finished. Status reports reachable `null`. */
   #driveKnown = false;
+  /** Set while an interactive Google login waits for the browser. Only one runs at a time. */
+  #loginFlow: Promise<string> | null = null;
+  /** Set once a switch has signed out. Stop then moves the state database aside. */
+  #resetStateOnStop = false;
   /** False until LLM setup has finished. Status omits the setup warning. */
   #llmKnown = false;
   /** Drive and model setup. Stop does not wait on this past {@link BACKGROUND_STOP_MS}. */
@@ -408,7 +551,26 @@ export class YouBrainDaemon {
   #preservedLoaded = false;
   #lastSyncAt: string | null = null;
   #lastSyncError: { message: string; at: string } | null = null;
+  /** Config push failures per file. A success clears `#lastSyncError` only when it is this push's error. */
+  #configPushErrors: Record<"shared" | "roles", { message: string; at: string } | null> = {
+    shared: null,
+    roles: null,
+  };
+  #sharedPush = new ConfigPush<SharedConfig>(
+    async (config) => {
+      await this.#sync?.updateShared(config);
+    },
+    (failure) => this.#onConfigPush("shared", failure),
+  );
+  #rolesPush = new ConfigPush<Roles>(
+    async (roles) => {
+      await this.#sync?.updateRoles(roles);
+    },
+    (failure) => this.#onConfigPush("roles", failure),
+  );
   #searchDirty = false;
+  /** `inbox.pending` still has files to index. Cleared only when that queue is empty. */
+  #inboxDirty = false;
   #portraitSoon = false;
   /** Topic book changed while this device is allowed to publish topic files. */
   #topicFilesDirty = false;
@@ -544,62 +706,7 @@ export class YouBrainDaemon {
       await log.time("openDrive", () => this.#openDrive());
       if (this.#stopped) return;
       if (this.#drive && this.#store) {
-        this.#sync = new ProtocolSync({
-          drive: this.#drive,
-          store: this.#store,
-          device: this.#identity(),
-          listener: {
-            onTopicsChanged: () => {
-              this.#onTopicsChanged();
-            },
-            onInboxChanged: (files) => this.#indexInbox(files),
-            onDigitalTwinChanged: () => {
-              this.#portraitSoon = true;
-            },
-            onConfigChanged: (update) => this.#onConfigChanged(update),
-          },
-          now: () => this.#clock.now(),
-        });
-        this.#uploader = new UploadService({
-          drive: this.#drive,
-          index: this.#uploadIndex(),
-          deviceId: this.#local.deviceId,
-          clock: { now: () => this.#clock.nowMs() },
-        });
-        this.#portrait = new PortraitService({
-          drive: this.#drive,
-          store: this.#store,
-          paths: this.#paths,
-          config: {
-            variants: this.#shared.portrait.variants,
-            snapshotPattern: this.#shared.portrait.snapshotPattern,
-          },
-          driveRoot: this.#local.driveRoot,
-          consent,
-          homeDir: this.#homeDir,
-          managedStatePath,
-        });
-        const sync = this.#sync;
-        if (!sync) {
-          this.#driveReachable = false;
-        } else {
-          try {
-            await log.time("syncRegister", () =>
-              sync.register({ lastActiveAt: this.#activityForDevice() }),
-            );
-            if (!this.#stopped) this.#driveReachable = true;
-          } catch {
-            this.#driveReachable = false;
-          }
-          if (!this.#stopped) this.#rememberDevice();
-        }
-        if (!this.#stopped) {
-          try {
-            await log.time("mountSearch", () => this.#mountSearch());
-          } catch {
-            this.#search = null;
-          }
-        }
+        await this.#connectDrive(log, consent, managedStatePath);
       } else {
         this.#driveReachable = false;
       }
@@ -609,6 +716,8 @@ export class YouBrainDaemon {
       console.error(`startup: background ${message}`);
     } finally {
       this.#driveKnown = true;
+      // Pages loaded during startup hold the "unknown" Drive state until told otherwise.
+      this.changes.publish("status", this.#clock.now().toISOString());
     }
     if (this.#stopped) return;
     if (!this.#llmKnown) {
@@ -627,6 +736,81 @@ export class YouBrainDaemon {
     }
     if (this.#stopped) return;
     await log.time("ensureCoding", () => this.#ensureCoding());
+    // Model warnings and the search index settle after Drive, so status changes again here.
+    this.changes.publish("status", this.#clock.now().toISOString());
+  }
+
+  /**
+   * Starts the Drive-backed services. Startup calls it after openDrive. A successful
+   * interactive Google login calls it too, so Drive comes up without a restart.
+   */
+  async #connectDrive(
+    log: StartupLog,
+    consent: FilePortraitConsentStore,
+    managedStatePath: string,
+  ): Promise<void> {
+    const drive = this.#drive;
+    const store = this.#store;
+    if (!drive || !store) return;
+    this.#sync = new ProtocolSync({
+      drive,
+      store,
+      device: this.#identity(),
+      listener: {
+        onTopicsChanged: () => {
+          this.#onTopicsChanged();
+        },
+        onInboxChanged: (files) => {
+          this.#enqueueInbox(files);
+        },
+        onDigitalTwinChanged: () => {
+          this.#portraitSoon = true;
+        },
+        onConfigChanged: (update) => this.#onConfigChanged(update),
+      },
+      now: () => this.#clock.now(),
+    });
+    if (readInboxPending(store).length > 0) this.#inboxDirty = true;
+    this.#uploader = new UploadService({
+      drive,
+      index: this.#uploadIndex(),
+      deviceId: this.#local.deviceId,
+      clock: { now: () => this.#clock.nowMs() },
+    });
+    this.#portrait = new PortraitService({
+      drive,
+      store,
+      paths: this.#paths,
+      config: {
+        variants: this.#shared.portrait.variants,
+        snapshotPattern: this.#shared.portrait.snapshotPattern,
+      },
+      driveRoot: this.#local.driveRoot,
+      consent,
+      homeDir: this.#homeDir,
+      managedStatePath,
+    });
+    const sync = this.#sync;
+    if (!sync) {
+      this.#driveReachable = false;
+    } else {
+      try {
+        await log.time("syncRegister", () =>
+          sync.register({ lastActiveAt: this.#activityForDevice() }),
+        );
+        if (!this.#stopped) this.#driveReachable = true;
+      } catch {
+        this.#driveReachable = false;
+      }
+      if (!this.#stopped) this.#rememberDevice();
+    }
+    if (!this.#stopped) {
+      try {
+        await log.time("mountSearch", () => this.#mountSearch());
+      } catch {
+        this.#search = null;
+      }
+    }
   }
 
   scan(extra?: { includeSubagents?: boolean }): Promise<void> {
@@ -668,6 +852,9 @@ export class YouBrainDaemon {
       process.off("SIGTERM", this.#onSignal);
       this.#onSignal = null;
     }
+    // A config value saved locally but not yet on Drive gets one last push before exit.
+    this.#retryConfigPush();
+    await Promise.race([this.settleConfigPush(), delay(FLUSH_DEADLINE_MS)]);
     try {
       await this.#run(async () => {
         this.#closeWatchers();
@@ -695,6 +882,17 @@ export class YouBrainDaemon {
         this.#searchSemantic = null;
         this.#store?.close();
         this.#store = null;
+        if (this.#resetStateOnStop && this.#paths) {
+          try {
+            await moveStateAside({
+              dataDir: this.#paths.dataDir,
+              stateFile: this.#paths.stateFile,
+              now: this.#clock.now(),
+            });
+          } catch (error) {
+            console.error(`switch: backup ${error instanceof Error ? error.message : "failed"}`);
+          }
+        }
         await this.#http?.stop();
         this.#http = null;
       }, "shutdown");
@@ -731,6 +929,11 @@ export class YouBrainDaemon {
     if (!this.#stopped) this.#arm();
   }
 
+  /** Search interval, or a dirty tick that still has text sync or vector backfill to do. */
+  #vectorBackfillDue(now: number): boolean {
+    return this.#searchDirty || intervalDue(this.#lastSearch, now, INTERVALS.searchMs);
+  }
+
   async #runDue(): Promise<void> {
     if (this.#stopped) return;
     const now = this.#clock.nowMs();
@@ -738,7 +941,7 @@ export class YouBrainDaemon {
       await this.#scanBody();
       this.#lastFullScan = this.#clock.nowMs();
     }
-    await this.#processDue();
+    await this.#processDue({ budgetMs: INTERVALS.uploadBudgetMs });
     if (this.#sync && intervalDue(this.#lastFlush, now, INTERVALS.flushMs)) {
       try {
         await this.#sync.flush();
@@ -766,6 +969,13 @@ export class YouBrainDaemon {
       this.#restoreLocalActivity();
       this.#lastPull = this.#clock.nowMs();
     }
+    if (this.#inboxDirty) {
+      try {
+        await this.#drainInbox({ budgetMs: INTERVALS.inboxBudgetMs });
+      } catch {
+        // One bad pass must not stop the loop. The queue stays for the next tick.
+      }
+    }
     if (intervalDue(this.#lastWebSessions, now, INTERVALS.webSessionsMs)) {
       try {
         await this.#processWebSessions();
@@ -786,16 +996,25 @@ export class YouBrainDaemon {
       this.#portraitSoon = false;
       this.#lastPortrait = this.#clock.nowMs();
     }
-    if (
-      this.#search &&
-      (this.#searchDirty || intervalDue(this.#lastSearch, now, INTERVALS.searchMs))
-    ) {
+    const vectorBackfillDue = this.#vectorBackfillDue(now);
+    if (this.#search && vectorBackfillDue) {
       try {
-        await this.#search.sync();
+        const result = await this.#search.sync({ budgetMs: 20_000, embed: false });
+        // Unfinished text sync stays dirty so the next tick continues it.
+        this.#searchDirty = !result.done;
+        if (result.done && vectorBackfillDue) {
+          try {
+            const filled = await this.#search.backfillVectors({ budgetMs: 10_000 });
+            // One tick embeds at most once. Progress with holes continues next tick.
+            if (filled.remaining > 0 && filled.embedded > 0) this.#searchDirty = true;
+          } catch {
+            // A failed backfill must not stop the loop. The next search interval retries.
+          }
+        }
       } catch {
         // Keyword search keeps the last successful index.
+        this.#searchDirty = false;
       }
-      this.#searchDirty = false;
       this.#lastSearch = this.#clock.nowMs();
     }
     if (intervalDue(this.#lastReminders, now, INTERVALS.reminderMs)) {
@@ -841,6 +1060,8 @@ export class YouBrainDaemon {
   async #processDue(options?: {
     forceIdle?: boolean;
     sources?: readonly string[];
+    /** Stop starting new sessions after this long. The rest stay due for the next tick. */
+    budgetMs?: number;
   }): Promise<{ scanned: number; uploaded: number }> {
     const now = this.#clock.nowMs();
     const backfill =
@@ -853,6 +1074,9 @@ export class YouBrainDaemon {
     );
     for (const [key, live] of sessions) {
       if (this.#stopped) return { scanned: sessions.length, uploaded };
+      if (options?.budgetMs !== undefined && this.#clock.nowMs() - now >= options.budgetMs) {
+        return { scanned: sessions.length, uploaded };
+      }
       const decision = decideUpload(live.schedule, now, { idleMs, activeIntervalMs });
       if (!decision.due) {
         if (this.#isIdle(live, now, idleMs)) await this.#retryIfDue(key, live, now);
@@ -1236,58 +1460,150 @@ export class YouBrainDaemon {
     }).session;
   }
 
-  async #indexInbox(files: readonly DriveEntry[]): Promise<void> {
+  /**
+   * Records inbox files to index and returns. Downloads happen later in `#drainInbox`,
+   * so a pull can publish `lastSyncAt` without waiting on the whole inbox.
+   */
+  #enqueueInbox(files: readonly DriveEntry[]): void {
+    const store = this.#store;
+    if (!store || files.length === 0) return;
+    const queued = readInboxPending(store);
+    const indexById = new Map(queued.map((item, index) => [item.id, index]));
+    let changed = false;
+    for (const file of files) {
+      if (!file.path.startsWith("inbox/") || !file.path.endsWith(".md")) continue;
+      if (store.getCursor(inboxIndexedKey(file.id)) === file.modifiedTime) continue;
+      const next: InboxPendingFile = {
+        id: file.id,
+        path: file.path,
+        modifiedTime: file.modifiedTime,
+      };
+      if (file.mimeType) next.mimeType = file.mimeType;
+      const at = indexById.get(file.id);
+      if (at === undefined) {
+        indexById.set(file.id, queued.length);
+        queued.push(next);
+        changed = true;
+        continue;
+      }
+      const current = queued[at];
+      if (!current || next.modifiedTime < current.modifiedTime) continue;
+      if (
+        current.modifiedTime === next.modifiedTime &&
+        current.path === next.path &&
+        current.mimeType === next.mimeType
+      ) {
+        continue;
+      }
+      queued[at] = next;
+      changed = true;
+    }
+    if (!changed) return;
+    writeInboxPending(store, queued);
+    this.#inboxDirty = true;
+  }
+
+  /**
+   * Indexes a slice of `inbox.pending`. Each file is tried at most once per call.
+   * A read that throws stays queued. The clock budget stops the pass after a batch.
+   */
+  async #drainInbox(options: { budgetMs: number }): Promise<void> {
     const drive = this.#drive;
     const store = this.#store;
     if (!drive || !store) return;
-    for (const file of files) {
-      if (!file.path.startsWith("inbox/") || !file.path.endsWith(".md")) continue;
+    const started = this.#clock.nowMs();
+    let rest = readInboxPending(store).filter(
+      (file) => store.getCursor(inboxIndexedKey(file.id)) !== file.modifiedTime,
+    );
+    const failed: InboxPendingFile[] = [];
+    let progressed = false;
+    try {
+      while (rest.length > 0) {
+        if (this.#stopped || this.#drive !== drive) break;
+        const batch = rest.slice(0, INBOX_READ_CONCURRENCY);
+        rest = rest.slice(batch.length);
+        // Downloads run together; rows are written one by one in listing order.
+        const results = await Promise.all(
+          batch.map(async (file) => {
+            try {
+              const object = await drive.read(file.id);
+              return { file, text: object.bytes.toString("utf8"), ok: true as const };
+            } catch {
+              return { file, text: "", ok: false as const };
+            }
+          }),
+        );
+        for (const result of results) {
+          if (!result.ok) {
+            failed.push(result.file);
+            continue;
+          }
+          this.#indexInboxFile(store, inboxPendingEntry(result.file), result.text);
+          if (result.file.modifiedTime) {
+            store.setCursor(inboxIndexedKey(result.file.id), result.file.modifiedTime);
+          }
+          progressed = true;
+        }
+        if (this.#clock.nowMs() - started >= options.budgetMs) break;
+      }
+    } finally {
+      const pending = [...failed, ...rest];
       try {
-        const object = await drive.read(file.id);
-        const fields = frontmatter(object.bytes.toString("utf8"));
-        const source = fields.get("source");
-        const conversationId = fields.get("conversation_id");
-        const startedAt = fields.get("started_at");
-        const web = isWebInboxPath(file.path);
-        const updatedAt = fields.get("updated_at") || (web ? file.modifiedTime : "");
-        if (!source || !conversationId || !startedAt || !updatedAt) continue;
-        const declared = Number(fields.get("turn_count") ?? "");
-        const text = object.bytes.toString("utf8");
-        // A browser plugin may omit turn_count. Count turns from the body so the session is not stuck at 0.
-        const turnCount =
-          Number.isInteger(declared) && declared >= 0 && fields.has("turn_count")
-            ? declared
-            : web
-              ? (parseWebSession(text)?.turnCount ?? 0)
-              : 0;
-        const sessionKey = conversationKey(source, conversationId);
-        const before = store.getSession(sessionKey);
-        store.upsertSession({
-          sessionKey,
-          source,
-          device: fields.get("device") || this.#local.displayName,
-          startedAt,
-          updatedAt,
-          fileId: file.id,
-          msgCount: Number.isInteger(turnCount) && turnCount >= 0 ? turnCount : 0,
-        });
-        if (!web) continue;
-        const after = store.getSession(sessionKey);
-        const identityChanged = rememberWebInbox(store, sessionKey, {
-          fileId: file.id,
-          path: file.path,
-        });
-        const bytesChanged =
-          before !== null &&
-          after !== null &&
-          (before.msgCount !== after.msgCount || before.updatedAt !== after.updatedAt);
-        if (identityChanged || bytesChanged) this.#retry.succeed(sessionKey);
+        writeInboxPending(store, pending);
+        this.#inboxDirty = pending.length > 0;
       } catch {
-        // Skip a malformed inbox file and keep pulling.
+        this.#inboxDirty = true;
+      }
+      if (progressed) {
+        this.#output?.schedule();
+        this.changes.publish("today", this.#clock.now().toISOString());
       }
     }
-    this.#output?.schedule();
-    this.changes.publish("today", this.#clock.now().toISOString());
+  }
+
+  /** Writes one inbox file into the sessions table. A malformed file is skipped. */
+  #indexInboxFile(store: SqliteStore, file: DriveEntry, text: string): void {
+    try {
+      const fields = frontmatter(text);
+      const source = fields.get("source");
+      const conversationId = fields.get("conversation_id");
+      const startedAt = fields.get("started_at");
+      const web = isWebInboxPath(file.path);
+      const updatedAt = fields.get("updated_at") || (web ? file.modifiedTime : "");
+      if (!source || !conversationId || !startedAt || !updatedAt) return;
+      const declared = Number(fields.get("turn_count") ?? "");
+      // A browser plugin may omit turn_count. Count turns from the body so the session is not stuck at 0.
+      const turnCount =
+        Number.isInteger(declared) && declared >= 0 && fields.has("turn_count")
+          ? declared
+          : web
+            ? (parseWebSession(text)?.turnCount ?? 0)
+            : 0;
+      const sessionKey = conversationKey(source, conversationId);
+      const before = store.getSession(sessionKey);
+      store.upsertSession({
+        sessionKey,
+        source,
+        device: fields.get("device") || this.#local.displayName,
+        startedAt,
+        updatedAt,
+        fileId: file.id,
+        msgCount: Number.isInteger(turnCount) && turnCount >= 0 ? turnCount : 0,
+      });
+      if (!web) return;
+      const after = store.getSession(sessionKey);
+      const identityChanged = rememberWebInbox(store, sessionKey, {
+        fileId: file.id,
+        path: file.path,
+      });
+      const bytesChanged =
+        before !== null &&
+        after !== null &&
+        (before.msgCount !== after.msgCount || before.updatedAt !== after.updatedAt);
+      if (identityChanged || bytesChanged) this.#retry.succeed(sessionKey);
+    } catch {
+      // Skip a malformed inbox file and keep pulling.
+    }
   }
 
   async #emitCopied(event: Event): Promise<void> {
@@ -1610,6 +1926,7 @@ export class YouBrainDaemon {
       } catch {
         this.#driveReachable = false;
       }
+      this.#retryConfigPush();
     }
     this.#rememberDevice();
   }
@@ -1777,6 +2094,201 @@ export class YouBrainDaemon {
     }
   }
 
+  async #writeLlmKey(body: LlmKeyPutBody): Promise<void> {
+    await setLlmApiKey(body.provider, body.apiKey, { platform: this.#platform });
+    // Startup builds the backend after the key may have been stored, so only rebuild once that has happened.
+    if (
+      this.#llmOverride === undefined &&
+      this.#llmKnown &&
+      body.provider === this.#shared.llm.provider
+    ) {
+      this.#llm = await this.#createLlm();
+      this.changes.publish("status", this.#clock.now().toISOString());
+    }
+  }
+
+  /**
+   * Interactive Google login from the settings page. One flow runs at a time. The request
+   * stays open until the browser step finishes, fails, or the daemon stops.
+   */
+  async #googleLogin(): Promise<GoogleLoginResult> {
+    if (this.#loginFlow) {
+      throw new HttpError(409, "LOGIN_IN_PROGRESS", "登录进行中，请在浏览器完成授权");
+    }
+    if (this.#drive) {
+      // Switching accounts is not part of this version. The current connection stays as it is.
+      const email = this.#local.account.email;
+      return { ok: true, message: email ? `已登录为 ${email}` : "已登录" };
+    }
+    if (!this.#driveKnown) {
+      throw new HttpError(409, "DRIVE_STARTING", "Drive 正在启动，请稍后再试");
+    }
+    this.#loginFlow = this.#connectGoogle();
+    try {
+      return { ok: true, message: await this.#loginFlow };
+    } finally {
+      this.#loginFlow = null;
+    }
+  }
+
+  /** Runs the browser login, then starts the Drive services here. Returns the user message. */
+  async #connectGoogle(): Promise<string> {
+    let opened: Awaited<ReturnType<typeof openGoogleDrive>>;
+    try {
+      opened = await (this.#options.googleOpen ?? openGoogleDrive)({
+        local: this.#local,
+        configFile: this.#configFile,
+        platform: this.#platform,
+        interactive: true,
+        ...(this.#options.secrets ? { secrets: this.#options.secrets } : {}),
+        // Stop cancels the browser wait, so the callback server does not hold the process open.
+        signal: this.#abort.signal,
+      });
+    } catch (error) {
+      if (error instanceof YouBrainError) throw new HttpError(409, error.code, error.message);
+      throw error;
+    }
+    if (!opened) throw new HttpError(409, "AUTH_REQUIRED", "Google 登录未完成");
+    if (this.#stopped) {
+      // openGoogleDrive has already saved the grant, so the next start picks it up.
+      throw new HttpError(503, "DAEMON_STOPPING", "daemon 正在停止，授权已保存，重启后生效");
+    }
+    const owner = this.#store?.getCursor(DRIVE_ACCOUNT_CURSOR) ?? null;
+    const picked = opened.config.account.permissionId;
+    if (owner && picked && owner !== picked) {
+      // Local data belongs to the account that signed out. Mixing two accounts would upload
+      // one person's sessions into another's Drive, so the new grant is dropped again.
+      const pickedEmail = opened.config.account.email;
+      await this.#dropGrant();
+      throw new HttpError(
+        409,
+        "ACCOUNT_MISMATCH",
+        `本机数据属于另一个 Google 账号，${pickedEmail || "这个账号"}未登录。要换账号，请使用「切换账号」，本机数据会先备份。`,
+      );
+    }
+    this.#local = opened.config;
+    this.#drive = opened.drive;
+    try {
+      // Same portrait paths as start(). The consent store is file-backed, so a new instance is equivalent.
+      await this.#connectDrive(
+        createStartupLog(() => undefined),
+        new FilePortraitConsentStore(portraitConsentPath(this.#paths.dataDir)),
+        join(this.#paths.dataDir, "managed-blocks.json"),
+      );
+    } catch (error) {
+      this.#driveReachable = false;
+      console.error(`login: drive ${error instanceof Error ? error.message : "failed"}`);
+    }
+    this.changes.publish("status");
+    // Pulls what Drive already has. A failure shows in status and does not fail the login.
+    void this.#syncNow().catch(() => undefined);
+    const email = opened.config.account.email;
+    return email ? `已使用 ${email} 登录` : "已登录";
+  }
+
+  #secretStore(): SecretStore {
+    return (
+      this.#options.secrets ??
+      createConfigSecretStore({ platform: this.#platform, configFile: this.#configFile })
+    );
+  }
+
+  /** Deletes the stored grant and the Drive binding in the config file. Local data stays. */
+  async #dropGrant(): Promise<boolean> {
+    const revoked = await signOutGoogle({
+      secrets: this.#secretStore(),
+      ...(this.#options.revokeFetch ? { fetcher: this.#options.revokeFetch } : {}),
+    });
+    this.#local = clearGoogleConnection(this.#local);
+    await writeLocalConfig(this.#configFile, this.#local);
+    return revoked;
+  }
+
+  /** Stops every Drive-backed service. The next login builds them again. */
+  #unmountDrive(): void {
+    this.#sync = null;
+    this.#uploader = null;
+    this.#portrait = null;
+    this.#search = null;
+    this.#searchSemantic = null;
+    this.#drive = null;
+    this.#driveReachable = false;
+  }
+
+  /**
+   * Signs out of Google and keeps all local data. The account is remembered so a later
+   * login can only resume with the same one. Returns null when nobody was signed in.
+   */
+  async #signOut(): Promise<{ email: string; revoked: boolean } | null> {
+    if (this.#loginFlow) {
+      throw new HttpError(409, "LOGIN_IN_PROGRESS", "登录进行中，请先在浏览器完成或取消授权");
+    }
+    if (!this.#driveKnown) {
+      throw new HttpError(409, "DRIVE_STARTING", "Drive 正在启动，请稍后再试");
+    }
+    return this.#run(async () => {
+      const store = this.#store;
+      if (!store) throw new HttpError(503, "DAEMON_STOPPING", "daemon 正在停止");
+      const account = this.#local.account;
+      if (!this.#drive && account.email === "") return null;
+      this.#unmountDrive();
+      if (account.permissionId) store.setCursor(DRIVE_ACCOUNT_CURSOR, account.permissionId);
+      const revoked = await this.#dropGrant();
+      this.changes.publish("status");
+      return { email: account.email, revoked };
+    });
+  }
+
+  async #googleLogout(): Promise<GoogleLogoutResult> {
+    const done = await this.#signOut();
+    if (!done) return { ok: true, message: "当前没有登录的 Google 账号" };
+    const who = done.email ? `已退出 ${done.email}` : "已退出";
+    return {
+      ok: true,
+      message: done.revoked
+        ? `${who}，本机数据已保留`
+        : `${who}，本机数据已保留；未能通知 Google 撤销授权，可在 Google 账号的安全设置里手动移除`,
+    };
+  }
+
+  /**
+   * Signs out, then backs the local state up and restarts clean, so the next login can use
+   * any account. The response goes out first; the restart follows once it has been sent.
+   * Whoever supervises the daemon starts it again (the desktop app does).
+   */
+  async #googleSwitch(): Promise<GoogleLogoutResult> {
+    await this.#signOut();
+    this.#resetStateOnStop = true;
+    setTimeout(() => {
+      void this.stop();
+    }, 200).unref();
+    return {
+      ok: true,
+      message: "已退出，本机数据已备份。后台正在重启，请稍后重新登录并选择账号",
+    };
+  }
+
+  /** Minimal connection check. Uses the request's values and never writes them to shared config. */
+  async #testLlm(body: LlmTestBody): Promise<LlmTestResult> {
+    if (LLM_PRESETS[body.provider].requiresApiKey) {
+      const key = await getLlmApiKey(body.provider, { platform: this.#platform });
+      if (!key) return { ok: false, message: "钥匙串里还没有这个服务商的 API Key。" };
+    }
+    try {
+      const backend = await createLlmBackend({
+        config: { provider: body.provider, model: body.model, baseUrl: body.baseUrl },
+        getApiKey: (provider) => getLlmApiKey(provider, { platform: this.#platform }),
+        dataDir: this.#paths.dataDir,
+        env: this.#env,
+        homeDir: this.#homeDir,
+      });
+      await backend.test();
+      return { ok: true, message: "连接成功，模型有响应。" };
+    } catch (error) {
+      return { ok: false, message: describeLlmSetupFailure(body.provider, error).message };
+    }
+  }
+
   #deps(): HttpDeps {
     const store = this.#store;
     if (!store) throw new YouBrainError("INVALID_INPUT", "store is not open");
@@ -1819,6 +2331,11 @@ export class YouBrainDaemon {
       readWebhook: () => Promise.resolve(this.#webhookView()),
       writeWebhook: (body) => this.#enqueueWebhook(() => this.#writeWebhook(body)),
       testWebhook: () => this.#testWebhook(),
+      writeLlmKey: (body) => this.#writeLlmKey(body),
+      testLlm: (body) => this.#testLlm(body),
+      googleLogin: () => this.#googleLogin(),
+      googleLogout: () => this.#googleLogout(),
+      googleSwitch: () => this.#googleSwitch(),
       status: () => this.#status(),
       sync: () => this.#syncNow(),
       upload: (input) => this.#uploadNow(input),
@@ -1873,7 +2390,7 @@ export class YouBrainDaemon {
     await writeJsonFile(join(this.#paths.dataDir, "roles.json"), roles);
     this.#applyZone();
     this.#mountOutput();
-    if (this.#sync) await this.#sync.updateRoles(roles);
+    if (this.#sync) this.#rolesPush.submit(roles);
     this.changes.publish("status", this.#clock.now().toISOString());
   }
 
@@ -1896,8 +2413,32 @@ export class YouBrainDaemon {
     await this.#rewatch();
     await this.#ensureCoding();
     await this.#mountSearch();
-    if (this.#sync) await this.#sync.updateShared(config);
+    if (this.#sync) this.#sharedPush.submit(config);
     this.changes.publish("status", this.#clock.now().toISOString());
+  }
+
+  #onConfigPush(name: "shared" | "roles", failure: { error: unknown } | null): void {
+    const at = this.#clock.now().toISOString();
+    if (failure === null) {
+      const own = this.#configPushErrors[name];
+      if (own && this.#lastSyncError === own) this.#lastSyncError = null;
+      this.#configPushErrors[name] = null;
+    } else {
+      const record = { message: describeSyncFailure(failure.error), at };
+      this.#configPushErrors[name] = record;
+      this.#lastSyncError = record;
+    }
+    this.changes.publish("status", at);
+  }
+
+  /** Test seam: waits for the config pushes in flight to finish. Production code does not call it. */
+  async settleConfigPush(): Promise<void> {
+    await Promise.all([this.#sharedPush.settled(), this.#rolesPush.settled()]);
+  }
+
+  #retryConfigPush(): void {
+    this.#sharedPush.retry();
+    this.#rolesPush.retry();
   }
 
   async #syncNow(): Promise<SyncActionResult> {

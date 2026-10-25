@@ -15,7 +15,8 @@ import { useToast } from "../components/toast.js";
 import { useDelayed } from "../components/use-delayed.js";
 import { variantName } from "../lib/format.js";
 import { extractToc, parseMarkdown } from "../lib/markdown.js";
-import { countReadingChars, formatReadingCount, writeClipboard } from "./portrait/logic.js";
+import { settingsHref } from "../lib/route.js";
+import { countReadingChars, formatReadingCount, portraitEmptyCopy, writeClipboard } from "./portrait/logic.js";
 import { PortraitMarkdown } from "./portrait/markdown-view.js";
 import { PortraitSide } from "./portrait/side-panel.js";
 
@@ -55,7 +56,7 @@ function useActiveHeading(ids: readonly string[]): [string | null, (id: string) 
 }
 
 export function PortraitPage() {
-  const { t, language, config, client } = useDaemon();
+  const { t, language, config, client, status, roles } = useDaemon();
   const { navigate } = useRoute();
   const { push } = useToast();
   const variants = config?.portrait.variants ?? DEFAULT_VARIANTS;
@@ -105,6 +106,7 @@ export function PortraitPage() {
   const ids = useMemo(() => toc.map((item) => item.id), [toc]);
   const [activeId, setActiveId] = useActiveHeading(ids);
   const words = formatReadingCount(countReadingChars(content), language);
+  const emptyCopy = portraitEmptyCopy({ consolidation: status?.consolidation, time: roles?.consolidation.time });
 
   async function copy(text: string, success: string): Promise<void> {
     const ok = await writeClipboard(text, (value) => navigator.clipboard.writeText(value));
@@ -152,11 +154,23 @@ export function PortraitPage() {
             <EmptyState
               icon="user"
               title={t("portraitEmptyTitle")}
-              description={t("portraitEmptyBody")}
+              description={
+                emptyCopy.kind === "off"
+                  ? t("portraitEmptyOffBody")
+                  : emptyCopy.kind === "scheduled"
+                    ? t("portraitEmptyBodyAt", { time: emptyCopy.time })
+                    : t("portraitEmptyBody")
+              }
               action={
-                <Button variant="primary" onClick={() => navigate("/status")}>
-                  {t("portraitViewStatus")}
-                </Button>
+                emptyCopy.kind === "off" ? (
+                  <Button variant="primary" onClick={() => navigate(settingsHref("consolidation"))}>
+                    {t("portraitEnableConsolidation")}
+                  </Button>
+                ) : (
+                  <Button variant="primary" onClick={() => navigate("/status")}>
+                    {t("portraitViewStatus")}
+                  </Button>
+                )
               }
             />
           </div>

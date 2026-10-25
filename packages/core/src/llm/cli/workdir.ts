@@ -82,8 +82,13 @@ export function isDedicatedCapturePath(
   return sessionPath.split(/[/\\]/u).some((segment) => markers.has(segment));
 }
 
+/**
+ * Compares text only. Resolving the session's cwd would touch the disk, and a cwd under
+ * a protected folder such as Documents blocks the whole scan until macOS permission
+ * is answered.
+ */
 export function isDedicatedCwd(cwd: string | null | undefined, workDir: string): boolean {
   if (cwd === null || cwd === undefined || cwd.trim() === "") return false;
   const wanted = new Set(physicalCandidates(workDir).map(normalizeDir));
-  return physicalCandidates(cwd).some((candidate) => wanted.has(normalizeDir(candidate)));
+  return wanted.has(normalizeDir(cwd));
 }

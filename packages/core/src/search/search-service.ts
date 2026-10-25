@@ -82,6 +82,43 @@ export interface SearchStatus {
   generatedAt?: string;
 }
 
+/** Documents indexed per committed batch. A pass stops between batches when its budget is spent. */
+const SYNC_BATCH_ENTRIES = 10;
+/** Chunks embedded per backfill batch. The time budget is checked after each batch. */
+export const BACKFILL_CHUNK_BATCH = 8;
+/** One embed call must not stall a tick longer than this. A timeout is a missing model. */
+const EMBED_CALL_TIMEOUT_MS = 60_000;
+/** Without a model, rows stay vectorless. Do not rebuild the index to fill them more often than this. */
+const VECTOR_RETRY_MS = 6 * 60 * 60 * 1000;
+const PENDING_KEY = "pending_sync";
+const PENDING_DONE_KEY = "pending_done";
+const VECTOR_RETRY_KEY = "vector_retry_after";
+/** `backfill` fills vectors in the background. `eager` may rebuild when vectors are missing. */
+const VECTOR_MODE_KEY = "vector_mode";
+
+/** Work found by one Drive listing that is still being indexed. Survives a restart. */
+interface PendingSync {
+  fingerprint: string;
+  /** The whole index is rebuilt: the first committed batch clears it. */
+  reset: boolean;
+  removed: string[];
+  cursor: string;
+  entries: SearchDriveEntry[];
+}
+
+interface SyncBatch {
+  work: PendingSync;
+  /** True only for offset 0. A resumed pass must not clear or replay removals. */
+  applyListing: boolean;
+  batch: SearchDriveEntry[];
+  chunks: IndexedChunk[];
+  next: number;
+  /** False once this pass has fallen back to keywords. */
+  modelAvailable: boolean;
+  /** False stores chunks and FTS only. Vectors stay empty for a later backfill. */
+  embed: boolean;
+}
+
 const keywordFallback = {
   code: "MODEL_UNAVAILABLE_KEYWORD_FALLBACK",
   message: "Embedding model is unavailable; using keyword search",
@@ -172,6 +209,7 @@ export class SearchService {
   readonly #database: Database;
   readonly #chunkTokens: number;
   readonly #chunkOverlap: number;
+  readonly #embedCallTimeoutMs: number;
   readonly #redact: (text: string) => string;
 
   constructor(options: {
@@ -182,6 +220,8 @@ export class SearchService {
     semantic?: boolean;
     embedBatchSize?: number;
     embedMaxChars?: number;
+    /** Upper bound for one backfill `embedPassages` call. Default 60s. */
+    embedCallTimeoutMs?: number;
     chunkTokens?: number;
     chunkOverlap?: number;
     redact?: (text: string) => string;
@@ -198,6 +238,7 @@ export class SearchService {
     this.#database = options.database;
     this.#chunkTokens = options.chunkTokens ?? 448;
     this.#chunkOverlap = options.chunkOverlap ?? 64;
+    this.#embedCallTimeoutMs = options.embedCallTimeoutMs ?? EMBED_CALL_TIMEOUT_MS;
     const redaction = options.redaction;
     this.#redact =
       options.redact ??
@@ -219,12 +260,12 @@ export class SearchService {
     return JSON.stringify(fingerprint);
   }
 
-  #cursor(): string | undefined {
-    const metadata = metadataMap(this.#database);
-    const missingVector = this.#semantic
-      ? (this.#database
-          .prepare(
-            `
+  /** True when semantic search is on and a stored chunk has no vector. */
+  #missingVector(): boolean {
+    if (!this.#semantic) return false;
+    const row = this.#database
+      .prepare(
+        `
         SELECT 1 AS missing
         FROM search_chunks c
         LEFT JOIN search_vectors v
@@ -232,11 +273,20 @@ export class SearchService {
         WHERE v.chunk_id IS NULL
         LIMIT 1
       `,
-          )
-          .get() as { missing: number } | null)
-      : null;
-    if (metadata.index_fingerprint !== this.#indexFingerprint() || missingVector) {
-      return undefined;
+      )
+      .get() as { missing: number } | null;
+    return row !== null;
+  }
+
+  #cursor(): string | undefined {
+    const metadata = metadataMap(this.#database);
+    if (metadata.index_fingerprint !== this.#indexFingerprint()) return undefined;
+    // Backfill fills holes in place. Eager mode still rebuilds once the retry window ends.
+    if (metadata[VECTOR_MODE_KEY] !== "backfill") {
+      const missingVector = this.#missingVector();
+      const retryAfter = Number(metadata[VECTOR_RETRY_KEY] ?? "0");
+      const waitingForModel = missingVector && Date.now() < retryAfter;
+      if (missingVector && !waitingForModel) return undefined;
     }
     const row = this.#database
       .prepare("SELECT value FROM cursors WHERE key = ?")
@@ -244,16 +294,51 @@ export class SearchService {
     return row?.value;
   }
 
-  async sync(): Promise<{
+  /**
+   * Brings the index up to date with Drive. Work is committed batch by batch and the rest
+   * is remembered, so a pass can stop once `budgetMs` is spent and the next one carries on,
+   * also after a restart. `done` is false while work remains. Without a budget the pass
+   * runs to the end. `embed: false` stores text only and leaves vectors for `backfillVectors`.
+   */
+  async sync(options: { budgetMs?: number; embed?: boolean } = {}): Promise<{
     documents: number;
     warnings: SearchOutput["warnings"];
+    done: boolean;
   }> {
     ensureSearchSchema(this.#database);
+    const embed = options.embed !== false;
+    const deadline = options.budgetMs === undefined ? Infinity : Date.now() + options.budgetMs;
+    const work = this.#readPending() ?? (await this.#findWork());
+    let offset = work.offset;
+    const warnings: SearchOutput["warnings"] = [];
+    let modelAvailable = true;
+    do {
+      const batch = work.entries.slice(offset, offset + SYNC_BATCH_ENTRIES);
+      const indexed = await this.#indexEntries(batch, modelAvailable, embed);
+      modelAvailable = indexed.modelAvailable;
+      for (const warning of indexed.warnings) addWarning(warnings, warning);
+      this.#commit({
+        work,
+        applyListing: offset === 0,
+        batch,
+        chunks: indexed.chunks,
+        next: offset + batch.length,
+        modelAvailable,
+        embed,
+      });
+      offset += batch.length;
+    } while (offset < work.entries.length && Date.now() < deadline);
+    const count = this.#database
+      .prepare("SELECT COUNT(DISTINCT drive_file_id) AS count FROM search_chunks")
+      .get() as CountRow;
+    return { documents: count.count, warnings, done: offset >= work.entries.length };
+  }
+
+  /** Lists what changed in Drive and remembers it as the work to do. */
+  async #findWork(): Promise<PendingSync & { offset: number }> {
     const cursor = this.#cursor();
     const changes = await this.#drive.changes(
-      cursor === undefined
-        ? { prefix: "inbox/" }
-        : { prefix: "inbox/", cursor },
+      cursor === undefined ? { prefix: "inbox/" } : { prefix: "inbox/", cursor },
     );
     const entries = changes.entries.filter(
       (entry) =>
@@ -264,35 +349,91 @@ export class SearchService {
     for (const entry of changes.entries) {
       if (!entries.includes(entry)) removedIds.add(entry.id);
     }
-    const chunks = await this.#indexEntries(entries);
-    this.#replace(changes.reset, removedIds, entries, chunks.chunks, changes.cursor);
-    const count = this.#database
-      .prepare("SELECT COUNT(DISTINCT drive_file_id) AS count FROM search_chunks")
-      .get() as CountRow;
-    return { documents: count.count, warnings: chunks.warnings };
+    const work: PendingSync = {
+      fingerprint: this.#indexFingerprint(),
+      reset: changes.reset,
+      removed: [...removedIds],
+      cursor: changes.cursor,
+      entries,
+    };
+    if (entries.length > SYNC_BATCH_ENTRIES) {
+      // Only a pass that may stop early needs to survive a restart.
+      this.#database
+        .prepare(
+          `INSERT INTO manifest(key, value) VALUES (?, ?)
+           ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        )
+        .run(PENDING_KEY, JSON.stringify(work));
+      this.#setManifest(PENDING_DONE_KEY, "0");
+    }
+    return { ...work, offset: 0 };
   }
 
-  async #indexEntries(entries: SearchDriveEntry[]): Promise<{
+  #readPending(): (PendingSync & { offset: number }) | null {
+    const metadata = metadataMap(this.#database);
+    const raw = metadata[PENDING_KEY];
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as PendingSync;
+      if (parsed.fingerprint !== this.#indexFingerprint()) {
+        this.#clearPending();
+        return null;
+      }
+      return { ...parsed, offset: Number(metadata[PENDING_DONE_KEY] ?? "0") || 0 };
+    } catch {
+      this.#clearPending();
+      return null;
+    }
+  }
+
+  #setManifest(key: string, value: string): void {
+    this.#database
+      .prepare(
+        `INSERT INTO manifest(key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(key, value);
+  }
+
+  #clearPending(): void {
+    this.#database.prepare("DELETE FROM manifest WHERE key IN (?, ?)").run(PENDING_KEY, PENDING_DONE_KEY);
+  }
+
+  async #indexEntries(
+    entries: SearchDriveEntry[],
+    modelAvailable: boolean,
+    embed: boolean,
+  ): Promise<{
     chunks: IndexedChunk[];
     warnings: SearchOutput["warnings"];
+    modelAvailable: boolean;
   }> {
-    const chunks: IndexedChunk[] = [];
     const warnings: SearchOutput["warnings"] = [];
-    let modelAvailable = true;
-    for (const entry of entries) {
-      const sourceObject = await this.#drive.read(entry.id);
-      const markdown = new TextDecoder().decode(sourceObject.bytes);
+    // Reads run together. A failure rejects the whole batch so it is not committed
+    // and the next pass retries the same files.
+    const loaded = await Promise.all(
+      entries.map(async (entry) => {
+        const sourceObject = await this.#drive.read(entry.id);
+        return {
+          entry,
+          markdown: new TextDecoder().decode(sourceObject.bytes),
+        };
+      }),
+    );
+    const chunks: IndexedChunk[] = [];
+    let available = modelAvailable;
+    for (const { entry, markdown } of loaded) {
       const metadata = parseFrontmatter(markdown);
       const textChunks = chunkText(this.#redact(stripImages(markdown)), {
         maxTokens: this.#chunkTokens,
         overlapTokens: this.#chunkOverlap,
       });
       let vectors: number[][] = [];
-      if (this.#semantic && modelAvailable && textChunks.length > 0) {
+      if (embed && this.#semantic && available && textChunks.length > 0) {
         try {
           vectors = await this.#embedBatched(textChunks.map((chunk) => chunk.text));
         } catch {
-          modelAvailable = false;
+          available = false;
           addWarning(warnings, keywordFallback);
         }
       }
@@ -307,23 +448,16 @@ export class SearchService {
         })),
       );
     }
-    return { chunks, warnings };
+    return { chunks, warnings, modelAvailable: available };
   }
 
-  #replace(
-    reset: boolean,
-    removedIds: Set<string>,
-    entries: SearchDriveEntry[],
-    chunks: IndexedChunk[],
-    cursor: string,
-  ): void {
+  /**
+   * One batch, one transaction. The listing's reset and removals run only with the
+   * first batch. The drive cursor is published only when the listing is finished.
+   */
+  #commit(input: SyncBatch): void {
     const database = this.#database;
-    const replace = database.transaction(() => {
-      if (reset) {
-        database.exec("DELETE FROM search_vectors");
-        database.exec("DELETE FROM search_chunks");
-        database.exec("DELETE FROM search_chunks_fts");
-      }
+    const commit = database.transaction(() => {
       const deleteVectors = database.prepare(
         "DELETE FROM search_vectors WHERE drive_file_id = ?",
       );
@@ -333,11 +467,20 @@ export class SearchService {
       const deleteFts = database.prepare(
         "DELETE FROM search_chunks_fts WHERE drive_file_id = ?",
       );
-      for (const id of [...removedIds, ...entries.map((entry) => entry.id)]) {
+      const remove = (id: string): void => {
         deleteVectors.run(id);
         deleteChunks.run(id);
         deleteFts.run(id);
+      };
+      if (input.applyListing) {
+        if (input.work.reset) {
+          database.exec("DELETE FROM search_vectors");
+          database.exec("DELETE FROM search_chunks");
+          database.exec("DELETE FROM search_chunks_fts");
+        }
+        for (const id of input.work.removed) remove(id);
       }
+      for (const entry of input.batch) remove(entry.id);
       const insertChunk = database.prepare(`
         INSERT INTO search_chunks(
           drive_file_id, drive_path, source, conversation_id,
@@ -352,7 +495,7 @@ export class SearchService {
         INSERT INTO search_chunks_fts(body, drive_file_id, chunk_id)
         VALUES (?, ?, ?)
       `);
-      for (const chunk of chunks) {
+      for (const chunk of input.chunks) {
         insertChunk.run(
           chunk.driveFileId,
           chunk.drivePath,
@@ -374,6 +517,13 @@ export class SearchService {
         }
         insertFts.run(indexBody(chunk.text), chunk.driveFileId, chunk.chunkId);
       }
+      const finished = input.next >= input.work.entries.length;
+      if (!finished) {
+        if (input.work.entries.length > SYNC_BATCH_ENTRIES) {
+          this.#setManifest(PENDING_DONE_KEY, String(input.next));
+        }
+        return;
+      }
       const manifest = database.prepare(`
         INSERT INTO manifest(key, value) VALUES (?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
@@ -384,13 +534,27 @@ export class SearchService {
       manifest.run("index_fingerprint", this.#indexFingerprint());
       manifest.run("generated_at", new Date().toISOString());
       database
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO cursors(key, value, updated_at) VALUES (?, ?, ?)
           ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-        `)
-        .run(SEARCH_DRIVE_CURSOR, cursor, new Date().toISOString());
+        `,
+        )
+        .run(SEARCH_DRIVE_CURSOR, input.work.cursor, new Date().toISOString());
+      if (!input.modelAvailable) {
+        this.#setManifest(VECTOR_RETRY_KEY, String(Date.now() + VECTOR_RETRY_MS));
+      } else if (!this.#missingVector()) {
+        // An empty follow-up must not clear the retry window while holes remain.
+        database.prepare("DELETE FROM manifest WHERE key = ?").run(VECTOR_RETRY_KEY);
+      }
+      if (!input.embed) {
+        this.#setManifest(VECTOR_MODE_KEY, "backfill");
+      } else if (!this.#missingVector()) {
+        this.#setManifest(VECTOR_MODE_KEY, "eager");
+      }
+      this.#clearPending();
     });
-    replace();
+    commit();
   }
 
   status(): SearchStatus {
@@ -403,11 +567,105 @@ export class SearchService {
       .prepare("SELECT value FROM cursors WHERE key = ?")
       .get(SEARCH_DRIVE_CURSOR) as { value: string } | null;
     return {
-      ready: Boolean(cursor?.value),
+      ready: Boolean(cursor?.value) && !(PENDING_KEY in metadata),
       documents: count.count,
       ...(cursor?.value ? { cursor: cursor.value } : {}),
       ...(metadata.generated_at ? { generatedAt: metadata.generated_at } : {}),
     };
+  }
+
+  /**
+   * Fills vector holes, newest document first, and stops when `budgetMs` is spent.
+   * One embed call is capped by `embedCallTimeoutMs`. A timeout or model error
+   * opens the retry window and later calls return without embedding.
+   */
+  async backfillVectors(options: { budgetMs?: number } = {}): Promise<{
+    embedded: number;
+    remaining: number;
+    warnings: SearchOutput["warnings"];
+  }> {
+    if (!this.#semantic || this.#embedder === null) {
+      return { embedded: 0, remaining: 0, warnings: [] };
+    }
+    ensureSearchSchema(this.#database);
+    const retryAfter = Number(metadataMap(this.#database)[VECTOR_RETRY_KEY] ?? "0");
+    if (Date.now() < retryAfter) {
+      return { embedded: 0, remaining: this.#countMissingVectors(), warnings: [] };
+    }
+    const deadline = options.budgetMs === undefined ? Infinity : Date.now() + options.budgetMs;
+    const warnings: SearchOutput["warnings"] = [];
+    let embedded = 0;
+    const select = this.#database.prepare(
+      `
+      SELECT c.drive_file_id, c.chunk_id, c.text
+      FROM search_chunks c
+      LEFT JOIN search_vectors v
+        ON v.drive_file_id = c.drive_file_id AND v.chunk_id = c.chunk_id
+      WHERE v.chunk_id IS NULL
+      ORDER BY c.updated_at DESC, c.drive_file_id ASC, c.chunk_id ASC
+      LIMIT ?
+    `,
+    );
+    while (true) {
+      const batch = select.all(BACKFILL_CHUNK_BATCH) as Array<{
+        drive_file_id: string;
+        chunk_id: string;
+        text: string;
+      }>;
+      if (batch.length === 0) break;
+      let vectors: number[][];
+      try {
+        vectors = await this.#embedPassagesLimited(batch.map((row) => row.text));
+        if (vectors.length !== batch.length) {
+          throw new Error("Embedding model returned the wrong number of vectors");
+        }
+      } catch {
+        addWarning(warnings, keywordFallback);
+        this.#setManifest(VECTOR_RETRY_KEY, String(Date.now() + VECTOR_RETRY_MS));
+        return { embedded, remaining: this.#countMissingVectors(), warnings };
+      }
+      this.#writeVectors(batch, vectors);
+      embedded += batch.length;
+      if (Date.now() >= deadline) break;
+    }
+    return { embedded, remaining: this.#countMissingVectors(), warnings };
+  }
+
+  #countMissingVectors(): number {
+    const row = this.#database
+      .prepare(
+        `
+        SELECT COUNT(*) AS count
+        FROM search_chunks c
+        LEFT JOIN search_vectors v
+          ON v.drive_file_id = c.drive_file_id AND v.chunk_id = c.chunk_id
+        WHERE v.chunk_id IS NULL
+      `,
+      )
+      .get() as CountRow;
+    return row.count;
+  }
+
+  #writeVectors(
+    batch: Array<{ drive_file_id: string; chunk_id: string }>,
+    vectors: number[][],
+  ): void {
+    const database = this.#database;
+    const write = database.transaction(() => {
+      const insert = database.prepare(
+        `
+        INSERT INTO search_vectors(drive_file_id, chunk_id, dimensions, vector)
+        VALUES (?, ?, ?, ?)
+      `,
+      );
+      for (let index = 0; index < batch.length; index += 1) {
+        const row = batch[index];
+        const vector = vectors[index];
+        if (!row || !vector) continue;
+        insert.run(row.drive_file_id, row.chunk_id, vector.length, encodeVector(vector));
+      }
+    });
+    write();
   }
 
   /**
@@ -435,8 +693,12 @@ export class SearchService {
     let indexStatus: SearchOutput["indexStatus"] = "fresh";
     const warnings: SearchOutput["warnings"] = [];
     try {
-      const synced = await this.sync();
+      const synced = await this.sync({ budgetMs: 3000, embed: false });
       warnings.push(...synced.warnings);
+      if (!synced.done) {
+        indexStatus = "stale";
+        addWarning(warnings, staleIndex);
+      }
     } catch {
       indexStatus = "stale";
       addWarning(warnings, staleIndex);
@@ -537,6 +799,27 @@ export class SearchService {
     const embedder = this.#embedder;
     if (!embedder) throw new Error("Embedding model is unavailable");
     return embedder.embedQuery(clampEmbedText(text, this.#maxChars));
+  }
+
+  async #embedPassagesLimited(texts: string[]): Promise<number[][]> {
+    const embedder = this.#embedder;
+    if (!embedder) throw new Error("Embedding model is unavailable");
+    const clamped = texts.map((text) => clampEmbedText(text, this.#maxChars));
+    const pending = embedder.embedPassages(clamped);
+    void pending.catch(() => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        pending,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error("Embedding model timed out"));
+          }, this.#embedCallTimeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
   }
 
   async #embedBatched(texts: string[]): Promise<number[][]> {

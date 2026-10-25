@@ -133,6 +133,7 @@ describe("local hybrid search", () => {
       database,
     });
 
+    await service.sync();
     const result = await service.search({
       query: "release strategy",
       limit: 10,
@@ -269,7 +270,7 @@ describe("local hybrid search", () => {
     );
   });
 
-  it("rebuilds missing vectors after a temporarily unavailable model recovers", async () => {
+  it("rebuilds missing vectors only after the model retry window has passed", async () => {
     const drive = new MemoryDrive();
     await drive.put({
       path: "inbox/mac/recover.md",
@@ -282,22 +283,43 @@ describe("local hybrid search", () => {
       mimeType: "text/markdown",
     });
     const embedder = new RecoveringEmbedder();
+    const database = openDatabase();
     const service = new SearchService({
       drive,
       embedder,
-      database: openDatabase(),
+      database,
     });
 
-    const degraded = await service.search({ query: "release", limit: 10 });
+    const degraded = await service.sync();
+    const keyword = await service.query({ query: "release", limit: 10 });
     embedder.available = true;
-    const recovered = await service.search({ query: "release", limit: 10 });
+    const read = spyOn(drive, "read");
+    await service.sync();
+    const still = await service.query({ query: "release", limit: 10 });
+    const retry = database
+      .prepare("SELECT value FROM manifest WHERE key = ?")
+      .get("vector_retry_after") as { value: string } | null;
 
-    expect(degraded.searchMode).toBe("keyword");
+    expect(degraded.warnings.map((warning) => warning.code)).toContain(
+      "MODEL_UNAVAILABLE_KEYWORD_FALLBACK",
+    );
+    expect(keyword.searchMode).toBe("keyword");
+    expect(still.searchMode).toBe("keyword");
+    expect(read).not.toHaveBeenCalled();
+    expect(Number(retry?.value ?? "0")).toBeGreaterThan(Date.now());
+
+    database
+      .prepare("UPDATE manifest SET value = ? WHERE key = ?")
+      .run("0", "vector_retry_after");
+    await service.sync();
+    const recovered = await service.query({ query: "release", limit: 10 });
+
     expect(recovered).toMatchObject({
       indexStatus: "fresh",
       searchMode: "semantic",
       results: [{ conversationId: "recovery-session" }],
     });
+    expect(read).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -377,6 +399,7 @@ describe("local hybrid search", () => {
       database: openDatabase(),
     });
 
+    await service.sync();
     const hybrid = await service.search({
       query: "sqlite rollback",
       limit: 10,
