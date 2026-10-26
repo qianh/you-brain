@@ -173,7 +173,33 @@ describe("local hybrid search", () => {
     expect(cursor.value).not.toBe("");
   });
 
-  it("uses the last local index and warns when Drive refresh fails", async () => {
+  it("warns when the index is not built and Drive fails", async () => {
+    const drive = new MemoryDrive();
+    await drive.put({
+      path: "inbox/mac/codex.md",
+      bytes: markdown({
+        source: "codex",
+        conversationId: "conversation-1",
+        contentSha: "c".repeat(64),
+        text: "Database migration with SQLite.",
+      }),
+      mimeType: "text/markdown",
+    });
+    drive.failChanges(true);
+
+    const result = await new SearchService({
+      drive,
+      embedder: new SemanticEmbedder(),
+      database: openDatabase(),
+    }).search({ query: "sqlite", limit: 10 });
+
+    expect(result.indexStatus).toBe("stale");
+    expect(result.warnings).toContainEqual(
+      expect.objectContaining({ code: "INDEX_STALE" }),
+    );
+  });
+
+  it("does not touch Drive while searching a ready index", async () => {
     const drive = new MemoryDrive();
     await drive.put({
       path: "inbox/mac/codex.md",
@@ -191,19 +217,30 @@ describe("local hybrid search", () => {
       embedder: new SemanticEmbedder(),
       database,
     }).sync();
-    drive.failChanges(true);
+
+    // The daemon keeps the index current; searching used to spend up to three seconds
+    // re-syncing work that was already done.
+    let changes = 0;
+    const counted = new Proxy(drive, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (property === "changes") changes += 1;
+          return (value as (...input: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    }) as MemoryDrive;
 
     const result = await new SearchService({
-      drive,
+      drive: counted,
       embedder: new SemanticEmbedder(),
       database,
     }).search({ query: "sqlite", limit: 10 });
 
-    expect(result.indexStatus).toBe("stale");
+    expect(changes).toBe(0);
+    expect(result.indexStatus).toBe("fresh");
     expect(result.results[0]?.conversationId).toBe("conversation-1");
-    expect(result.warnings).toContainEqual(
-      expect.objectContaining({ code: "INDEX_STALE" }),
-    );
   });
 
   it("persists and resumes the Drive change cursor", async () => {

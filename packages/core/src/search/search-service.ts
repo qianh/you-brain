@@ -54,6 +54,9 @@ interface ChunkRow {
   vector: Uint8Array | null;
 }
 
+/** A scored row still carrying where its text lives; text is fetched for the page only. */
+type RankedHit = SearchOutput["results"][number] & { fileId?: string; chunkId?: string };
+
 interface CountRow {
   count: number;
 }
@@ -136,7 +139,7 @@ const remoteUnavailable = {
 } as const;
 
 /** Hits read from Drive per query; each costs one download. */
-const REMOTE_HITS = 10;
+const REMOTE_HITS = 6;
 const REMOTE_SEARCH_TIMEOUT_MS = 8_000;
 
 const staleIndex = {
@@ -716,16 +719,22 @@ export class SearchService {
   }): Promise<SearchOutput> {
     let indexStatus: SearchOutput["indexStatus"] = "fresh";
     const warnings: SearchOutput["warnings"] = [];
-    try {
-      const synced = await this.sync({ budgetMs: 3000, embed: false });
-      warnings.push(...synced.warnings);
-      if (!synced.done) {
+    // A ready index is maintained by the daemon's own tick. Syncing here only made the
+    // user wait up to three seconds for work that was already done.
+    if (this.status().ready) {
+      // nothing to do
+    } else {
+      try {
+        const synced = await this.sync({ budgetMs: 3000, embed: false });
+        warnings.push(...synced.warnings);
+        if (!synced.done) {
+          indexStatus = "stale";
+          addWarning(warnings, staleIndex);
+        }
+      } catch {
         indexStatus = "stale";
         addWarning(warnings, staleIndex);
       }
-    } catch {
-      indexStatus = "stale";
-      addWarning(warnings, staleIndex);
     }
     const local = await this.#rank(input, indexStatus, warnings);
     return this.#withRemote(input, local);
@@ -744,6 +753,9 @@ export class SearchService {
   ): Promise<SearchOutput> {
     const drive = this.#drive;
     if (!this.#scope || !drive.searchText) return local;
+    // The local index already fills the page. Asking Drive anyway cost five seconds per
+    // query and could not change the answer: the remote hits only fill leftover slots.
+    if (local.results.length >= input.limit) return local;
     const terms = queryTerms(input.query);
     if (terms.length === 0) return local;
     const rangeInput: { since?: string; until?: string } = {};
@@ -751,37 +763,49 @@ export class SearchService {
     if (input.until) rangeInput.until = input.until;
     const range = parseSearchRange(rangeInput);
     const own = this.#scope();
-    const found: SearchOutput["results"] = [];
+    const wanted = Math.min(REMOTE_HITS, input.limit - local.results.length);
+    let found: Array<SearchOutput["results"][number] | null> = [];
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const hits = await Promise.race([
         drive.searchText({
           text: input.query,
           prefix: "inbox/",
-          limit: REMOTE_HITS * 2,
+          limit: wanted * 2,
         }),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error("Drive search timed out")), REMOTE_SEARCH_TIMEOUT_MS);
         }),
       ]);
-      for (const hit of hits) {
-        if (found.length >= REMOTE_HITS) break;
-        if (inScope(hit.path, own) || !hit.path.endsWith(".md")) continue;
-        const markdown = Buffer.from((await drive.read(hit.id)).bytes).toString("utf8");
-        const meta = parseFrontmatter(markdown);
-        if (input.sources?.length && !input.sources.includes(meta.source)) continue;
-        if (!updatedAtInRange(meta.updatedAt, range)) continue;
-        found.push({
-          score: 0,
-          source: meta.source,
-          conversationId: meta.conversationId,
-          startedAt: meta.startedAt,
-          updatedAt: meta.updatedAt,
-          excerpt: excerptAround(markdown, terms),
-          device: deviceOfInboxPath(hit.path),
-          driveFileId: hit.id,
-        });
-      }
+      // Downloads run together: one at a time made the whole query wait on Drive once per
+      // candidate, which is seconds each.
+      found = (
+        await Promise.all(
+          hits
+            .filter((hit) => !inScope(hit.path, own) && hit.path.endsWith(".md"))
+            .slice(0, wanted)
+            .map(async (hit) => {
+              try {
+                const markdown = Buffer.from((await drive.read(hit.id)).bytes).toString("utf8");
+                const meta = parseFrontmatter(markdown);
+                if (input.sources?.length && !input.sources.includes(meta.source)) return null;
+                if (!updatedAtInRange(meta.updatedAt, range)) return null;
+                return {
+                  score: 0,
+                  source: meta.source,
+                  conversationId: meta.conversationId,
+                  startedAt: meta.startedAt,
+                  updatedAt: meta.updatedAt,
+                  excerpt: excerptAround(markdown, terms),
+                  device: deviceOfInboxPath(hit.path),
+                  driveFileId: hit.id,
+                };
+              } catch {
+                return null;
+              }
+            }),
+        )
+      ).filter((hit) => hit !== null);
     } catch {
       const warnings = [...local.warnings];
       addWarning(warnings, remoteUnavailable);
@@ -790,7 +814,10 @@ export class SearchService {
       if (timer !== undefined) clearTimeout(timer);
     }
     const known = new Set(local.results.map((r) => `${r.source}:${r.conversationId}`));
-    const remote = found.filter((r) => !known.has(`${r.source}:${r.conversationId}`));
+    const remote = found.filter(
+      (hit): hit is SearchOutput["results"][number] =>
+        hit !== null && !known.has(`${hit.source}:${hit.conversationId}`),
+    );
     if (remote.length === 0) return local;
     const slots = Math.min(
       remote.length,
@@ -818,18 +845,22 @@ export class SearchService {
     if (input.until !== undefined && input.until.length > 0) rangeInput.until = input.until;
     const range = parseSearchRange(rangeInput);
     ensureSearchSchema(this.#database);
+    // Rank without the chunk text: a full library carries well over a hundred megabytes
+    // of it, and every query used to load all of that just to build excerpts for the few
+    // results it returned. Stage 1 reads ids and vectors; stage 2 fetches text for the
+    // winners only.
     const rows = this.#database
       .prepare(
         `
         SELECT c.drive_file_id, c.drive_path, c.source, c.conversation_id,
-               c.started_at, c.updated_at, c.content_sha256, c.chunk_id, c.text,
+               c.started_at, c.updated_at, c.content_sha256, c.chunk_id,
                v.vector AS vector
         FROM search_chunks c
         LEFT JOIN search_vectors v
           ON v.drive_file_id = c.drive_file_id AND v.chunk_id = c.chunk_id
       `,
       )
-      .all() as ChunkRow[];
+      .all() as Array<Omit<ChunkRow, "text">>;
     const lexical = keywordScores(this.#database, input.query);
 
     let queryVector: number[] | null = null;
@@ -862,7 +893,9 @@ export class SearchService {
           conversationId: row.conversation_id,
           startedAt: row.started_at,
           updatedAt: row.updated_at,
-          excerpt: row.text.replace(/\s+/gu, " ").trim().slice(0, 360),
+          excerpt: "",
+          fileId: row.drive_file_id,
+          chunkId: row.chunk_id,
         };
       })
       .filter((result) => queryVector !== null || result.score > 0)
@@ -871,7 +904,7 @@ export class SearchService {
           right.score - left.score ||
           right.updatedAt.localeCompare(left.updatedAt),
       );
-    const deduplicated = new Map<string, SearchOutput["results"][number]>();
+    const deduplicated = new Map<string, RankedHit>();
     for (const result of scored) {
       const key = `${result.source}:${result.conversationId}`;
       const previous = deduplicated.get(key);
@@ -882,13 +915,31 @@ export class SearchService {
         right.score - left.score ||
         right.updatedAt.localeCompare(left.updatedAt),
     );
+    // Only the page actually returned needs text; fetching it for every candidate is the
+    // cost this split exists to avoid.
+    const page: RankedHit[] = ranked.slice(0, input.limit);
+    for (const result of page) {
+      if (result.fileId !== undefined && result.chunkId !== undefined) {
+        result.excerpt = this.#excerpt(result.fileId, result.chunkId);
+      }
+    }
     return {
       query: input.query,
       indexStatus,
       searchMode,
-      results: ranked.slice(0, input.limit),
+      results: page.map(({ fileId: _fileId, chunkId: _chunkId, ...rest }) => rest),
       warnings,
     };
+  }
+
+  /** Whitespace-collapsed chunk text, trimmed for a one-line preview. */
+  #excerpt(fileId: string, chunkId: string): string {
+    const row = this.#database
+      .prepare(
+        "SELECT text FROM search_chunks WHERE drive_file_id = ? AND chunk_id = ?",
+      )
+      .get(fileId, chunkId) as { text: string } | null;
+    return (row?.text ?? "").replace(/\s+/gu, " ").trim().slice(0, 360);
   }
 
   async #embedQuery(text: string): Promise<number[]> {

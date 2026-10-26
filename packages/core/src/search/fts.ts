@@ -24,6 +24,15 @@ export function matchExpression(query: string): string | null {
     .join(" OR ");
 }
 
+/**
+ * Keyword rows considered per query, best first.
+ *
+ * A two-word query like "3X-UI" matched 27,000 chunks in a real library; loading and
+ * ranking all of them dominated the response time while only the top few could ever be
+ * shown. bm25 ordering keeps the ones that matter.
+ */
+const KEYWORD_CANDIDATES = 500;
+
 interface FtsRow {
   drive_file_id: string;
   chunk_id: string;
@@ -45,9 +54,11 @@ export function keywordScores(
         SELECT drive_file_id, chunk_id, bm25(search_chunks_fts) AS rank
         FROM search_chunks_fts
         WHERE search_chunks_fts MATCH ?
+        ORDER BY rank
+        LIMIT ?
       `,
       )
-      .all(expression) as FtsRow[];
+      .all(expression, KEYWORD_CANDIDATES) as FtsRow[];
   } catch {
     return scores;
   }

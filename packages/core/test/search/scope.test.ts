@@ -123,6 +123,45 @@ describe("search scope", () => {
     expect(indexedPaths(database)).toEqual(["inbox/mac/own.md"]);
   });
 
+  it("does not search Drive once the local index fills the page", async () => {
+    const drive = new MemoryDrive();
+    // Two local sessions match, so a limit of 2 is already satisfied.
+    for (const id of ["own-1", "own-2"]) {
+      await drive.put({
+        path: `inbox/mac/${id}.md`,
+        bytes: markdown(id),
+        mimeType: "text/markdown",
+      });
+    }
+    await putAll(drive);
+    const database = new Database(":memory:");
+    let searches = 0;
+    const counted = new Proxy(drive, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (property === "searchText") searches += 1;
+          return (value as (...input: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    }) as MemoryDrive;
+    const service = new SearchService({
+      drive: counted,
+      embedder,
+      database,
+      semantic: false,
+      scope: () => inboxScopePrefixes({ device: "mac", includeWeb: false }),
+    });
+    await service.sync();
+
+    const output = await service.query({ query: "rollback", limit: 2 });
+
+    // Drive search costs about five seconds; it cannot change a full page of local hits.
+    expect(searches).toBe(0);
+    expect(output.results.every((hit) => hit.device === undefined)).toBe(true);
+  });
+
   it("keeps local results and warns when Drive search fails", async () => {
     const drive = new MemoryDrive();
     await putAll(drive);
