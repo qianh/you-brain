@@ -95,6 +95,15 @@ export function CommandPalette({
     const list: PaletteItem[] = [];
     const q = query.trim();
     if (q.length >= 2) {
+      // First row on purpose: Enter after typing should show the full result page, not
+      // open whichever session happened to rank first.
+      list.push({
+        id: "search-all",
+        group: t("cmdSessions"),
+        title: t("cmdSearchAll", { query: q }),
+        icon: <Icon name="search" />,
+        run: () => go(searchHref(q)),
+      });
       for (const hit of hits) {
         list.push({
           id: `hit-${hit.conversationId}`,

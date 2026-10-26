@@ -89,6 +89,13 @@
 }
 
 .search-trigger:hover { border-color: var(--border-strong); color: var(--text-2); }
+/* The search page is reached from this control, so it carries the "you are here" state
+   that a nav tab would otherwise show. */
+.search-trigger.is-current {
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
 
 .search-trigger span { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

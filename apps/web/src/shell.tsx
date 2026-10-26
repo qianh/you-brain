@@ -24,7 +24,6 @@ const TABS: ReadonlyArray<{ key: MessageKey; href: string; icon: IconName }> = [
   { key: "navToday", href: "/today", icon: "calendar" },
   { key: "topicsBook", href: "/topics", icon: "book" },
   { key: "navPortrait", href: "/portrait", icon: "user" },
-  { key: "navSearch", href: "/search", icon: "search" },
   { key: "navDevices", href: "/devices", icon: "laptop" },
   { key: "navStatus", href: "/status", icon: "activity" },
 ];
@@ -130,6 +129,8 @@ export function Shell({ children }: { children: ReactNode }) {
   useShortcuts(shortcuts);
 
   const current = TABS.find((tab) => isPrimaryNavActive(location.pathname, tab.href))?.href ?? "";
+  // The search page has no tab of its own; the top-bar trigger is where it lives now.
+  const onSearch = location.pathname === "/search";
   const kind = shellCapsuleKind({ loading, status });
 
   return (
@@ -166,7 +167,13 @@ export function Shell({ children }: { children: ReactNode }) {
         </div>
         <div className="top-actions" {...(overlayTitlebar ? { "data-tauri-drag-region": "" } : {})}>
           <Tooltip content={t("searchTrigger")} shortcut={chord("K")}>
-            <button type="button" className="search-trigger" aria-label={t("openPalette")} onClick={() => setPalette(true)}>
+            <button
+              type="button"
+              className={onSearch ? "search-trigger is-current" : "search-trigger"}
+              aria-label={t("openPalette")}
+              {...(onSearch ? { "aria-current": "page" as const } : {})}
+              onClick={() => setPalette(true)}
+            >
               <Icon name="search" />
               <span>{t("searchTrigger")}</span>
               <Kbd>{chord("K")}</Kbd>

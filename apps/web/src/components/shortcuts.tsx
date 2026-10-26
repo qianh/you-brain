@@ -4,7 +4,7 @@ import { isTextEntry, matchShortcut, shortcutMod, type ShortcutAction } from "..
 
 export interface ShortcutHandlers {
   onPalette: () => void;
-  /** 1–6, matching the primary tabs from the left. */
+  /** 1–5, matching the primary tabs from the left. Search has no tab; it lives on ⌘K. */
   onNav: (index: number) => void;
   onSettings: () => void;
   onRefresh: () => void;
