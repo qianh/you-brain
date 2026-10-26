@@ -16,6 +16,17 @@ import {
 
 export const STALE_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * Old topics reviewed per week at most.
+ *
+ * Every archived topic with an open todo used to get its own reminder, so a library
+ * with a few hundred topics produced eighty of them in one go — more than anyone would
+ * read, and enough to push the rest of the page out of sight. The weekly review line
+ * already summarises the whole history, so this is a shortlist rather than a complete
+ * list: most open todos first, then the most recently active.
+ */
+export const HISTORY_REMINDERS_PER_WEEK = 5;
+
 export const REMINDER_KIND = {
   stale: "stale",
   history: "history",
@@ -97,9 +108,21 @@ export function computeDueReminders(input: ComputeDueInput): ReminderIssuedData[
 
   const week = isoWeekKey(parts);
   if (weekdayReached(parts, input.weeklyReviewDay, input.weeklyReviewTime)) {
-    for (const topic of zoned.history) {
-      const count = openTodos.get(topic.topicId) ?? 0;
-      if (count === 0 || blocked(topic, input, nowMs)) continue;
+    const historyShortlist = zoned.history
+      .flatMap((topic) => {
+        const count = openTodos.get(topic.topicId) ?? 0;
+        if (count === 0 || blocked(topic, input, nowMs)) return [];
+        const lastActive = topic.lastActive === null ? Number.NEGATIVE_INFINITY : Date.parse(topic.lastActive);
+        return [{ topic, count, lastActive: Number.isNaN(lastActive) ? Number.NEGATIVE_INFINITY : lastActive }];
+      })
+      .sort(
+        (left, right) =>
+          right.count - left.count ||
+          right.lastActive - left.lastActive ||
+          (left.topic.topicId < right.topic.topicId ? -1 : 1),
+      )
+      .slice(0, HISTORY_REMINDERS_PER_WEEK);
+    for (const { topic, count } of historyShortlist) {
       const reminderId = `history:${topic.topicId}:${week}`;
       if (existing.has(reminderId)) continue;
       due.push({

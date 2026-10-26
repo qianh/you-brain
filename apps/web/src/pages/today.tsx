@@ -31,11 +31,17 @@ import {
   type TodayMode,
 } from "./today/model.js";
 
+/** Reminders shown before the list collapses; the rest stay behind one click. */
+const REMINDERS_PREVIEW = 2;
+
 export function TodayPage() {
   const { t, language, today, devices, timeZone, topics, status, reminders, error, loading, reload, reminderAction } = useDaemon();
   const { navigate } = useRoute();
   // The session blocks point at the list further down this page.
   const sessionsRef = useRef<HTMLDivElement | null>(null);
+  // Reminders stack above the sessions; a dozen of them would push today's topics off
+  // the first screen. Show the first few and keep the rest one click away.
+  const [showAllReminders, setShowAllReminders] = useState(false);
   const [mode, setMode] = useState<TodayMode>(() => readTodayMode(storage()));
   const sessions = today?.sessions ?? [];
   const arrived = useArrived(sessions.map((session) => session.sessionKey));
@@ -152,15 +158,33 @@ export function TodayPage() {
             </Card>
             {reminders.length > 0 ? (
               <div className="today-reminders">
-                <p className="today-reminders-label">{t("reminders")}</p>
-                <ReminderList
-                  reminders={reminders}
-                  layout="today"
-                  timeZone={timeZone}
-                  t={t}
-                  onAction={reminderAction}
-                  onOpenTopic={(topicId) => navigate(topicHref(topicZone(topics, topicId), topicId))}
-                />
+                <div className="today-reminders-head">
+                  <p className="today-reminders-label">
+                    {t("reminders")}
+                    <span className="today-reminders-count">{formatCount(reminders.length, language)}</span>
+                  </p>
+                  {reminders.length > REMINDERS_PREVIEW ? (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setShowAllReminders((current) => !current)}
+                    >
+                      {showAllReminders
+                        ? t("todayRemindersCollapse")
+                        : t("todayRemindersShowAll", { count: reminders.length - REMINDERS_PREVIEW })}
+                    </Button>
+                  ) : null}
+                </div>
+                <div className={showAllReminders ? "today-reminders-list is-open" : "today-reminders-list"}>
+                  <ReminderList
+                    reminders={showAllReminders ? reminders : reminders.slice(0, REMINDERS_PREVIEW)}
+                    layout="today"
+                    timeZone={timeZone}
+                    t={t}
+                    onAction={reminderAction}
+                    onOpenTopic={(topicId) => navigate(topicHref(topicZone(topics, topicId), topicId))}
+                  />
+                </div>
               </div>
             ) : null}
             {sessions.length === 0 ? (

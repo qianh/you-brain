@@ -1,5 +1,7 @@
 export const zh = {
   todayStatSessions: "今日会话",
+  todayRemindersShowAll: "展开另外 {count} 条",
+  todayRemindersCollapse: "收起提醒",
   todayStatSources: "来自 {count} 个来源",
   todayStatTopics: "涉及话题",
   todayStatUnassigned: "{count} 个未归类",
@@ -46,6 +48,8 @@ export const zh = {
 
 export const en: { [K in keyof typeof zh]: string } = {
   todayStatSessions: "Sessions",
+  todayRemindersShowAll: "Show {count} more",
+  todayRemindersCollapse: "Collapse",
   todayStatSources: "From {count} sources",
   todayStatTopics: "Topics",
   todayStatUnassigned: "{count} unassigned",

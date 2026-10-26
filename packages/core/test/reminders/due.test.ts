@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 import { foldEvents } from "../../src/topics/fold.js";
 import {
+  HISTORY_REMINDERS_PER_WEEK,
   STALE_MS,
   computeDueReminders,
   dueRemindersForDevice,
@@ -16,6 +17,7 @@ import {
   timeZoneOffsetMinutes,
   weekdayReached,
 } from "../../src/reminders/time.js";
+import { sessionKey } from "../topics/helpers.js";
 import { DAY, KEY_A, KEY_B, KEY_C, at, topicEvents } from "./fixture.js";
 
 const NOW = "2026-10-21T16:30:00.000Z";
@@ -136,6 +138,37 @@ describe("computeDueReminders", () => {
     const nextKey = isoWeekKey(localParts(Date.parse(nextWeek), 0));
     expect(nextKey).not.toBe(week);
     expect(later.map((item) => item.reminderId)).toContain(`history:old-a:${nextKey}`);
+  });
+
+  it("keeps the weekly history review to a shortlist, most open todos first", () => {
+    const old = at(NOW_MS - 40 * DAY);
+    // Ten archived topics with open todos: without a cap each one became its own
+    // reminder, which is how a real library ended up with eighty in a single week.
+    const ids = Array.from({ length: 10 }, (_, index) => `bulk-${String(index).padStart(2, "0")}`);
+    const events = ids.flatMap((topicId, index) =>
+      topicEvents({
+        topicId,
+        name: `话题 ${index}`,
+        key: sessionKey(50 + index),
+        at: at(NOW_MS - 40 * DAY - index * DAY),
+        todos: index + 1,
+      }),
+    );
+    const sessionUpdatedAt = Object.fromEntries(
+      ids.map((_, index) => [sessionKey(50 + index), at(NOW_MS - 40 * DAY - index * DAY)]),
+    );
+    const history = due(events, { sessionUpdatedAt }).filter((item) => item.kind === "history");
+    // The list is finally ordered by reminder id, so check the set: the five topics with
+    // the most open todos, not the five oldest.
+    expect(history.map((item) => item.topicId).sort()).toEqual([
+      "bulk-05",
+      "bulk-06",
+      "bulk-07",
+      "bulk-08",
+      "bulk-09",
+    ]);
+    expect(history).toHaveLength(HISTORY_REMINDERS_PER_WEEK);
+    expect(old).toBeTruthy();
   });
 
   it("issues the morning digest once, and only after the local time", () => {
