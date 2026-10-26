@@ -47,6 +47,20 @@
 - [x] **D3 .app 整包 ad-hoc 签名**：`tauri.bundle.conf.json` 设 macOS `signingIdentity: "-"`，Tauri 先签 `.app` 再打 DMG，`codesign --verify --deep --strict` 通过，DMG 内的包 CDHash 与外面一致；`bundle.sh` 留有复查失败时整包重签并重建 DMG 的兜底。未公证，`spctl` 拒绝是预期；未启动应用验证 sidecar 加载 vendor
 - [x] **D2 进度文档更新**：`进度.md`、`产品说明.md`、`技术方案.md` 的状态按现状更新（2026-10-23）；此后每完成一项仍同步更新对应行
 
+## F. 真实数据下暴露的问题（2026-10-25 ~ 26）
+
+- [x] **F1 Codex 启动噪音**：Codex 每次启动写一份只含 `AGENTS.md` 注入的 JSONL，6735 个文件里只有 189 个真对话。统一 `isConversation` 判定并接入全部适配器；`scripts/cleanup-noise-sessions.ts` 清理历史（本机删 158 会话 / 34 空话题 / 327 事件）
+- [x] **F2 话题活跃时间被提醒污染**：`reminder.action` 的 `touchUser` 让「忽略提醒」算成话题活跃，一次批量清理把 40 个话题刷成今天。拆出 `lastContentAt`（迁移 3），`countReminderActions` 显式选择口径
+- [x] **F3 重启全量重扫**：采集指纹只在内存，重启重解析 9,596 个文件（7 分钟）。`capture.files` 持久化指纹 + 会话元数据，启动恢复；未变化的扫描结果要保留旧元数据否则下次恢复不出来
+- [x] **F4 上传等模型**：`#uploadOne` 在 idle 时顺带提炼，一次上传 6 秒变 64 秒。上传与提炼解耦，上传移到独立循环
+- [x] **F5 慢会话饿死其他**：批处理每次从第一个开始，慢会话占满预算。遍历起点轮转
+- [x] **F6 提炼永久停摆**：两次静默超时把提炼永久停用，只能重启。改为暂停 + 指数退避
+- [x] **F7 上传挤停变更流**：`lastSync` 停更十几分钟。tick 的 Drive 步骤期间 `#syncBusy`，上传让路
+- [x] **F8 新增 Pi 与 T3 Code 采集**：Pi 读 `~/.pi/agent/sessions`，T3 读 `~/.t3/userdata/state.sqlite`（行式数据源，`import:` 会话跳过）
+- [ ] **F9 历史回灌的进度可见性**：`upload.pending` 与 `capture.parsed` 已在 `/api/status`，界面还没有展示；欠账大时用户看不出在跑
+- [ ] **F10 pull 在大量上传后变慢**：一次 pull 约 2-3 分钟，因为要消化自己刚上传的数百个变更；与上传分时后能跑，但 `lastSync` 周期仍是 2 分钟而非 1 分钟
+- [ ] **F11 网页会话队列消化慢**：`web.pending` 长期在 200 上下，每个会话一次模型调用
+
 ## E. 后续功能（不在第一期，第一期以当前功能为主）
 
 - [!] **E1 知识库（Obsidian vault）**：作为会话之外的第二类数字资产接入，术语见 `CONTEXT.md`
@@ -56,9 +70,9 @@
 
 ## 需要你决定或配合（不进自动队列）
 
-- [!] **P0 真实环境验收**：用真实 CLI、真实 Drive、真实模型走一遍「聊完 → 空闲 5 分钟 → 今日出现概要并归入话题 → 会话继续链接不变 → 新会话读到数字分身 → MCP 搜索到历史会话」。需要你的 Google 账号与模型配置
+- [!] **P0 真实环境验收**：已在真实 Drive 与真实模型上跑通采集 → 上传 → 提炼 → 话题册（见进度.md「真实环境实跑记录」）。仍未逐条走：会话继续后链接不变且内容更新、新会话读到编码版数字分身、MCP 搜索历史会话
 - [!] **LICENSE**：选 MIT 还是 Apache-2.0
-- [!] **README 与 GitHub About**：仓库公开，需要对外说明
+- [~] **README 与 GitHub About**：`README.md` 已补（2026-10-26）；GitHub About 与截图仍需你补
 - [!] **官方 OAuth 受限范围审核**：属于向 Google 申请的流程，不是代码
 - [!] **旧 `.orchestration` 提交历史是否改写**：公开仓库历史里留有编排文件，是否清理
 - [!] **手机端**：产品说明第 10 节明确排除手机端采集，保持不做，除非你改变范围
