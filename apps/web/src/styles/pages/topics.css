@@ -344,6 +344,8 @@
 }
 
 .topics-alias-x:disabled { opacity: 0.45; cursor: not-allowed; }
+/* The chip stays readable while its removal is in flight; only the × becomes a spinner. */
+.topics-alias-x.is-pending { cursor: progress; opacity: 1; }
 
 .topics-status .select { width: auto; }
 

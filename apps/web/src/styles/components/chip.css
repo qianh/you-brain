@@ -43,6 +43,9 @@ button.chip:disabled, .chip.is-disabled { opacity: 0.45; cursor: not-allowed; }
   border-color: color-mix(in srgb, var(--danger) 28%, transparent);
 }
 
+.chip .spinner { width: 10px; height: 10px; border-width: 1.5px; }
+.chip.is-loading { cursor: progress; }
+
 .chip-dot {
   width: 6px;
   height: 6px;

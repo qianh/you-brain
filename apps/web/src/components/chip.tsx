@@ -1,5 +1,7 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
 
+import { Spinner } from "./spinner.js";
+
 export type ChipTone = "neutral" | "accent" | "success" | "warn" | "danger";
 
 export function Chip({
@@ -10,6 +12,7 @@ export function Chip({
   onClick,
   pressed = false,
   disabled = false,
+  loading = false,
   className = "",
 }: {
   tone?: ChipTone;
@@ -19,13 +22,15 @@ export function Chip({
   onClick?: () => void;
   pressed?: boolean;
   disabled?: boolean;
+  /** Shows a spinner and blocks clicks while a change is in flight. */
+  loading?: boolean;
   className?: string;
 }) {
-  const classes = ["chip", tone, className].filter(Boolean).join(" ");
+  const classes = ["chip", tone, loading ? "is-loading" : "", className].filter(Boolean).join(" ");
   const body = (
     <>
       {dot ? <i className="chip-dot" aria-hidden="true" /> : null}
-      {icon}
+      {loading ? <Spinner /> : icon}
       {children}
     </>
   );
@@ -34,8 +39,9 @@ export function Chip({
     type: "button",
     className: classes,
     onClick,
-    disabled,
+    disabled: disabled || loading,
     "aria-pressed": pressed,
+    ...(loading ? { "aria-busy": true } : {}),
   };
   return (
     <button {...buttonProps} data-tone={tone}>
