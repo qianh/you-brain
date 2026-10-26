@@ -14,6 +14,27 @@
 
 .stat:last-child { border-right: 0; }
 
+/* A block whose number has somewhere to go: same layout, but it reads as a control. */
+.stat-select {
+  appearance: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-top: 0;
+  border-bottom: 0;
+  border-left: 0;
+  transition: background-color 120ms ease;
+}
+
+.stat-select:hover { background: var(--surface-2, var(--surface-1)); }
+.stat-select:active { background: var(--surface-3, var(--surface-2, var(--surface-1))); }
+.stat-select:focus-visible {
+  outline: 2px solid var(--accent, currentColor);
+  outline-offset: -2px;
+}
+
 .stat strong {
   font-size: var(--fs-stat);
   line-height: var(--lh-stat);

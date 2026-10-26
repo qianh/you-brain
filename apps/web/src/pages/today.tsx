@@ -34,6 +34,8 @@ import {
 export function TodayPage() {
   const { t, language, today, devices, timeZone, topics, status, reminders, error, loading, reload, reminderAction } = useDaemon();
   const { navigate } = useRoute();
+  // The session blocks point at the list further down this page.
+  const sessionsRef = useRef<HTMLDivElement | null>(null);
   const [mode, setMode] = useState<TodayMode>(() => readTodayMode(storage()));
   const sessions = today?.sessions ?? [];
   const arrived = useArrived(sessions.map((session) => session.sessionKey));
@@ -114,6 +116,12 @@ export function TodayPage() {
                   hint={t("todayStatSources", { count: stats.sources })}
                   zero={stats.sessions === 0}
                   english={language === "en"}
+                  {...(sessions.length > 0
+                    ? {
+                        onSelect: () =>
+                          sessionsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
+                      }
+                    : {})}
                 />
                 <StatBlock
                   value={formatCount(stats.topics, language)}
@@ -121,6 +129,7 @@ export function TodayPage() {
                   hint={t("todayStatUnassigned", { count: stats.unassigned })}
                   zero={stats.topics === 0}
                   english={language === "en"}
+                  onSelect={() => navigate(topicHref("active"))}
                 />
                 <StatBlock
                   value={formatCount(stats.openTodos, language)}
@@ -128,6 +137,7 @@ export function TodayPage() {
                   hint={t("todayStatDone", { count: stats.doneTodos })}
                   zero={stats.openTodos === 0}
                   english={language === "en"}
+                  onSelect={() => navigate(topicHref("active"))}
                 />
                 <StatBlock
                   value={syncValue}
@@ -136,6 +146,7 @@ export function TodayPage() {
                   zero={!syncedAt}
                   compact={!/^\d+$/.test(syncValue)}
                   english={language === "en"}
+                  onSelect={() => navigate("/status")}
                 />
               </StatGrid>
             </Card>
@@ -177,15 +188,17 @@ export function TodayPage() {
                 }
               />
             ) : (
-              <TodayGroups
-                mode={mode}
-                sessions={sessions}
-                devices={devices}
-                language={language}
-                timeZone={timeZone}
-                topics={topics}
-                arrived={arrived}
-              />
+              <div ref={sessionsRef}>
+                <TodayGroups
+                  mode={mode}
+                  sessions={sessions}
+                  devices={devices}
+                  language={language}
+                  timeZone={timeZone}
+                  topics={topics}
+                  arrived={arrived}
+                />
+              </div>
             )}
           </>
         ) : null}

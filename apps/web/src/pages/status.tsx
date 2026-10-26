@@ -231,12 +231,15 @@ export function StatusPage() {
                 label={t("statPending")}
                 hint={status.sync.pendingOutbox === 0 ? t("statusAllSynced") : t("outboxLine", { count: status.sync.pendingOutbox })}
                 english={language === "en"}
+                title={t("statPendingHint")}
               />
               <StatBlock
                 value={String(status.search.documents)}
                 label={t("statusStatDocs")}
                 hint={status.search.ready ? t("statusIndexReady") : t("notReady")}
                 english={language === "en"}
+                onSelect={() => navigate("/search")}
+                title={t("statusStatDocsHint")}
               />
               <StatBlock
                 value={String(status.refine.pending)}
@@ -250,6 +253,7 @@ export function StatusPage() {
                 label={t("statusStatDaily")}
                 hint={consolidationHint(view, finishedAt, finishedRelative, t)}
                 english={language === "en"}
+                onSelect={() => navigate(settingsHref("consolidation"))}
               />
             </StatGrid>
           </Card>
