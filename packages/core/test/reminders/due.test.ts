@@ -2,8 +2,9 @@ import { describe, expect, it } from "bun:test";
 
 import { foldEvents } from "../../src/topics/fold.js";
 import {
-  HISTORY_REMINDERS_PER_WEEK,
+  FOLLOW_UP_WINDOW_MS,
   STALE_MS,
+  WEEKLY_FOLLOW_UPS,
   computeDueReminders,
   dueRemindersForDevice,
   staleText,
@@ -105,7 +106,8 @@ describe("computeDueReminders", () => {
     expect(again.some((item) => item.reminderId === stale?.reminderId)).toBe(false);
   });
 
-  it("issues one history reminder per topic per ISO week", () => {
+  it("names a few follow-ups in the weekly review instead of a reminder per topic", () => {
+    // Archived (older than historyDays=30) but still inside the 90-day follow-up window.
     const old = at(NOW_MS - 40 * DAY);
     const events = [
       ...topicEvents({ topicId: "old-a", name: "甲", key: KEY_A, at: old, todos: 2 }),
@@ -113,62 +115,39 @@ describe("computeDueReminders", () => {
       ...topicEvents({ topicId: "old-c", name: "丙", key: KEY_C, at: old, todos: 0 }),
     ];
     const sessionUpdatedAt = { [KEY_A]: old, [KEY_B]: old, [KEY_C]: old };
-    const week = isoWeekKey(localParts(NOW_MS, 0));
-    const first = due(events, { sessionUpdatedAt });
-    const history = first.filter((item) => item.kind === "history");
-    expect(history.map((item) => item.reminderId).sort()).toEqual([
-      `history:old-a:${week}`,
-      `history:old-b:${week}`,
-    ]);
-    expect(history.find((item) => item.topicId === "old-a")?.text).toContain("2 件待办");
-    const kept = history.map((item) => ({
-      reminderId: item.reminderId,
-      kind: item.kind,
-      topicId: item.topicId,
-      text: item.text,
-      status: "open",
-      until: null,
-      issuedAt: NOW,
-      updatedAt: NOW,
-    }));
-    const second = due(events, { sessionUpdatedAt, reminders: kept });
-    expect(second.some((item) => item.kind === "history")).toBe(false);
-    const nextWeek = at(NOW_MS + 7 * DAY);
-    const later = due(events, { sessionUpdatedAt, reminders: kept, now: nextWeek });
-    const nextKey = isoWeekKey(localParts(Date.parse(nextWeek), 0));
-    expect(nextKey).not.toBe(week);
-    expect(later.map((item) => item.reminderId)).toContain(`history:old-a:${nextKey}`);
+    const items = due(events, { sessionUpdatedAt });
+    // Nothing per topic any more: the old behaviour produced one reminder per archived
+    // topic and filled the page with topics nobody meant to follow up.
+    expect(items.filter((item) => item.kind === "history")).toEqual([]);
+    const weekly = items.find((item) => item.kind === "weekly_review");
+    expect(weekly?.text).toContain("可以回头看一下");
+    expect(weekly?.text).toContain("甲（2 项待办）");
+    expect(weekly?.text).toContain("乙（1 项待办）");
+    expect(weekly?.text).not.toContain("丙");
   });
 
-  it("keeps the weekly history review to a shortlist, most open todos first", () => {
+  it("counts topics older than the follow-up window without naming them", () => {
+    const old = at(NOW_MS - (FOLLOW_UP_WINDOW_MS / DAY + 10) * DAY);
+    const events = topicEvents({ topicId: "ancient", name: "很久以前", key: KEY_A, at: old, todos: 2 });
+    const weekly = due(events, { sessionUpdatedAt: { [KEY_A]: old } }).find(
+      (item) => item.kind === "weekly_review",
+    );
+    expect(weekly?.text).toContain("没有需要回头跟进的话题");
+    expect(weekly?.text).toContain("另有 1 个较早话题还有未完成待办");
+    expect(weekly?.text).not.toContain("很久以前");
+  });
+
+  it("caps the follow-ups the review names", () => {
     const old = at(NOW_MS - 40 * DAY);
-    // Ten archived topics with open todos: without a cap each one became its own
-    // reminder, which is how a real library ended up with eighty in a single week.
-    const ids = Array.from({ length: 10 }, (_, index) => `bulk-${String(index).padStart(2, "0")}`);
+    const ids = Array.from({ length: WEEKLY_FOLLOW_UPS + 3 }, (_, index) => `many-${index}`);
     const events = ids.flatMap((topicId, index) =>
-      topicEvents({
-        topicId,
-        name: `话题 ${index}`,
-        key: sessionKey(50 + index),
-        at: at(NOW_MS - 40 * DAY - index * DAY),
-        todos: index + 1,
-      }),
+      topicEvents({ topicId, name: `话题${index}`, key: sessionKey(70 + index), at: old, todos: index + 1 }),
     );
-    const sessionUpdatedAt = Object.fromEntries(
-      ids.map((_, index) => [sessionKey(50 + index), at(NOW_MS - 40 * DAY - index * DAY)]),
-    );
-    const history = due(events, { sessionUpdatedAt }).filter((item) => item.kind === "history");
-    // The list is finally ordered by reminder id, so check the set: the five topics with
-    // the most open todos, not the five oldest.
-    expect(history.map((item) => item.topicId).sort()).toEqual([
-      "bulk-05",
-      "bulk-06",
-      "bulk-07",
-      "bulk-08",
-      "bulk-09",
-    ]);
-    expect(history).toHaveLength(HISTORY_REMINDERS_PER_WEEK);
-    expect(old).toBeTruthy();
+    const sessionUpdatedAt = Object.fromEntries(ids.map((_, index) => [sessionKey(70 + index), old]));
+    const weekly = due(events, { sessionUpdatedAt }).find((item) => item.kind === "weekly_review");
+    const named = (weekly?.text.match(/项待办）/gu) ?? []).length;
+    expect(named).toBe(WEEKLY_FOLLOW_UPS);
+    expect(weekly?.text).toContain(`另有 ${ids.length - WEEKLY_FOLLOW_UPS} 个较早话题`);
   });
 
   it("issues the morning digest once, and only after the local time", () => {
@@ -205,16 +184,13 @@ describe("computeDueReminders", () => {
       weeklyReviewDay: parts.isoWeekday,
       weeklyReviewTime: "18:00",
     });
-    expect(before.some((item) => item.kind === "weekly_review" || item.kind === "history")).toBe(
-      false,
-    );
+    expect(before.some((item) => item.kind === "weekly_review")).toBe(false);
     const after = due(events, {
       sessionUpdatedAt: { [KEY_A]: old },
       weeklyReviewDay: parts.isoWeekday,
       weeklyReviewTime: "16:30",
     });
     expect(after.some((item) => item.kind === "weekly_review")).toBe(true);
-    expect(after.some((item) => item.kind === "history")).toBe(true);
     const weekly = after.find((item) => item.kind === "weekly_review");
     expect(weekly?.reminderId).toBe(`weekly:${isoWeekKey(parts)}`);
     expect(weekly?.text).not.toContain("相似话题");

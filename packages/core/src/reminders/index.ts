@@ -1,4 +1,4 @@
-export { HISTORY_REMINDERS_PER_WEEK } from "./due.js";
+export { FOLLOW_UP_WINDOW_MS, WEEKLY_FOLLOW_UPS } from "./due.js";
 export { acceptActivityAt, ACTIVITY_FUTURE_SLACK_MS, ACTIVITY_PAST_LIMIT_MS } from "./activity.js";
 export { planReminderAction, type ReminderActionPlan } from "./action.js";
 export {

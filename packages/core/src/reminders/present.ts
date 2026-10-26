@@ -15,6 +15,9 @@ export function effectiveStatus(record: Pick<ReminderRecord, "status" | "until">
   return "snoozed";
 }
 
+/** No longer issued; kept so an existing event log does not surface as open reminders. */
+const LEGACY_HISTORY_KIND = "history";
+
 export function presentReminders(
   records: readonly ReminderRecord[],
   now: string,
@@ -22,7 +25,12 @@ export function presentReminders(
   all: boolean,
 ): ReminderView[] {
   const nowMs = Date.parse(now);
-  const views = records.map((record) => toView(record, nowMs, topics));
+  const views = records
+    // `history` reminders were issued one per archived topic before the weekly review
+    // started naming a shortlist instead. The events stay in the log, so filter them here
+    // rather than rewriting history on every device.
+    .filter((record) => record.kind !== LEGACY_HISTORY_KIND)
+    .map((record) => toView(record, nowMs, topics));
   const visible = all ? views : views.filter((item) => item.status === "open");
   visible.sort((left, right) => {
     if (left.issuedAt !== right.issuedAt) return left.issuedAt < right.issuedAt ? 1 : -1;

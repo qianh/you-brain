@@ -17,15 +17,17 @@ import {
 export const STALE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
- * Old topics reviewed per week at most.
+ * Topics the weekly review names as worth following up.
  *
- * Every archived topic with an open todo used to get its own reminder, so a library
- * with a few hundred topics produced eighty of them in one go — more than anyone would
- * read, and enough to push the rest of the page out of sight. The weekly review line
- * already summarises the whole history, so this is a shortlist rather than a complete
- * list: most open todos first, then the most recently active.
+ * Archived topics with open todos used to get a reminder each: a few hundred topics
+ * produced eighty of them in one week, which is noise rather than help — plenty of
+ * conversations were one-off questions that need no follow-up. Instead the review names
+ * the few that still look live, and only counts the rest.
  */
-export const HISTORY_REMINDERS_PER_WEEK = 5;
+export const WEEKLY_FOLLOW_UPS = 3;
+
+/** A topic untouched for longer than this is history, not something to chase. */
+export const FOLLOW_UP_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
 
 export const REMINDER_KIND = {
   stale: "stale",
@@ -108,30 +110,6 @@ export function computeDueReminders(input: ComputeDueInput): ReminderIssuedData[
 
   const week = isoWeekKey(parts);
   if (weekdayReached(parts, input.weeklyReviewDay, input.weeklyReviewTime)) {
-    const historyShortlist = zoned.history
-      .flatMap((topic) => {
-        const count = openTodos.get(topic.topicId) ?? 0;
-        if (count === 0 || blocked(topic, input, nowMs)) return [];
-        const lastActive = topic.lastActive === null ? Number.NEGATIVE_INFINITY : Date.parse(topic.lastActive);
-        return [{ topic, count, lastActive: Number.isNaN(lastActive) ? Number.NEGATIVE_INFINITY : lastActive }];
-      })
-      .sort(
-        (left, right) =>
-          right.count - left.count ||
-          right.lastActive - left.lastActive ||
-          (left.topic.topicId < right.topic.topicId ? -1 : 1),
-      )
-      .slice(0, HISTORY_REMINDERS_PER_WEEK);
-    for (const { topic, count } of historyShortlist) {
-      const reminderId = `history:${topic.topicId}:${week}`;
-      if (existing.has(reminderId)) continue;
-      due.push({
-        reminderId,
-        kind: REMINDER_KIND.history,
-        topicId: topic.topicId,
-        text: historyText(topic.name, count),
-      });
-    }
     const weeklyId = `weekly:${week}`;
     if (!existing.has(weeklyId)) {
       due.push({
@@ -292,14 +270,33 @@ function weeklyBody(
       return !Number.isNaN(lastMs) && nowMs - lastMs >= STALE_MS;
     })
     .map((topic) => topic.name);
-  const historyNames = history
-    .filter((topic) => (openTodos.get(topic.topicId) ?? 0) > 0)
-    .map((topic) => topic.name);
+  // Worth following up: archived topics that still have open todos and were touched
+  // recently. Everything older is counted, not named — a conversation from last year is
+  // not a task, and naming each one turned the review into a wall of text.
+  const withTodos = history.flatMap((topic) => {
+    const count = openTodos.get(topic.topicId) ?? 0;
+    if (count === 0) return [];
+    const lastMs = topic.lastActive === null ? Number.NaN : Date.parse(topic.lastActive);
+    return [{ topic, count, lastMs: Number.isNaN(lastMs) ? Number.NEGATIVE_INFINITY : lastMs }];
+  });
+  const followUps = withTodos
+    .filter((item) => nowMs - item.lastMs <= FOLLOW_UP_WINDOW_MS)
+    .filter((item) => !blocked(item.topic, input, nowMs))
+    .sort(
+      (left, right) =>
+        right.count - left.count ||
+        right.lastMs - left.lastMs ||
+        (left.topic.topicId < right.topic.topicId ? -1 : 1),
+    )
+    .slice(0, WEEKLY_FOLLOW_UPS)
+    .map((item) => ({ name: item.topic.name, openTodos: item.count }));
+  const olderCount = withTodos.length - followUps.length;
   return weeklyText({
     activeCount,
     conclusionCount,
     staleNames,
-    historyNames,
+    followUps,
+    olderCount,
     ...(input.mergeLines ? { mergeSuggestions: input.mergeLines } : {}),
   });
 }

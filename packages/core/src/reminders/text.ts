@@ -66,14 +66,26 @@ export function weeklyText(input: {
   activeCount: number;
   conclusionCount: number;
   staleNames: readonly string[];
-  historyNames: readonly string[];
+  /** Archived topics worth another look: still has open todos and touched recently. */
+  followUps: ReadonlyArray<{ name: string; openTodos: number }>;
+  /** Topics with open todos that have gone quiet for longer than the follow-up window. */
+  olderCount: number;
   mergeSuggestions?: readonly { fromName: string; intoName: string; reason: string }[];
 }): string {
+  const followUpLine =
+    input.followUps.length === 0
+      ? "没有需要回头跟进的话题。"
+      : `可以回头看一下：${input.followUps
+          .map((item) => `${clipText(displayName(item.name), 16)}（${item.openTodos} 项待办）`)
+          .join("、")}。`;
+  const olderLine =
+    input.olderCount > 0 ? `另有 ${input.olderCount} 个较早话题还有未完成待办，在话题册历史区。` : null;
   const lines = [
     `本周活跃话题 ${input.activeCount} 个。`,
     `新增结论 ${input.conclusionCount} 条。`,
     `停滞话题：${nameList(input.staleNames)}。`,
-    `历史未完成：${nameList(input.historyNames)}。`,
+    followUpLine,
+    ...(olderLine === null ? [] : [olderLine]),
   ];
   for (const item of (input.mergeSuggestions ?? []).slice(0, 3)) {
     lines.push(`${item.fromName} 与 ${item.intoName} 看起来是同一件事（${item.reason}）。`);

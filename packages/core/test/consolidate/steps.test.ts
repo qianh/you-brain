@@ -575,7 +575,8 @@ describe("weekly copy", () => {
       activeCount: 1,
       conclusionCount: 0,
       staleNames: [],
-      historyNames: [],
+      followUps: [],
+      olderCount: 0,
       mergeSuggestions: lines,
     });
     expect(withLines).toContain("甲 与 乙 看起来是同一件事（重复）。");
@@ -583,7 +584,8 @@ describe("weekly copy", () => {
       activeCount: 1,
       conclusionCount: 0,
       staleNames: [],
-      historyNames: [],
+      followUps: [],
+      olderCount: 0,
     });
     expect(without).not.toContain("看起来是同一件事");
     expect(without).not.toContain("相似话题");
