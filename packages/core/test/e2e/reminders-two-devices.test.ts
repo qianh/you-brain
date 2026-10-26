@@ -231,6 +231,7 @@ async function startOne(
     clock,
     drive,
     llm,
+    refineBackfillWindowDays: 30,
     embedder: throwingEmbedder,
     sourceRoots: { "claude-code": [dirs.sourceDir] },
     watch: false,

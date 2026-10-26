@@ -142,7 +142,7 @@ describe("refine backfill", () => {
     expect(newer.id).not.toBe(older.id);
   });
 
-  it("leaves sessions outside the 30-day window unrefined", async () => {
+  it("leaves sessions outside the 7-day window unrefined", async () => {
     const dirs = await makeDaemonDirs("you-brain-refine-window-");
     roots.push(dirs.root);
     const clock = testClock();
@@ -161,7 +161,8 @@ describe("refine backfill", () => {
       path: "inbox/Johns-MacBook-Pro-2.local/codex/ancient.md",
       bytes: sessionMarkdown({
         conversationId: "ancient",
-        updatedAt: new Date(now - 200 * DAY_MS).toISOString(),
+        // Ten days: inside the old 30-day window, outside the 7-day one.
+        updatedAt: new Date(now - 10 * DAY_MS).toISOString(),
         text: "ancient question",
       }),
       mimeType: "text/markdown",

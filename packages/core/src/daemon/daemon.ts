@@ -208,10 +208,15 @@ const STATUS_DRIVE_WAIT_MS = 1_000;
 /** Inbox files downloaded at the same time while draining the index queue. */
 const INBOX_READ_CONCURRENCY = 8;
 /**
- * How far back the refine backfill reaches. The topic list only shows this window, and
- * every session in it costs one model call, so older history stays unrefined.
+ * How far back the refine backfill reaches.
+ *
+ * Every session in the window costs one model call, and history deeper than a week
+ * mostly adds noise: a library can hold hundreds of short image-generation sessions that
+ * would each become a topic of their own without saying anything about the user. The
+ * original transcripts are uploaded and searchable regardless — this only limits what
+ * gets turned into topics and portrait material.
  */
-const REFINE_BACKFILL_WINDOW_DAYS = 30;
+const REFINE_BACKFILL_WINDOW_DAYS = 7;
 
 /**
  * Cursor key holding the file fingerprint of the last capture scan.
@@ -323,6 +328,8 @@ export interface DaemonOptions {
   signals?: boolean;
   /** Test injection. Shortens subscription CLI calls so a silent hang fails quickly. */
   llmTimeoutMs?: number;
+  /** Test injection. Widens the refine window so a test can set up older history. */
+  refineBackfillWindowDays?: number;
   secrets?: SecretStore;
   appVersion?: string;
   /** Default true. Tests set false so discovery is driven only by scan() and the 10 minute timer. */
@@ -1543,9 +1550,8 @@ export class YouBrainDaemon {
     // Both passes share one CLI slot. A web session is what the user just produced, so
     // it goes first; the history backlog only loses time, which costs nothing.
     if (countUnrefinedWebSessions(listWebInbox(store), store.listSessions()) > 0) return;
-    const since = new Date(
-      this.#clock.nowMs() - REFINE_BACKFILL_WINDOW_DAYS * 24 * 60 * 60 * 1000,
-    ).toISOString();
+    const windowDays = this.#options.refineBackfillWindowDays ?? REFINE_BACKFILL_WINDOW_DAYS;
+    const since = new Date(this.#clock.nowMs() - windowDays * 24 * 60 * 60 * 1000).toISOString();
     const pending = store
       .listSessions({ unrefinedOnly: true, updatedSince: since })
       .filter((session) => session.device === this.#local.displayName)
