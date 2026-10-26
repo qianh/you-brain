@@ -14,6 +14,7 @@ import {
   splitEmbedBatches,
   type Embedder,
 } from "./embedder.js";
+import { isInboxSessionFile } from "../drive/inbox-file.js";
 import { chunkKey, indexBody, keywordScores } from "./fts.js";
 import { redactText, type RedactionOptions } from "./redact.js";
 import { ensureSearchSchema, SEARCH_DRIVE_CURSOR } from "./schema.js";
@@ -363,9 +364,7 @@ export class SearchService {
     const prefixes = this.#scope?.() ?? null;
     const entries = changes.entries.filter(
       (entry) =>
-        entry.path.startsWith("inbox/") &&
-        (prefixes === null || inScope(entry.path, prefixes)) &&
-        (entry.mimeType === "text/markdown" || entry.path.endsWith(".md")),
+        (prefixes === null || inScope(entry.path, prefixes)) && isInboxSessionFile(entry),
     );
     const removedIds = new Set(changes.removedIds);
     for (const entry of changes.entries) {

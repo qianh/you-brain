@@ -7,6 +7,7 @@ export { md5Hex, sha256Hex } from "./hash.js";
 export { MemoryDrive } from "./memory-drive.js";
 export { safeName, safePath } from "./path.js";
 export { InboxScopedDrive } from "./scoped-drive.js";
+export { isInboxSessionFile } from "./inbox-file.js";
 export type {
   DriveChanges,
   DriveEntry,

@@ -57,6 +57,7 @@
 - [x] **F6 提炼永久停摆**：两次静默超时把提炼永久停用，只能重启。改为暂停 + 指数退避
 - [x] **F7 上传挤停变更流**：`lastSync` 停更十几分钟。tick 的 Drive 步骤期间 `#syncBusy`，上传让路
 - [x] **F8 新增 Pi 与 T3 Code 采集**：Pi 读 `~/.pi/agent/sessions`，T3 读 `~/.t3/userdata/state.sqlite`（行式数据源，`import:` 会话跳过）
+- [x] **F12 插件的半成品被当成会话**：浏览器插件先写 `.tmp` 再改名，中途的临时文件带 `text/markdown` 类型，被按类型判定当成会话，导致同一 `conversation_id` 出现两个文件。`drive/inbox-file.ts` 统一判定（跳过 `.` 开头与 `.tmp`），索引入口与收件箱队列都改用它；已清理索引里混入的 6 个片段
 - [ ] **F9 历史回灌的进度可见性**：`upload.pending` 与 `capture.parsed` 已在 `/api/status`，界面还没有展示；欠账大时用户看不出在跑
 - [ ] **F10 pull 在大量上传后变慢**：一次 pull 约 2-3 分钟，因为要消化自己刚上传的数百个变更；与上传分时后能跑，但 `lastSync` 周期仍是 2 分钟而非 1 分钟
 - [ ] **F11 网页会话队列消化慢**：`web.pending` 长期在 200 上下，每个会话一次模型调用

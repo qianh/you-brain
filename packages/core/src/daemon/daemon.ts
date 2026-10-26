@@ -45,6 +45,7 @@ import {
   type YouBrainPaths,
 } from "../domain/index.js";
 import type { DriveEntry, DrivePort } from "../drive/drive-port.js";
+import { isInboxSessionFile } from "../drive/inbox-file.js";
 import { HttpError } from "../http/handlers.js";
 import { ChangeHub } from "../http/hub.js";
 import {
@@ -1869,7 +1870,7 @@ export class YouBrainDaemon {
     const indexById = new Map(queued.map((item, index) => [item.id, index]));
     let changed = false;
     for (const file of files) {
-      if (!file.path.startsWith("inbox/") || !file.path.endsWith(".md")) continue;
+      if (!isInboxSessionFile(file)) continue;
       if (!inScope(file.path, scope)) continue;
       if (store.getCursor(inboxIndexedKey(file.id)) === file.modifiedTime) continue;
       const next: InboxPendingFile = {
