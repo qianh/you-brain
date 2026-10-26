@@ -31,7 +31,7 @@ export function matchExpression(query: string): string | null {
  * ranking all of them dominated the response time while only the top few could ever be
  * shown. bm25 ordering keeps the ones that matter.
  */
-const KEYWORD_CANDIDATES = 500;
+export const KEYWORD_CANDIDATES = 500;
 
 interface FtsRow {
   drive_file_id: string;
@@ -39,16 +39,16 @@ interface FtsRow {
   rank: number;
 }
 
-export function keywordScores(
+/** The keyword shortlist, best first. Running bm25 costs the same as the full match set. */
+export function keywordHits(
   database: Database,
   query: string,
-): Map<string, number> {
+  limit = KEYWORD_CANDIDATES,
+): FtsRow[] {
   const expression = matchExpression(query);
-  const scores = new Map<string, number>();
-  if (!expression) return scores;
-  let rows: FtsRow[];
+  if (!expression) return [];
   try {
-    rows = database
+    return database
       .prepare(
         `
         SELECT drive_file_id, chunk_id, bm25(search_chunks_fts) AS rank
@@ -58,10 +58,15 @@ export function keywordScores(
         LIMIT ?
       `,
       )
-      .all(expression, KEYWORD_CANDIDATES) as FtsRow[];
+      .all(expression, limit) as FtsRow[];
   } catch {
-    return scores;
+    return [];
   }
+}
+
+/** bm25 is negative and unbounded; normalise to 0..1 against the best hit. */
+export function keywordScoresFrom(rows: readonly FtsRow[]): Map<string, number> {
+  const scores = new Map<string, number>();
   let max = 0;
   const weighted = rows.map((row) => {
     const weight = Number.isFinite(row.rank) ? -row.rank : 0;
@@ -75,4 +80,11 @@ export function keywordScores(
     if (score > previous) scores.set(key, score);
   }
   return scores;
+}
+
+export function keywordScores(
+  database: Database,
+  query: string,
+): Map<string, number> {
+  return keywordScoresFrom(keywordHits(database, query));
 }

@@ -15,7 +15,7 @@ import {
   type Embedder,
 } from "./embedder.js";
 import { isInboxSessionFile } from "../drive/inbox-file.js";
-import { chunkKey, indexBody, keywordScores } from "./fts.js";
+import { chunkKey, indexBody, keywordHits, keywordScoresFrom } from "./fts.js";
 import { redactText, type RedactionOptions } from "./redact.js";
 import { ensureSearchSchema, SEARCH_DRIVE_CURSOR } from "./schema.js";
 import { parseSearchRange, updatedAtInRange } from "./time-range.js";
@@ -137,6 +137,9 @@ const remoteUnavailable = {
   code: "REMOTE_SEARCH_UNAVAILABLE",
   message: "Searching other devices' sessions on Drive failed; showing this device only",
 } as const;
+
+/** Query embeddings kept in memory. One entry is a few kilobytes. */
+const QUERY_VECTOR_CACHE = 64;
 
 /** Hits read from Drive per query; each costs one download. */
 const REMOTE_HITS = 6;
@@ -845,23 +848,52 @@ export class SearchService {
     if (input.until !== undefined && input.until.length > 0) rangeInput.until = input.until;
     const range = parseSearchRange(rangeInput);
     ensureSearchSchema(this.#database);
-    // Rank without the chunk text: a full library carries well over a hundred megabytes
-    // of it, and every query used to load all of that just to build excerpts for the few
-    // results it returned. Stage 1 reads ids and vectors; stage 2 fetches text for the
-    // winners only.
-    const rows = this.#database
+    // Two candidate sets instead of one full table scan.
+    //
+    // Semantic ranking only has vectors to compare, so the join is inner: on a real
+    // library that is 19,780 of 143,965 chunks. Keyword ranking brings its own shortlist
+    // (`keywordScores` keeps the bm25 leaders), and only those rows need metadata — they
+    // are the chunks this device has not embedded yet.
+    //
+    // Chunk text is never part of this: a full library carries far more text than the
+    // page it returns, and stage 2 fetches it for the winners only.
+    const withVector = this.#database
       .prepare(
         `
         SELECT c.drive_file_id, c.drive_path, c.source, c.conversation_id,
                c.started_at, c.updated_at, c.content_sha256, c.chunk_id,
                v.vector AS vector
         FROM search_chunks c
-        LEFT JOIN search_vectors v
+        JOIN search_vectors v
           ON v.drive_file_id = c.drive_file_id AND v.chunk_id = c.chunk_id
       `,
       )
       .all() as Array<Omit<ChunkRow, "text">>;
-    const lexical = keywordScores(this.#database, input.query);
+    // One bm25 pass feeds both the scores and the shortlist of chunks still waiting for a
+    // vector; running the same match twice cost about a second per query.
+    const keywordRows = keywordHits(this.#database, input.query);
+    const lexical = keywordScoresFrom(keywordRows);
+    const rows: Array<Omit<ChunkRow, "text">> = withVector;
+    if (keywordRows.length > 0) {
+      const known = new Set(withVector.map((row) => chunkKey(row.drive_file_id, row.chunk_id)));
+      const wanted = keywordRows.filter((hit) => !known.has(chunkKey(hit.drive_file_id, hit.chunk_id)));
+      if (wanted.length > 0) {
+        const selectOne = this.#database.prepare(
+          `
+          SELECT drive_file_id, drive_path, source, conversation_id,
+                 started_at, updated_at, content_sha256, chunk_id
+          FROM search_chunks
+          WHERE drive_file_id = ? AND chunk_id = ?
+        `,
+        );
+        for (const hit of wanted) {
+          const row = selectOne.get(hit.drive_file_id, hit.chunk_id) as
+            | Omit<ChunkRow, "text" | "vector">
+            | null;
+          if (row) rows.push({ ...row, vector: null });
+        }
+      }
+    }
 
     let queryVector: number[] | null = null;
     if (this.#semantic && rows.some((row) => row.vector !== null)) {
@@ -942,10 +974,33 @@ export class SearchService {
     return (row?.text ?? "").replace(/\s+/gu, " ").trim().slice(0, 360);
   }
 
+  /**
+   * Query embeddings, most recent last.
+   *
+   * Running the model again for the same words was the bulk of a repeat search: typing
+   * a term, changing the source filter, then searching again all re-ran the same
+   * inference. A small cache covers that without holding much memory.
+   */
+  #queryVectors = new Map<string, number[]>();
+
   async #embedQuery(text: string): Promise<number[]> {
     const embedder = this.#embedder;
     if (!embedder) throw new Error("Embedding model is unavailable");
-    return embedder.embedQuery(clampEmbedText(text, this.#maxChars));
+    const key = clampEmbedText(text, this.#maxChars);
+    const cached = this.#queryVectors.get(key);
+    if (cached) {
+      // Refresh recency so a term in active use is not evicted first.
+      this.#queryVectors.delete(key);
+      this.#queryVectors.set(key, cached);
+      return cached;
+    }
+    const vector = await embedder.embedQuery(key);
+    this.#queryVectors.set(key, vector);
+    if (this.#queryVectors.size > QUERY_VECTOR_CACHE) {
+      const oldest = this.#queryVectors.keys().next().value;
+      if (oldest !== undefined) this.#queryVectors.delete(oldest);
+    }
+    return vector;
   }
 
   async #embedPassagesLimited(texts: string[]): Promise<number[][]> {
