@@ -21,4 +21,6 @@ export interface SearchDrive {
     cursor?: string;
   }): Promise<SearchDriveChanges>;
   read(id: string): Promise<SearchDriveObject>;
+  /** Drive full-text search under `prefix`. Reaches sessions on other devices without downloading them. */
+  searchText?(query: { text: string; prefix: string; limit: number }): Promise<SearchDriveEntry[]>;
 }

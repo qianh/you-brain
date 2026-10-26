@@ -65,10 +65,16 @@ export function captureGeneration(input: {
 export async function captureFileStamp(
   path: string,
 ): Promise<{ stamp: string; bytes: number } | null> {
+  // A row-backed source points at `<database>#<row>`. Its stamp is the database file,
+  // so a changed thread row is picked up on the next scan.
+  const at = path.indexOf("#");
+  const filePath = at > 0 ? path.slice(0, at) : path;
+  const row = at > 0 ? path.slice(at + 1) : "";
   try {
-    const info = await stat(path);
+    const info = await stat(filePath);
     if (!info.isDirectory()) {
-      return { stamp: `f:${info.mtimeMs}:${info.size}`, bytes: info.size };
+      const stamp = `f:${info.mtimeMs}:${info.size}`;
+      return { stamp: row ? `${stamp}#${row}` : stamp, bytes: info.size };
     }
     const history = await stat(join(path, "chat_history.jsonl"));
     const summary = await stat(join(path, "summary.json"));

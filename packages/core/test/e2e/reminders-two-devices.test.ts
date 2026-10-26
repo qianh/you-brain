@@ -17,6 +17,7 @@ import {
   claudeLine,
   fakeBackend,
   makeDaemonDirs,
+  refineNow,
   testClock,
   throwingEmbedder,
   writeClaudeSession,
@@ -79,6 +80,8 @@ describe("reminders on two devices", () => {
       backfill: true,
     });
     expect(uploaded.uploaded).toBeGreaterThan(0);
+    // Uploading only syncs; the topic and its todo come from the refine pass.
+    await refineNow(clock, daemonA);
     const topics = await getJson<{ topics: TopicListItem[] }>(daemonA, "/api/topics?zone=active");
     const topic = topics.topics.find((item) => item.openTodoCount >= 1);
     expect(topic?.lastActive).toBeTruthy();

@@ -118,9 +118,19 @@ const MIGRATION_2 = `
 CREATE INDEX IF NOT EXISTS events_type ON events(type);
 `;
 
+/**
+ * `last_user_op_at` also moves when the user dismisses a reminder, which is what the
+ * reminder streak needs. The topic list needs the moment the topic itself was worked
+ * on, so it gets its own column. Existing rows start empty and fill on the next fold.
+ */
+const MIGRATION_3 = `
+ALTER TABLE topics ADD COLUMN last_content_at TEXT;
+`;
+
 export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   { version: 1, sql: MIGRATION_1 },
   { version: 2, sql: MIGRATION_2 },
+  { version: 3, sql: MIGRATION_3 },
 ];
 
 const latest = SCHEMA_MIGRATIONS[SCHEMA_MIGRATIONS.length - 1];

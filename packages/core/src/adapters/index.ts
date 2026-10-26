@@ -1,6 +1,8 @@
 import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import { Database } from "bun:sqlite";
+
 import { applyCaptureRedaction } from "../capture/redact.js";
 import type { NormalizedSession, SessionSource } from "../domain/session.js";
 import { allowCapturePath } from "./filter.js";
@@ -10,6 +12,8 @@ import { parseCursorSession } from "./cursor.js";
 import { parseGeminiSession } from "./gemini.js";
 import { globFiles } from "./glob.js";
 import { parseGrokSession } from "./grok.js";
+import { parsePiSession } from "./pi.js";
+import { isImportedThread, parseT3Session, t3SourcePath } from "./t3.js";
 import type {
   AdapterOptions,
   AdapterResult,
@@ -23,6 +27,8 @@ export { parseCodexSession, codexAdapter } from "./codex.js";
 export { parseCursorSession, cursorAdapter } from "./cursor.js";
 export { parseGeminiSession, geminiAdapter } from "./gemini.js";
 export { parseGrokSession, grokAdapter } from "./grok.js";
+export { parsePiSession, piAdapter } from "./pi.js";
+export { parseT3Session, t3Adapter, isImportedThread, parseT3Path } from "./t3.js";
 export {
   clearContinuationIndex,
   continuationByPrefix,
@@ -38,6 +44,7 @@ export {
   registerAdapter,
   unregisterAdapter,
 } from "./registry.js";
+export { isConversation, isInjectedPrompt } from "./conversation.js";
 export { allowCapturePath, captureSourceFilters, globToRegExp } from "./filter.js";
 export type { CapturePathFilter } from "./filter.js";
 export {
@@ -65,23 +72,26 @@ const emptyStatus = (): DiscoveryStatus => ({
   discovered: 0,
   captured: 0,
   skippedSubagents: 0,
+  skippedNoise: 0,
   malformed: 0,
   errors: 0,
 });
-
 async function incrementalFiles(
-  paths: string[],
+  paths: string[] | Promise<string[]>,
   modifiedAfter: string | undefined,
   includePaths: Set<string>,
   sourcePath: (path: string) => string = (path) => path,
 ): Promise<string[]> {
-  if (!modifiedAfter) return paths;
+  const listed = await paths;
+  if (!modifiedAfter) return listed;
   const candidates = await Promise.all(
-    paths.map(async (path) => {
+    listed.map(async (path) => {
       if (includePaths.has(path) || includePaths.has(sourcePath(path)))
         return path;
       try {
-        return (await stat(path)).mtime.toISOString() > modifiedAfter
+        // A row-backed path (`<database>#<row>`) is stamped by its database file.
+        const at = path.indexOf("#");
+        return (await stat(at > 0 ? path.slice(0, at) : path)).mtime.toISOString() > modifiedAfter
           ? path
           : null;
       } catch {
@@ -90,6 +100,39 @@ async function incrementalFiles(
     }),
   );
   return candidates.filter((path): path is string => path !== null);
+}
+
+/**
+ * One path per live T3 thread. T3 keeps every transcript in one database, so the
+ * unit of work is a row, not a file: `<database>#<threadId>`.
+ */
+async function t3ThreadPaths(roots: string[]): Promise<string[]> {
+  const paths: string[] = [];
+  for (const root of roots) {
+    const database = join(root, "state.sqlite");
+    let db: Database;
+    try {
+      db = new Database(database, { readonly: true });
+    } catch {
+      continue;
+    }
+    try {
+      const rows = db
+        .query<{ thread_id: string }, []>(
+          `SELECT thread_id FROM projection_threads WHERE deleted_at IS NULL`,
+        )
+        .all();
+      for (const row of rows) {
+        if (isImportedThread(row.thread_id)) continue;
+        paths.push(t3SourcePath(database, row.thread_id));
+      }
+    } catch {
+      // Not a T3 database, or an older schema without threads.
+    } finally {
+      db.close();
+    }
+  }
+  return paths;
 }
 
 export async function discoverSessions(
@@ -101,10 +144,13 @@ export async function discoverSessions(
     grok: emptyStatus(),
     cursor: emptyStatus(),
     gemini: emptyStatus(),
+    pi: emptyStatus(),
+    t3: emptyStatus(),
   };
   const output: DiscoveryResult = {
     sessions: [],
     skippedSubagents: 0,
+    skippedNoise: 0,
     malformed: 0,
     warnings: [],
     status,
@@ -243,6 +289,46 @@ export async function discoverSessions(
       })),
     );
   }
+  if (!stopped() && options.sources.includes("pi")) {
+    const paths = visible(
+      "pi",
+      await incrementalFiles(
+        await globFiles(
+          (options.paths.pi ?? []).map((root) => join(root, "**", "*.jsonl")),
+          options.signal,
+        ),
+        options.modifiedAfter?.pi,
+        includePaths,
+      ),
+    );
+    status.pi.discovered = paths.length;
+    work.push(
+      ...paths.map((path) => ({
+        name: "pi" as const,
+        path,
+        parse: () => parsePiSession(path, parserOptions),
+      })),
+    );
+  }
+  if (!stopped() && options.sources.includes("t3-code")) {
+    // T3 lists its own threads: one row per session, not one file per directory.
+    const paths = visible(
+      "t3-code",
+      await incrementalFiles(
+        await t3ThreadPaths(options.paths.t3 ?? []),
+        options.modifiedAfter?.["t3-code"],
+        includePaths,
+      ),
+    );
+    status.t3.discovered = paths.length;
+    work.push(
+      ...paths.map((path) => ({
+        name: "t3" as const,
+        path,
+        parse: () => parseT3Session(path, parserOptions),
+      })),
+    );
+  }
 
   const retainSessions = options.retainSessions !== false;
   for (const item of work) {
@@ -262,6 +348,10 @@ export async function discoverSessions(
       if (result.skippedSubagent) {
         status[item.name].skippedSubagents += 1;
         output.skippedSubagents += 1;
+      }
+      if (result.skippedNoise) {
+        status[item.name].skippedNoise += 1;
+        output.skippedNoise += 1;
       }
       if (result.session) status[item.name].captured += 1;
       if (options.onParsed) await options.onParsed(item.path, result.session);
@@ -297,5 +387,9 @@ export async function parseSourceFile(
       return parseCursorSession(path, options);
     case "gemini-cli":
       return parseGeminiSession(path, options);
+    case "pi":
+      return parsePiSession(path, options);
+    case "t3-code":
+      return parseT3Session(path, options);
   }
 }

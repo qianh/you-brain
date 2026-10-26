@@ -9,6 +9,7 @@ import type {
   DrivePort,
   DrivePutInput,
   DriveQuota,
+  DriveTextQuery,
   DriveUpdateOptions,
 } from "./drive-port.js";
 
@@ -63,6 +64,15 @@ export class InboxScopedDrive implements DrivePort {
   async list(query: DriveListQuery): Promise<DriveEntry[]> {
     const prefix = query.prefix ? inboxPath(query.prefix) : inboxPrefix;
     const entries = await this.#drive.list({ ...query, prefix });
+    return entries.flatMap((entry) => {
+      const registered = this.#register(entry);
+      return registered ? [registered] : [];
+    });
+  }
+
+  async searchText(query: DriveTextQuery): Promise<DriveEntry[]> {
+    const prefix = query.prefix ? inboxPath(query.prefix) : inboxPrefix;
+    const entries = await this.#drive.searchText({ ...query, prefix });
     return entries.flatMap((entry) => {
       const registered = this.#register(entry);
       return registered ? [registered] : [];

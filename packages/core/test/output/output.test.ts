@@ -461,6 +461,7 @@ describe("local markdown output", () => {
       mergedInto: null,
       createdTs: recent,
       lastUserOpAt: null,
+      lastContentAt: null,
       userLocked: false,
     });
     const session = (n: number, topicId: string, updatedAt: string): SessionRecord => ({

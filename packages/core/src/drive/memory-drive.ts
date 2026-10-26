@@ -8,6 +8,7 @@ import type {
   DriveChanges,
   DriveEntry,
   DriveListQuery,
+  DriveTextQuery,
   DriveObject,
   DrivePort,
   DrivePutInput,
@@ -105,6 +106,19 @@ export class MemoryDrive implements DrivePort {
         (left, right) =>
           left.path.localeCompare(right.path) || left.id.localeCompare(right.id),
       )
+      .map((object) => this.#entry(object));
+  }
+
+  async searchText(query: DriveTextQuery): Promise<DriveEntry[]> {
+    const terms = query.text.toLowerCase().split(/\s+/u).filter(Boolean);
+    return [...this.#objects.values()]
+      .filter((object) => !object.trashed && object.path.startsWith(query.prefix))
+      .filter((object) => {
+        const text = object.bytes.toString("utf8").toLowerCase();
+        return terms.length > 0 && terms.every((term) => text.includes(term));
+      })
+      .sort((left, right) => right.modifiedTime.localeCompare(left.modifiedTime))
+      .slice(0, query.limit)
       .map((object) => this.#entry(object));
   }
 

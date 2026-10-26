@@ -9,6 +9,7 @@ export {
   splitEmbedBatches,
   type Embedder,
 } from "./embedder.js";
+export { inboxScopePrefixes, inScope } from "./scope.js";
 export { serveEmbedWorker } from "./embed-worker.js";
 export type { EmbedWorkerRequest, EmbedWorkerResponse } from "./embed-protocol.js";
 export { isModelReady, markModelReady, type ModelIdentity } from "./model-cache.js";

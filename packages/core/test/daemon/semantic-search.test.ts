@@ -71,7 +71,7 @@ describe("semantic search switch", () => {
     const clock = testClock();
     const drive = new MemoryDrive({ now: () => clock.now() });
     await drive.put({
-      path: "inbox/mac/codex.md",
+      path: "inbox/device-a/codex.md",
       bytes: Buffer.from(`---
 source: codex
 conversation_id: semantic-off

@@ -111,7 +111,7 @@ describe("inbox indexing during a pull", () => {
     const entries = new Map<string, string>();
     for (const id of ids) {
       const entry = await memory.put({
-        path: `inbox/other-mac/claude-code/2026/10/${id}.md`,
+        path: `inbox/device-a/claude-code/2026/10/${id}.md`,
         bytes: inboxFile(id, "2026-10-17T02:00:00.000Z"),
         mimeType: "text/markdown",
       });
@@ -168,6 +168,63 @@ describe("inbox indexing during a pull", () => {
   });
 });
 
+describe("inbox scope", () => {
+  it("never downloads or indexes another device's sessions", async () => {
+    const dirs = await makeDaemonDirs("you-brain-inbox-scope-");
+    roots.push(dirs.root);
+    const clock = testClock();
+    const memory = new MemoryDrive({ now: () => clock.now() });
+    const reads: string[] = [];
+    const drive = new Proxy(memory, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) => {
+          if (property === "read") reads.push(String(args[0]));
+          return (value as (...input: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    }) as DrivePort;
+    const own = await memory.put({
+      path: "inbox/device-a/claude-code/2026/10/own.md",
+      bytes: inboxFile("own", "2026-10-17T02:00:00.000Z"),
+      mimeType: "text/markdown",
+    });
+    const other = await memory.put({
+      path: "inbox/other-mac/claude-code/2026/10/other.md",
+      bytes: inboxFile("other", "2026-10-17T02:00:00.000Z"),
+      mimeType: "text/markdown",
+    });
+    const daemon = await startDaemon({
+      homeDir: dirs.homeDir,
+      platform: "darwin",
+      env: dirs.env,
+      hostname: "device-a",
+      clock,
+      drive,
+      llm: null,
+      embedder: throwingEmbedder,
+      sourceRoots: {},
+      watch: false,
+      signals: false,
+    });
+    started.push(daemon);
+    await daemon.settled();
+    await fetch(`${daemon.baseUrl}/api/actions/sync`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    await nextTick(clock, daemon);
+    await clock.advance(60_000);
+    await daemon.settled();
+
+    expect(reads).toContain(own.id);
+    expect(reads).not.toContain(other.id);
+    expect(sessionFileIds(dirs.dataDir)).toEqual([own.id]);
+    expect(pendingIds(dirs.dataDir)).not.toContain(other.id);
+  });
+});
+
 describe("inbox index queue", () => {
   it("sets lastSyncAt before the inbox is fully read, then finishes across ticks", async () => {
     const dirs = await makeDaemonDirs("you-brain-inbox-budget-");
@@ -200,7 +257,7 @@ describe("inbox index queue", () => {
     for (let index = 0; index < count; index += 1) {
       const id = `budget-${String(index).padStart(2, "0")}`;
       const entry = await memory.put({
-        path: `inbox/other-mac/claude-code/2026/10/${id}.md`,
+        path: `inbox/device-a/claude-code/2026/10/${id}.md`,
         bytes: inboxFile(id, "2026-10-18T02:00:00.000Z"),
         mimeType: "text/markdown",
       });
@@ -271,7 +328,7 @@ describe("inbox index queue", () => {
     for (let index = 0; index < count; index += 1) {
       const id = `resume-${String(index).padStart(2, "0")}`;
       await memory.put({
-        path: `inbox/other-mac/claude-code/2026/10/${id}.md`,
+        path: `inbox/device-a/claude-code/2026/10/${id}.md`,
         bytes: inboxFile(id, "2026-10-18T02:00:00.000Z"),
         mimeType: "text/markdown",
       });
@@ -331,7 +388,7 @@ describe("inbox index queue", () => {
     for (let index = 0; index < 8; index += 1) {
       const id = `retry-${String(index).padStart(2, "0")}`;
       const entry = await memory.put({
-        path: `inbox/other-mac/claude-code/2026/10/${id}.md`,
+        path: `inbox/device-a/claude-code/2026/10/${id}.md`,
         bytes: inboxFile(id, "2026-10-18T02:00:00.000Z"),
         mimeType: "text/markdown",
       });

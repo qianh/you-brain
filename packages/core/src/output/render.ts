@@ -315,6 +315,7 @@ function zoningSessions(
       title: "",
       summary: "",
       refinedUpTo: 0,
+      refinedAt: null,
       topicId: topic.topicId,
     });
     updatedAt[sessionKey] = topic.lastActive;
@@ -334,6 +335,7 @@ function toTopicState(topic: TopicRecord): TopicState {
     mergedInto: topic.mergedInto,
     createdTs: topic.createdTs,
     lastUserOpAt: topic.lastUserOpAt,
+    lastContentAt: topic.lastUserOpAt,
     userLocked: topic.userLocked,
   };
 }
@@ -346,6 +348,7 @@ function toSessionState(session: SessionRecord): SessionState {
     title: session.title,
     summary: session.summary,
     refinedUpTo: session.refinedUpTo,
+    refinedAt: null,
     topicId: session.topicId,
   };
 }

@@ -23,6 +23,7 @@ export function persistTopicBook(store: TopicBookPersistence, book: TopicBook): 
       mergedInto: topic.mergedInto,
       createdTs: topic.createdTs,
       lastUserOpAt: topic.lastUserOpAt,
+      lastContentAt: topic.lastContentAt,
       userLocked: topic.userLocked,
     })),
     sessions: book.sessions.map((session) => ({
@@ -32,6 +33,7 @@ export function persistTopicBook(store: TopicBookPersistence, book: TopicBook): 
       title: session.title,
       summary: session.summary,
       refinedUpTo: session.refinedUpTo,
+      refinedAt: session.refinedAt,
       topicId: session.topicId,
     })),
     conclusions: book.conclusions.map((conclusion) => ({ ...conclusion })),

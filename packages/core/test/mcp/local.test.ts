@@ -86,6 +86,7 @@ describe("local MCP services", () => {
       mergedInto: null,
       createdTs: NOW,
       lastUserOpAt: null,
+      lastContentAt: null,
       userLocked: false,
     };
     store.upsertSession({
@@ -172,6 +173,7 @@ describe("local MCP services", () => {
               mergedInto: null,
               createdTs: NOW,
               lastUserOpAt: null,
+              lastContentAt: null,
               userLocked: false,
               conclusions: [],
               todos: [],

@@ -42,8 +42,9 @@ async function isDir(path: string): Promise<boolean> {
   }
 }
 
-async function run(args: string[], cwd: string): Promise<void> {
-  console.log(`$ ${args.join(" ")}`);
+/** `display` overrides the echoed command so secrets never reach a log. */
+async function run(args: string[], cwd: string, display = args.join(" ")): Promise<void> {
+  console.log(`$ ${display}`);
   const child = Bun.spawn(args, { cwd, stdout: "inherit", stderr: "inherit" });
   const code = await child.exited;
   if (code !== 0) throw new Error(`${args[0] ?? "command"} 退出 ${code}`);
@@ -154,26 +155,37 @@ async function readReleaseEnv(): Promise<Record<string, string>> {
   }
 }
 
+/**
+ * Compiles the daemon through the `bun build` CLI rather than `Bun.build`.
+ *
+ * `Bun.build({ compile: { outfile } })` returned success without writing the executable
+ * on bun 1.2.19 (the output stayed a plain `entry.js`), while the CLI has produced the
+ * same artifact on every version. The CLI also defaults to `--env=disable`, so the
+ * build machine's environment is still never inlined: official credentials enter only
+ * through `--define`, which rewrites the bundled env reads.
+ */
 async function compileDaemon(
   outfile: string,
   define: Record<string, string> | undefined,
 ): Promise<void> {
-  console.log(`$ bun build --compile --target=bun --outfile ${outfile}`);
-  const result = await Bun.build({
-    entrypoints: [join(root, "packages/cli/src/index.ts")],
-    root,
-    target: "bun",
-    compile: { outfile },
-    external: ["@huggingface/transformers", "sharp", "onnxruntime-node"],
-    // Do not inline the build machine's environment. Official credentials
-    // enter only through `define`, which rewrites the BUNDLED env reads.
-    env: "disable",
-    ...(define ? { define } : {}),
-  });
-  if (!result.success) {
-    const detail = result.logs.map((log) => log.message).join("\n");
-    throw new Error(`bun build 失败\n${detail}`);
-  }
+  const external = ["@huggingface/transformers", "sharp", "onnxruntime-node"];
+  const args = [
+    bun,
+    "build",
+    "--compile",
+    "--target=bun",
+    `--outfile=${outfile}`,
+    `--root=${root}`,
+    ...external.map((name) => `--external=${name}`),
+    ...Object.entries(define ?? {}).map(([key, value]) => `--define=${key}=${value}`),
+    join(root, "packages/cli/src/index.ts"),
+  ];
+  // The `--define` values carry the official OAuth client secret. Echo the shape of the
+  // command, never the values, so a CI log cannot leak them.
+  const shown = args.slice(1).map((arg) =>
+    arg.startsWith("--define=") ? `--define=${arg.slice("--define=".length).split("=")[0]}=***` : arg,
+  );
+  await run(args, root, shown.join(" "));
 }
 
 async function assertOAuthInjected(

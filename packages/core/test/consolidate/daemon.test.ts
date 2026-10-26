@@ -14,6 +14,7 @@ import {
   claudeLine,
   fakeBackend,
   makeDaemonDirs,
+  refineNow,
   readStatus,
   refineJson,
   testClock,
@@ -242,6 +243,8 @@ describe("consolidation daemon", () => {
       backfill: true,
     });
     expect(uploaded.uploaded).toBeGreaterThan(0);
+    // Refine is a separate pass now, so the topic has to exist before consolidating.
+    await refineNow(clock, daemon);
 
     const kinds: string[] = [];
     const unsubscribe = daemon.changes.subscribe((event) => kinds.push(event.kind));
@@ -316,6 +319,9 @@ describe("consolidation daemon", () => {
       backfill: true,
     });
     expect(uploaded.uploaded).toBeGreaterThan(0);
+    // Uploading is a sync step now; the topic the consolidation rewrites comes from the
+    // refine pass that follows.
+    await refineNow(clock, daemon);
 
     const response = await postConsolidate(daemon, {});
     expect(response.status).toBe(200);

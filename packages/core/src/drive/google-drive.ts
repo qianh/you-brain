@@ -10,6 +10,7 @@ import type {
   DriveChanges,
   DriveEntry,
   DriveListQuery,
+  DriveTextQuery,
   DriveObject,
   DrivePort,
   DrivePutInput,
@@ -516,6 +517,32 @@ export class GoogleDrive implements DrivePort {
           !query.modifiedAfter || (file.modifiedTime ?? "") > query.modifiedAfter,
       )
       .map(({ file, path }) => this.#entry(file, path));
+  }
+
+  async searchText(query: DriveTextQuery): Promise<DriveEntry[]> {
+    const prefix = safePath(query.prefix.replace(/\/$/u, "") || "invalid");
+    const response = await this.#client.files.list({
+      q: `fullText contains '${escapeQuery(query.text)}' and mimeType != '${folderMimeType}' and trashed = false`,
+      fields: `files(${fileFields})`,
+      orderBy: "modifiedTime desc",
+      pageSize: 50,
+      spaces: "drive",
+      includeItemsFromAllDrives: true,
+      supportsAllDrives: true,
+    });
+    const entries: DriveEntry[] = [];
+    for (const file of response.data.files ?? []) {
+      if (entries.length >= query.limit) break;
+      if (!file.id) continue;
+      let path: string;
+      try {
+        path = await this.#pathFor(file.id, file);
+      } catch {
+        continue;
+      }
+      if (path.startsWith(`${prefix}/`)) entries.push(this.#entry(file, path));
+    }
+    return entries;
   }
 
   async startPageToken(): Promise<string> {

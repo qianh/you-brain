@@ -43,6 +43,10 @@ export interface SessionListQuery {
   /** Newest `updatedAt` first. Omit to return every row. */
   limit?: number;
   topicId?: string;
+  /** Only sessions that still have turns the refine step has not seen. */
+  unrefinedOnly?: boolean;
+  /** Only sessions updated at or after this ISO timestamp. */
+  updatedSince?: string;
 }
 
 export interface TopicRecord {
@@ -57,6 +61,8 @@ export interface TopicRecord {
   mergedInto: string | null;
   createdTs: string | null;
   lastUserOpAt: string | null;
+  /** Newest moment the topic's own content changed. Reminder actions do not move it. */
+  lastContentAt: string | null;
   userLocked: boolean;
 }
 
@@ -87,6 +93,8 @@ export interface DerivedSessionRow {
   title: string;
   summary: string;
   refinedUpTo: number;
+  /** Newest refine event. Dates a session this device has no file for. Optional. */
+  refinedAt?: string | null;
   topicId: string | null;
 }
 

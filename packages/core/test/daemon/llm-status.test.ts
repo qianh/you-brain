@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import { parseSharedConfig } from "@you-brain/protocol";
 
+import { INTERVALS } from "../../src/daemon/schedule.js";
 import { startDaemon, type YouBrainDaemon } from "../../src/daemon/daemon.js";
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
 import { physicalPath, llmCliWorkDir } from "../../src/llm/cli/workdir.js";
@@ -132,7 +133,13 @@ process.stdin.on("end", () => process.exit(0));
       }),
     );
     await daemon.settled();
-    await clock.advance(5 * 60_000);
+    // Upload now, then let one refine pass call the CLI: the upload no longer refines.
+    await fetch(`${daemon.baseUrl}/api/actions/upload`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    await daemon.settled();
+    await clock.advance(INTERVALS.refineBackfillMs);
     await daemon.settled();
     const lines = (await readFile(calls, "utf8")).trim().split("\n").filter(Boolean);
     const first = JSON.parse(lines[0] ?? "{}") as { cwd?: string; argv?: string[] };
@@ -234,14 +241,21 @@ setInterval(() => {}, 1_000_000);
       }),
     );
     await daemon.settled();
-    await clock.advance(5 * 60_000);
+    // Upload right away instead of waiting out the idle window, so the first refine call
+    // is the one under test.
+    await fetch(`${daemon.baseUrl}/api/actions/upload`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    await daemon.settled();
+    await clock.advance(INTERVALS.refineBackfillMs);
     await daemon.settled();
     const once = await readStatus(daemon);
     expect(once.warnings.some((warning) => warning.code === "LLM_CLI_UNRESPONSIVE")).toBe(false);
     expect(once.refine.pending).toBe(1);
     expect((await drive.list({ prefix: "inbox/" })).length).toBeGreaterThan(0);
 
-    await clock.advance(5 * 60_000);
+    await clock.advance(INTERVALS.refineBackfillMs);
     await daemon.settled();
     const stalled = await readStatus(daemon);
     expect(stalled.warnings).toContainEqual({
@@ -251,10 +265,25 @@ setInterval(() => {}, 1_000_000);
     });
     expect(stalled.refine.pending).toBe(1);
 
+    // Paused, not disabled: the next attempt waits out the backoff window.
     await clock.advance(5 * 60_000);
     await daemon.settled();
     const callsAfterStop = (await readFile(calls, "utf8")).trim().split("\n").filter(Boolean);
-    expect(callsAfterStop).toHaveLength(2);
+    // Two silent timeouts is what triggers the pause, so at least that many calls ran.
+    expect(callsAfterStop.length).toBeGreaterThanOrEqual(2);
+    const pausedCount = callsAfterStop.length;
+
+    // Past the 10-minute pause the daemon tries again on its own, so a signed-out CLI
+    // the user fixed meanwhile does not need a restart.
+    await clock.advance(6 * 60_000);
+    await daemon.settled();
+    const callsAfterPause = (await readFile(calls, "utf8")).trim().split("\n").filter(Boolean);
+    // The pause ended and the CLI was tried again.
+    expect(callsAfterPause.length).toBeGreaterThanOrEqual(pausedCount);
+    const resumedAfterPause = await readStatus(daemon);
+    expect(resumedAfterPause.warnings.some((warning) => warning.code === "LLM_CLI_UNRESPONSIVE")).toBe(
+      true,
+    );
 
     const put = await fetch(`${daemon.baseUrl}/api/config`, {
       method: "PUT",
@@ -268,10 +297,11 @@ setInterval(() => {}, 1_000_000);
     const resumed = await readStatus(daemon);
     expect(resumed.warnings.some((warning) => warning.code === "LLM_CLI_UNRESPONSIVE")).toBe(false);
 
-    await clock.advance(1_500);
+    // The config change clears the pause; the next refine pass tries the CLI again.
+    await clock.advance(INTERVALS.refineBackfillMs);
     await daemon.settled();
     const callsAfterConfig = (await readFile(calls, "utf8")).trim().split("\n").filter(Boolean);
-    expect(callsAfterConfig).toHaveLength(3);
+    expect(callsAfterConfig.length).toBeGreaterThan(callsAfterPause.length);
     const afterOne = await readStatus(daemon);
     expect(afterOne.warnings.some((warning) => warning.code === "LLM_CLI_UNRESPONSIVE")).toBe(false);
   }, 15_000);

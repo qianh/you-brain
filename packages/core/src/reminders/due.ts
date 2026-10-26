@@ -72,6 +72,8 @@ export function computeDueReminders(input: ComputeDueInput): ReminderIssuedData[
     activeLimit: input.activeLimit,
     historyDays: input.historyDays,
     sessionUpdatedAt: input.sessionUpdatedAt,
+    // A stale reminder's id embeds this date, so dismissing one must move it forward.
+    countReminderActions: true,
   });
   const openTodos = countOpenTodos(input.book);
   const existing = new Set(input.reminders.map((item) => item.reminderId));

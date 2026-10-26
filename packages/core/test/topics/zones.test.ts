@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { foldEvents, partitionTopics } from "../../src/topics/index.js";
+import { deriveLastActive, foldEvents, partitionTopics } from "../../src/topics/index.js";
 import { buildEvent, plus, sessionKey } from "./helpers.js";
 
 const NOW = "2026-08-01T00:00:00.000Z";
@@ -190,5 +190,38 @@ describe("active and history zones", () => {
     });
     expect(tied.active.map((topic) => topic.topicId)).toEqual(["topic-a"]);
     expect(tied.history.map((topic) => topic.topicId)).toEqual(["topic-b"]);
+  });
+
+  it("uses the refine time for a session this device never downloaded", () => {
+    const refined = plus(30 * 60 * 1000);
+    const book = foldEvents([
+      created("topic-remote", "Remote", 1),
+      buildEvent({
+        type: "session.refined",
+        data: {
+          sessionKey: sessionKey(1),
+          fileId: "file-1",
+          source: "codex",
+          title: "from another device",
+          summary: "",
+          refinedUpTo: 2,
+        },
+        device: "dev-b",
+        ts: refined,
+        seq: 1,
+      }),
+      buildEvent({
+        type: "topic.assigned",
+        data: { topicId: "topic-remote", sessionKey: sessionKey(1) },
+        device: "dev-b",
+        ts: plus(30 * 60 * 1000 + 1),
+        seq: 2,
+      }),
+    ]);
+
+    expect(deriveLastActive(book).get("topic-remote")).toBe(refined);
+    expect(deriveLastActive(book, { [sessionKey(1)]: plus(60 * 60 * 1000) }).get("topic-remote")).toBe(
+      plus(60 * 60 * 1000),
+    );
   });
 });

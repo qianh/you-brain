@@ -16,6 +16,7 @@ import {
   makeDaemonDirs,
   readStatus,
   refineJson,
+  refineNow,
   testClock,
   throwingEmbedder,
   writeClaudeSession,
@@ -82,6 +83,8 @@ describe("consolidation across two devices", () => {
         backfill: true,
       });
       expect(uploaded.uploaded).toBeGreaterThan(0);
+      // Uploading is a sync step; the topic appears once the refine pass has run.
+      await refineNow(clock, daemonA);
       expect(summaryCalls).toBe(0);
       const before = await topicSummary(daemonA);
       expect(before.name).toBe("发布流程");

@@ -60,6 +60,8 @@ export interface AdapterOptions {
 export interface AdapterResult {
   session: NormalizedSession | null;
   skippedSubagent: boolean;
+  /** Startup noise: injected instructions with no real question, or no reply at all. */
+  skippedNoise?: boolean;
   malformedLines: number;
 }
 
@@ -92,6 +94,8 @@ export interface DiscoveryOptions {
     grok: string[];
     cursor: string[];
     gemini?: string[];
+    pi?: string[];
+    t3?: string[];
   };
   modifiedAfter?: Partial<Record<SessionSource, string>>;
   includePaths?: string[];
@@ -123,6 +127,8 @@ export interface DiscoveryStatus {
   discovered: number;
   captured: number;
   skippedSubagents: number;
+  /** Files that held CLI startup context rather than a conversation. */
+  skippedNoise: number;
   malformed: number;
   errors: number;
 }
@@ -130,10 +136,11 @@ export interface DiscoveryStatus {
 export interface DiscoveryResult {
   sessions: NormalizedSession[];
   skippedSubagents: number;
+  skippedNoise: number;
   malformed: number;
   warnings: Array<{ code: string; message: string }>;
   status: Record<
-    "claude" | "codex" | "grok" | "cursor" | "gemini",
+    "claude" | "codex" | "grok" | "cursor" | "gemini" | "pi" | "t3",
     DiscoveryStatus
   >;
 }

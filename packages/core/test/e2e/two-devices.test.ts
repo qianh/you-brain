@@ -16,6 +16,7 @@ import {
   claudeLine,
   fakeBackend,
   makeDaemonDirs,
+  refineNow,
   testClock,
   writeClaudeSession,
   type DaemonDirs,
@@ -77,6 +78,11 @@ describe("two devices", () => {
     await daemonA.scan();
     await clock.advance(5 * 60_000 + INTERVALS.outputDebounceMs);
     await daemonA.settled();
+    // The upload only writes to Drive; refining runs on its own pass and then has to
+    // reach the other device through a flush and a pull.
+    await refineNow(clock, daemonA);
+    await clock.advance(INTERVALS.flushMs + INTERVALS.pullMs);
+    await daemonA.settled();
     await daemonB.settled();
 
     const inbox = (await drive.list({ prefix: "inbox/" })).filter((file) => file.path.endsWith(".md"));
@@ -113,6 +119,10 @@ describe("two devices", () => {
     ]);
     await daemonA.scan();
     await clock.advance(5 * 60_000 + INTERVALS.outputDebounceMs);
+    await daemonA.settled();
+    // The new turn reaches the model on the refine pass, then syncs to the other device.
+    await refineNow(clock, daemonA);
+    await clock.advance(INTERVALS.flushMs + INTERVALS.pullMs);
     await daemonA.settled();
     await daemonB.settled();
 

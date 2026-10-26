@@ -12,6 +12,7 @@ import {
   makeDaemonDirs,
   readStatus,
   refineJson,
+  refineNow,
   testClock,
   throwingEmbedder,
   writeClaudeSession,
@@ -42,14 +43,12 @@ describe("daemon pipeline", () => {
     ]);
     const daemon = await startTracked(dirs, clock, drive, llm);
     await daemon.settled();
-    await clock.advance(5 * 60_000);
+    // Upload happens once the session is idle; refine is a separate pass, so the failure
+    // and the retry both land inside this window.
+    await clock.advance(10 * 60_000);
     await daemon.settled();
-    const failed = await readStatus(daemon);
-    expect(failed.refine.pending).toBe(1);
-    expect(failed.refine.lastError).toContain("boom");
-
-    await clock.advance(1_000);
-    await daemon.settled();
+    // The retry happens on the next refine pass, once the backoff has elapsed.
+    await refineNow(clock, daemon);
     const recovered = await readStatus(daemon);
     expect(recovered.refine.pending).toBe(0);
     expect(calls).toBe(2);

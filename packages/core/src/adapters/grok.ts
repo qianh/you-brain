@@ -12,6 +12,7 @@ import {
   toolTextFromCalls,
   visibleTurnContent,
 } from "./content.js";
+import { isConversation } from "./conversation.js";
 import { globFiles } from "./glob.js";
 import { asRecord, asString, forEachJsonLine } from "./jsonl.js";
 import {
@@ -67,8 +68,8 @@ export async function parseGrokSession(
   if (isSubagent && !options.includeSubagents) {
     return { session: null, skippedSubagent: true, malformedLines };
   }
-  if (turns.length === 0) {
-    return { session: null, skippedSubagent: false, malformedLines };
+  if (!isConversation(turns)) {
+    return { session: null, skippedSubagent: false, skippedNoise: true, malformedLines };
   }
   const bounds = timestampBounds(
     [asString(summary?.created_at), asString(summary?.updated_at)],

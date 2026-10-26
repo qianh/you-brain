@@ -36,7 +36,7 @@ export interface HeroInput {
   warningCount: number;
 }
 
-const SOURCE_ORDER = ["claude-code", "codex", "grok-build", "cursor", "gemini-cli"] as const;
+const SOURCE_ORDER = ["claude-code", "codex", "grok-build", "cursor", "gemini-cli", "pi", "t3-code"] as const;
 
 export function heroKind(input: HeroInput): HeroKind {
   if (!input.hasStatus || input.loading) {

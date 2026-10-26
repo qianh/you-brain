@@ -63,6 +63,8 @@ function captureSources(): Record<CaptureSourceId, CaptureSourceConfig> {
     "grok-build": captureSource(),
     cursor: captureSource(),
     "gemini-cli": captureSource(),
+    pi: captureSource(),
+    "t3-code": captureSource(),
   };
 }
 
@@ -92,6 +94,8 @@ const SharedConfigObjectSchema = z.object({
       "grok-build": CaptureSourceConfigSchema,
       cursor: CaptureSourceConfigSchema,
       "gemini-cli": CaptureSourceConfigSchema,
+      pi: CaptureSourceConfigSchema,
+      "t3-code": CaptureSourceConfigSchema,
     }),
     keepToolCalls: z.boolean(),
     includeSubagents: z.boolean(),

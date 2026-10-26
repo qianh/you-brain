@@ -73,8 +73,10 @@ describe("web session processor", () => {
         expect(earlyB.web.isLocalProcessor).toBe(false);
         expect(earlyB.web.pending).toBe(0);
         expect(earlyB.web.processor).toBe(earlyA.deviceId);
+        // Only the web processor downloads the plugin files. device-b is not the
+        // processor, so it never indexes them; it learns about them from the status view.
         expect(webPaths(deviceA.dirs)).toEqual(["inbox/web-chrome/launch.md"]);
-        expect(webPaths(deviceB.dirs)).toEqual(["inbox/web-chrome/launch.md"]);
+        expect(webPaths(deviceB.dirs)).toEqual([]);
 
         await clock.advance(60_000);
         expect(promptsA).toHaveLength(1);
@@ -83,15 +85,21 @@ describe("web session processor", () => {
         expect(refinedCount(deviceA.dirs)).toBe(1);
         expect((await readStatus(deviceA.daemon)).web.pending).toBe(0);
         expect(sessionRow(deviceA.dirs, "web-launch")?.refinedUpTo).toBe(2);
-        expect(sessionRow(deviceA.dirs, "cli-local", "claude-code")?.refinedUpTo).toBe(0);
+        // `inbox/laptop/` belongs to another device, so this one never indexes it.
+        expect(sessionRow(deviceA.dirs, "cli-local", "claude-code")).toBeNull();
 
         // The refine event is flushed on the next 30s boundary and pulled on the next minute.
         await clock.advance(60_000);
         expect(promptsB).toHaveLength(0);
         expect(refinedCount(deviceB.dirs)).toBe(1);
+        // The topic book travels; the session row that produced it does not.
         expect(await topicNames(deviceA.daemon)).toContain("发布流程");
         expect(await topicNames(deviceB.daemon)).toContain("发布流程");
-        expect(sessionRow(deviceB.dirs, "web-launch")?.summary).toContain("网页里的发布步骤");
+        // device-b learns the session from the synced event log, but never downloads the
+        // turns: no message count, no excerpt of the original text.
+        expect(sessionRow(deviceB.dirs, "web-launch")?.msgCount).toBe(0);
+        expect(sessionRow(deviceA.dirs, "web-launch")?.msgCount).toBe(2);
+        expect(sessionRow(deviceA.dirs, "web-launch")?.summary).toContain("网页里的发布步骤");
       });
     },
     { timeout: 120_000 },
@@ -448,6 +456,9 @@ describe("web session processor", () => {
         );
 
         await clock.advance(60_000);
+        // Refine runs detached from the tick, so wait for the pass to finish before
+        // counting what the model was asked.
+        await device.daemon.settled();
         expect(prompts).toHaveLength(3);
         expect(prompts.join("\n")).toContain("MARKER_ONE");
         expect(prompts.join("\n")).toContain("MARKER_TWO");
@@ -457,6 +468,7 @@ describe("web session processor", () => {
         expect((await readStatus(device.daemon)).web.pending).toBe(2);
 
         await clock.advance(60_000);
+        await device.daemon.settled();
         expect(prompts).toHaveLength(5);
         expect(prompts.join("\n")).toContain("MARKER_FOUR");
         expect(prompts.join("\n")).toContain("ONLY_ONE");
@@ -465,6 +477,7 @@ describe("web session processor", () => {
         expect((await readStatus(device.daemon)).web.pending).toBe(1);
 
         await clock.advance(60_000);
+        await device.daemon.settled();
         expect(prompts).toHaveLength(5);
         expect(sessionRow(device.dirs, "short")?.msgCount).toBe(1);
         expect(sessionRow(device.dirs, "short")?.refinedUpTo).toBe(1);

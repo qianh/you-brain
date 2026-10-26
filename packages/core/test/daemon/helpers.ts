@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { INTERVALS } from "../../src/daemon/schedule.js";
 import type { Embedder } from "../../src/search/embedder.js";
 import type { LlmBackend } from "../../src/llm/types.js";
 import type { StatusResponse } from "../../src/http/types.js";
@@ -106,6 +107,22 @@ export function fakeBackend(complete: LlmBackend["complete"]): LlmBackend {
       return Promise.resolve();
     },
   };
+}
+
+/**
+ * Uploading no longer refines: it only writes the markdown to Drive. A test that wants
+ * a topic therefore has to let the refine pass run once.
+ */
+export async function refineNow(
+  clock: ReturnType<typeof testClock>,
+  daemon: YouBrainDaemon,
+): Promise<void> {
+  // Two rounds: the first may land while an earlier pass is still running, in which case
+  // the tick skips starting a new one.
+  for (let round = 0; round < 2; round += 1) {
+    await clock.advance(INTERVALS.refineBackfillMs);
+    await daemon.settled();
+  }
 }
 
 export async function readStatus(daemon: YouBrainDaemon): Promise<StatusResponse> {

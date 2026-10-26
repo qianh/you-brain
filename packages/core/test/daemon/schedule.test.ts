@@ -10,6 +10,7 @@ import {
   claudeLine,
   fakeBackend,
   makeDaemonDirs,
+  refineNow,
   testClock,
   throwingEmbedder,
   writeClaudeSession,
@@ -90,14 +91,20 @@ describe("schedule intervals", () => {
     await clock.advance(60_000);
     await daemon.settled();
     expect(await drive.list({ prefix: "inbox/" })).not.toHaveLength(0);
-    expect(refined).toBe(0);
 
+    // The session only reaches the model through the refine pass, not through the upload.
+    await refineNow(clock, daemon);
+    expect(refined).toBe(1);
+
+    // Editing the file without adding a turn leaves nothing new to refine, so the model
+    // is not asked again even though the bytes changed.
     await writeClaudeSession(dirs.sourceDir, [
       claudeLine("active-1", "user", "Add a rollback step", "2026-10-18T02:05:00.000Z"),
     ]);
     await daemon.scan();
     await clock.advance(5 * 60_000 + INTERVALS.outputDebounceMs);
     await daemon.settled();
+    await refineNow(clock, daemon);
     expect(refined).toBe(1);
   });
 });

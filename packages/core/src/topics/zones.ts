@@ -21,6 +21,7 @@ function prefer(current: Stamp | null, text: string): Stamp | null {
 export function deriveLastActive(
   book: TopicBook,
   sessionUpdatedAt?: Readonly<Record<string, string>>,
+  options: { countReminderActions?: boolean } = {},
 ): Map<string, string | null> {
   const activity = sessionUpdatedAt ?? {};
   const byTopic = new Map<string, Stamp>();
@@ -29,7 +30,8 @@ export function deriveLastActive(
   );
   for (const session of sessions) {
     if (session.topicId === null) continue;
-    const text = activity[session.sessionKey];
+    // A session from another device has no local row. Its refine time is the best known activity.
+    const text = activity[session.sessionKey] ?? session.refinedAt ?? undefined;
     if (text === undefined) continue;
     const next = prefer(byTopic.get(session.topicId) ?? null, text);
     if (next) byTopic.set(session.topicId, next);
@@ -37,7 +39,10 @@ export function deriveLastActive(
   const result = new Map<string, string | null>();
   for (const topic of book.topics) {
     let best = byTopic.get(topic.topicId) ?? null;
-    if (topic.lastUserOpAt) best = prefer(best, topic.lastUserOpAt);
+    // `lastContentAt` leaves reminder actions out. The reminder engine opts into
+    // `lastUserOpAt` because its ids embed this date and must keep advancing.
+    const userOp = options.countReminderActions ? topic.lastUserOpAt : topic.lastContentAt;
+    if (userOp) best = prefer(best, userOp);
     result.set(topic.topicId, best?.text ?? null);
   }
   return result;
@@ -66,7 +71,9 @@ export function partitionTopics(book: TopicBook, query: ZoneQuery): ZonePartitio
     ? Math.max(0, Math.floor(query.activeLimit))
     : 0;
   const windowMs = query.historyDays * DAY_MS;
-  const lastActive = deriveLastActive(book, query.sessionUpdatedAt);
+  const lastActive = deriveLastActive(book, query.sessionUpdatedAt, {
+    countReminderActions: query.countReminderActions === true,
+  });
   const visible = book.topics.filter((topic) => topic.mergedInto === null);
   const candidates = visible
     .flatMap((topic) => {

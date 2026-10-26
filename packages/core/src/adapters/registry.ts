@@ -4,6 +4,8 @@ import { codexAdapter } from "./codex.js";
 import { cursorAdapter } from "./cursor.js";
 import { geminiAdapter } from "./gemini.js";
 import { grokAdapter } from "./grok.js";
+import { piAdapter } from "./pi.js";
+import { t3Adapter } from "./t3.js";
 import type { SourceAdapter } from "./types.js";
 
 const registry = new Map<string, SourceAdapter>();
@@ -37,3 +39,5 @@ registerAdapter(codexAdapter);
 registerAdapter(grokAdapter);
 registerAdapter(cursorAdapter);
 registerAdapter(geminiAdapter);
+registerAdapter(piAdapter);
+registerAdapter(t3Adapter);

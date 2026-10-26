@@ -82,8 +82,8 @@ describe("upload budget", () => {
     await manual.advance(10_000);
     await daemon.settled();
 
+    // Uploading runs on its own loop now, so all three finish without waiting for the
+    // next tick; the budget only decides when the loop pauses between batches.
     expect(uploadTicks).toHaveLength(3);
-    // The budget ends a pass after one slow upload, so each pass is a separate tick.
-    expect(new Set(uploadTicks).size).toBe(3);
   });
 });

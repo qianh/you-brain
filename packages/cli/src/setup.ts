@@ -777,6 +777,8 @@ async function configureBackfill(
       grok: shared.capture.sources["grok-build"].paths,
       cursor: shared.capture.sources.cursor.paths,
       gemini: shared.capture.sources["gemini-cli"].paths,
+      pi: shared.capture.sources.pi.paths,
+      t3: shared.capture.sources["t3-code"].paths,
     },
   });
   const counts = new Map<string, number>();

@@ -41,6 +41,7 @@ function topic(
     mergedInto: null,
     createdTs: "2026-07-01T00:00:00.000Z",
     lastUserOpAt: null,
+    lastContentAt: null,
     userLocked: false,
     ...extra,
   };

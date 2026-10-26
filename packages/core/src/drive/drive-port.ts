@@ -47,8 +47,17 @@ export interface DriveChanges {
   reset: boolean;
 }
 
+export interface DriveTextQuery {
+  text: string;
+  /** Only files whose path starts with this prefix are returned. */
+  prefix: string;
+  limit: number;
+}
+
 export interface DrivePort {
   list(query: DriveListQuery): Promise<DriveEntry[]>;
+  /** Drive full-text search, newest first. Used to reach sessions this device never downloaded. */
+  searchText(query: DriveTextQuery): Promise<DriveEntry[]>;
   /**
    * Drive `changes.list`. Omit `cursor` to snapshot `prefix` and return a
    * startPageToken. Pass the previous cursor to read the increment.

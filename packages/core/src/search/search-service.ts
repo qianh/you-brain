@@ -4,6 +4,8 @@ import type { Database } from "bun:sqlite";
 
 import { chunkText } from "./chunk-text.js";
 import type { SearchDrive, SearchDriveEntry } from "./drive.js";
+import { deviceOfInboxPath, excerptAround, queryTerms } from "./remote.js";
+import { inScope } from "./scope.js";
 import {
   E5_SMALL,
   EMBED_MAX_CHARS,
@@ -71,6 +73,9 @@ export interface SearchOutput {
     startedAt: string;
     updatedAt: string;
     excerpt: string;
+    /** Set for a hit found on Drive in another device's folder. */
+    device?: string;
+    driveFileId?: string;
   }>;
   warnings: Array<{ code: string; message: string }>;
 }
@@ -123,6 +128,15 @@ const keywordFallback = {
   code: "MODEL_UNAVAILABLE_KEYWORD_FALLBACK",
   message: "Embedding model is unavailable; using keyword search",
 } as const;
+
+const remoteUnavailable = {
+  code: "REMOTE_SEARCH_UNAVAILABLE",
+  message: "Searching other devices' sessions on Drive failed; showing this device only",
+} as const;
+
+/** Hits read from Drive per query; each costs one download. */
+const REMOTE_HITS = 10;
+const REMOTE_SEARCH_TIMEOUT_MS = 8_000;
 
 const staleIndex = {
   code: "INDEX_STALE",
@@ -199,6 +213,7 @@ function metadataMap(database: Database): Record<string, string> {
 
 export class SearchService {
   readonly #drive: SearchDrive;
+  readonly #scope: (() => readonly string[]) | null;
   readonly #embedder: Embedder | null;
   readonly #model: string;
   readonly #revision: string;
@@ -218,6 +233,8 @@ export class SearchService {
     database: Database;
     /** Default true. False skips the embedder and reports keyword mode without a fallback warning. */
     semantic?: boolean;
+    /** Drive path prefixes this device indexes. Unset indexes the whole inbox. Read on every pass. */
+    scope?: () => readonly string[];
     embedBatchSize?: number;
     embedMaxChars?: number;
     /** Upper bound for one backfill `embedPassages` call. Default 60s. */
@@ -228,6 +245,7 @@ export class SearchService {
     redaction?: RedactionOptions;
   }) {
     this.#drive = options.drive;
+    this.#scope = options.scope ?? null;
     this.#embedder = options.embedder;
     this.#model = options.embedder?.model ?? E5_SMALL.model;
     this.#revision = options.embedder?.revision ?? E5_SMALL.revision;
@@ -257,6 +275,8 @@ export class SearchService {
       chunkOverlap: this.#chunkOverlap,
     };
     if (!this.#semantic) fingerprint.semantic = false;
+    // A new scope rebuilds the index so documents outside it are dropped.
+    if (this.#scope) fingerprint.scope = [...this.#scope()].sort().join("|");
     return JSON.stringify(fingerprint);
   }
 
@@ -340,9 +360,11 @@ export class SearchService {
     const changes = await this.#drive.changes(
       cursor === undefined ? { prefix: "inbox/" } : { prefix: "inbox/", cursor },
     );
+    const prefixes = this.#scope?.() ?? null;
     const entries = changes.entries.filter(
       (entry) =>
         entry.path.startsWith("inbox/") &&
+        (prefixes === null || inScope(entry.path, prefixes)) &&
         (entry.mimeType === "text/markdown" || entry.path.endsWith(".md")),
     );
     const removedIds = new Set(changes.removedIds);
@@ -669,8 +691,9 @@ export class SearchService {
   }
 
   /**
-   * Rank the local index. Does not call Drive. MCP search_sessions and the
-   * HTTP search route use this; the daemon refreshes the index itself.
+   * Rank the local index, then add hits from other devices' sessions through Drive
+   * full-text search. It never syncs the index; the daemon refreshes that itself.
+   * MCP search_sessions and the HTTP search route use this.
    */
   async query(input: {
     query: string;
@@ -680,7 +703,9 @@ export class SearchService {
     until?: string;
   }): Promise<SearchOutput> {
     const ready = this.status().ready;
-    return this.#rank(input, ready ? "fresh" : "stale", []);
+    const warnings: SearchOutput["warnings"] = [];
+    const local = await this.#rank(input, ready ? "fresh" : "stale", warnings);
+    return this.#withRemote(input, local);
   }
 
   async search(input: {
@@ -703,7 +728,79 @@ export class SearchService {
       indexStatus = "stale";
       addWarning(warnings, staleIndex);
     }
-    return this.#rank(input, indexStatus, warnings);
+    const local = await this.#rank(input, indexStatus, warnings);
+    return this.#withRemote(input, local);
+  }
+
+  /** Other devices keep their sessions on Drive; ask Drive instead of indexing them here. */
+  async #withRemote(
+    input: {
+      query: string;
+      limit: number;
+      sources?: string[];
+      since?: string;
+      until?: string;
+    },
+    local: SearchOutput,
+  ): Promise<SearchOutput> {
+    const drive = this.#drive;
+    if (!this.#scope || !drive.searchText) return local;
+    const terms = queryTerms(input.query);
+    if (terms.length === 0) return local;
+    const rangeInput: { since?: string; until?: string } = {};
+    if (input.since) rangeInput.since = input.since;
+    if (input.until) rangeInput.until = input.until;
+    const range = parseSearchRange(rangeInput);
+    const own = this.#scope();
+    const found: SearchOutput["results"] = [];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const hits = await Promise.race([
+        drive.searchText({
+          text: input.query,
+          prefix: "inbox/",
+          limit: REMOTE_HITS * 2,
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Drive search timed out")), REMOTE_SEARCH_TIMEOUT_MS);
+        }),
+      ]);
+      for (const hit of hits) {
+        if (found.length >= REMOTE_HITS) break;
+        if (inScope(hit.path, own) || !hit.path.endsWith(".md")) continue;
+        const markdown = Buffer.from((await drive.read(hit.id)).bytes).toString("utf8");
+        const meta = parseFrontmatter(markdown);
+        if (input.sources?.length && !input.sources.includes(meta.source)) continue;
+        if (!updatedAtInRange(meta.updatedAt, range)) continue;
+        found.push({
+          score: 0,
+          source: meta.source,
+          conversationId: meta.conversationId,
+          startedAt: meta.startedAt,
+          updatedAt: meta.updatedAt,
+          excerpt: excerptAround(markdown, terms),
+          device: deviceOfInboxPath(hit.path),
+          driveFileId: hit.id,
+        });
+      }
+    } catch {
+      const warnings = [...local.warnings];
+      addWarning(warnings, remoteUnavailable);
+      return { ...local, warnings };
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    const known = new Set(local.results.map((r) => `${r.source}:${r.conversationId}`));
+    const remote = found.filter((r) => !known.has(`${r.source}:${r.conversationId}`));
+    if (remote.length === 0) return local;
+    const slots = Math.min(
+      remote.length,
+      Math.max(Math.floor(input.limit / 2), input.limit - local.results.length),
+    );
+    return {
+      ...local,
+      results: [...local.results.slice(0, input.limit - slots), ...remote.slice(0, slots)],
+    };
   }
 
   async #rank(

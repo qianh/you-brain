@@ -42,6 +42,23 @@ export class MemoryDrive implements SearchDrive {
       .map((object) => this.#entry(object));
   }
 
+  searchText(query: { text: string; prefix: string; limit: number }): Promise<SearchDriveEntry[]> {
+    this.searches.push(query.text);
+    const terms = query.text.toLowerCase().split(/\s+/u).filter(Boolean);
+    return Promise.resolve(
+      [...this.#objects.values()]
+        .filter((object) => !object.trashed && object.path.startsWith(query.prefix))
+        .filter((object) => {
+          const text = new TextDecoder().decode(object.bytes).toLowerCase();
+          return terms.every((term) => text.includes(term));
+        })
+        .slice(0, query.limit)
+        .map((object) => this.#entry(object)),
+    );
+  }
+
+  readonly searches: string[] = [];
+
   async put(input: {
     path: string;
     bytes: Uint8Array;

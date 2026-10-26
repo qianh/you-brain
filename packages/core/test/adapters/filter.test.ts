@@ -40,7 +40,18 @@ describe("capture path filters", () => {
           ],
         },
       });
-    await writeFile(visible, `${line("visible-1", "Authorization: Bearer cursor-secret-value")}\n`);
+    const question = (sessionId: string) =>
+      JSON.stringify({
+        type: "user",
+        isSidechain: false,
+        sessionId,
+        timestamp: "2026-10-18T01:59:00.000Z",
+        message: { role: "user", content: "why does this fail" },
+      });
+    await writeFile(
+      visible,
+      `${question("visible-1")}\n${line("visible-1", "Authorization: Bearer cursor-secret-value")}\n`,
+    );
     await writeFile(
       join(hiddenDir, "secret.jsonl"),
       `${line("hidden-1", "Authorization: Bearer cursor-secret-value")}\n`,

@@ -252,13 +252,15 @@ describe("capture views", () => {
     expect(readCaptureCounts({ captures: [{ source: "codex", count: -1 }] }).size).toBe(0);
   });
 
-  test("shows the five sources when nothing has been captured yet", () => {
+  test("shows every source when nothing has been captured yet", () => {
     expect(captureViews({ captures: [] }, null).map((row) => row.source)).toEqual([
       "claude-code",
       "codex",
       "grok-build",
       "cursor",
       "gemini-cli",
+      "pi",
+      "t3-code",
     ]);
   });
 });

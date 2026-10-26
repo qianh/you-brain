@@ -13,6 +13,7 @@ import {
   createDefaultSharedConfig,
   parseRoles,
   parseSharedConfig,
+  resolveWebProcessor,
   type DeviceCapability,
 } from "@you-brain/protocol";
 import { YouBrainError, loadLocalConfig } from "@you-brain/core";
@@ -26,7 +27,7 @@ import type {
   TopicListItem,
 } from "@you-brain/core/http";
 import { createLocalMcpServices, serveMcp } from "@you-brain/core/mcp";
-import { SearchService, serveEmbedWorker, type Embedder } from "@you-brain/core/search";
+import { SearchService, inboxScopePrefixes, serveEmbedWorker, type Embedder } from "@you-brain/core/search";
 import { SqliteStore } from "@you-brain/core/store";
 
 import {
@@ -516,6 +517,7 @@ async function serveLocalMcp(): Promise<void> {
   const search = new SearchService({
     drive: {
       changes: (query) => drive.changes(query),
+      searchText: (query) => drive.searchText(query),
       async read(id: string) {
         const object = await drive.read(id);
         return { bytes: object.bytes };
@@ -523,6 +525,11 @@ async function serveLocalMcp(): Promise<void> {
     },
     embedder: quietEmbedder,
     database,
+    scope: () =>
+      inboxScopePrefixes({
+        device: loaded.config.displayName,
+        includeWeb: resolveWebProcessor(roles) === loaded.config.deviceId,
+      }),
   });
   await serveMcp(
     createLocalMcpServices({
@@ -557,6 +564,7 @@ function unavailableDrive(): DrivePort {
     Promise.reject(new YouBrainError("AUTH_REQUIRED", "尚未登录 Google Drive，无法读取会话原文"));
   return {
     list: fail,
+    searchText: fail,
     changes: fail,
     startPageToken: fail,
     create: fail,

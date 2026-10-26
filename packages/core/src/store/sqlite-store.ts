@@ -57,6 +57,7 @@ interface TopicRow {
   merged_into: string | null;
   created_ts: string | null;
   last_user_op_at: string | null;
+  last_content_at: string | null;
   user_locked: number;
 }
 
@@ -181,6 +182,7 @@ function mapTopic(row: TopicRow): TopicRecord {
     mergedInto: row.merged_into,
     createdTs: row.created_ts,
     lastUserOpAt: row.last_user_op_at,
+    lastContentAt: row.last_content_at ?? null,
     userLocked: row.user_locked === 1,
   };
 }
@@ -410,6 +412,12 @@ export class SqliteStore {
       filters.push("topic_id = ?");
       params.push(query.topicId);
     }
+    if (query.unrefinedOnly) filters.push("refined_up_to < msg_count");
+    if (query.updatedSince !== undefined) {
+      const ms = parseTimestamp(query.updatedSince, "updatedSince");
+      filters.push("updated_at_ms >= ?");
+      params.push(ms);
+    }
     let sql = "SELECT * FROM sessions";
     if (filters.length > 0) sql += ` WHERE ${filters.join(" AND ")}`;
     sql += " ORDER BY updated_at_ms DESC, session_key ASC";
@@ -518,8 +526,8 @@ export class SqliteStore {
         `
         INSERT INTO topics (
           topic_id, name, aliases, status, status_by, summary, next_step,
-          last_active, merged_into, created_ts, last_user_op_at, user_locked
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          last_active, merged_into, created_ts, last_user_op_at, last_content_at, user_locked
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
       );
       for (const topic of snapshot.topics) {
@@ -535,6 +543,7 @@ export class SqliteStore {
           topic.mergedInto,
           topic.createdTs,
           topic.lastUserOpAt,
+          topic.lastContentAt,
           sqlBool(topic.userLocked),
         );
       }
@@ -580,8 +589,10 @@ export class SqliteStore {
           session_key, source, device, file_id, title, summary,
           started_at, updated_at, started_at_ms, updated_at_ms,
           msg_count, refined_up_to, topic_id
-        ) VALUES (?, ?, '', ?, ?, ?, NULL, NULL, NULL, NULL, 0, ?, ?)
+        ) VALUES (?, ?, '', ?, ?, ?, NULL, ?, NULL, ?, 0, ?, ?)
         ON CONFLICT(session_key) DO UPDATE SET
+          updated_at = COALESCE(sessions.updated_at, excluded.updated_at),
+          updated_at_ms = COALESCE(sessions.updated_at_ms, excluded.updated_at_ms),
           source = CASE WHEN excluded.source = '' THEN sessions.source ELSE excluded.source END,
           file_id = CASE
             WHEN excluded.file_id IS NULL THEN sessions.file_id
@@ -594,12 +605,15 @@ export class SqliteStore {
       `,
       );
       for (const session of snapshot.sessions) {
+        const refinedMs = session.refinedAt ? Date.parse(session.refinedAt) : Number.NaN;
         upsertDerivedSession.run(
           session.sessionKey,
           session.source,
           session.fileId,
           session.title,
           session.summary,
+          Number.isNaN(refinedMs) ? null : session.refinedAt ?? null,
+          Number.isNaN(refinedMs) ? null : refinedMs,
           session.refinedUpTo,
           session.topicId,
         );

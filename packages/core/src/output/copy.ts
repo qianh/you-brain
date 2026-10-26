@@ -44,6 +44,8 @@ const SOURCES: Record<string, string> = {
   "grok-build": "Grok Build",
   cursor: "Cursor",
   "gemini-cli": "Gemini CLI",
+  pi: "Pi",
+  "t3-code": "T3 Code",
 };
 
 const EN_STATUS: Record<TopicStatus, string> = {

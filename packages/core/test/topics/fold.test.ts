@@ -241,6 +241,7 @@ describe("event fold", () => {
       title: "tie",
       summary: "same watermark",
       refinedUpTo: 5,
+      refinedAt: tie.ts,
       topicId: null,
     });
   });
@@ -559,12 +560,51 @@ describe("event fold", () => {
     expect(book.topics).toEqual([]);
   });
 
-  it("counts a reminder action as user activity and ignores portrait events", () => {
+  it("does not count dismissing a reminder as activity on the topic", () => {
+    const created = buildEvent({
+      type: "topic.created",
+      data: { topicId: "topic-a", name: "Alpha", aliases: [] },
+      device: "dev-a",
+      ts: plus(1),
+      seq: 1,
+    });
+    // A stale reminder for an old topic, dismissed long after the conversation ended.
+    const dismissed = buildEvent({
+      type: "reminder.action",
+      data: {
+        reminderId: "history:topic-a:2026-W43",
+        topicId: "topic-a",
+        action: "ignore",
+        until: null,
+      },
+      device: "dev-a",
+      ts: plus(10),
+      seq: 1,
+    });
+    const book = foldEvents([created, dismissed]);
+    // `lastUserOpAt` feeds the reminder streak and keeps moving. The topic list reads
+    // `lastContentAt`, which must stay empty: nothing was done to the topic itself.
+    expect(book.topics[0]).toMatchObject({
+      status: "active",
+      lastUserOpAt: plus(10),
+      lastContentAt: null,
+    });
+  });
+
+  it("counts reactivating a topic as user activity through its status change", () => {
     const created = buildEvent({
       type: "topic.created",
       data: { topicId: "topic-a", name: "Alpha", aliases: [] },
       device: "dev-a",
       ts: plus(2),
+      seq: 1,
+    });
+    // `planReminderAction` emits both events; the status change carries the user intent.
+    const status = buildEvent({
+      type: "topic.status_changed",
+      data: { topicId: "topic-a", status: "active", by: "user" },
+      device: "dev-a",
+      ts: plus(1),
       seq: 1,
     });
     const reminder = buildEvent({
@@ -577,7 +617,7 @@ describe("event fold", () => {
       },
       device: "dev-a",
       ts: plus(1),
-      seq: 1,
+      seq: 2,
     });
     const portrait = buildEvent({
       type: "portrait.correction",
@@ -591,12 +631,14 @@ describe("event fold", () => {
       ts: plus(3),
       seq: 1,
     });
-    const withExtra = foldEvents([portrait, created, reminder]);
+    const withExtra = foldEvents([portrait, created, status, reminder]);
     expect(withExtra.topics[0]).toMatchObject({
       status: "active",
       lastUserOpAt: plus(1),
     });
-    expect(topicBookView(foldEvents([created, reminder]))).toEqual(topicBookView(withExtra));
+    expect(topicBookView(foldEvents([created, status, reminder]))).toEqual(
+      topicBookView(withExtra),
+    );
   });
 
   it("replays when a new event sorts before the last applied event", () => {

@@ -126,7 +126,7 @@ export function toolTextFromContent(content: unknown, maxChars: number): string 
     const part = asRecord(value);
     if (!part) continue;
     const type = asString(part.type);
-    if (type !== "tool_use" && type !== "function_call") continue;
+    if (type !== "tool_use" && type !== "function_call" && type !== "toolCall") continue;
     const line = formatToolCall(
       asString(part.name) ?? "tool",
       part.input ?? part.arguments ?? part.args,

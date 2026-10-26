@@ -1,8 +1,10 @@
 export const INTERVALS = {
   tickMs: 1_000,
   flushMs: 30_000,
-  /** One tick uploads for at most this long, so flush, pull, and search still run between passes. */
+  /** One upload batch runs for at most this long before the loop yields. */
   uploadBudgetMs: 20_000,
+  /** Pause between upload batches so pull, flush, and scan can use the connection pool. */
+  uploadLoopGapMs: 100,
   /** One tick indexes queued inbox files for at most this long. The rest wait for the next tick. */
   inboxBudgetMs: 15_000,
   heartbeatMs: 5 * 60_000,
@@ -19,6 +21,17 @@ export const INTERVALS = {
   topicFilesDebounceMs: 5 * 60_000,
   /** How often the web-session processor looks for idle `inbox/web-` sessions. */
   webSessionsMs: 60_000,
+  /**
+   * A subscription CLI that answers nothing twice in a row is paused for this long
+   * before the next attempt, doubling on each further stall up to {@link cliStallMaxMs}.
+   */
+  cliStallMinMs: 10 * 60_000,
+  cliStallMaxMs: 60 * 60_000,
+  /** Sessions refined per pass. Calls run one after another, so this only sets how
+   * often the pass pauses for `refineBackfillMs` between batches. */
+  refineBackfillBatch: 8,
+  /** Pause between backfill passes so the normal tick work keeps running. */
+  refineBackfillMs: 15_000,
   /** Coalesce webhook sends after an event lands. Never wait longer than this. */
   webhookDebounceMs: 2_000,
   /** Retry sweep. Backoff is enforced by the delivery state, not by this interval. */

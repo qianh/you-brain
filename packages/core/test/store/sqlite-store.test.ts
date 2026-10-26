@@ -53,7 +53,7 @@ describe("sqlite store", () => {
     withStore((store) => {
       expect(store.journalMode()).toBe("wal");
       expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
-      expect(store.schemaVersion()).toBe(2);
+      expect(store.schemaVersion()).toBe(3);
       expect(store.migrationCount()).toBe(SCHEMA_MIGRATIONS.length);
       const objects = store.schemaObjects();
       for (const table of TOPIC_TABLES) expect(objects).toContain(table);
@@ -73,7 +73,7 @@ describe("sqlite store", () => {
     store.close();
     const again = new SqliteStore(path);
     try {
-      expect(again.schemaVersion()).toBe(2);
+      expect(again.schemaVersion()).toBe(3);
       expect(again.getSession(key(1))?.title).toBe("kept");
     } finally {
       again.close();
@@ -106,8 +106,8 @@ describe("sqlite store", () => {
 
     const store = new SqliteStore(path);
     try {
-      expect(store.schemaVersion()).toBe(2);
-      expect(store.migrationCount()).toBe(2);
+      expect(store.schemaVersion()).toBe(3);
+      expect(store.migrationCount()).toBe(3);
       expect(store.schemaObjects()).toContain("events_type");
       expect(store.getSession(key(7))?.title).toBe("legacy");
       expect(store.getSession(key(7))?.msgCount).toBe(2);
@@ -400,6 +400,7 @@ describe("sqlite store", () => {
             mergedInto: null,
             createdTs: event.ts,
             lastUserOpAt: null,
+            lastContentAt: null,
             userLocked: false,
           },
           {
@@ -414,6 +415,7 @@ describe("sqlite store", () => {
             mergedInto: "topic-1",
             createdTs: event.ts,
             lastUserOpAt: null,
+            lastContentAt: null,
             userLocked: true,
           },
         ],

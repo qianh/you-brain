@@ -275,6 +275,9 @@ export interface SearchHit {
   startedAt: string;
   updatedAt: string;
   excerpt: string;
+  /** Present for a session that lives only on another device's Drive folder. */
+  device?: string;
+  driveFileId?: string;
 }
 
 export interface SearchResponse {
@@ -323,6 +326,20 @@ export interface StatusResponse {
   };
   refine: {
     pending: number;
+    lastError: string | null;
+  };
+  capture?: {
+    /** Session files parsed by the last scan. Zero means every file was unchanged. */
+    parsed: number;
+  };
+  upload?: {
+    /** Sessions waiting in the live map: captured but not yet on Drive. */
+    pending: number;
+    /** Milliseconds the slowest upload of this process took. */
+    slowestMs: number;
+    /** Consecutive failed upload passes. Reset by a successful one. */
+    failures: number;
+    /** Reason of the last upload failure, if any. */
     lastError: string | null;
   };
   consolidation: {

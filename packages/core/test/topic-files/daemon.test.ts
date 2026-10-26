@@ -14,6 +14,7 @@ import {
   makeDaemonDirs,
   readStatus,
   refineJson,
+  refineNow,
   testClock,
   throwingEmbedder,
   writeClaudeSession,
@@ -86,6 +87,7 @@ describe("topic files daemon", () => {
       backfill: true,
     });
     expect(uploaded.uploaded).toBeGreaterThan(0);
+    await refineNow(clock, daemon);
     const topicId = await onlyTopicId(daemon);
     expect((await rename(daemon, topicId, "防抖之后")).status).toBe(200);
     expect(await drive.findByPath(DRIVE_PATHS.topicsLatest)).toBeNull();
@@ -130,6 +132,8 @@ describe("topic files daemon", () => {
       (await postJson<{ uploaded: number }>(daemon, "/api/actions/upload", { backfill: true }))
         .uploaded,
     ).toBeGreaterThan(0);
+    // The upload no longer refines, so give the refine pass a turn before consolidating.
+    await refineNow(clock, daemon);
     expect(await drive.findByPath(DRIVE_PATHS.topicsLatest)).toBeNull();
 
     const response = await send(daemon, "/api/actions/consolidate", {

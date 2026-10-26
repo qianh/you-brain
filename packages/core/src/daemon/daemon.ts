@@ -134,6 +134,8 @@ import {
   SearchService,
   assertSearchRange,
   embedWorkerCommand,
+  inScope,
+  inboxScopePrefixes,
   type Embedder,
   type SearchDrive,
 } from "../search/index.js";
@@ -204,6 +206,28 @@ const BACKFILL_CURSOR = "capture.backfill";
 const STATUS_DRIVE_WAIT_MS = 1_000;
 /** Inbox files downloaded at the same time while draining the index queue. */
 const INBOX_READ_CONCURRENCY = 8;
+/**
+ * How far back the refine backfill reaches. The topic list only shows this window, and
+ * every session in it costs one model call, so older history stays unrefined.
+ */
+const REFINE_BACKFILL_WINDOW_DAYS = 30;
+
+/**
+ * Cursor key holding the file fingerprint of the last capture scan.
+ *
+ * Without it, every restart forgets which files were already parsed and re-reads the
+ * whole library: a 9,000-file scan takes minutes, and a scan that long starves the
+ * upload pass that shares the tick. The fingerprints let a restart skip straight to
+ * the files that changed.
+ */
+const CAPTURE_FILES_CURSOR = "capture.files";
+
+/**
+ * Cursor key set when a pull saw `inbox/web-*` files. A device that is not the web
+ * processor does not download them, so the status warning about a missing processor
+ * cannot rely on the local index.
+ */
+const WEB_INBOX_SEEN_CURSOR = "webinbox.seen";
 
 /** Cursor key remembering the modified time at which an inbox file was last indexed. */
 function inboxIndexedKey(fileId: string): string {
@@ -330,6 +354,94 @@ interface CaptureFileCursor {
   stamp: string;
   key: string | null;
   generation: string;
+  /**
+   * Session metadata recorded with the fingerprint. Restoring it puts the session back
+   * in the live map after a restart, so an unchanged file is neither re-parsed nor
+   * uploaded again.
+   */
+  meta?: CaptureMeta;
+}
+
+/** Session metadata as stored in a fingerprint. Anything unexpected is dropped. */
+function readCaptureMeta(value: unknown): CaptureMeta | null {
+  if (!value || typeof value !== "object") return null;
+  const meta = value as Record<string, unknown>;
+  const text = (key: string): string | null =>
+    typeof meta[key] === "string" && (meta[key] as string).length > 0 ? (meta[key] as string) : null;
+  const num = (key: string): number | null =>
+    typeof meta[key] === "number" && Number.isFinite(meta[key] as number)
+      ? (meta[key] as number)
+      : null;
+  const source = text("source");
+  const conversationId = text("conversationId");
+  const device = text("device");
+  const startedAt = text("startedAt");
+  const updatedAt = text("updatedAt");
+  const sourcePath = text("sourcePath");
+  const hash = text("hash");
+  const turnCount = num("turnCount");
+  if (
+    !source ||
+    !conversationId ||
+    !device ||
+    !startedAt ||
+    !updatedAt ||
+    !sourcePath ||
+    !hash ||
+    turnCount === null
+  ) {
+    return null;
+  }
+  return {
+    source: source as CaptureMeta["source"],
+    conversationId,
+    device,
+    startedAt,
+    updatedAt,
+    sourcePath,
+    turnCount,
+    hash,
+    includeSubagents: meta.includeSubagents === true,
+    keepToolCalls: meta.keepToolCalls === true,
+    redact: meta.redact !== false,
+  };
+}
+
+/**
+ * Reads back the fingerprints written by {@link YouBrainDaemon#rememberCaptureFiles}.
+ * Unreadable or malformed data yields an empty map, which only costs one full scan.
+ */
+function readCaptureFiles(raw: string | null): Map<string, CaptureFileCursor> {
+  const files = new Map<string, CaptureFileCursor>();
+  if (!raw) return files;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return files;
+    for (const entry of parsed) {
+      if (!Array.isArray(entry) || entry.length !== 2) continue;
+      const [path, value] = entry as [unknown, unknown];
+      if (typeof path !== "string" || path.length === 0) continue;
+      if (!value || typeof value !== "object") continue;
+      const cursor = value as {
+        stamp?: unknown;
+        key?: unknown;
+        generation?: unknown;
+        meta?: unknown;
+      };
+      if (typeof cursor.stamp !== "string" || typeof cursor.generation !== "string") continue;
+      if (cursor.key !== null && typeof cursor.key !== "string") continue;
+      const meta = readCaptureMeta(cursor.meta);
+      files.set(path, {
+        stamp: cursor.stamp,
+        key: cursor.key as string | null,
+        generation: cursor.generation,
+        ...(meta ? { meta } : {}),
+      });
+    }
+  } catch {
+    return new Map();
+  }
+  return files;
 }
 
 class LazyEmbedder implements Embedder {
@@ -499,9 +611,20 @@ export class YouBrainDaemon {
   #llmOverride: LlmBackend | null | undefined;
   /** Consecutive timeouts that produced no stdout and no stderr. */
   #cliSilentStreak = 0;
-  /** Set after two silent timeouts. Cleared on config change or process restart. */
-  #cliUnresponsive = false;
+  /** How many stalls so far. Drives the backoff, so a long outage keeps backing off. */
+  #cliStalls = 0;
+  /**
+   * A silent CLI pauses refine until this moment instead of disabling it forever.
+   * Two silent timeouts usually mean the CLI is signed out or the network dropped,
+   * and both can be fixed while the process keeps running.
+   */
+  #cliPausedUntilMs = 0;
   #retry: LlmRetryQueue<string>;
+
+  /** True while a stalled CLI is being waited out. */
+  #cliPaused(): boolean {
+    return this.#clock.nowMs() < this.#cliPausedUntilMs;
+  }
   #http: DaemonHttpServer | null = null;
   #lockRelease: (() => Promise<void>) | null = null;
   #live = new Map<string, LiveSession>();
@@ -534,9 +657,13 @@ export class YouBrainDaemon {
   #lastPull: number | null = null;
   #lastPortrait: number | null = null;
   #lastSearch: number | null = null;
+  #lastVector: number | null = null;
   #lastReminders: number | null = null;
   #lastConsolidation: number | null = null;
   #lastWebSessions: number | null = null;
+  #lastRefineBackfill: number | null = null;
+  /** Sessions uploaded after this process started are the live path's job, not the backfill's. */
+  #bootedAtMs: number | null = null;
   #lastWebhook: number | null = null;
   #webhook: WebhookConfig = defaultWebhookConfig();
   #webhookFetch: WebhookFetch = fetch;
@@ -568,7 +695,10 @@ export class YouBrainDaemon {
     },
     (failure) => this.#onConfigPush("roles", failure),
   );
-  #searchDirty = false;
+  /** The search index still has documents to index. Cleared only when a text pass finishes. */
+  #searchTextDirty = false;
+  /** Vector backfill filled holes on the last pass, so the next tick continues it. */
+  #vectorDirty = false;
   /** `inbox.pending` still has files to index. Cleared only when that queue is empty. */
   #inboxDirty = false;
   #portraitSoon = false;
@@ -579,6 +709,37 @@ export class YouBrainDaemon {
   #topicFilesQuietUntil: number | null = null;
   #topicFilesLock: Promise<void> = Promise.resolve();
   #scannedOnce = false;
+  /**
+   * Refine is the only tick work that waits on a model, and a model call can run for
+   * minutes. It runs detached so the serial tick keeps uploading, pulling, and scanning
+   * meanwhile. Both passes are idempotent and guard their own writes.
+   */
+  #webJob: Promise<void> | null = null;
+  #backfillJob: Promise<void> | null = null;
+  /**
+   * Uploading runs on its own loop, not inside the tick.
+   *
+   * Each upload is a handful of Drive round trips, so a tick that could only afford a
+   * few of them left a 2,800 session backlog crawling: the queue was throttled by the
+   * tick period rather than by Drive. The loop keeps going while sessions are due and
+   * stops as soon as none are left, which is what the idle gate does for a live session.
+   */
+  #uploadJob: Promise<void> | null = null;
+  /**
+   * Set while the tick is pulling, flushing, or indexing from Drive. The upload loop
+   * waits for these windows, so a long upload backlog cannot delay the change feed.
+   */
+  #syncBusy = false;
+  /**
+   * Where the next upload pass starts. Without it every pass began at the first entry,
+   * so one slow session could spend the whole budget and the rest never ran.
+   */
+  #uploadCursor = 0;
+  #uploadSlowestMs = 0;
+  #uploadFailures = 0;
+  #uploadLastError: string | null = null;
+  /** Files the last scan had to parse, for the status view and the fingerprint tests. */
+  #lastScanParsed = 0;
 
   constructor(options: DaemonOptions) {
     this.#options = options;
@@ -628,6 +789,8 @@ export class YouBrainDaemon {
     this.#log = new EventLog(this.#store, this.#local.deviceId, {
       now: () => this.#clock.now(),
     });
+    this.#files = readCaptureFiles(this.#store.getCursor(CAPTURE_FILES_CURSOR));
+    this.#restoreLiveFromFiles();
     this.#webhook = await log.time("readWebhook", () =>
       readWebhookConfig(webhookConfigPath(this.#paths.dataDir)),
     );
@@ -667,8 +830,11 @@ export class YouBrainDaemon {
     this.#lastHeartbeat = startedAt;
     this.#lastPull = startedAt;
     this.#lastWebSessions = startedAt;
+    this.#lastRefineBackfill = startedAt;
+    this.#bootedAtMs = startedAt;
     this.#lastPortrait = startedAt;
     this.#lastSearch = startedAt;
+    this.#lastVector = startedAt;
     this.#started = true;
     try {
       await this.#issueReminders();
@@ -823,6 +989,17 @@ export class YouBrainDaemon {
   async settled(): Promise<void> {
     await this.#services;
     await this.#chain;
+    // A detached refine pass belongs to "settled" too: tests and shutdown both want to
+    // know that nothing is still writing. A pass can be started by the tick it overlaps,
+    // so keep draining until none is left.
+    for (let round = 0; round < 8; round += 1) {
+      const jobs = [this.#webJob, this.#backfillJob, this.#uploadJob].filter(
+        (job): job is Promise<void> => job !== null,
+      );
+      if (jobs.length === 0) break;
+      await Promise.all(jobs);
+      await this.#chain;
+    }
     await this.#output?.whenIdle();
   }
 
@@ -929,9 +1106,30 @@ export class YouBrainDaemon {
     if (!this.#stopped) this.#arm();
   }
 
-  /** Search interval, or a dirty tick that still has text sync or vector backfill to do. */
-  #vectorBackfillDue(now: number): boolean {
-    return this.#searchDirty || intervalDue(this.#lastSearch, now, INTERVALS.searchMs);
+  /**
+   * Runs the Drive-facing tick steps while the upload loop stands down, so a large
+   * upload backlog cannot delay the change feed or the outbox flush.
+   */
+  async #withSyncWindow(run: () => Promise<void>): Promise<void> {
+    this.#syncBusy = true;
+    try {
+      await run();
+    } finally {
+      this.#syncBusy = false;
+    }
+  }
+
+  /** Text sync runs on the interval, or right away while documents are still queued. */
+  #searchTextDue(now: number): boolean {
+    return this.#searchTextDirty || intervalDue(this.#lastSearch, now, INTERVALS.searchMs);
+  }
+
+  /**
+   * Backfill runs on its own clock: once per interval, or again on the next tick while the
+   * last pass made progress. It must not pull the change feed, which is what text sync does.
+   */
+  #vectorDue(now: number): boolean {
+    return this.#vectorDirty || intervalDue(this.#lastVector, now, INTERVALS.searchMs);
   }
 
   async #runDue(): Promise<void> {
@@ -941,48 +1139,62 @@ export class YouBrainDaemon {
       await this.#scanBody();
       this.#lastFullScan = this.#clock.nowMs();
     }
-    await this.#processDue({ budgetMs: INTERVALS.uploadBudgetMs });
-    if (this.#sync && intervalDue(this.#lastFlush, now, INTERVALS.flushMs)) {
-      try {
-        await this.#sync.flush();
-        this.#driveReachable = true;
-      } catch {
-        this.#driveReachable = false;
+    this.#startUploadLoop();
+    await this.#withSyncWindow(async () => {
+      if (this.#sync && intervalDue(this.#lastFlush, now, INTERVALS.flushMs)) {
+        try {
+          await this.#sync.flush();
+          this.#driveReachable = true;
+        } catch {
+          this.#driveReachable = false;
+        }
+        this.#lastFlush = this.#clock.nowMs();
       }
-      this.#lastFlush = this.#clock.nowMs();
-    }
-    if (intervalDue(this.#lastHeartbeat, now, INTERVALS.heartbeatMs)) {
-      await this.#heartbeat();
-      this.#lastHeartbeat = this.#clock.nowMs();
-    }
-    if (
-      this.#sync &&
-      intervalDue(this.#lastPull, now, pullInterval(this.changes.subscriberCount()))
-    ) {
-      try {
-        const pulled = await this.#sync.pull();
-        this.#rememberSyncSuccess();
-        if (pulled.applied > 0) this.#scheduleWebhook();
-      } catch (error) {
-        this.#rememberSyncFailure(error);
+      if (intervalDue(this.#lastHeartbeat, now, INTERVALS.heartbeatMs)) {
+        await this.#heartbeat();
+        this.#lastHeartbeat = this.#clock.nowMs();
       }
-      this.#restoreLocalActivity();
-      this.#lastPull = this.#clock.nowMs();
-    }
-    if (this.#inboxDirty) {
-      try {
-        await this.#drainInbox({ budgetMs: INTERVALS.inboxBudgetMs });
-      } catch {
-        // One bad pass must not stop the loop. The queue stays for the next tick.
+      if (
+        this.#sync &&
+        intervalDue(this.#lastPull, now, pullInterval(this.changes.subscriberCount()))
+      ) {
+        try {
+          const pulled = await this.#sync.pull();
+          this.#rememberSyncSuccess();
+          if (pulled.applied > 0) this.#scheduleWebhook();
+        } catch (error) {
+          this.#rememberSyncFailure(error);
+        }
+        this.#restoreLocalActivity();
+        this.#lastPull = this.#clock.nowMs();
       }
-    }
+      if (this.#inboxDirty) {
+        try {
+          await this.#drainInbox({ budgetMs: INTERVALS.inboxBudgetMs });
+        } catch {
+          // One bad pass must not stop the loop. The queue stays for the next tick.
+        }
+      }
+    });
     if (intervalDue(this.#lastWebSessions, now, INTERVALS.webSessionsMs)) {
-      try {
-        await this.#processWebSessions();
-      } catch {
-        // One bad pass must not stop the loop.
-      }
       this.#lastWebSessions = this.#clock.nowMs();
+      this.#webJob ??= this.#processWebSessions()
+        .catch(() => {
+          // One bad pass must not stop the loop.
+        })
+        .finally(() => {
+          this.#webJob = null;
+        });
+    }
+    if (intervalDue(this.#lastRefineBackfill, now, INTERVALS.refineBackfillMs)) {
+      this.#lastRefineBackfill = this.#clock.nowMs();
+      this.#backfillJob ??= this.#refineBackfill()
+        .catch(() => {
+          // One bad pass must not stop the loop.
+        })
+        .finally(() => {
+          this.#backfillJob = null;
+        });
     }
     if (
       this.#portrait &&
@@ -996,26 +1208,33 @@ export class YouBrainDaemon {
       this.#portraitSoon = false;
       this.#lastPortrait = this.#clock.nowMs();
     }
-    const vectorBackfillDue = this.#vectorBackfillDue(now);
-    if (this.#search && vectorBackfillDue) {
-      try {
-        const result = await this.#search.sync({ budgetMs: 20_000, embed: false });
-        // Unfinished text sync stays dirty so the next tick continues it.
-        this.#searchDirty = !result.done;
-        if (result.done && vectorBackfillDue) {
-          try {
-            const filled = await this.#search.backfillVectors({ budgetMs: 10_000 });
-            // One tick embeds at most once. Progress with holes continues next tick.
-            if (filled.remaining > 0 && filled.embedded > 0) this.#searchDirty = true;
-          } catch {
-            // A failed backfill must not stop the loop. The next search interval retries.
-          }
+    if (this.#search) {
+      if (this.#searchTextDue(now)) {
+        try {
+          const result = await this.#search.sync({ budgetMs: 20_000, embed: false });
+          // Unfinished text sync stays dirty so the next tick continues it.
+          this.#searchTextDirty = !result.done;
+          // Freshly indexed chunks have no vectors yet. Fill them before the next interval.
+          if (result.done) this.#vectorDirty = true;
+        } catch {
+          // Keyword search keeps the last successful index.
+          this.#searchTextDirty = false;
         }
-      } catch {
-        // Keyword search keeps the last successful index.
-        this.#searchDirty = false;
+        this.#lastSearch = this.#clock.nowMs();
       }
-      this.#lastSearch = this.#clock.nowMs();
+      // Text sync comes first: vectors for a document that is not indexed yet are wasted work.
+      if (!this.#searchTextDirty && this.#vectorDue(now)) {
+        try {
+          const filled = await this.#search.backfillVectors({ budgetMs: 10_000 });
+          // One tick embeds at most once. Progress with holes continues next tick;
+          // no progress means a missing model or a spent retry window, so wait for the interval.
+          this.#vectorDirty = filled.remaining > 0 && filled.embedded > 0;
+        } catch {
+          // A failed backfill must not stop the loop. The next interval retries.
+          this.#vectorDirty = false;
+        }
+        this.#lastVector = this.#clock.nowMs();
+      }
     }
     if (intervalDue(this.#lastReminders, now, INTERVALS.reminderMs)) {
       try {
@@ -1057,6 +1276,47 @@ export class YouBrainDaemon {
     }
   }
 
+  /** Starts the upload loop when anything is queued and it is not already running. */
+  #startUploadLoop(): void {
+    if (this.#uploadJob || this.#stopped) return;
+    let queued = false;
+    for (const live of this.#live.values()) {
+      if (live.schedule.dirtySince !== null) {
+        queued = true;
+        break;
+      }
+    }
+    if (!queued) return;
+    this.#uploadJob = this.#uploadLoop()
+      .catch(() => {
+        // One bad pass must not stop the loop; the next tick starts a new one.
+      })
+      .finally(() => {
+        this.#uploadJob = null;
+      });
+  }
+
+  /**
+   * Uploads until nothing is due. A session that is still active stays queued and is
+   * picked up by a later tick, which is the idle gate working as intended.
+   */
+  async #uploadLoop(): Promise<void> {
+    for (;;) {
+      if (this.#stopped) return;
+      // Give the change feed and the outbox flush a clear window first.
+      while (this.#syncBusy && !this.#stopped) await delay(INTERVALS.uploadLoopGapMs);
+      if (this.#stopped) return;
+      const result = await this.#processDue({ budgetMs: INTERVALS.uploadBudgetMs });
+      if (this.#stopped) return;
+      // Nothing moved: every remaining session is waiting for its idle window, or the
+      // writes failed and the next tick should try again.
+      if (result.uploaded === 0) return;
+      // Yield between batches. Uploading without a pause fills the Drive connection pool
+      // and the pull and flush in the tick starve behind it.
+      await delay(INTERVALS.uploadLoopGapMs);
+    }
+  }
+
   async #processDue(options?: {
     forceIdle?: boolean;
     sources?: readonly string[];
@@ -1072,30 +1332,46 @@ export class YouBrainDaemon {
     const sessions = [...this.#live.entries()].filter(([, live]) =>
       options?.sources ? options.sources.includes(live.source) : true,
     );
-    for (const [key, live] of sessions) {
-      if (this.#stopped) return { scanned: sessions.length, uploaded };
+    // Rotate the starting point so a slow or failing session cannot starve the rest
+    // when the budget runs out mid-pass.
+    const total = sessions.length;
+    const start = total === 0 ? 0 : this.#uploadCursor % total;
+    for (let offset = 0; offset < total; offset += 1) {
+      const entry = sessions[(start + offset) % total];
+      if (!entry) continue;
+      const [key, live] = entry;
+      if (this.#stopped) return { scanned: total, uploaded };
       if (options?.budgetMs !== undefined && this.#clock.nowMs() - now >= options.budgetMs) {
-        return { scanned: sessions.length, uploaded };
+        this.#uploadCursor = (start + offset) % total;
+        return { scanned: total, uploaded };
       }
       const decision = decideUpload(live.schedule, now, { idleMs, activeIntervalMs });
       if (!decision.due) {
         if (this.#isIdle(live, now, idleMs)) await this.#retryIfDue(key, live, now);
         continue;
       }
+      const startedAt = this.#clock.nowMs();
       try {
-        const did = await this.#uploadOne(key, live, decision.reason === "idle");
+        const did = await this.#uploadOne(key, live);
         if (did) uploaded += 1;
-      } catch {
-        // Leave the session dirty so the next tick retries the upload.
+        this.#uploadFailures = 0;
+        this.#uploadLastError = null;
+        this.#uploadSlowestMs = Math.max(this.#uploadSlowestMs, this.#clock.nowMs() - startedAt);
+      } catch (error) {
+        // Leave the session dirty so the next tick retries the upload, but say so:
+        // a pass that keeps failing otherwise looks like an idle daemon.
+        this.#uploadFailures += 1;
+        this.#uploadLastError = error instanceof Error ? error.message : String(error);
       }
     }
+    this.#uploadCursor = 0;
     if (this.#store?.getCursor(BACKFILL_CURSOR) === "pending" && this.#scannedOnce) {
       this.#store.setCursor(BACKFILL_CURSOR, "done");
     }
     return { scanned: sessions.length, uploaded };
   }
 
-  async #uploadOne(key: string, live: LiveSession, refine: boolean): Promise<boolean> {
+  async #uploadOne(key: string, live: LiveSession): Promise<boolean> {
     if (!this.#uploader) return false;
     const before = live.hash;
     const session = await this.#materialize(live);
@@ -1109,24 +1385,18 @@ export class YouBrainDaemon {
     }
     const result = await this.#uploader.upload(this.#renderUpload(live, session));
     this.#rememberUpload(live, result.fileId, result.key);
-    this.#searchDirty = true;
+    this.#searchTextDirty = true;
     const now = this.#clock.nowMs();
     const current = this.#live.get(key) ?? live;
-    // An active upload refreshes the bytes but leaves the session dirty so the
-    // later idle pass still refines. Only the idle upload clears that debt.
-    if (refine) {
-      current.schedule =
-        current.hash === before
-          ? noteUpload(current.schedule, now)
-          : noteActivity(noteUpload(current.schedule, now), now);
-      await this.#refine(key, current, result.fileId, session);
-    } else {
-      current.schedule = {
-        lastActivityAt: current.hash === before ? current.schedule.lastActivityAt : now,
-        lastUploadAt: now,
-        dirtySince: current.hash === before ? (current.schedule.dirtySince ?? now) : now,
-      };
-    }
+    // Uploading is a sync step, nothing more: waiting for a model here made a 2,800
+    // session backlog take a day and a half, because every write queued behind a
+    // 30-60 second refine call. Refining runs on its own schedule (`#refineBackfill`),
+    // which reads the session back from Drive.
+    current.schedule = {
+      lastActivityAt: current.hash === before ? current.schedule.lastActivityAt : now,
+      lastUploadAt: now,
+      dirtySince: null,
+    };
     return true;
   }
 
@@ -1165,7 +1435,7 @@ export class YouBrainDaemon {
       this.#retry.succeed(input.key);
       return;
     }
-    if (this.#cliUnresponsive) return;
+    if (this.#cliPaused()) return;
     try {
       const result = await refineSession(
         this.#llm,
@@ -1190,24 +1460,34 @@ export class YouBrainDaemon {
       );
       if (result.status === "skipped") {
         this.#cliSilentStreak = 0;
+        this.#cliStalls = 0;
         if (result.reason === "no_new_messages") this.#retry.succeed(input.key);
         else this.#retry.fail(input.key, input.key, new Error(result.detail));
         return;
       }
       for (const event of result.events) await this.#emitCopied(event);
       this.#cliSilentStreak = 0;
+      this.#cliStalls = 0;
       this.#retry.succeed(input.key);
     } catch (error) {
       if (isCliNoOutputTimeout(error)) this.#cliSilentStreak += 1;
       else this.#cliSilentStreak = 0;
-      if (this.#cliSilentStreak >= 2) this.#cliUnresponsive = true;
+      if (this.#cliSilentStreak >= 2) {
+        this.#cliSilentStreak = 0;
+        this.#cliStalls += 1;
+        const wait = Math.min(
+          INTERVALS.cliStallMinMs * 2 ** (this.#cliStalls - 1),
+          INTERVALS.cliStallMaxMs,
+        );
+        this.#cliPausedUntilMs = this.#clock.nowMs() + wait;
+      }
       this.#retry.fail(input.key, input.key, error);
       this.changes.publish("status", this.#clock.now().toISOString());
     }
   }
 
   #canProcessWebSessions(): boolean {
-    if (this.#cliUnresponsive || !this.#llm || !this.#drive || !this.#store) return false;
+    if (this.#cliPaused() || !this.#llm || !this.#drive || !this.#store) return false;
     const processor = resolveWebProcessor(this.#roles);
     return processor !== null && processor === this.#local.deviceId;
   }
@@ -1239,6 +1519,71 @@ export class YouBrainDaemon {
         // One bad session must not stop the batch.
       }
     }
+  }
+
+  /**
+   * Refines this device's sessions that are on Drive but not yet refined, newest first.
+   *
+   * This is the only place a captured session is handed to the model. Uploading does not
+   * wait for it: a library that was captured while signed out holds thousands of
+   * sessions, and queueing each write behind a 30-60 second model call left the backlog
+   * growing for days. Keeping the two apart lets Drive fill up fast and the topics catch
+   * up afterwards.
+   *
+   * Only sessions updated in the last {@link REFINE_BACKFILL_WINDOW_DAYS} days are
+   * refined, because that is the window the topic list shows and every call costs money.
+   * Newest first means a conversation the user just finished is refined before history.
+   */
+  async #refineBackfill(): Promise<void> {
+    const drive = this.#drive;
+    const store = this.#store;
+    if (!drive || !store || !this.#llm) return;
+    if (this.#cliPaused()) return;
+    const since = new Date(
+      this.#clock.nowMs() - REFINE_BACKFILL_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+    ).toISOString();
+    const pending = store
+      .listSessions({ unrefinedOnly: true, updatedSince: since })
+      .filter((session) => session.device === this.#local.displayName)
+      .filter((session) => session.fileId !== null)
+      .filter((session) => !this.#webRetryBlocked(session.sessionKey, this.#clock.nowMs()))
+      .slice(0, INTERVALS.refineBackfillBatch);
+    for (const session of pending) {
+      if (this.#stopped || !this.#llm) return;
+      try {
+        await this.#refineStoredSession(session);
+      } catch (error) {
+        this.#retry.fail(session.sessionKey, session.sessionKey, error);
+      }
+    }
+  }
+
+  /** One stored session: read its markdown from Drive and run the refine step. */
+  async #refineStoredSession(session: {
+    sessionKey: string;
+    source: string;
+    fileId: string | null;
+    msgCount: number;
+  }): Promise<void> {
+    const drive = this.#drive;
+    const store = this.#store;
+    if (!drive || !store || session.fileId === null) return;
+    const object = await drive.read(session.fileId);
+    const parsed = parseWebSession(object.bytes.toString("utf8"));
+    if (!parsed) {
+      this.#retry.fail(
+        session.sessionKey,
+        session.sessionKey,
+        new LlmRequestError("client", "会话原文无法解析"),
+      );
+      return;
+    }
+    await this.#runRefine({
+      key: session.sessionKey,
+      source: session.source,
+      fileId: session.fileId,
+      turns: parsed.turns,
+    });
   }
 
   async #refineWebSession(item: { sessionKey: string; fileId: string }): Promise<void> {
@@ -1288,7 +1633,7 @@ export class YouBrainDaemon {
   }
 
   async #retryIfDue(key: string, live: LiveSession, now: number): Promise<void> {
-    if (this.#cliUnresponsive) return;
+    if (this.#cliPaused()) return;
     const job = this.#retry.get(key);
     if (!job || job.exhausted || job.nextAttemptAt > now || !this.#llm || !this.#store) return;
     const fileId = this.#store.getSession(key)?.fileId;
@@ -1326,6 +1671,8 @@ export class YouBrainDaemon {
         grok: roots["grok-build"],
         cursor: roots.cursor,
         gemini: roots["gemini-cli"],
+        pi: roots.pi,
+        t3: roots["t3-code"],
       },
       cursors: this.#captureCursors(),
     };
@@ -1389,12 +1736,56 @@ export class YouBrainDaemon {
     }
     const visited = new Set(hits.map((hit) => hit.path));
     for (const hit of hits) {
-      this.#files.set(hit.path, { stamp: hit.stamp, key: hit.key, generation });
+      // An unchanged hit carries no metadata. Keep what the file earned on an earlier
+      // scan, or the next restart would have fingerprints but nothing to restore.
+      const known = hit.meta ?? this.#files.get(hit.path)?.meta;
+      this.#files.set(hit.path, {
+        stamp: hit.stamp,
+        key: hit.key,
+        generation,
+        ...(known ? { meta: known } : {}),
+      });
     }
     for (const path of this.#files.keys()) {
       if (!visited.has(path)) this.#files.delete(path);
     }
+    this.#lastScanParsed = hits.filter((hit) => !hit.unchanged).length;
+    this.#rememberCaptureFiles();
     this.#scannedOnce = true;
+  }
+
+  /**
+   * Puts the sessions from the stored fingerprints back into the live map.
+   *
+   * A session the store has no `file_id` for is queued for upload: it was captured but
+   * never reached Drive, which is the normal state after a long offline or signed-out
+   * period. Everything else is marked as already uploaded, so a restart does not push
+   * every session again; a file that changed still gets a new hash on the next scan,
+   * which is what marks it dirty.
+   */
+  #restoreLiveFromFiles(): void {
+    for (const cursor of this.#files.values()) {
+      if (!cursor.key || !cursor.meta) continue;
+      const at = Date.parse(cursor.meta.updatedAt);
+      const stamp = Number.isNaN(at) ? this.#clock.nowMs() : at;
+      const uploaded = (this.#store?.getSession(cursor.key)?.fileId ?? null) !== null;
+      this.#live.set(cursor.key, {
+        ...cursor.meta,
+        schedule: uploaded
+          ? { lastActivityAt: stamp, lastUploadAt: stamp, dirtySince: null }
+          : { lastActivityAt: stamp, lastUploadAt: null, dirtySince: stamp },
+      });
+    }
+  }
+
+  /** Persists the fingerprints so a restart does not re-parse the whole library. */
+  #rememberCaptureFiles(): void {
+    if (!this.#store) return;
+    try {
+      this.#store.setCursor(CAPTURE_FILES_CURSOR, JSON.stringify([...this.#files]));
+    } catch {
+      // A failed write only costs an extra full scan after the next restart.
+    }
   }
 
   #captureCursors(): Record<string, CaptureCursorInput> {
@@ -1467,11 +1858,19 @@ export class YouBrainDaemon {
   #enqueueInbox(files: readonly DriveEntry[]): void {
     const store = this.#store;
     if (!store || files.length === 0) return;
-    const queued = readInboxPending(store);
+    // Recorded before the scope filter: a device that is not the web processor never
+    // downloads these files, but the status page still has to say they are waiting.
+    const sawWeb = files.some((file) => isWebInboxPath(file.path));
+    if (sawWeb !== (store.getCursor(WEB_INBOX_SEEN_CURSOR) === "1")) {
+      store.setCursor(WEB_INBOX_SEEN_CURSOR, sawWeb ? "1" : "0");
+    }
+    const scope = this.#inboxScope();
+    const queued = readInboxPending(store).filter((item) => inScope(item.path, scope));
     const indexById = new Map(queued.map((item, index) => [item.id, index]));
     let changed = false;
     for (const file of files) {
       if (!file.path.startsWith("inbox/") || !file.path.endsWith(".md")) continue;
+      if (!inScope(file.path, scope)) continue;
       if (store.getCursor(inboxIndexedKey(file.id)) === file.modifiedTime) continue;
       const next: InboxPendingFile = {
         id: file.id,
@@ -1512,8 +1911,11 @@ export class YouBrainDaemon {
     const store = this.#store;
     if (!drive || !store) return;
     const started = this.#clock.nowMs();
+    const scope = this.#inboxScope();
     let rest = readInboxPending(store).filter(
-      (file) => store.getCursor(inboxIndexedKey(file.id)) !== file.modifiedTime,
+      (file) =>
+        inScope(file.path, scope) &&
+        store.getCursor(inboxIndexedKey(file.id)) !== file.modifiedTime,
     );
     const failed: InboxPendingFile[] = [];
     let progressed = false;
@@ -1559,6 +1961,26 @@ export class YouBrainDaemon {
         this.changes.publish("today", this.#clock.now().toISOString());
       }
     }
+  }
+
+  /** A device that just became the web processor never downloaded the plugin files. Queue them once. */
+  async #catchUpWebInbox(): Promise<void> {
+    const drive = this.#drive;
+    if (!drive) return;
+    try {
+      const entries = await drive.list({ prefix: "inbox/" });
+      this.#enqueueInbox(entries.filter((entry) => isWebInboxPath(entry.path)));
+    } catch {
+      // The next role change or a re-listed change feed queues them again.
+    }
+  }
+
+  /** This device downloads its own sessions, plus browser-plugin files when it refines them. */
+  #inboxScope(): string[] {
+    return inboxScopePrefixes({
+      device: this.#local.displayName,
+      includeWeb: resolveWebProcessor(this.#roles) === this.#local.deviceId,
+    });
   }
 
   /** Writes one inbox file into the sessions table. A malformed file is skipped. */
@@ -1909,10 +2331,14 @@ export class YouBrainDaemon {
       await this.#mountSearch();
     }
     if (update.roles) {
+      const wasWebProcessor = resolveWebProcessor(this.#roles) === this.#local.deviceId;
       this.#roles = update.roles;
       await writeJsonFile(join(this.#paths.dataDir, "roles.json"), this.#roles);
       this.#applyZone();
       this.#mountOutput();
+      if (!wasWebProcessor && resolveWebProcessor(this.#roles) === this.#local.deviceId) {
+        await this.#catchUpWebInbox();
+      }
     }
     this.changes.publish("status", this.#clock.now().toISOString());
     if (update.removedDevices?.length) this.changes.publish("devices", this.#clock.now().toISOString());
@@ -2049,6 +2475,7 @@ export class YouBrainDaemon {
     this.#searchSemantic = semantic;
     this.#search = new SearchService({
       drive: asSearchDrive(this.#drive),
+      scope: () => this.#inboxScope(),
       embedder,
       database: this.#searchDb,
       semantic,
@@ -2398,7 +2825,8 @@ export class YouBrainDaemon {
 
   #clearCliStall(): void {
     this.#cliSilentStreak = 0;
-    this.#cliUnresponsive = false;
+    this.#cliStalls = 0;
+    this.#cliPausedUntilMs = 0;
   }
 
   async #writeConfig(config: SharedConfig): Promise<void> {
@@ -2518,7 +2946,7 @@ export class YouBrainDaemon {
         },
       );
     } else if (isCliProvider(this.#shared.llm.provider)) {
-      if (this.#cliUnresponsive) {
+      if (this.#cliPaused()) {
         const stalled = cliUnresponsiveWarning(this.#shared.llm.provider);
         if (stalled) warnings.push(stalled);
       } else {
@@ -2550,7 +2978,8 @@ export class YouBrainDaemon {
     const processor = resolveWebProcessor(this.#roles);
     const isLocalProcessor = processor !== null && processor === this.#local.deviceId;
     const indexed = this.#store ? listWebInbox(this.#store) : [];
-    if (indexed.length > 0 && processor === null) {
+    const sawWeb = this.#store?.getCursor(WEB_INBOX_SEEN_CURSOR) === "1";
+    if ((indexed.length > 0 || sawWeb) && processor === null) {
       warnings.push({ code: "WEB_PROCESSOR_MISSING", message: "没有指定网页会话处理设备" });
     }
     const webPending =
@@ -2573,6 +3002,13 @@ export class YouBrainDaemon {
       refine: {
         pending: pending.length,
         lastError: pending[0]?.reason ?? null,
+      },
+      capture: { parsed: this.#lastScanParsed },
+      upload: {
+        pending: [...this.#live.values()].filter((live) => live.schedule.dirtySince !== null).length,
+        slowestMs: this.#uploadSlowestMs,
+        failures: this.#uploadFailures,
+        lastError: this.#uploadLastError,
       },
       consolidation,
       web: {
@@ -2853,6 +3289,8 @@ export class YouBrainDaemon {
       "grok-build": [] as string[],
       cursor: [] as string[],
       "gemini-cli": [] as string[],
+      pi: [] as string[],
+      "t3-code": [] as string[],
     };
     for (const id of SESSION_SOURCES) {
       if (this.#options.sourceRoots) {
@@ -2984,6 +3422,7 @@ function assignMeta(live: LiveSession, meta: CaptureMeta): void {
 function asSearchDrive(drive: DrivePort): SearchDrive {
   return {
     changes: (query) => drive.changes(query),
+    searchText: (query) => drive.searchText(query),
     async read(id: string) {
       const object = await drive.read(id);
       return { bytes: object.bytes };

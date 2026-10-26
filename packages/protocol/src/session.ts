@@ -8,6 +8,8 @@ export const CAPTURE_SOURCE_IDS = [
   "grok-build",
   "cursor",
   "gemini-cli",
+  "pi",
+  "t3-code",
 ] as const;
 
 export const CaptureSourceIdSchema = z.enum(CAPTURE_SOURCE_IDS);

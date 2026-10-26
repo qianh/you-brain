@@ -12,6 +12,7 @@ import {
   toolTextFromCalls,
   visibleTurnContent,
 } from "./content.js";
+import { isConversation } from "./conversation.js";
 import { globFiles } from "./glob.js";
 import { asRecord, asString } from "./jsonl.js";
 import {
@@ -98,8 +99,8 @@ export async function parseGeminiSession(
     if (turn) turns.push(turn);
   }
 
-  if (turns.length === 0) {
-    return { session: null, skippedSubagent: false, malformedLines: 0 };
+  if (!isConversation(turns)) {
+    return { session: null, skippedSubagent: false, skippedNoise: true, malformedLines: 0 };
   }
   const bounds = timestampBounds(
     [asString(record.startTime), asString(record.lastUpdated), ...timestamps],

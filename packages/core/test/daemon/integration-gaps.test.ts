@@ -186,9 +186,19 @@ describe("integration gaps", () => {
           ],
         },
       });
+    // A real conversation starts with a question the user typed; the injected context a
+    // CLI writes on startup is not enough to make the session worth keeping.
+    const question = (sessionId: string) =>
+      JSON.stringify({
+        type: "user",
+        isSidechain: false,
+        sessionId,
+        timestamp: "2026-10-18T01:59:00.000Z",
+        message: { role: "user", content: "why does this fail" },
+      });
     await writeFile(
       join(dirs.sourceDir, "visible.jsonl"),
-      `${assistant("visible-1", "Authorization: Bearer cursor-secret-value")}\n`,
+      `${question("visible-1")}\n${assistant("visible-1", "Authorization: Bearer cursor-secret-value")}\n`,
     );
     await writeFile(
       join(dirs.sourceDir, "hidden", "secret.jsonl"),

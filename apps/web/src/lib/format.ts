@@ -8,6 +8,8 @@ const SOURCE_LABELS: Record<string, string> = {
   "grok-build": "Grok",
   cursor: "Cursor",
   "gemini-cli": "Gemini CLI",
+  pi: "Pi",
+  "t3-code": "T3 Code",
 };
 
 export function sourceLabel(source: string): string {

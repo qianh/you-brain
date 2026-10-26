@@ -24,6 +24,7 @@ function blankTopic(topicId: string): TopicState {
     mergedInto: null,
     createdTs: null,
     lastUserOpAt: null,
+    lastContentAt: null,
     userLocked: false,
   };
 }
@@ -36,6 +37,7 @@ function blankSession(sessionKey: string): SessionState {
     title: "",
     summary: "",
     refinedUpTo: 0,
+    refinedAt: null,
     topicId: null,
   };
 }
@@ -102,6 +104,19 @@ function touchUser(topic: TopicState, ts: string): void {
   }
 }
 
+/**
+ * The user changed the topic itself: status, name, merge, todo, or a new session.
+ * Reminder actions deliberately do not call this, so the topic list keeps showing
+ * when the topic was last worked on rather than when its reminder was dismissed.
+ */
+function touchContent(topic: TopicState, ts: string): void {
+  const next = Date.parse(ts);
+  if (Number.isNaN(next)) return;
+  if (topic.lastContentAt === null || next >= Date.parse(topic.lastContentAt)) {
+    topic.lastContentAt = ts;
+  }
+}
+
 function releaseName(memory: FoldMemory, topicId: string): void {
   for (const [key, id] of [...memory.liveByName.entries()]) {
     if (id === topicId) memory.liveByName.delete(key);
@@ -118,6 +133,7 @@ function link(memory: FoldMemory, fromId: string, intoId: string): void {
   fromTopic.mergedInto = into;
   const winner = ensureRow(memory, into);
   if (loser?.lastUserOpAt) touchUser(winner, loser.lastUserOpAt);
+  if (loser?.lastContentAt) touchContent(winner, loser.lastContentAt);
   for (const session of memory.sessions.values()) {
     if (session.topicId === from) session.topicId = into;
   }
@@ -186,6 +202,7 @@ function applyRenamed(memory: FoldMemory, event: EventOf<"topic.renamed">): void
   topic.aliases = [...event.data.aliases];
   indexName(memory, topic);
   touchUser(topic, event.ts);
+  touchContent(topic, event.ts);
 }
 
 function applyAssigned(memory: FoldMemory, event: EventOf<"topic.assigned">): void {
@@ -203,6 +220,7 @@ function applyUnassigned(memory: FoldMemory, event: EventOf<"topic.unassigned">)
   const topicId = resolveTopicId(memory, event.data.topicId);
   const topic = ensureRow(memory, topicId);
   touchUser(topic, event.ts);
+  touchContent(topic, event.ts);
   const session = memory.sessions.get(event.data.sessionKey);
   if (session && session.topicId === topicId) session.topicId = null;
 }
@@ -218,6 +236,7 @@ function applyTopicStatus(
   if (event.data.by === "user") {
     topic.userLocked = true;
     touchUser(topic, event.ts);
+    touchContent(topic, event.ts);
   }
 }
 
@@ -238,7 +257,10 @@ function applyMerged(memory: FoldMemory, event: EventOf<"topic.merged">): void {
   if (from === into) return;
   link(memory, from, into);
   const survivor = memory.topics.get(resolveTopicId(memory, into));
-  if (survivor) touchUser(survivor, event.ts);
+  if (survivor) {
+    touchUser(survivor, event.ts);
+    touchContent(survivor, event.ts);
+  }
 }
 
 function applyRefined(memory: FoldMemory, event: EventOf<"session.refined">): void {
@@ -253,6 +275,7 @@ function applyRefined(memory: FoldMemory, event: EventOf<"session.refined">): vo
   session.title = event.data.title;
   session.summary = event.data.summary;
   session.refinedUpTo = event.data.refinedUpTo;
+  session.refinedAt = event.ts;
 }
 
 function applyConclusion(memory: FoldMemory, event: EventOf<"conclusion.added">): void {
@@ -272,6 +295,7 @@ function touchTodoTopic(memory: FoldMemory, todo: TodoMemory): void {
   if (!todo.userLocked || todo.userStatusTs === null || todo.topicId === "") return;
   const topic = ensureRow(memory, resolveTopicId(memory, todo.topicId));
   touchUser(topic, todo.userStatusTs);
+  touchContent(topic, todo.userStatusTs);
 }
 
 function applyTodoAdded(memory: FoldMemory, event: EventOf<"todo.added">): void {
@@ -326,6 +350,9 @@ function applyReminderAction(
 ): void {
   if (event.data.topicId === null) return;
   const topic = ensureRow(memory, resolveTopicId(memory, event.data.topicId));
+  // Reminder bookkeeping, not work on the topic. `lastUserOpAt` feeds the reminder
+  // streak in `topicControl` and must keep moving; `lastContentAt` does not, so the
+  // topic list still shows when the topic was last worked on.
   touchUser(topic, event.ts);
 }
 

@@ -23,6 +23,12 @@ export interface TopicState {
   mergedInto: string | null;
   createdTs: string | null;
   lastUserOpAt: string | null;
+  /**
+   * Newest moment the user actually worked on this topic's content. Reminder actions
+   * (`ignore`, `snooze`, `mute`) do not move it, so dismissing a stale reminder never
+   * makes an old topic look recently active. `deriveLastActive` reads this one.
+   */
+  lastContentAt: string | null;
   userLocked: boolean;
 }
 
@@ -33,6 +39,8 @@ export interface SessionState {
   title: string;
   summary: string;
   refinedUpTo: number;
+  /** When the newest refine event was written. Stands in for a session this device never downloaded. */
+  refinedAt: string | null;
   topicId: string | null;
 }
 
@@ -92,6 +100,15 @@ export interface ZoneQuery {
   activeLimit: number;
   historyDays: number;
   sessionUpdatedAt?: Readonly<Record<string, string>>;
+  /**
+   * Count reminder actions (`ignore`, `snooze`, `mute`) as activity.
+   *
+   * The reminder engine needs this: a stale reminder's id embeds the topic's last
+   * active date, so dismissing one has to move that date forward or the same id is
+   * generated again and suppressed. The topic list must not use it, or dismissing a
+   * stale reminder would push a topic from last year to the top of the list.
+   */
+  countReminderActions?: boolean;
 }
 
 export interface ZonedTopic extends TopicState {

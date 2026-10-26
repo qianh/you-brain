@@ -196,6 +196,78 @@
                 "exclude"
               ],
               "type": "object"
+            },
+            "pi": {
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "exclude": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "include": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "paths": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "enabled",
+                "paths",
+                "include",
+                "exclude"
+              ],
+              "type": "object"
+            },
+            "t3-code": {
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "exclude": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "include": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "paths": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "enabled",
+                "paths",
+                "include",
+                "exclude"
+              ],
+              "type": "object"
             }
           },
           "required": [
@@ -203,7 +275,9 @@
             "codex",
             "grok-build",
             "cursor",
-            "gemini-cli"
+            "gemini-cli",
+            "pi",
+            "t3-code"
           ],
           "type": "object"
         }

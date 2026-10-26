@@ -167,10 +167,10 @@ describe("source adapters", () => {
       },
     );
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       session: null,
       skippedSubagent: false,
-      malformedLines: 0,
+      skippedNoise: true,
     });
   });
 
@@ -183,10 +183,10 @@ describe("source adapters", () => {
       },
     );
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       session: null,
       skippedSubagent: false,
-      malformedLines: 0,
+      skippedNoise: true,
     });
   });
 

@@ -55,6 +55,12 @@ export function SearchResults({
               </span>
               <span className="search-hit-meta">
                 <span>{sourceLabel(hit.source)}</span>
+                {hit.device ? (
+                  <>
+                    <span aria-hidden="true">·</span>
+                    <span>{hit.device}</span>
+                  </>
+                ) : null}
                 <span aria-hidden="true">·</span>
                 <time dateTime={hit.updatedAt}>{when}</time>
               </span>

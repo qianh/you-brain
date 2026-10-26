@@ -11,6 +11,7 @@ import {
   toolTextFromContent,
   visibleTurnContent,
 } from "./content.js";
+import { isConversation } from "./conversation.js";
 import { globFiles } from "./glob.js";
 import { asRecord, asString, forEachJsonLine } from "./jsonl.js";
 import {
@@ -79,8 +80,8 @@ export async function parseCursorSession(
     stat(path),
   ]);
 
-  if (turns.length === 0) {
-    return { session: null, skippedSubagent: false, malformedLines };
+  if (!isConversation(turns)) {
+    return { session: null, skippedSubagent: false, skippedNoise: true, malformedLines };
   }
   const bounds = timestampBounds(
     [

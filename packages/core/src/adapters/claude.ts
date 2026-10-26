@@ -11,6 +11,7 @@ import {
   toolTextFromContent,
   visibleTurnContent,
 } from "./content.js";
+import { isConversation } from "./conversation.js";
 import { globFiles } from "./glob.js";
 import { asRecord, asString, forEachJsonLine } from "./jsonl.js";
 import { resolveContinuation } from "./continuation.js";
@@ -73,8 +74,8 @@ export async function parseClaudeSession(
     return { session: null, skippedSubagent: true, malformedLines };
   }
 
-  if (!conversationId || turns.length === 0) {
-    return { session: null, skippedSubagent: false, malformedLines };
+  if (!conversationId || !isConversation(turns)) {
+    return { session: null, skippedSubagent: false, skippedNoise: true, malformedLines };
   }
   const bounds = timestampBounds(timestamps, fileStat.mtime.toISOString());
   const session = NormalizedSessionSchema.parse({

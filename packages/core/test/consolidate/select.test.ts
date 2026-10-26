@@ -295,6 +295,7 @@ function zoned(topicId: string, lastActive: string | null): ZonedTopic {
     mergedInto: null,
     createdTs: null,
     lastUserOpAt: null,
+    lastContentAt: null,
     userLocked: false,
     lastActive,
     zone: "history",

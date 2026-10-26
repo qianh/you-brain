@@ -19,13 +19,15 @@ const fixture = (...parts: string[]) =>
   resolve(import.meta.dirname, "..", "fixtures", ...parts);
 
 describe("adapter registry", () => {
-  it("registers the five built-in sources and their default roots", () => {
+  it("registers the seven built-in sources and their default roots", () => {
     expect(listAdapters().map((adapter) => adapter.id)).toEqual([
       "claude-code",
       "codex",
       "grok-build",
       "cursor",
       "gemini-cli",
+      "pi",
+      "t3-code",
     ]);
     expect(claudeAdapter.defaultRoots("/Users/me")).toEqual([
       "/Users/me/.claude/projects",
@@ -41,6 +43,12 @@ describe("adapter registry", () => {
     ]);
     expect(getAdapter("gemini-cli")?.defaultRoots("/Users/me")).toEqual([
       "/Users/me/.gemini/tmp",
+    ]);
+    expect(getAdapter("pi")?.defaultRoots("/Users/me")).toEqual([
+      "/Users/me/.pi/agent/sessions",
+    ]);
+    expect(getAdapter("t3-code")?.defaultRoots("/Users/me")).toEqual([
+      "/Users/me/.t3/userdata",
     ]);
   });
 

@@ -11,6 +11,7 @@ export type {
   DriveChanges,
   DriveEntry,
   DriveListQuery,
+  DriveTextQuery,
   DriveObject,
   DrivePort,
   DrivePutInput,

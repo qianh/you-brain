@@ -55,6 +55,7 @@ describe("daemon readers", () => {
           mergedInto: null,
           createdTs: "2026-10-18T02:00:00.000Z",
           lastUserOpAt: null,
+          lastContentAt: null,
           userLocked: false,
         },
       ],

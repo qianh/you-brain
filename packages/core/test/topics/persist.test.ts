@@ -127,7 +127,7 @@ describe("persist topic book", () => {
         title: "only-event",
         summary: "from events",
         startedAt: null,
-        updatedAt: null,
+        updatedAt: "2026-07-01T00:00:06.000Z",
         msgCount: 0,
         refinedUpTo: 1,
         topicId: null,
