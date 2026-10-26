@@ -62,7 +62,7 @@ describe("web inbox index", () => {
     ]);
   });
 
-  test("selects idle unrefined sessions oldest first and counts without the idle filter", () => {
+  test("selects idle unrefined sessions newest first and counts without the idle filter", () => {
     const now = Date.parse("2026-10-18T02:00:00.000Z");
     const idleMs = 5 * 60_000;
     const indexed = [
@@ -91,7 +91,8 @@ describe("web inbox index", () => {
         idleMs,
         blocked: (key) => key === "blocked",
       }).map((row) => row.sessionKey),
-    ).toEqual(["old", "new"]);
+      // Newest first: what the user just finished comes back as a topic right away.
+    ).toEqual(["new", "old"]);
     expect(countUnrefinedWebSessions(indexed, sessions)).toBe(4);
   });
 });

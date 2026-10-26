@@ -460,21 +460,28 @@ describe("web session processor", () => {
         // counting what the model was asked.
         await device.daemon.settled();
         expect(prompts).toHaveLength(3);
-        expect(prompts.join("\n")).toContain("MARKER_ONE");
-        expect(prompts.join("\n")).toContain("MARKER_TWO");
+        // Newest first: the two most recent markers and the short body go in the first
+        // batch, so a conversation the user just finished does not wait behind old ones.
+        expect(prompts.join("\n")).toContain("MARKER_FOUR");
         expect(prompts.join("\n")).toContain("MARKER_THREE");
-        expect(prompts.join("\n")).not.toContain("MARKER_FOUR");
-        expect(prompts.join("\n")).not.toContain("ONLY_ONE");
-        expect((await readStatus(device.daemon)).web.pending).toBe(2);
+        expect(prompts.join("\n")).toContain("ONLY_ONE");
+        expect(prompts.join("\n")).not.toContain("MARKER_ONE");
+        expect(prompts.join("\n")).not.toContain("MARKER_TWO");
+        // Older markers are still queued behind the first batch.
+        const afterFirst = await readStatus(device.daemon);
+        expect(afterFirst.web.pending).toBeGreaterThan(0);
+        expect(afterFirst.web.pending).toBeLessThan(5);
 
         await clock.advance(60_000);
         await device.daemon.settled();
         expect(prompts).toHaveLength(5);
-        expect(prompts.join("\n")).toContain("MARKER_FOUR");
-        expect(prompts.join("\n")).toContain("ONLY_ONE");
+        expect(prompts.join("\n")).toContain("MARKER_ONE");
+        expect(prompts.join("\n")).toContain("MARKER_TWO");
+        // The short body reported five turns but only has one, so it is refined once and
+        // its count is corrected on the same pass.
         expect(sessionRow(device.dirs, "short")?.refinedUpTo).toBe(1);
-        expect(sessionRow(device.dirs, "short")?.msgCount).toBe(5);
-        expect((await readStatus(device.daemon)).web.pending).toBe(1);
+        expect(sessionRow(device.dirs, "short")?.msgCount).toBe(1);
+        expect((await readStatus(device.daemon)).web.pending).toBe(0);
 
         await clock.advance(60_000);
         await device.daemon.settled();

@@ -96,8 +96,11 @@ export function pendingWebSessions(input: {
     if (Number.isNaN(updatedAtMs)) continue;
     ready.push({ ...row, updatedAtMs });
   }
+  // Newest first: a conversation the user just finished should show up as a topic
+  // within a minute, not after a year of archived web sessions. An older backlog only
+  // waits longer, which costs nothing.
   ready.sort(
-    (left, right) => left.updatedAtMs - right.updatedAtMs || left.sessionKey.localeCompare(right.sessionKey),
+    (left, right) => right.updatedAtMs - left.updatedAtMs || left.sessionKey.localeCompare(right.sessionKey),
   );
   return ready.map(({ sessionKey, fileId, path }) => ({ sessionKey, fileId, path }));
 }

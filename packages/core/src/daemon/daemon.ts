@@ -1540,6 +1540,9 @@ export class YouBrainDaemon {
     const store = this.#store;
     if (!drive || !store || !this.#llm) return;
     if (this.#cliPaused()) return;
+    // Both passes share one CLI slot. A web session is what the user just produced, so
+    // it goes first; the history backlog only loses time, which costs nothing.
+    if (countUnrefinedWebSessions(listWebInbox(store), store.listSessions()) > 0) return;
     const since = new Date(
       this.#clock.nowMs() - REFINE_BACKFILL_WINDOW_DAYS * 24 * 60 * 60 * 1000,
     ).toISOString();
