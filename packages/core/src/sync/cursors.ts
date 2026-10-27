@@ -11,3 +11,8 @@ export function outboxCursorKey(deviceId: string): string {
 export function lineCursorKey(fileId: string): string {
   return `sync.lines.${fileId}`;
 }
+
+/** What this device last uploaded for an event file, so a pull can skip re-reading it. */
+export function selfUploadKey(fileId: string): string {
+  return `sync.self.${fileId}`;
+}

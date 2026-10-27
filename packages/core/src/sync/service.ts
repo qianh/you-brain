@@ -25,14 +25,15 @@ import {
 
 import { YouBrainError } from "../domain/errors.js";
 import type { DriveChanges, DriveEntry, DrivePort } from "../drive/drive-port.js";
+import { md5Hex } from "../drive/hash.js";
 import { ACTIVITY_EPOCH } from "../reminders/delivery.js";
 import { updateJsonWithMerge, upsertByPath } from "../upload/write.js";
 import { applyEvents, foldEvents, persistTopicBook } from "../topics/index.js";
 import type { TopicBook } from "../topics/types.js";
 import { zonedDay } from "./day.js";
-import { lineCursorKey, SYNC_DRIVE_CURSOR } from "./cursors.js";
+import { lineCursorKey, selfUploadKey, SYNC_DRIVE_CURSOR } from "./cursors.js";
 import { EventLog, type AllocateOptions } from "./event-log.js";
-import { selectNewLines } from "./lines.js";
+import { logicalLines, selectNewLines } from "./lines.js";
 import { readOutboxQueue, writeOutboxQueue } from "./queue.js";
 import type {
   DeviceIdentity,
@@ -80,6 +81,11 @@ interface DayWrite {
   entry: DriveEntry;
   included: Event[];
   eventCount: number;
+}
+
+interface SelfUpload {
+  md5: string;
+  lines: number;
 }
 
 function deviceIdFromPath(path: string): string | null {
@@ -385,7 +391,45 @@ export class ProtocolSync {
     const merged = unionBySeq([remoteEvents, local, included]);
     const body = serializeEventsJsonl(merged);
     const entry = await upsertByPath(this.#drive, path, body, { mimeType: JSONL_MIME });
+    this.#rememberSelfUpload(entry.id, body);
     return { entry, included, eventCount: merged.length };
+  }
+
+  /**
+   * Every event in a day file we wrote was applied locally before the write (authored
+   * events sit in the store; merged remote lines were applied when read), so a later pull
+   * can skip re-downloading the file when the remote bytes are still exactly ours. Without
+   * this, a flush of a few hundred events made the next pull spend minutes re-reading this
+   * device's own day files.
+   */
+  #rememberSelfUpload(fileId: string, body: string): void {
+    const record: SelfUpload = {
+      md5: md5Hex(Buffer.from(body, "utf8")),
+      lines: logicalLines(body).length,
+    };
+    this.#store.setCursor(selfUploadKey(fileId), JSON.stringify(record));
+  }
+
+  #selfUpload(fileId: string): SelfUpload | null {
+    const raw = this.#store.getCursor(selfUploadKey(fileId));
+    if (raw === null) return null;
+    try {
+      const value = JSON.parse(raw) as Partial<SelfUpload> | null;
+      if (
+        value !== null &&
+        typeof value === "object" &&
+        typeof value.md5 === "string" &&
+        value.md5.length > 0 &&
+        typeof value.lines === "number" &&
+        Number.isSafeInteger(value.lines) &&
+        value.lines >= 0
+      ) {
+        return { md5: value.md5, lines: value.lines };
+      }
+    } catch {
+      // A corrupt record just falls back to the normal read path.
+    }
+    return null;
   }
 
   async #pullInitial(): Promise<PullResult> {
@@ -473,6 +517,14 @@ export class ProtocolSync {
     const cursors: { fileId: string; next: number }[] = [];
     const errors: SyncLineError[] = [];
     for (const file of files) {
+      const self = this.#selfUpload(file.id);
+      if (self && self.md5 === file.md5Checksum) {
+        // Still byte-for-byte what this device wrote: nothing to read, and the line
+        // cursor moves to the uploaded count. A peer appending later changes the md5
+        // and the normal path reads from here on.
+        cursors.push({ fileId: file.id, next: self.lines });
+        continue;
+      }
       const object = await this.#drive.read(file.id);
       const text = object.bytes.toString("utf8");
       const readLines = initial ? 0 : this.#lineCursor(file.id);

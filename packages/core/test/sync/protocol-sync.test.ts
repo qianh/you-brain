@@ -13,7 +13,7 @@ import {
   type DeviceRecord,
   type Event,
 } from "@you-brain/protocol";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 
 import type { DrivePort, DrivePutInput, DriveUpdateOptions } from "../../src/drive/drive-port.js";
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
@@ -778,6 +778,64 @@ describe("protocol sync", () => {
         aliases: [],
       })).seq).toBe(2);
       expect(local.store.listEvents()).toHaveLength(2);
+    } finally {
+      local.close();
+    }
+  });
+
+  it("skips re-reading its own event file on pull but reads a peer's appended lines", async () => {
+    const drive = new MemoryDrive();
+    const local = openStore();
+    try {
+      const sync = new ProtocolSync({
+        drive,
+        store: local.store,
+        device: identity(DEVICE_A, "MacBook Air"),
+      });
+      await sync.append("topic.created", {
+        topicId: "topic-1",
+        name: "One",
+        aliases: [],
+      });
+      await sync.flush();
+      await sync.pull();
+      const readsBefore = spyOn(drive, "read");
+
+      await sync.append("topic.created", {
+        topicId: "topic-2",
+        name: "Two",
+        aliases: [],
+      });
+      const flushed = await sync.flush();
+      // The flush itself reads the file for its etag; only the pull must not.
+      readsBefore.mockClear();
+      await sync.pull();
+
+      // The flush made the day file "changed" again, but the bytes are still exactly
+      // what this device wrote: no download, and the line cursor sits at both events.
+      expect(readsBefore).not.toHaveBeenCalled();
+      const dayPath = flushed.files[0]?.path;
+      expect(dayPath).toBeDefined();
+      const entry = await drive.findByPath(dayPath!);
+      expect(entry).not.toBeNull();
+      expect(local.store.getCursor(`sync.lines.${entry!.id}`)).toBe("2");
+
+      // A writer outside this sync instance appends one line: md5 no longer matches,
+      // the pull downloads once and applies only the appended event.
+      const remote = await drive.readPath(dayPath!);
+      const appended = topic(DEVICE_A, 3, "2026-07-01T03:00:00.000Z", "topic-3", "Three");
+      await upsertByPath(
+        drive,
+        dayPath!,
+        `${remote!.bytes.toString("utf8")}${serializeEventsJsonl([appended])}`,
+        { mimeType: "application/jsonl" },
+      );
+      readsBefore.mockClear();
+      await sync.pull();
+
+      expect(readsBefore).toHaveBeenCalledTimes(1);
+      expect(local.store.getCursor(`sync.lines.${entry!.id}`)).toBe("3");
+      expect(local.store.getTopic("topic-3")).toMatchObject({ name: "Three" });
     } finally {
       local.close();
     }
