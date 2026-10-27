@@ -257,6 +257,6 @@ setInterval(() => {}, 1_000_000);
     );
     expect(stopped).toBeInstanceOf(Error);
     expect((stopped as Error).message).toContain("stop-before-key");
-    expect(filledLogs.some((line) => line.includes("API Key（存入钥匙串）"))).toBe(true);
+    expect(filledLogs.some((line) => line.includes("API Key（只存在本机"))).toBe(true);
   });
 });

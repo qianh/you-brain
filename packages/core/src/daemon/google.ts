@@ -28,7 +28,11 @@ export interface OpenGoogleDriveOptions {
   /** 文件密钥后端。不传时走系统钥匙串。 */
   secretBackend?: SecretBackend;
   /** 无界面服务器：固定回调端口、打印 SSH 隧道命令、不拉起浏览器。 */
-  headless?: { port?: number; describeTunnel?: (port: number) => string | null };
+  headless?: {
+    port?: number;
+    describeTunnel?: (port: number) => string | null;
+    onAuthorizationUrl?: (info: { url: string; tunnel: string | null }) => void;
+  };
   /** Passed through when resolving the official OAuth client. */
   env?: NodeJS.ProcessEnv;
   /** Aborting cancels an interactive login that is waiting for the browser. */
@@ -96,9 +100,13 @@ export function describeGoogleDriveOpenError(error: unknown): string {
   if (
     codes.includes("EADDRINUSE") ||
     message.includes("EADDRINUSE") ||
-    message.includes("本地授权端口被占用")
+    message.includes("本地授权端口被占用") ||
+    // 无界面固定端口的新文案（headless-oauth.ts）。
+    message.includes("被占用")
   ) {
-    return "本地授权端口被占用，请关闭占用 127.0.0.1 的程序后重试";
+    return message.includes("端口")
+      ? message
+      : "本地授权端口被占用，请关闭占用 127.0.0.1 的程序后重试";
   }
   if (/OAuth callback validation failed/u.test(message) || message.includes("回调校验失败")) {
     return "Google 登录回调校验失败";

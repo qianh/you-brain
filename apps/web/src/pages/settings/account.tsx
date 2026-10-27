@@ -97,6 +97,23 @@ export function AccountSection({
           {error ? <FieldError>{error}</FieldError> : null}
         </div>
       ) : null}
+      {status?.login ? (
+        <div className="settings-login-hint">
+          <p>{t("loginNeedsTunnel")}</p>
+          {status.login.tunnel ? (
+            <code className="settings-mono-line">{status.login.tunnel}</code>
+          ) : null}
+          <a
+            className="settings-textlink"
+            href={status.login.authorizationUrl}
+            target="_blank"
+            rel="noreferrer noopener"
+          >
+            {t("loginOpenUrl")}
+          </a>
+          <p className="settings-quiet">{t("loginTunnelHint")}</p>
+        </div>
+      ) : null}
       <ConfirmDialog
         open={confirm !== null}
         tone="danger"

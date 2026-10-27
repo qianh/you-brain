@@ -46,6 +46,7 @@
 - [x] **D1 M0 六项验证记录**：`scripts/m0/*`（`bun scripts/m0/<项>.ts`）；1/2/6 本机已跑（onnxruntime/sharp 在 vendor 与编译产物中可加载；.app 为 ad-hoc 签名且 `codesign --verify` 失败），3/5 需真实 Drive、4 需真实 CLI 额度，脚本已备未跑，结论写入 进度.md
 - [x] **D3 .app 整包 ad-hoc 签名**：`tauri.bundle.conf.json` 设 macOS `signingIdentity: "-"`，Tauri 先签 `.app` 再打 DMG，`codesign --verify --deep --strict` 通过，DMG 内的包 CDHash 与外面一致；`bundle.sh` 留有复查失败时整包重签并重建 DMG 的兜底。未公证，`spctl` 拒绝是预期；未启动应用验证 sidecar 加载 vendor
 - [x] **D2 进度文档更新**：`进度.md`、`产品说明.md`、`技术方案.md` 的状态按现状更新（2026-10-23）；此后每完成一项仍同步更新对应行
+- [ ] **D4 服务器端真机验收**：在真实 Linux 服务器上跑通 `install.sh` → `setup --server --oauth custom`（SSH 隧道完成一次真实 Google 授权）→ `service install` + `loginctl enable-linger` → 设为主设备 → 完成一次每日沉淀。同时在 GitHub Actions 手动触发 `server-linux.yml` 确认 tar.gz 可用
 
 ## F. 真实数据下暴露的问题（2026-10-25 ~ 26）
 
@@ -84,7 +85,7 @@
 
 - [!] **P0 真实环境验收**：已在真实 Drive 与真实模型上跑通采集 → 上传 → 提炼 → 话题册（见进度.md「真实环境实跑记录」）。仍未逐条走：会话继续后链接不变且内容更新、新会话读到编码版数字分身、MCP 搜索历史会话
 - [!] **LICENSE**：选 MIT 还是 Apache-2.0
-- [~] **README 与 GitHub About**：`README.md` 已补（2026-10-26）；GitHub About 与截图仍需你补
-- [!] **官方 OAuth 受限范围审核**：属于向 Google 申请的流程，不是代码
+- [~] **README 与 GitHub About**：`README.md` 已补（2026-10-27，含部署形态、服务器部署、授权方式）；新增 `docs/部署.md`。GitHub About 与截图仍需你补
+- [!] **官方 OAuth 受限范围审核**：属于向 Google 申请的流程，不是代码。当前分发策略是**每人自带 Google Cloud 项目**，不受测试用户数限制；只有要走「内置官方凭据、任何人装上就能用」时才需要审核，并需决定 scope 是否换 `auth/drive.file`（影响 E1 知识库的读取方式）
 - [!] **旧 `.orchestration` 提交历史是否改写**：公开仓库历史里留有编排文件，是否清理
 - [!] **手机端**：产品说明第 10 节明确排除手机端采集，保持不做，除非你改变范围

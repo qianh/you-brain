@@ -581,7 +581,7 @@ async function configureModel(
   let apiKey = flags.apiKey ?? "";
   if (!flags.apiKey && !flags.yes && preset.requiresApiKey) {
     requireTty("API Key", io);
-    apiKey = await io.ask("API Key（存入钥匙串）：", "");
+    apiKey = await io.ask("API Key（只存在本机，不会回显）：", "");
     if (!apiKey) throw new CliError("需要 API Key 才能测试模型连接");
   }
   const next = parseSharedConfig({

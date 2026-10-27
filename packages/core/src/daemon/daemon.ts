@@ -662,6 +662,8 @@ export class YouBrainDaemon {
   #driveKnown = false;
   /** Set while an interactive Google login waits for the browser. Only one runs at a time. */
   #loginFlow: Promise<string> | null = null;
+  /** 无界面登录时拿到的授权链接，等 #googleLogin 返回时一并交给界面。 */
+  #pendingAuthorization: { url: string; tunnel: string | null } | undefined;
   /** Set once a switch has signed out. Stop then moves the state database aside. */
   #resetStateOnStop = false;
   /** False until LLM setup has finished. Status omits the setup warning. */
@@ -2601,7 +2603,14 @@ export class YouBrainDaemon {
     }
     this.#loginFlow = this.#connectGoogle();
     try {
-      return { ok: true, message: await this.#loginFlow };
+      const message = await this.#loginFlow;
+      const authorization = this.#pendingAuthorization;
+      this.#pendingAuthorization = undefined;
+      return {
+        ok: true,
+        message,
+        ...(authorization ? { authorization } : {}),
+      };
     } finally {
       this.#loginFlow = null;
     }
@@ -2617,8 +2626,19 @@ export class YouBrainDaemon {
         platform: this.#platform,
         interactive: true,
         secretBackend: this.#secretBackend,
-        // 服务器上没有浏览器：固定回调端口，先打印 SSH 隧道命令。
-        ...(this.#local.role === "server" ? { headless: {} } : {}),
+        // 服务器上没有浏览器：固定回调端口，并把链接交给界面展示。
+        // daemon 的 stdout 只进 journalctl，直接写出去用户看不到。
+        ...(this.#local.role === "server"
+          ? {
+              headless: {
+                onAuthorizationUrl: (info: { url: string; tunnel: string | null }) => {
+                  this.#pendingAuthorization = info;
+                  // 登录接口会阻塞到授权完成，界面靠这次推送拿到链接。
+                  this.changes.publish("status", this.#clock.now().toISOString());
+                },
+              },
+            }
+          : {}),
         ...(this.#options.secrets ? { secrets: this.#options.secrets } : {}),
         // Stop cancels the browser wait, so the callback server does not hold the process open.
         signal: this.#abort.signal,
@@ -2828,7 +2848,7 @@ export class YouBrainDaemon {
         platform: this.#platform,
         backend: this.#secretBackend,
       });
-      if (!key) return { ok: false, message: "钥匙串里还没有这个服务商的 API Key。" };
+      if (!key) return { ok: false, message: "还没有这个服务商的 API Key。" };
     }
     try {
       const backend = await createLlmBackend({
@@ -3150,6 +3170,15 @@ export class YouBrainDaemon {
         pending: webPending,
       },
       warnings,
+      // 无界面登录时界面靠这个拿到授权链接；其余情况不出现。
+      ...(this.#pendingAuthorization
+        ? {
+            login: {
+              authorizationUrl: this.#pendingAuthorization.url,
+              tunnel: this.#pendingAuthorization.tunnel,
+            },
+          }
+        : {}),
     };
   }
 

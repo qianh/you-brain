@@ -145,7 +145,7 @@ program
   .option("--skip-brainhub", "不接管 BrainHub")
   .option("--provider <provider>", "模型 Provider")
   .option("--model <model>", "模型名")
-  .option("--api-key <key>", "模型 API Key，写入钥匙串")
+  .option("--api-key <key>", "模型 API Key，只存在本机（桌面钥匙串 / 服务器 0600 文件）")
   .option("--base-url <url>", "模型接口地址")
   .option("--source <id=path>", "采集来源，可重复", collect, [])
   .option("--integrations <ids>", "逗号分隔的客户端 id")

@@ -206,6 +206,29 @@
 .oauth-mode-option:has(input:checked) { color: var(--text); font-weight: 500; }
 .oauth-mode-option:has(input:disabled) { cursor: not-allowed; opacity: 0.55; }
 
+.settings-login-hint {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-sm);
+}
+.settings-login-hint p { margin: 0; color: var(--text-2); }
+.settings-mono-line {
+  max-width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-ctl);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  overflow-x: auto;
+  white-space: pre;
+}
+
 .settings-block-label {
   padding: var(--sp-3) var(--sp-4) 0;
   color: var(--text);

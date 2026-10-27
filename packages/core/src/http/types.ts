@@ -364,6 +364,15 @@ export interface StatusResponse {
     pending: number;
   };
   warnings: Array<{ code: string; message: string }>;
+  /**
+   * 无界面机器上正在进行的一次登录。登录接口会阻塞到用户完成授权，
+   * 所以授权链接只能从状态里拿，界面才能把它显示出来。
+   */
+  login?: {
+    authorizationUrl: string;
+    /** `ssh -L` 隧道命令；无法推断时为空。 */
+    tunnel: string | null;
+  };
 }
 
 export interface ReminderView {
@@ -502,6 +511,14 @@ export interface LlmTestResult {
 export interface GoogleLoginResult {
   ok: boolean;
   message: string;
+  /**
+   * 无界面机器上的授权链接与隧道命令。登录要等用户在别处完成，所以先返回这个，
+   * 界面自己展示；没有这个字段时说明浏览器已经在本机打开。
+   */
+  authorization?: {
+    url: string;
+    tunnel: string | null;
+  };
 }
 
 /** Response of POST /api/actions/google-logout and google-switch. `message` is shown as-is. */

@@ -38,6 +38,7 @@ describe("headless OAuth callback", () => {
     const original = console.log;
     console.log = (line: string) => lines.push(line);
     const loopback = await startHeadlessOAuthLoopback("expected-state", {
+      port: 0,
       printUrl: (url) => lines.push(url),
       describeTunnel: (port) => `ssh -N -L ${port}:127.0.0.1:${port} me@server`,
       timeoutMs: 1_000,
@@ -45,9 +46,10 @@ describe("headless OAuth callback", () => {
     try {
       const pending = capture(loopback.authorize("https://accounts.example/authorize"));
       await new Promise((resolve) => setTimeout(resolve, 20));
+      const port = new URL(loopback.redirectUri).port;
       expect(lines).toEqual([
         "这台机器没有浏览器。先在你自己的电脑上执行：",
-        `  ssh -N -L ${HEADLESS_CALLBACK_PORT}:127.0.0.1:${HEADLESS_CALLBACK_PORT} me@server`,
+        `  ssh -N -L ${port}:127.0.0.1:${port} me@server`,
         "保持这个终端窗口开着，然后在浏览器里打开下面的链接：",
         "https://accounts.example/authorize",
       ]);
@@ -64,6 +66,7 @@ describe("headless OAuth callback", () => {
     const original = console.log;
     console.log = (line: string) => lines.push(line);
     const loopback = await startHeadlessOAuthLoopback("expected-state", {
+      port: 0,
       printUrl: (url) => lines.push(url),
       describeTunnel: () => null,
       timeoutMs: 1_000,
@@ -83,6 +86,7 @@ describe("headless OAuth callback", () => {
   it("only opens a browser when the caller supplies one", async () => {
     let opened = 0;
     const loopback = await startHeadlessOAuthLoopback("expected-state", {
+      port: 0,
       printUrl: () => undefined,
       openUrl: async () => {
         opened += 1;
@@ -103,6 +107,7 @@ describe("headless OAuth callback", () => {
 
   it("resolves the code from a valid callback and rejects a wrong state", async () => {
     const loopback = await startHeadlessOAuthLoopback("expected-state", {
+      port: 0,
       printUrl: () => undefined,
       timeoutMs: 2_000,
     });
@@ -116,6 +121,7 @@ describe("headless OAuth callback", () => {
     }
 
     const second = await startHeadlessOAuthLoopback("state-2", {
+      port: 0,
       printUrl: () => undefined,
       timeoutMs: 2_000,
     });
@@ -142,5 +148,53 @@ describe("ssh tunnel hint", () => {
 
   it("falls back to a readable placeholder", () => {
     expect(describeSshTunnel(53682, {})).toBe("ssh -N -L 53682:127.0.0.1:53682 user@这台服务器");
+  });
+});
+
+describe("headless callback port conflicts", () => {
+  it("explains a busy fixed port instead of leaking EADDRINUSE", async () => {
+    const first = await startHeadlessOAuthLoopback("state-a", {
+      printUrl: () => undefined,
+      timeoutMs: 500,
+    });
+    const port = Number(new URL(first.redirectUri).port);
+    try {
+      await expect(
+        startHeadlessOAuthLoopback("state-b", {
+          port,
+          printUrl: () => undefined,
+          timeoutMs: 500,
+        }),
+      ).rejects.toThrow(/端口 \d+ 被占用/);
+    } finally {
+      await first.close();
+    }
+  });
+
+  it("hands the URL and tunnel to the caller instead of stdout", async () => {
+    const lines: string[] = [];
+    const seen: Array<{ url: string; tunnel: string | null }> = [];
+    const original = console.log;
+    console.log = (line: string) => lines.push(line);
+    const loopback = await startHeadlessOAuthLoopback("expected-state", {
+      port: 0,
+      printUrl: (url) => lines.push(url),
+      onAuthorizationUrl: (info) => seen.push(info),
+      timeoutMs: 1_000,
+    });
+    try {
+      const pending = capture(loopback.authorize("https://accounts.example/authorize"));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      // 界面自己会展示，stdout 保持干净。
+      expect(lines).toEqual([]);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.url).toBe("https://accounts.example/authorize");
+      expect(seen[0]?.tunnel).toContain("ssh -N -L");
+      await loopback.close();
+      await expect(pending).rejects.toThrow(/cancelled/);
+    } finally {
+      console.log = original;
+      await loopback.close();
+    }
   });
 });

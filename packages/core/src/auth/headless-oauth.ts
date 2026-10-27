@@ -18,6 +18,13 @@ export interface HeadlessLoopbackOptions extends OAuthLoopbackOptions {
   port?: number;
   /** 打印给用户的 SSH 隧道命令。返回 null 时不打印（例如已经在同一台机器上）。 */
   describeTunnel?: (port: number) => string | null;
+  /**
+   * 授权链接已经交给别的渠道展示（例如 Web 界面的“登录”按钮）时设为 false，
+   * 不再往 stdout 写。daemon 的 stdout 在服务器上只进 journalctl，用户看不到。
+   */
+  printHint?: boolean;
+  /** 把授权链接与隧道命令交给调用方展示，而不是只写 stdout。 */
+  onAuthorizationUrl?: (info: { url: string; tunnel: string | null }) => void;
 }
 
 export function headlessRedirectUri(port = HEADLESS_CALLBACK_PORT): string {
@@ -76,7 +83,18 @@ export async function startHeadlessOAuthLoopback(
     }
   });
   await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
+    server.once("error", (error: NodeJS.ErrnoException) => {
+      // 端口固定，重启或旧进程残留时很容易撞上。直接说清楚该怎么办。
+      if (error.code === "EADDRINUSE") {
+        reject(
+          new Error(
+            `本地授权端口 ${port} 被占用（可能上一个登录还没结束）。先关闭占用它的进程，或稍后重试。`,
+          ),
+        );
+        return;
+      }
+      reject(error);
+    });
     server.listen(port, "127.0.0.1", () => resolve());
   });
   const address = server.address();
@@ -97,12 +115,18 @@ export async function startHeadlessOAuthLoopback(
       if (signal?.aborted) onAbort();
       signal?.addEventListener("abort", onAbort, { once: true });
       const tunnel = (options.describeTunnel ?? describeSshTunnel)(address.port);
-      if (tunnel) {
-        console.log("这台机器没有浏览器。先在你自己的电脑上执行：");
-        console.log(`  ${tunnel}`);
-        console.log("保持这个终端窗口开着，然后在浏览器里打开下面的链接：");
+      const handedOff = options.onAuthorizationUrl !== undefined;
+      options.onAuthorizationUrl?.({ url: authorizationUrl, tunnel });
+      // 链接已经交给界面时不再写 stdout：服务器上 stdout 只进 journalctl，
+      // 重复写只会让人以为应该去看日志。
+      if (options.printHint !== false && !handedOff) {
+        if (tunnel) {
+          console.log("这台机器没有浏览器。先在你自己的电脑上执行：");
+          console.log(`  ${tunnel}`);
+          console.log("保持这个终端窗口开着，然后在浏览器里打开下面的链接：");
+        }
+        (options.printUrl ?? printHeadlessUrl)(authorizationUrl);
       }
-      (options.printUrl ?? printHeadlessUrl)(authorizationUrl);
       // 服务器上不要尝试拉起浏览器：没有图形会话，open 只会失败并刷一行噪音。
       if (options.openUrl) await options.openUrl(authorizationUrl).catch(() => undefined);
       timeout = setTimeout(
@@ -133,8 +157,9 @@ export async function startHeadlessOAuthLoopback(
 export function describeSshTunnel(port: number, env: NodeJS.ProcessEnv = process.env): string {
   const user = env.USER?.trim() || env.LOGNAME?.trim();
   const host = env.SSH_CONNECTION?.split(/\s+/u)[2]?.trim();
-  const target = [user, host].filter((part) => part && part.length > 0).join("@");
-  return `ssh -N -L ${port}:127.0.0.1:${port} ${target || "user@这台服务器"}`;
+  // 两个都拿到才拼出可用的命令。只拿到用户名时会变成 `ssh ... john`，反而误导。
+  const target = user && host ? `${user}@${host}` : "user@这台服务器";
+  return `ssh -N -L ${port}:127.0.0.1:${port} ${target}`;
 }
 
 function printHeadlessUrl(url: string): void {
