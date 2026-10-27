@@ -60,7 +60,8 @@ const CHUNK_UNITS = 10_000;
 const DAY_UNITS = 40_000;
 const TURN_CLIP = 1_500;
 /** Units of claims per rebuild merge. */
-const REBUILD_BATCH_UNITS = 8_000;
+const REBUILD_BATCH_UNITS = 11_000;
+const REBUILD_FIX_PASSES = 3;
 const PENDING_KEEP_DAYS = 60;
 const EVAL_INTERVAL_DAYS = 7;
 
@@ -262,14 +263,20 @@ export async function rebuildTwin(input: RebuildTwinInput): Promise<RebuildTwinR
   const files = await input.portrait.read();
   if (!files.full && !files.coding && !files.projects) throw new Error("没有现有数字分身，无法重建");
   const before = textsOf(files);
-  const chunks = TWIN_LAYERS.flatMap((layer) => chunkDocument(before[layer]));
-  log(`旧分身切成 ${chunks.length} 段，开始抽取主张`);
-  const claims = (
-    await extractClaims(input.llm, chunks, "legacy", projectNames(before.projects), (done) =>
-      log(`主张抽取 ${done}/${chunks.length}`),
-    )
-  ).map((claim) => ({ ...claim, day: input.day }));
-  await input.portrait.saveClaims({ name: `rebuild-${input.day}`, claims, pending: null });
+  const name = `rebuild-${input.day}`;
+  let claims = await input.portrait.claimsOf([name]);
+  if (claims.length > 0) {
+    log(`复用今天已抽取的 ${claims.length} 条主张`);
+  } else {
+    const chunks = TWIN_LAYERS.flatMap((layer) => chunkDocument(before[layer]));
+    log(`旧分身切成 ${chunks.length} 段，开始抽取主张`);
+    claims = (
+      await extractClaims(input.llm, chunks, "legacy", projectNames(before.projects), (done) =>
+        log(`主张抽取 ${done}/${chunks.length}`),
+      )
+    ).map((claim) => ({ ...claim, day: input.day }));
+    await input.portrait.saveClaims({ name, claims, pending: null });
+  }
   const usable = claims.filter((claim) => claim.confidence === "high");
   log(`抽到 ${claims.length} 条主张，其中高置信 ${usable.length} 条`);
 
@@ -296,6 +303,13 @@ export async function rebuildTwin(input: RebuildTwinInput): Promise<RebuildTwinR
       texts = await fixOnce(input.llm, texts, check.blocking);
     }
     if (index === 0) changelog.push(...merged.changelog.slice(0, 2));
+  }
+  // Squeezing some 1500 rules into the budget can take more than the one pass finishTwin gives.
+  for (let pass = 1; pass <= REBUILD_FIX_PASSES; pass += 1) {
+    const check = checkTwin(texts, new Set(TWIN_LAYERS));
+    if (check.blocking.length === 0) break;
+    log(`收尾修正第 ${pass} 轮：${check.blocking.join("；")}`);
+    texts = await fixOnce(input.llm, texts, check.blocking);
   }
   const outcome = await finishTwin(input.llm, before, texts, { guardShrink: false });
   if ("skip" in outcome) throw new Error(outcome.skip);

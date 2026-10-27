@@ -196,7 +196,7 @@ ${TWIN_LAYOUT}
 2. 门槛：full 和 coding 只收高置信主张：confidence 为 high，或者同一意思在「待定主张」里出现在另一天。单次纠正只进 projects，除非用户说了以后都 / 一律 / 必须。「未应用的纠正」一律视为高置信，可以改任一层。其余低置信主张不写进任何层。
 3. 一条规则只住一处：写之前在三层里搜同义说法；已有就原地改写那一句，删掉被取代的旧说法；禁止在别的节或别的层再写一遍。原话样本和像 / 不像是举例，不得重抄规则正文。
 4. ${TWIN_WRITING}
-5. 预算：full 小于 12288 字节，coding 小于 12288 字节，projects 每个小节小于 4096 字节。常驻层超预算时合并同义规则、把项目专属内容下放到 projects、删掉已被取代的说法；不准删掉仍然成立的规则。项目小节超预算时只合并同义表述、按子主题拆成新小节。
+5. 预算：full 小于 12288 字节，coding 小于 12288 字节，projects 每个小节小于 4096 字节。常驻层超预算时依次：合并同义规则、删掉例子和解释、把项目专属内容下放到 projects、删掉已被取代的说法；仍然超预算才删最少触发、影响最小的细则。项目小节超预算时只合并同义表述、按子主题拆成新小节。
 6. 和本次主张、纠正无关的小节不要输出。
 
 ${TWIN_EDIT_FORMAT}`;
@@ -258,9 +258,16 @@ export function buildTwinMergePrompt(input: TwinMergePromptInput): {
   return { system: TWIN_MERGE_SYSTEM_PROMPT, user, includedCorrectionIds: corrections.ids };
 }
 
-export const TWIN_FIX_SYSTEM_PROMPT = `你是 you-brain 的数字分身维护者。下面的三层数字分身没有通过写入前检查。只处理列出的问题，不引入新内容，不删仍然成立的规则。只输出一个 JSON 对象，不要 Markdown，不要解释。
+export const TWIN_FIX_SYSTEM_PROMPT = `你是 you-brain 的数字分身维护者。下面的三层数字分身没有通过写入前检查。只处理列出的问题，不引入新内容。只输出一个 JSON 对象，不要 Markdown，不要解释。
 
 ${TWIN_LAYOUT}
+
+超预算时按下面的顺序压缩，直到低于问题里给出的字节数，每一步做完再估一次大小：
+1. 合并同义或重叠的规则，删掉被取代的旧说法。
+2. 删掉例子、解释和理由，只留规则本身。
+3. 只对某个项目、系统或业务成立的规则移到 projects 对应小节（同时输出 projects 的 edits）。
+4. 仍然超预算，删掉最少触发、影响最小的细则。
+超预算的层，把需要压缩的小节按完整新内容输出；参考「各节字节数」先压最大的节。没有超预算的层不删仍然成立的规则。
 
 ${TWIN_WRITING}
 
@@ -272,6 +279,10 @@ export function buildTwinFixPrompt(input: {
 }): { system: string; user: string } {
   const user = [
     ...docBlock(input.docs),
+    "## 各节字节数",
+    ...sectionSizes("full", input.docs.full),
+    ...sectionSizes("coding", input.docs.coding),
+    "",
     "## 需要修正的问题",
     input.problems.map((problem) => `- ${problem}`).join("\n"),
     "",
@@ -354,6 +365,13 @@ export function buildTwinEvalJudgePrompt(input: {
     JSON.stringify(TWIN_EVAL_JUDGE_JSON_SCHEMA),
   ].join("\n");
   return { system: TWIN_EVAL_JUDGE_SYSTEM_PROMPT, user };
+}
+
+function sectionSizes(layer: string, text: string): string[] {
+  return text
+    .split(/^(?=## )/mu)
+    .filter((piece) => piece.startsWith("## "))
+    .map((piece) => `- ${layer} ${piece.split("\n", 1)[0]}：${Buffer.byteLength(piece, "utf8")} 字节`);
 }
 
 function docBlock(docs: { full: string; coding: string; projects: string }): string[] {

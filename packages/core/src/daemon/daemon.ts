@@ -107,6 +107,7 @@ import {
   mergeSuggestionLines,
   parseMergeSuggestions,
   readConsolidateLease,
+  shiftDateKey,
   writeConsolidateLease,
   MERGE_SUGGESTIONS_CURSOR,
   type ConsolidationState,
@@ -3267,13 +3268,15 @@ export class YouBrainDaemon {
     const store = this.#store;
     if (!drive || !store) return [];
     const timeZone = this.#roles.timezone;
+    // A 03:00 run would miss yesterday's evening without the extra day; the turn cursor skips repeats.
+    const since = shiftDateKey(day, -1);
     const rows = store
       .listSessions()
       .filter(
         (session) =>
           session.fileId !== null &&
           session.updatedAt !== null &&
-          localDayKey(new Date(session.updatedAt), timeZone) >= day,
+          localDayKey(new Date(session.updatedAt), timeZone) >= since,
       )
       .sort((left, right) => (left.updatedAt ?? "").localeCompare(right.updatedAt ?? ""));
     const sessions: Array<{ sessionKey: string; title: string; turns: string[] }> = [];

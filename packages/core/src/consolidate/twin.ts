@@ -257,15 +257,19 @@ export interface TwinCheck {
   sizes: { full: number; coding: number; maxSection: number };
 }
 
+/** Asks for 90% of the budget so the next merge has room. */
+function overBudget(layer: TwinLayer, size: number, budget: number): string {
+  const target = Math.floor((budget * 0.9) / 100) * 100;
+  return `${layer} 为 ${size} 字节，超过 ${budget} 字节预算，要压到 ${target} 字节以内`;
+}
+
 export function checkTwin(texts: TwinTexts, changed: ReadonlySet<TwinLayer>): TwinCheck {
   const blocking: string[] = [];
   const warnings: string[] = [];
   const full = byteLength(texts.full);
   const coding = byteLength(texts.coding);
-  if (full >= TWIN_BUDGET.full) blocking.push(`full 为 ${full} 字节，超过 ${TWIN_BUDGET.full} 字节预算`);
-  if (coding >= TWIN_BUDGET.coding) {
-    blocking.push(`coding 为 ${coding} 字节，超过 ${TWIN_BUDGET.coding} 字节预算`);
-  }
+  if (full >= TWIN_BUDGET.full) blocking.push(overBudget("full", full, TWIN_BUDGET.full));
+  if (coding >= TWIN_BUDGET.coding) blocking.push(overBudget("coding", coding, TWIN_BUDGET.coding));
   for (const layer of TWIN_LAYERS) {
     const hits = [...texts[layer].matchAll(LINT)].map((match) => match[0]);
     if (hits.length > 0) blocking.push(`${layer} 出现禁用的记账措辞：${[...new Set(hits)].join("、")}`);

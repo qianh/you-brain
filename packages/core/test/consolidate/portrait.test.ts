@@ -708,6 +708,44 @@ describe("portrait eval", () => {
 });
 
 describe("portrait rebuild", () => {
+  it("reuses today's extracted claims and keeps fixing until the budget holds", async () => {
+    const box = await world();
+    await seed(box.drive, FULL, "# 旧分身\nv1.3.11 · 2026-10-27\n\n## 1. 行为\n旧规则。\n");
+    await seed(box.drive, CODING, "# 旧编码\nv1.3.11 · 2026-10-27\n\n## 编码\n旧编码规则。\n");
+    await seed(
+      box.drive,
+      `digital-twin/claims/rebuild-${LOCAL_DAY}.jsonl`,
+      `${JSON.stringify({ ...highCoding, day: LOCAL_DAY })}\n`,
+    );
+    const bloated = { layer: "coding", heading: "## 3. 实现原则", text: `## 3. 实现原则\n${"一条很长的规则。".repeat(600)}` };
+    const fixes: unknown[] = [
+      { ...noEdits, edits: [{ ...bloated, text: `## 3. 实现原则\n${"一条很长的规则。".repeat(560)}` }] },
+      { ...noEdits, edits: [{ ...bloated, text: `## 3. 实现原则\n${"一条很长的规则。".repeat(530)}` }] },
+      { ...noEdits, edits: [{ ...bloated, text: "## 3. 实现原则\n交付前先跑测试。" }] },
+    ];
+    const lines: string[] = [];
+    const result = await rebuildTwin({
+      llm: fakeBackend(async (request) => {
+        box.requests.push(request);
+        if (request.system === TWIN_FIX_SYSTEM_PROMPT) return JSON.stringify(fixes.shift());
+        return model({ merge: { bump: "major", changelog: [], edits: [bloated] } })(request);
+      }),
+      portrait: box.portrait,
+      day: LOCAL_DAY,
+      log: (line) => lines.push(line),
+    });
+    expect(result.version).toBe("2.0.0");
+    expect(box.requests.some((request) => request.system === TWIN_CLAIMS_SYSTEM_PROMPT)).toBe(false);
+    expect(lines[0]).toBe("复用今天已抽取的 1 条主张");
+    const fixRequests = box.requests.filter((request) => request.system === TWIN_FIX_SYSTEM_PROMPT);
+    expect(fixRequests).toHaveLength(3);
+    expect(fixRequests[0]?.user).toContain("- coding ## 3. 实现原则：");
+    expect(fixRequests[0]?.user).toContain("超过 12288 字节预算，要压到 11000 字节以内");
+    expect(lines.filter((line) => line.startsWith("收尾修正第"))).toHaveLength(2);
+    expect(await textAt(box.drive, CODING)).toContain("## 3. 实现原则\n交付前先跑测试。");
+  });
+
+
   it("rebuilds the three layers from the old files with a major bump", async () => {
     const box = await world();
     const oldFull = `# 旧分身\nv1.3.11 · 2026-10-27 · derived\n\n## 1. 行为\n${"旧规则。".repeat(50)}\n`;

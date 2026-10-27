@@ -281,7 +281,7 @@ describe("consolidation daemon", () => {
     expect(topics.topics.every((topic) => topic.summary === "")).toBe(true);
   });
 
-  it("feeds the day's sessions into the twin during a manual run", async () => {
+  it("feeds yesterday's sessions into a run after midnight", async () => {
     const dirs = await trackDirs();
     const clock = testClock();
     const drive = new MemoryDrive({ now: () => clock.now() });
@@ -336,7 +336,7 @@ describe("consolidation daemon", () => {
       (
         await putRoles(daemon, {
           mainDevice: id,
-          consolidation: { enabled: true, time: "23:00" },
+          consolidation: { enabled: false, time: "03:00" },
         })
       ).status,
     ).toBe(200);
@@ -347,11 +347,17 @@ describe("consolidation daemon", () => {
     // Uploading is a sync step now; the topic the consolidation rewrites comes from the
     // refine pass that follows.
     await refineNow(clock, daemon);
+    // The session happened on 10-18; the run lands on 10-19 at 01:00, before its 03:00 slot.
+    await clock.advance(15 * 60 * 60 * 1000);
+    await daemon.settled();
+    expect(
+      (await putRoles(daemon, { mainDevice: id, consolidation: { enabled: true, time: "03:00" } })).status,
+    ).toBe(200);
 
     const response = await postConsolidate(daemon, {});
     expect(response.status).toBe(200);
     const body = (await response.json()) as ConsolidateActionResult;
-    expect(body.day).toBe("2026-10-18");
+    expect(body.day).toBe("2026-10-19");
     expect(body.steps).toEqual([
       { id: "topic_summaries", ok: true },
       { id: "merge_suggestions", ok: true },
@@ -362,11 +368,11 @@ describe("consolidation daemon", () => {
     expect(claimInputs.join("\n")).toContain("Plan the launch checklist");
     expect(claimInputs.join("\n")).not.toContain("先列一个清单。");
     const written = (await drive.readPath("digital-twin/JOHN-TWIN-coding.md"))?.bytes.toString("utf8");
-    expect(written?.split("\n")[1]).toBe("版本 v2.1.0 · 2026-10-18 · 变更见 changelog");
+    expect(written?.split("\n")[1]).toBe("版本 v2.1.0 · 2026-10-19 · 变更见 changelog");
     expect(written).toContain("发布前先列清单。");
     expect((await drive.readPath("digital-twin/JOHN-DIGITAL-TWIN-latest.md"))?.bytes.toString("utf8")).toBe(full);
     expect(
-      (await drive.readPath("digital-twin/consolidate-backup/JOHN-TWIN-coding-2026-10-18.md"))?.bytes.toString(
+      (await drive.readPath("digital-twin/consolidate-backup/JOHN-TWIN-coding-2026-10-19.md"))?.bytes.toString(
         "utf8",
       ),
     ).toBe(coding);
