@@ -290,3 +290,16 @@
 .today-guide.is-mini .today-guide-summary > svg { flex: none; color: var(--text-3); }
 .today-guide.is-mini .today-guide-summary:hover { background: var(--hover); }
 .today-guide.is-mini .today-guide-summary:focus-visible { outline-offset: -2px; }
+
+/* Visible only while a catch-up is running: tells the user why the counts lag. */
+.today-backfill {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  margin: var(--sp-3) 0 0;
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+.today-backfill-label { font-weight: 600; }

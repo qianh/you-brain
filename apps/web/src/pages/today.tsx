@@ -49,6 +49,10 @@ export function TodayPage() {
   const offline = !loading && today === null && isUnreachableError(error);
   const stats = summarizeToday(sessions);
   const syncedAt = status?.sync.lastSyncAt ?? null;
+  // A large catch-up (first run, days signed out) otherwise looks like nothing is happening.
+  const backfillUpload = status?.upload?.pending ?? 0;
+  const backfillParsed = status?.capture?.parsed ?? 0;
+  const backfill = backfillUpload > 0 || backfillParsed > 0;
   const relativeSync = useRelativeTime(syncedAt, language, timeZone);
   const syncValue = syncedAt ? relativeSync : t("neverSynced");
   const steps =
@@ -155,6 +159,17 @@ export function TodayPage() {
                   onSelect={() => navigate("/status")}
                 />
               </StatGrid>
+              {backfill ? (
+                <p className="today-backfill" role="status">
+                  <span className="today-backfill-label">{t("todayBackfillLabel")}</span>
+                  {backfillUpload > 0 ? (
+                    <span>{t("todayBackfillUpload", { count: backfillUpload })}</span>
+                  ) : null}
+                  {backfillParsed > 0 ? (
+                    <span>{t("todayBackfillParsed", { count: backfillParsed })}</span>
+                  ) : null}
+                </p>
+              ) : null}
             </Card>
             {reminders.length > 0 ? (
               <div className="today-reminders">
