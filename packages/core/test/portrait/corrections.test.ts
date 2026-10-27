@@ -130,18 +130,19 @@ describe("portrait correction views", () => {
     ]);
   });
 
-  it("keeps unapplied full corrections oldest-first for consolidation", () => {
+  it("keeps unapplied corrections for every layer oldest-first for consolidation", () => {
     const events = [
       correction("later", at(9), "full", "后写的", 1),
       correction("earlier", at(1), "full", "先写的", 2),
       correction("earlier", at(8), "full", "同一条的后写", 3),
-      correction("brief", at(0), "brief", "精简不用管", 4),
+      correction("coding", at(0), "coding", "编码层也收", 4),
       correction("done", at(2), "full", "已经用过", 5),
       applied("done", at(3), "old.md", 6),
     ];
     expect(pendingCorrections(events)).toEqual([
-      { correctionId: "earlier", section: "语气", text: "先写的" },
-      { correctionId: "later", section: "语气", text: "后写的" },
+      { correctionId: "coding", variant: "coding", section: "语气", text: "编码层也收" },
+      { correctionId: "earlier", variant: "full", section: "语气", text: "先写的" },
+      { correctionId: "later", variant: "full", section: "语气", text: "后写的" },
     ]);
   });
 });

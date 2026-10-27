@@ -74,6 +74,16 @@
 - [ ] **F10 pull 在大量上传后变慢**：一次 pull 约 2-3 分钟，因为要消化自己刚上传的数百个变更；与上传分时后能跑，但 `lastSync` 周期仍是 2 分钟而非 1 分钟
 - [ ] **F11 网页会话队列消化慢**：`web.pending` 长期在 200 上下，每个会话一次模型调用
 
+## G. 数字分身三层提炼（规格见 [数字分身提炼.md](./数字分身提炼.md)，取代外部例程「数字分身 inbox 提炼」）
+
+- [!] **G0 迁移准备**：不再手工上传草稿，改由 `you-brain portrait-rebuild` 从 Drive 现有分身重建三层（v2.0.0，旧文件先备份到 `consolidate-backup/`）；Drive 上 `shared.json` 的 `portrait.variants` 已去掉 `brief`、加上 `projects`；待办：停掉外部例程「数字分身·日增量」
+- [x] **G1 变体与 skill**：`DEFAULT_PORTRAIT_VARIANTS` 去掉 `brief`、加上 `projects`，同步 `packages/cli/src/maintenance.ts`、`packages/cli/src/setup.ts`；`skills/you-brain-portrait/SKILL.md` 改为 `full` / `coding` / `projects`
+- [x] **G2 主张抽取**：输入改为当天会话里用户本人的发言加未应用纠正；抽出的主张带 `layer` 与 `confidence`，写 `digital-twin/claims/YYYY-MM-DD.jsonl`，拿不准的写 `claims/pending.jsonl`（规格第 3 节）
+- [x] **G3 三层合并**：`portrait` 步骤一次处理三个变体；`PORTRAIT_SYSTEM_PROMPT` 换成规格第 4 节的规则；纠正可以指向任一层
+- [x] **G4 写入前检查**：预算、记账措辞、敏感信息扫描、一轮修正、忽略版本行的变化判定、三层共用版本号、`changelog-latest.md`（规格第 5 节）
+- [x] **G5 变化通知**：`full` 或 `coding` 有实质变化时经现有提醒渠道发一句话加 Drive 链接（规格第 6 节）
+- [~] **G6 保真评测与周月对比**：每周用 `digital-twin/eval/probes.jsonl` 只读 `full` + `coding` 作答并判分，得分进 changelog 与周回顾（规格第 7、8 节）；周评测已实现，月度对比未做
+
 ## E. 后续功能（不在第一期，第一期以当前功能为主）
 
 - [!] **E1 知识库（Obsidian vault）**：作为会话之外的第二类数字资产接入，术语见 `CONTEXT.md`

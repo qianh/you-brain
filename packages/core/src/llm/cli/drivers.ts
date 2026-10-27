@@ -192,6 +192,9 @@ const grokDriver: CliDriver = {
         "--no-memory",
         "--no-auto-update",
         "--verbatim",
+        // Without this grok uses the user's global default, which can be xhigh and runs ~3x slower.
+        "--effort",
+        "low",
         "--cwd",
         ctx.cwd,
         ...modelArgs(ctx.model, "-m"),

@@ -1,7 +1,11 @@
 import {
   MERGE_SUGGESTIONS_JSON_SCHEMA,
-  PORTRAIT_JSON_SCHEMA,
   TOPIC_SUMMARY_JSON_SCHEMA,
+  TWIN_CLAIMS_JSON_SCHEMA,
+  TWIN_EDITS_JSON_SCHEMA,
+  TWIN_EVAL_ANSWERS_JSON_SCHEMA,
+  TWIN_EVAL_JUDGE_JSON_SCHEMA,
+  TWIN_PROBES_JSON_SCHEMA,
 } from "./schema.js";
 import { clipUnits, textUnits } from "./text.js";
 
@@ -126,112 +130,277 @@ export function buildMergeSuggestionsPrompt(input: {
   return { system: MERGE_SUGGESTIONS_SYSTEM_PROMPT, user };
 }
 
-export const PORTRAIT_SYSTEM_PROMPT = `你是 you-brain 的数字分身维护者。根据当天的话题变化和尚未应用的纠正，决定是否更新 full 变体。只输出一个 JSON 对象，不要 Markdown，不要解释。
+const TWIN_LAYOUT = `三层分工（每条规则只能住在一层）：
+- full 人格分身：只写换项目、换话题也成立的东西。固定 11 节：1 一句话 / 2 身份 / 3 价值排序 / 4 思维方式 / 5 说话方式（真实原话样本最多 10 条）/ 6 像他与不像他（最多 12 对）/ 7 对助手的期待 / 8 绝对不做（最多 10 条）/ 9 品味 / 10 世界观（标明探索性，不当指令）/ 11 生活（低权重）。
+- coding 编码分身：只写所有代码仓库都通用的编码行为、技术栈默认、AI 工具与本机环境。
+- projects 项目决定：按「## 项目名」分小节，只写该项目已锁定的口径和决定；一个项目内容多时拆成「## 项目 · 子主题」。`;
+
+const TWIN_WRITING = `写法：
+- 一条规则一句话，写成指令（做什么 / 不做什么），不写来历和原因；完整的中文短句，不用分号串十几个子句，不用自造缩写；专有名词和标识符保留英文。
+- 正文禁止出现：版本说明、来源、样本数、证据 ID、「待确认」「不升格」「两条都有效」这类记账措辞；否定式身份事实（直接不写）；把用户举的例子写成规则；任何密钥、token、密码、手机号、邮箱、身份信息、主机名、IP、完整本机路径。`;
+
+const TWIN_EDIT_FORMAT = `输出格式：
+- 只输出需要改动的小节。edits 每项是 {layer, heading, text}：heading 是该小节在当前文件里的「## 」行原文；text 是改完后该小节的完整内容，从「## 」行开始，可以改标题；删除整节时 text 为空字符串；新增小节时 heading 写新小节的「## 」行。
+- 不要输出文件开头的标题行、版本行和编码分身的项目索引行，这些由程序维护。
+- bump：只改措辞或删重复为 patch，新增或改变规则为 minor，结构调整为 major。
+- changelog 用中文短句列出改了什么，每条写明层和小节，最多 8 条。没有改动时 edits 和 changelog 都是空数组。
+- JSON 键名保持英文。`;
+
+export const TWIN_CLAIMS_SYSTEM_PROMPT = `你是 you-brain 的数字分身主张抽取器。从输入里抽出关于用户本人的主张：他是谁、看重什么、怎么想、怎么说话、要助手怎么做、编码习惯、某个项目里定下的口径。只输出一个 JSON 对象，不要 Markdown，不要解释。
 
 规则：
-1. 保持原有结构、标题、格式和语气。
-2. 只在当天证据支持的地方增改，不要凭空编造。
-3. 每条纠正都必须体现在新文本里。
-4. 与当天无关的内容原样保留。
-5. 没有值得更新的内容时 changed 为 false，portrait 可以是空字符串。
-6. changed 为 true 时 portrait 是完整的新文本，不是差异片段。
-7. JSON 键名保持英文。`;
+1. layer：
+   - persona：换项目、换话题也成立的身份、价值排序、思维和说话方式、品味、生活。说话方式的真实原话可以原样作为一条 persona 主张，加引号。
+   - coding：所有代码仓库都适用的工程行为、技术栈默认、AI 工具与本机环境约束。
+   - project：只对某个系统、仓库、业务成立；project 填项目名，优先沿用输入里给出的已有项目名。
+   - 一次性操作、临时状态、设备和网络的琐碎细节、试用信号、他人或群聊的观点：不要输出。
+2. 每条主张一句完整中文，写成指令或陈述，不写来历；专有名词和标识符保留英文。
+3. 不要把用户举的例子写成规则；不要输出否定式身份事实；不要输出任何密钥、token、密码、手机号、邮箱、主机名、IP、完整本机路径。
+4. 同一意思只输出一条。没有主张时输出空数组。
+5. JSON 键名保持英文。`;
 
-export interface PortraitPromptTopic {
-  name: string;
-  summary: string;
-  titles: readonly string[];
-  conclusions: readonly string[];
+const CLAIMS_FROM_SESSIONS = `输入是用户本人在 AI 会话里的发言。只看他自己说的话；粘贴进来的文档、日志、别人的观点都不算。
+confidence：他明确说「以后都 / 一律 / 必须 / 不要再」，或者是在纠正助手的做法 → high；其余 → low。`;
+
+const CLAIMS_FROM_LEGACY = `输入是旧版数字分身的一段原文，里面的规则都已经由用户确认过。
+confidence：一律 high；只有标了待确认、试用、暂定的内容才是 low。版本说明、来源、证据 ID、样本数这类记账内容不要抽。尽量保留所有仍然成立的规则，不要因为看起来琐碎就丢掉项目口径。`;
+
+export interface TwinClaimPromptInput {
+  source: "sessions" | "legacy";
+  projects: readonly string[];
+  text: string;
 }
 
-export interface PortraitPromptCorrection {
+export function buildTwinClaimsPrompt(input: TwinClaimPromptInput): { system: string; user: string } {
+  const user = [
+    input.source === "sessions" ? CLAIMS_FROM_SESSIONS : CLAIMS_FROM_LEGACY,
+    "",
+    "## 已有项目名",
+    input.projects.length === 0 ? "（无）" : input.projects.join("、"),
+    "",
+    "## 输入",
+    input.text.trim() === "" ? "（无）" : input.text,
+    "",
+    "## 输出 JSON schema",
+    JSON.stringify(TWIN_CLAIMS_JSON_SCHEMA),
+  ].join("\n");
+  return { system: TWIN_CLAIMS_SYSTEM_PROMPT, user };
+}
+
+export const TWIN_MERGE_SYSTEM_PROMPT = `你是 you-brain 的数字分身维护者。把新主张和纠正合并进三层数字分身。目标是蒸馏：分身越短、越准越好。只输出一个 JSON 对象，不要 Markdown，不要解释。
+
+${TWIN_LAYOUT}
+
+合并规则：
+1. 分流：换项目、换话题也成立的人格、价值、说话特征 → full；所有代码仓库都适用的工程行为或工具约束 → coding；只对某个系统、仓库、业务成立 → projects 的对应小节（没有就新建）；一次性操作、临时状态、设备和网络的琐碎细节、他人或群聊的观点、试用信号 → 丢弃。主张自带的 layer 只是参考，按这条重新判断。
+2. 门槛：full 和 coding 只收高置信主张：confidence 为 high，或者同一意思在「待定主张」里出现在另一天。单次纠正只进 projects，除非用户说了以后都 / 一律 / 必须。「未应用的纠正」一律视为高置信，可以改任一层。其余低置信主张不写进任何层。
+3. 一条规则只住一处：写之前在三层里搜同义说法；已有就原地改写那一句，删掉被取代的旧说法；禁止在别的节或别的层再写一遍。原话样本和像 / 不像是举例，不得重抄规则正文。
+4. ${TWIN_WRITING}
+5. 预算：full 小于 12288 字节，coding 小于 12288 字节，projects 每个小节小于 4096 字节。常驻层超预算时合并同义规则、把项目专属内容下放到 projects、删掉已被取代的说法；不准删掉仍然成立的规则。项目小节超预算时只合并同义表述、按子主题拆成新小节。
+6. 和本次主张、纠正无关的小节不要输出。
+
+${TWIN_EDIT_FORMAT}`;
+
+export interface TwinPromptClaim {
+  layer: string;
+  project: string;
+  confidence: string;
+  text: string;
+  day?: string;
+}
+
+export interface TwinPromptCorrection {
   correctionId: string;
+  variant: string;
   section: string;
   text: string;
 }
 
-export interface PortraitPromptInput {
+export interface TwinMergePromptInput {
   day: string;
-  current: string;
-  topics: readonly PortraitPromptTopic[];
-  corrections: readonly PortraitPromptCorrection[];
+  docs: { full: string; coding: string; projects: string };
+  claims: readonly TwinPromptClaim[];
+  pending: readonly TwinPromptClaim[];
+  corrections: readonly TwinPromptCorrection[];
 }
 
-const PORTRAIT_NAME_CLIP = 80;
-const PORTRAIT_SUMMARY_CLIP = 400;
-const PORTRAIT_TITLE_CLIP = 80;
-const PORTRAIT_CONCLUSION_CLIP = 160;
-const PORTRAIT_SECTION_CLIP = 40;
-const PORTRAIT_CORRECTION_CLIP = 240;
-/** Cap on the day's evidence. The existing portrait is sent in full. */
-export const PORTRAIT_EVIDENCE_LIMIT = 6_000;
+const TWIN_CLAIM_CLIP = 400;
+const TWIN_SECTION_CLIP = 40;
+const TWIN_CORRECTION_CLIP = 240;
+/** Cap on claims plus corrections sent with one merge. The three layers are sent in full. */
+export const TWIN_EVIDENCE_LIMIT = 12_000;
+/** Cap on earlier pending claims shown for recurrence. */
+export const TWIN_PENDING_LIMIT = 6_000;
 
-export function buildPortraitPrompt(input: PortraitPromptInput): {
+export function buildTwinMergePrompt(input: TwinMergePromptInput): {
   system: string;
   user: string;
   includedCorrectionIds: string[];
 } {
-  const included = packCorrections(input.corrections);
-  const correctionUnits = textUnits(included.text);
-  const separator = included.text === "" ? 0 : 2;
-  const topicBudget = Math.max(0, PORTRAIT_EVIDENCE_LIMIT - correctionUnits - separator);
-  const topics = clipUnits(formatTopics(input.topics), topicBudget);
+  const corrections = packCorrections(input.corrections, TWIN_EVIDENCE_LIMIT);
+  const claimBudget = Math.max(0, TWIN_EVIDENCE_LIMIT - textUnits(corrections.text));
   const user = [
     `日期：${input.day}`,
     "",
-    "## 当前数字分身",
-    input.current.trim() === "" ? "（空）" : input.current,
+    ...docBlock(input.docs),
+    "## 新主张",
+    packClaims(input.claims, claimBudget) || "（无）",
     "",
-    "## 当天变化",
-    topics.trim() === "" ? "（无）" : topics,
+    "## 待定主张（之前几天的低置信主张）",
+    packClaims(input.pending, TWIN_PENDING_LIMIT) || "（无）",
     "",
     "## 未应用的纠正",
-    included.text === "" ? "（无）" : included.text,
+    corrections.text === "" ? "（无）" : corrections.text,
     "",
     "## 输出 JSON schema",
-    JSON.stringify(PORTRAIT_JSON_SCHEMA),
+    JSON.stringify(TWIN_EDITS_JSON_SCHEMA),
   ].join("\n");
-  return { system: PORTRAIT_SYSTEM_PROMPT, user, includedCorrectionIds: included.ids };
+  return { system: TWIN_MERGE_SYSTEM_PROMPT, user, includedCorrectionIds: corrections.ids };
 }
 
-function formatTopics(topics: readonly PortraitPromptTopic[]): string {
-  return topics
-    .map((topic) => {
-      const titles =
-        topic.titles.length === 0
-          ? "（无）"
-          : topic.titles.map((title) => clipUnits(oneLine(title), PORTRAIT_TITLE_CLIP)).join("、");
-      const conclusions =
-        topic.conclusions.length === 0
-          ? "（无）"
-          : topic.conclusions
-              .map((item) => clipUnits(oneLine(item), PORTRAIT_CONCLUSION_CLIP))
-              .join("；");
-      return [
-        `### ${clipUnits(oneLine(topic.name), PORTRAIT_NAME_CLIP)}`,
-        `概要：${clipUnits(oneLine(topic.summary), PORTRAIT_SUMMARY_CLIP)}`,
-        `当天会话：${titles}`,
-        `当天结论：${conclusions}`,
-      ].join("\n");
-    })
-    .join("\n\n");
+export const TWIN_FIX_SYSTEM_PROMPT = `你是 you-brain 的数字分身维护者。下面的三层数字分身没有通过写入前检查。只处理列出的问题，不引入新内容，不删仍然成立的规则。只输出一个 JSON 对象，不要 Markdown，不要解释。
+
+${TWIN_LAYOUT}
+
+${TWIN_WRITING}
+
+${TWIN_EDIT_FORMAT}`;
+
+export function buildTwinFixPrompt(input: {
+  docs: { full: string; coding: string; projects: string };
+  problems: readonly string[];
+}): { system: string; user: string } {
+  const user = [
+    ...docBlock(input.docs),
+    "## 需要修正的问题",
+    input.problems.map((problem) => `- ${problem}`).join("\n"),
+    "",
+    "## 输出 JSON schema",
+    JSON.stringify(TWIN_EDITS_JSON_SCHEMA),
+  ].join("\n");
+  return { system: TWIN_FIX_SYSTEM_PROMPT, user };
 }
 
-function packCorrections(corrections: readonly PortraitPromptCorrection[]): {
-  text: string;
-  ids: string[];
-} {
+export const TWIN_PROBES_SYSTEM_PROMPT = `你是 you-brain 的数字分身评测出题人。从用户本人这一周的主张里，挑 2 到 5 条最能体现他判断方式的，各写成一道情境题。只输出一个 JSON 对象，不要 Markdown，不要解释。
+
+规则：
+1. situation 写一个助手会遇到的具体情境，不要复述主张原文，不要透露答案。
+2. expect 写用户在这种情境下的实际反应，一两句中文。
+3. layer 是 persona 或 coding；只对某个项目成立的主张不要出题。
+4. 不要和已有题目重复。没有合适的就输出空数组。
+5. JSON 键名保持英文。`;
+
+export function buildTwinProbesPrompt(input: {
+  claims: readonly TwinPromptClaim[];
+  existing: readonly { situation: string }[];
+}): { system: string; user: string } {
+  const user = [
+    "## 本周主张",
+    packClaims(input.claims, TWIN_EVIDENCE_LIMIT) || "（无）",
+    "",
+    "## 已有题目",
+    input.existing.length === 0
+      ? "（无）"
+      : input.existing.map((probe) => `- ${clipUnits(oneLine(probe.situation), 120)}`).join("\n"),
+    "",
+    "## 输出 JSON schema",
+    JSON.stringify(TWIN_PROBES_JSON_SCHEMA),
+  ].join("\n");
+  return { system: TWIN_PROBES_SYSTEM_PROMPT, user };
+}
+
+export const TWIN_EVAL_ANSWER_SYSTEM_PROMPT = `你在扮演下面数字分身描述的这个人。只根据给出的数字分身，回答每个情境里他会怎么反应、会要求助手怎么做。每个回答一两句中文。只输出一个 JSON 对象，不要 Markdown，不要解释。JSON 键名保持英文。`;
+
+export function buildTwinEvalAnswerPrompt(input: {
+  full: string;
+  coding: string;
+  probes: readonly { id: string; situation: string }[];
+}): { system: string; user: string } {
+  const user = [
+    "## 人格分身",
+    input.full,
+    "",
+    "## 编码分身",
+    input.coding,
+    "",
+    "## 情境",
+    input.probes.map((probe) => `- ${probe.id}：${oneLine(probe.situation)}`).join("\n"),
+    "",
+    "## 输出 JSON schema",
+    JSON.stringify(TWIN_EVAL_ANSWERS_JSON_SCHEMA),
+  ].join("\n");
+  return { system: TWIN_EVAL_ANSWER_SYSTEM_PROMPT, user };
+}
+
+export const TWIN_EVAL_JUDGE_SYSTEM_PROMPT = `你是数字分身评测的判分人。对照每个情境里用户的真实反应 expect，判断回答是否做出了同样的选择。只看决定和方向是否一致，不看措辞。只输出一个 JSON 对象，不要 Markdown，不要解释。JSON 键名保持英文。`;
+
+export function buildTwinEvalJudgePrompt(input: {
+  items: readonly { id: string; situation: string; expect: string; answer: string }[];
+}): { system: string; user: string } {
+  const user = [
+    "## 题目与回答",
+    input.items
+      .map((item) =>
+        [
+          `### ${item.id}`,
+          `情境：${oneLine(item.situation)}`,
+          `真实反应：${oneLine(item.expect)}`,
+          `回答：${oneLine(item.answer) || "（未作答）"}`,
+        ].join("\n"),
+      )
+      .join("\n\n"),
+    "",
+    "## 输出 JSON schema",
+    JSON.stringify(TWIN_EVAL_JUDGE_JSON_SCHEMA),
+  ].join("\n");
+  return { system: TWIN_EVAL_JUDGE_SYSTEM_PROMPT, user };
+}
+
+function docBlock(docs: { full: string; coding: string; projects: string }): string[] {
+  return [
+    "## 当前人格分身 full",
+    docs.full.trim() === "" ? "（空）" : docs.full,
+    "",
+    "## 当前编码分身 coding",
+    docs.coding.trim() === "" ? "（空）" : docs.coding,
+    "",
+    "## 当前项目决定 projects",
+    docs.projects.trim() === "" ? "（空）" : docs.projects,
+    "",
+  ];
+}
+
+function packClaims(claims: readonly TwinPromptClaim[], budget: number): string {
+  const lines: string[] = [];
+  let used = 0;
+  for (const claim of claims) {
+    const place = claim.layer === "project" ? `project:${claim.project}` : claim.layer;
+    const day = claim.day ? ` ${claim.day}` : "";
+    const line = `- [${place} ${claim.confidence}${day}] ${clipUnits(oneLine(claim.text), TWIN_CLAIM_CLIP)}`;
+    const extra = textUnits(line) + (lines.length === 0 ? 0 : 1);
+    if (used + extra > budget) break;
+    lines.push(line);
+    used += extra;
+  }
+  return lines.join("\n");
+}
+
+function packCorrections(
+  corrections: readonly TwinPromptCorrection[],
+  budget: number,
+): { text: string; ids: string[] } {
   const lines: string[] = [];
   const ids: string[] = [];
   let used = 0;
   for (const correction of corrections) {
     const line = [
       `- ${correction.correctionId}`,
-      `  位置：${clipUnits(oneLine(correction.section), PORTRAIT_SECTION_CLIP)}`,
-      `  内容：${clipUnits(oneLine(correction.text), PORTRAIT_CORRECTION_CLIP)}`,
+      `  层：${oneLine(correction.variant)}`,
+      `  位置：${clipUnits(oneLine(correction.section), TWIN_SECTION_CLIP)}`,
+      `  内容：${clipUnits(oneLine(correction.text), TWIN_CORRECTION_CLIP)}`,
     ].join("\n");
     const extra = textUnits(line) + (lines.length === 0 ? 0 : 1);
-    if (used + extra > PORTRAIT_EVIDENCE_LIMIT) break;
+    if (used + extra > budget) break;
     lines.push(line);
     ids.push(correction.correctionId);
     used += extra;

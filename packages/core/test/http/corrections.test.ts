@@ -122,8 +122,8 @@ describe("portrait correction HTTP", () => {
 
       const listed = await client.portraitCorrections("full");
       expect(listed.corrections).toEqual([added.correction]);
-      const brief = await client.addPortraitCorrection({
-        variant: "brief",
+      const coding = await client.addPortraitCorrection({
+        variant: "coding",
         section: "长度",
         text: "再短一点",
       });
@@ -132,7 +132,7 @@ describe("portrait correction HTTP", () => {
       ]);
       const all = await client.portraitCorrections();
       expect(new Set(all.corrections.map((item) => item.correctionId))).toEqual(
-        new Set([brief.correction.correctionId, added.correction.correctionId]),
+        new Set([coding.correction.correctionId, added.correction.correctionId]),
       );
 
       const snapshot = "JOHN-DIGITAL-TWIN-v1.3.4-2026-10-18.md";

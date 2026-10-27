@@ -18,20 +18,25 @@ export {
 } from "./lease.js";
 export {
   normalizeMergePairs,
-  parsePortraitUpdate,
   parseTopicRewrite,
+  parseTwinClaims,
+  parseTwinEdits,
   type MergePair,
-  type PortraitUpdate,
   type TopicRewrite,
+  type TwinClaim,
+  type TwinEditsUpdate,
 } from "./normalize.js";
 export {
   buildMergeSuggestionsPrompt,
-  buildPortraitPrompt,
   buildTopicSummaryPrompt,
+  buildTwinClaimsPrompt,
+  buildTwinFixPrompt,
+  buildTwinMergePrompt,
   MERGE_SUGGESTIONS_SYSTEM_PROMPT,
-  PORTRAIT_EVIDENCE_LIMIT,
-  PORTRAIT_SYSTEM_PROMPT,
   TOPIC_SUMMARY_SYSTEM_PROMPT,
+  TWIN_CLAIMS_SYSTEM_PROMPT,
+  TWIN_EVIDENCE_LIMIT,
+  TWIN_MERGE_SYSTEM_PROMPT,
 } from "./prompt.js";
 export { runConsolidation, type ConsolidationRunResult, type ConsolidationStepResult } from "./run.js";
 export {
@@ -49,8 +54,9 @@ export {
 } from "./schedule.js";
 export {
   MERGE_SUGGESTIONS_JSON_SCHEMA,
-  PORTRAIT_JSON_SCHEMA,
   TOPIC_SUMMARY_JSON_SCHEMA,
+  TWIN_CLAIMS_JSON_SCHEMA,
+  TWIN_EDITS_JSON_SCHEMA,
 } from "./schema.js";
 export {
   MERGE_TOPIC_LIMIT,
@@ -64,6 +70,7 @@ export {
 export {
   consolidationSteps,
   mergeSuggestionsStep,
+  portraitEvalStep,
   portraitStep,
   registerConsolidationStep,
   resetConsolidationSteps,
@@ -72,8 +79,47 @@ export {
   type ConsolidationContext,
   type ConsolidationPortrait,
   type ConsolidationStep,
+  type StoredTwinClaim,
+  type TwinFileRef,
+  type TwinProbe,
 } from "./steps.js";
-export { createDrivePortrait, fillSnapshotPattern, pendingCorrections } from "./portrait-drive.js";
+export {
+  createDrivePortrait,
+  driveViewUrl,
+  fillSnapshotPattern,
+  pendingCorrections,
+  type DrivePortraitSource,
+} from "./portrait-drive.js";
+export {
+  PORTRAIT_EVAL_CURSOR,
+  PORTRAIT_TURNS_CURSOR,
+  cleanUserTurn,
+  rebuildTwin,
+  type RebuildTwinInput,
+  type RebuildTwinResult,
+} from "./portrait.js";
+export {
+  TWIN_BUDGET,
+  TWIN_LAYERS,
+  applyTwinEdits,
+  bumpVersion,
+  changedLayers,
+  checkTwin,
+  codingIndexLine,
+  joinTwin,
+  skeletonTwin,
+  splitTwin,
+  twinBody,
+  twinVersion,
+  withCodingIndex,
+  withHeader,
+  type TwinCheck,
+  type TwinDocument,
+  type TwinEdit,
+  type TwinLayer,
+  type TwinTexts,
+  type VersionBump,
+} from "./twin.js";
 export {
   MERGE_SUGGESTIONS_CURSOR,
   mergeSuggestionLines,

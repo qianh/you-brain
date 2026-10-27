@@ -2,6 +2,8 @@ import { rm } from "node:fs/promises";
 
 import { afterEach, describe, expect, it } from "bun:test";
 
+import { TWIN_CLAIMS_SYSTEM_PROMPT, TWIN_MERGE_SYSTEM_PROMPT } from "../../src/consolidate/index.js";
+import { TWIN_PROBES_SYSTEM_PROMPT } from "../../src/consolidate/prompt.js";
 import { startDaemon, type YouBrainDaemon } from "../../src/daemon/daemon.js";
 import { INTERVALS } from "../../src/daemon/schedule.js";
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
@@ -19,8 +21,9 @@ import {
 
 const TEXT = "B4纠正把工作方式写成先测后改";
 const SECTION = "工作方式";
-const ORIGINAL = ["# 数字分身", "", "## 工作方式", "", "保持原结构。数据留在自己的 Drive。", "统一用 bun。回复用中文。", ""].join("\n");
-const NEXT = `${ORIGINAL}\n补上这条纠正。\n`;
+const VERSION_LINE = "版本 v2.0.0 · 2026-10-01 · 变更见 changelog";
+const ORIGINAL = ["# 数字分身 · 人格", VERSION_LINE, "", "## 工作方式", "保持原结构。数据留在自己的 Drive。", "统一用 bun。回复用中文。", ""].join("\n");
+const CODING = ["# 数字分身 · 编码", VERSION_LINE, "", "## 1. 授权与边界", "提问不等于授权改代码。", ""].join("\n");
 
 const daemons: YouBrainDaemon[] = [];
 const roots: string[] = [];
@@ -38,10 +41,18 @@ describe("portrait corrections across two devices", () => {
       const drive = new MemoryDrive({ now: () => clock.now() });
       const prompts: string[] = [];
       const llm = fakeBackend(async (request) => {
-        if (request.system.includes("数字分身")) {
+        if (request.system === TWIN_MERGE_SYSTEM_PROMPT) {
           prompts.push(request.user);
-          return JSON.stringify({ changed: true, portrait: NEXT });
+          return JSON.stringify({
+            bump: "minor",
+            changelog: ["full · 工作方式：先测后改"],
+            edits: [
+              { layer: "full", heading: "## 工作方式", text: "## 工作方式\n保持原结构。数据留在自己的 Drive。\n先测后改。" },
+            ],
+          });
         }
+        if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT) return JSON.stringify({ claims: [] });
+        if (request.system === TWIN_PROBES_SYSTEM_PROMPT) return JSON.stringify({ probes: [] });
         if (request.system.includes("话题概要")) {
           return JSON.stringify({ summary: "发布清单已整理", nextStep: "" });
         }
@@ -51,6 +62,11 @@ describe("portrait corrections across two devices", () => {
       await drive.put({
         path: "digital-twin/JOHN-DIGITAL-TWIN-latest.md",
         bytes: Buffer.from(ORIGINAL, "utf8"),
+        mimeType: "text/markdown",
+      });
+      await drive.put({
+        path: "digital-twin/JOHN-TWIN-coding.md",
+        bytes: Buffer.from(CODING, "utf8"),
         mimeType: "text/markdown",
       });
       const dirsA = await track("a");
@@ -87,7 +103,7 @@ describe("portrait corrections across two devices", () => {
         status: "applied",
         section: SECTION,
         text: TEXT,
-        snapshot: "JOHN-DIGITAL-TWIN-v1.0.0-2026-10-18.md",
+        snapshot: "JOHN-DIGITAL-TWIN-v2.1.0-2026-10-18.md",
       });
 
       await clock.advance(INTERVALS.flushMs);
@@ -97,7 +113,7 @@ describe("portrait corrections across two devices", () => {
       const onB = await appliedCorrection(clientB, added.correction.correctionId);
       expect(onB).toMatchObject({
         status: "applied",
-        snapshot: "JOHN-DIGITAL-TWIN-v1.0.0-2026-10-18.md",
+        snapshot: "JOHN-DIGITAL-TWIN-v2.1.0-2026-10-18.md",
       });
     },
     120_000,

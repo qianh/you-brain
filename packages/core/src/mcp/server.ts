@@ -368,7 +368,7 @@ export function createMcpServer(services: McpServices): McpServer {
   server.registerTool(
     "get_portrait",
     {
-      description: "读取本机数字分身。variant 默认 full，也可以是 brief、coding 或自定义变体",
+      description: "读取本机数字分身。variant 默认 full，也可以是 coding、projects 或自定义变体",
       inputSchema: {
         variant: z.string().min(1).optional(),
       },

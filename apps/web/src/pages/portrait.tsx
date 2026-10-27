@@ -22,8 +22,8 @@ import { PortraitSide } from "./portrait/side-panel.js";
 
 const DEFAULT_VARIANTS = [
   { id: "full", path: "" },
-  { id: "brief", path: "" },
   { id: "coding", path: "" },
+  { id: "projects", path: "" },
 ];
 
 const SKELETON_WIDTHS = ["100%", "96%", "92%", "84%", "100%", "70%"];

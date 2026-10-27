@@ -3,8 +3,17 @@ import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { createDefaultSharedConfig, parseSharedConfig, type SharedConfig } from "@you-brain/protocol";
+import {
+  createDefaultSharedConfig,
+  parseRoles,
+  parseSharedConfig,
+  type SharedConfig,
+} from "@you-brain/protocol";
+import { getLlmApiKey, resolveSecretBackend } from "@you-brain/core/auth";
+import { createDrivePortrait, localDayKey, rebuildTwin } from "@you-brain/core/consolidate";
+import { openGoogleDrive } from "@you-brain/core/daemon";
 import { isProcessAlive } from "@you-brain/core/http";
+import { createLlmBackend } from "@you-brain/core/llm";
 import {
   applyClientIntegrations,
   planClientIntegrations,
@@ -19,9 +28,9 @@ import {
   revokeIntegrationConsent,
 } from "@you-brain/core/portrait";
 import type { SessionSource } from "@you-brain/core";
-import { SESSION_SOURCES } from "@you-brain/core";
+import { SESSION_SOURCES, loadLocalConfig } from "@you-brain/core";
 
-import { CliError, runtimePaths } from "./env.js";
+import { CliError, runtimePaths, supportedPlatform } from "./env.js";
 import { createRuntimeServiceManager } from "./service/manager.js";
 import { serviceUnitPath } from "./service/paths.js";
 
@@ -84,19 +93,69 @@ export async function applyIntegrations(options: {
 }
 
 function codingVariantPath(dataDir: string): string {
-  let shared: SharedConfig = createDefaultSharedConfig();
-  const file = join(dataDir, "shared.json");
-  if (existsSync(file)) {
-    try {
-      shared = parseSharedConfig(JSON.parse(readFileSync(file, "utf8")) as unknown);
-    } catch {
-      shared = createDefaultSharedConfig();
-    }
-  }
   return (
-    shared.portrait.variants.find((variant) => variant.id === "coding")?.path ??
+    readLocalShared(dataDir).portrait.variants.find((variant) => variant.id === "coding")?.path ??
     "digital-twin/JOHN-TWIN-coding.md"
   );
+}
+
+function readLocalShared(dataDir: string): SharedConfig {
+  const file = join(dataDir, "shared.json");
+  if (!existsSync(file)) return createDefaultSharedConfig();
+  try {
+    return parseSharedConfig(JSON.parse(readFileSync(file, "utf8")) as unknown);
+  } catch {
+    return createDefaultSharedConfig();
+  }
+}
+
+/** Rebuild the three twin layers on Drive from the current files, without the daemon. */
+export async function rebuildPortrait(options: { timeoutSeconds: number }): Promise<void> {
+  const platform = supportedPlatform();
+  const homeDir = homedir();
+  const loaded = await loadLocalConfig({ homeDir, platform, env: process.env });
+  const dataDir = loaded.paths.dataDir;
+  const secretBackend = resolveSecretBackend({ env: process.env, dataDir, role: loaded.config.role });
+  const shared = readLocalShared(dataDir);
+  const rolesFile = join(dataDir, "roles.json");
+  const roles = parseRoles(existsSync(rolesFile) ? (JSON.parse(readFileSync(rolesFile, "utf8")) as unknown) : {});
+  const opened = await openGoogleDrive({
+    local: loaded.config,
+    configFile: loaded.configFile,
+    platform,
+    interactive: false,
+    secretBackend,
+  });
+  if (!opened) {
+    throw new CliError("打不开 Google Drive：未登录，或当前运行的不是内置官方 OAuth 凭据的构建");
+  }
+  const llm = await createLlmBackend({
+    config: shared.llm,
+    getApiKey: (provider) => getLlmApiKey(provider, { platform, backend: secretBackend }),
+    dataDir,
+    env: process.env,
+    homeDir,
+    timeoutMs: options.timeoutSeconds * 1000,
+  });
+  const portrait = createDrivePortrait({
+    drive: opened.drive,
+    driveRoot: opened.config.driveRoot,
+    config: () => ({
+      variants: shared.portrait.variants,
+      snapshotPattern: shared.portrait.snapshotPattern,
+    }),
+    events: () => [],
+  });
+  const result = await rebuildTwin({
+    llm,
+    portrait,
+    day: localDayKey(new Date(), roles.timezone),
+    log: (line) => console.log(line),
+  });
+  console.log(
+    `已重建为 v${result.version}：full ${result.sizes.full} 字节，coding ${result.sizes.coding} 字节，projects 最大小节 ${result.sizes.maxSection} 字节，共 ${result.claims} 条主张`,
+  );
+  for (const warning of result.warnings) console.log(`提示：${warning}`);
 }
 
 export async function restoreBrainHub(backupDir: string): Promise<void> {

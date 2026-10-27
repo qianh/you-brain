@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { NEXT_STEP_MAX, REASON_MAX, SUMMARY_MAX, collapseText, textUnits } from "./text.js";
+import type { TwinEdit, VersionBump } from "./twin.js";
 
 const RewriteSchema = z.object({
   summary: z.string(),
@@ -17,9 +18,45 @@ const MergeSchema = z.object({
   pairs: z.array(PairSchema),
 });
 
-const PortraitUpdateSchema = z.object({
-  changed: z.boolean(),
-  portrait: z.string(),
+const ClaimsSchema = z.object({
+  claims: z.array(
+    z.object({
+      layer: z.enum(["persona", "coding", "project"]),
+      project: z.string(),
+      confidence: z.enum(["high", "low"]),
+      text: z.string(),
+    }),
+  ),
+});
+
+const EditsSchema = z.object({
+  bump: z.enum(["patch", "minor", "major"]),
+  changelog: z.array(z.string()),
+  edits: z.array(
+    z.object({
+      layer: z.enum(["full", "coding", "projects"]),
+      heading: z.string(),
+      text: z.string(),
+    }),
+  ),
+});
+
+const ProbesSchema = z.object({
+  probes: z.array(
+    z.object({
+      layer: z.enum(["persona", "coding"]),
+      situation: z.string(),
+      expect: z.string(),
+    }),
+  ),
+});
+
+const AnswersSchema = z.object({
+  answers: z.array(z.object({ id: z.string(), answer: z.string() })),
+});
+
+const JudgeSchema = z.object({
+  results: z.array(z.object({ id: z.string(), pass: z.boolean() })),
 });
 
 export interface TopicRewrite {
@@ -33,15 +70,77 @@ export interface MergePair {
   reason: string;
 }
 
-export interface PortraitUpdate {
-  changed: boolean;
-  portrait: string;
+export interface TwinClaim {
+  layer: "persona" | "coding" | "project";
+  project: string;
+  confidence: "high" | "low";
+  text: string;
 }
 
-/** Keep the portrait text verbatim. Structure and whitespace are part of the document. */
-export function parsePortraitUpdate(input: unknown): PortraitUpdate {
-  const parsed = PortraitUpdateSchema.parse(input);
-  return { changed: parsed.changed, portrait: parsed.portrait };
+export interface TwinEditsUpdate {
+  bump: VersionBump;
+  changelog: string[];
+  edits: TwinEdit[];
+}
+
+export interface TwinProbeDraft {
+  layer: "persona" | "coding";
+  situation: string;
+  expect: string;
+}
+
+/** Blank claims drop; a project claim without a project name drops too. Same text keeps the first. */
+export function parseTwinClaims(input: unknown): TwinClaim[] {
+  const parsed = ClaimsSchema.parse(input);
+  const seen = new Set<string>();
+  const claims: TwinClaim[] = [];
+  for (const claim of parsed.claims) {
+    const text = collapseText(claim.text);
+    const project = claim.layer === "project" ? collapseText(claim.project) : "";
+    if (text === "" || (claim.layer === "project" && project === "")) continue;
+    if (seen.has(text)) continue;
+    seen.add(text);
+    claims.push({ layer: claim.layer, project, confidence: claim.confidence, text });
+  }
+  return claims;
+}
+
+/** Section text stays verbatim: structure and whitespace are part of the document. */
+export function parseTwinEdits(input: unknown): TwinEditsUpdate {
+  const parsed = EditsSchema.parse(input);
+  const edits: TwinEdit[] = [];
+  for (const edit of parsed.edits) {
+    const heading = edit.heading.trim();
+    if (heading === "") throw new Error("edits 里有空的 heading");
+    edits.push({ layer: edit.layer, heading, text: edit.text });
+  }
+  return {
+    bump: parsed.bump,
+    changelog: parsed.changelog.map((line) => line.trim().replace(/\s+/gu, " ")).filter((line) => line !== ""),
+    edits,
+  };
+}
+
+export function parseTwinProbes(input: unknown): TwinProbeDraft[] {
+  return ProbesSchema.parse(input)
+    .probes.map((probe) => ({
+      layer: probe.layer,
+      situation: collapseText(probe.situation),
+      expect: collapseText(probe.expect),
+    }))
+    .filter((probe) => probe.situation !== "" && probe.expect !== "");
+}
+
+export function parseTwinAnswers(input: unknown): Map<string, string> {
+  const answers = new Map<string, string>();
+  for (const item of AnswersSchema.parse(input).answers) answers.set(item.id.trim(), item.answer);
+  return answers;
+}
+
+export function parseTwinJudge(input: unknown): Map<string, boolean> {
+  const results = new Map<string, boolean>();
+  for (const item of JudgeSchema.parse(input).results) results.set(item.id.trim(), item.pass);
+  return results;
 }
 
 export function parseTopicRewrite(input: unknown): TopicRewrite {

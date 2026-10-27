@@ -296,6 +296,7 @@ const DRIVERS: DriverCase[] = [
       ["--max-turns", "1"],
       ["--no-plan"],
       ["--no-memory"],
+      ["--effort", "low"],
       ["--prompt-file"],
     ],
   },

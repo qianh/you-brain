@@ -40,7 +40,13 @@ import {
   supportedPlatform,
 } from "./env.js";
 import { registerProtocolCommand } from "./protocol-command.js";
-import { applyIntegrations, listIntegrations, restoreBrainHub, uninstall } from "./maintenance.js";
+import {
+  applyIntegrations,
+  listIntegrations,
+  rebuildPortrait,
+  restoreBrainHub,
+  uninstall,
+} from "./maintenance.js";
 import { registerServiceCommand } from "./service/command.js";
 import { runSetup, type SetupFlags } from "./setup.js";
 
@@ -230,11 +236,25 @@ program
 program
   .command("portrait")
   .description("数字分身")
-  .option("--variant <variant>", "full、brief 或 coding")
+  .option("--variant <variant>", "full、coding 或 projects")
   .action(async (opts: { variant?: string }) => {
     try {
       const portrait = await (await connectDaemon()).portrait(opts.variant);
       console.log(portrait.content);
+    } catch (error) {
+      fail(error);
+    }
+  });
+
+program
+  .command("portrait-rebuild")
+  .description("从 Drive 上现有的数字分身重建人格、编码、项目决定三层，并写回 Drive")
+  .option("--timeout <seconds>", "单次模型调用的超时秒数", "900")
+  .action(async (opts: { timeout: string }) => {
+    try {
+      const seconds = Number(opts.timeout);
+      if (!Number.isFinite(seconds) || seconds <= 0) throw new CliError("--timeout 必须是正数");
+      await rebuildPortrait({ timeoutSeconds: seconds });
     } catch (error) {
       fail(error);
     }

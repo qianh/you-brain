@@ -103,6 +103,7 @@ import {
   createDrivePortrait,
   emptyConsolidationState,
   executeConsolidation,
+  localDayKey,
   mergeSuggestionLines,
   parseMergeSuggestions,
   readConsolidateLease,
@@ -3255,8 +3256,39 @@ export class YouBrainDaemon {
         }),
         events: () =>
           store.listEventsByType(["portrait.correction", "portrait.correction_applied"]),
+        sessions: (day) => this.#twinSessions(day),
       }),
     };
+  }
+
+  /** The user's own turns for sessions last updated on or after `day`, oldest session first. */
+  async #twinSessions(day: string): Promise<Array<{ sessionKey: string; title: string; turns: string[] }>> {
+    const drive = this.#drive;
+    const store = this.#store;
+    if (!drive || !store) return [];
+    const timeZone = this.#roles.timezone;
+    const rows = store
+      .listSessions()
+      .filter(
+        (session) =>
+          session.fileId !== null &&
+          session.updatedAt !== null &&
+          localDayKey(new Date(session.updatedAt), timeZone) >= day,
+      )
+      .sort((left, right) => (left.updatedAt ?? "").localeCompare(right.updatedAt ?? ""));
+    const sessions: Array<{ sessionKey: string; title: string; turns: string[] }> = [];
+    for (const session of rows) {
+      if (session.fileId === null) continue;
+      const object = await drive.read(session.fileId).catch(() => null);
+      const parsed = object ? parseWebSession(object.bytes.toString("utf8")) : null;
+      if (!parsed) continue;
+      sessions.push({
+        sessionKey: session.sessionKey,
+        title: session.title,
+        turns: parsed.turns.filter((turn) => turn.role === "user").map((turn) => turn.text),
+      });
+    }
+    return sessions;
   }
 
   #consolidationView() {

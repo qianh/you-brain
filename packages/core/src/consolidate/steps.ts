@@ -15,27 +15,64 @@ import {
 } from "./select.js";
 import type { TopicFilesResult } from "../topic-files/sync.js";
 import { MERGE_SUGGESTIONS_CURSOR } from "./suggestions.js";
-import { portraitStep } from "./portrait.js";
+import type { TwinClaim } from "./normalize.js";
+import { portraitEvalStep, portraitStep } from "./portrait.js";
 import { sameText } from "./text.js";
+import type { TwinLayer } from "./twin.js";
 
-export { portraitStep };
+export { portraitEvalStep, portraitStep };
 
 const MAX_ATTEMPTS = 2;
 const TOPIC_CONCURRENCY = 2;
 
+export interface TwinFileRef {
+  text: string;
+  etag: string;
+  fileId: string;
+}
+
+export interface StoredTwinClaim extends TwinClaim {
+  day: string;
+}
+
+export interface TwinProbe {
+  id: string;
+  layer: "persona" | "coding";
+  situation: string;
+  expect: string;
+}
+
 export interface ConsolidationPortrait {
-  /** Read the current full variant. Missing file returns null. */
-  read(): Promise<{ text: string; etag: string; fileId: string } | null>;
-  /** Back up the old latest, write a snapshot, update latest with ifMatch, then refresh the local cache. */
+  /** Current files of the three layers. A missing file is null. */
+  read(): Promise<Record<TwinLayer, TwinFileRef | null>>;
+  /** The user's own turns, in order, for sessions updated on or after `day`. */
+  sessions(day: string): Promise<Array<{ sessionKey: string; title: string; turns: string[] }>>;
+  /** Pending corrections for any layer, oldest first. */
+  corrections(): Array<{ correctionId: string; variant: string; section: string; text: string }>;
+  /** Low-confidence claims kept from earlier days. */
+  pendingClaims(): Promise<StoredTwinClaim[]>;
+  /** Write `claims/<name>.jsonl`; a non-null `pending` replaces `claims/pending.jsonl`. */
+  saveClaims(input: {
+    name: string;
+    claims: readonly StoredTwinClaim[];
+    pending: readonly StoredTwinClaim[] | null;
+  }): Promise<void>;
+  /** Claims saved for these days. Missing days are skipped. */
+  claimsOf(days: readonly string[]): Promise<StoredTwinClaim[]>;
+  /**
+   * Back up each previous file, update it with ifMatch (or create it), write the full
+   * snapshot when full changed, prepend the changelog entry, then refresh the local cache.
+   */
   save(input: {
-    text: string;
-    previous: string;
-    etag: string;
-    fileId: string;
     day: string;
-  }): Promise<{ snapshot: string }>;
-  /** Pending full-variant corrections, oldest first. */
-  corrections(): Array<{ correctionId: string; section: string; text: string }>;
+    version: string;
+    files: Array<{ layer: TwinLayer; text: string; previous: TwinFileRef | null }>;
+    changelog: string;
+  }): Promise<{ snapshot: string | null; links: Partial<Record<TwinLayer, string>> }>;
+  probes(): Promise<TwinProbe[]>;
+  saveProbes(probes: readonly TwinProbe[]): Promise<void>;
+  /** Prepend an entry to the changelog. */
+  appendChangelog(entry: string): Promise<void>;
 }
 
 export interface ConsolidationContext {
@@ -87,6 +124,7 @@ export function consolidationSteps(): ConsolidationStep[] {
     topicSummariesStep,
     mergeSuggestionsStep,
     portraitStep,
+    portraitEvalStep,
     topicFilesStep,
     ...registeredSteps,
   ];

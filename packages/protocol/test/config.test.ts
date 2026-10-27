@@ -35,17 +35,17 @@ describe("shared config defaults", () => {
     expect(Object.keys(config.llm).sort()).toEqual(["baseUrl", "model", "provider"]);
     expect(config.portrait.variants.map((variant) => variant.id)).toEqual([
       "full",
-      "brief",
       "coding",
+      "projects",
     ]);
     expect(config.portrait.variants[0]?.path).toBe(
       "digital-twin/JOHN-DIGITAL-TWIN-latest.md",
     );
     expect(config.portrait.variants[1]?.path).toBe(
-      "digital-twin/JOHN-DIGITAL-TWIN-latest-brief.md",
+      "digital-twin/JOHN-TWIN-coding.md",
     );
     expect(config.portrait.variants[2]?.path).toBe(
-      "digital-twin/JOHN-TWIN-coding.md",
+      "digital-twin/JOHN-TWIN-projects.md",
     );
     expect(config.portrait.snapshotPattern).toBe(DEFAULT_PORTRAIT_SNAPSHOT_PATTERN);
     expect(config.reminders.notifications).toBe(true);

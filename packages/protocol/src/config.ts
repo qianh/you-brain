@@ -75,8 +75,8 @@ const PortraitVariantConfigSchema = z.object({
 
 export const DEFAULT_PORTRAIT_VARIANTS = [
   { id: "full", path: "digital-twin/JOHN-DIGITAL-TWIN-latest.md" },
-  { id: "brief", path: "digital-twin/JOHN-DIGITAL-TWIN-latest-brief.md" },
   { id: "coding", path: "digital-twin/JOHN-TWIN-coding.md" },
+  { id: "projects", path: "digital-twin/JOHN-TWIN-projects.md" },
 ];
 
 export const DEFAULT_PORTRAIT_SNAPSHOT_PATTERN =

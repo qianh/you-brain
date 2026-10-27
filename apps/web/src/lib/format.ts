@@ -187,13 +187,13 @@ export function driveFileUrl(fileId: string): string {
 export function variantName(id: string, language: Language): string {
   if (language === "en") {
     if (id === "full") return "Full";
-    if (id === "brief") return "Brief";
     if (id === "coding") return "Coding";
+    if (id === "projects") return "Projects";
     return id;
   }
   if (id === "full") return "全量";
-  if (id === "brief") return "精简";
   if (id === "coding") return "编码";
+  if (id === "projects") return "项目";
   return id;
 }
 

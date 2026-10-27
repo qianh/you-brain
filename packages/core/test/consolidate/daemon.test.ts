@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 
 import { startDaemon, type YouBrainDaemon } from "../../src/daemon/daemon.js";
 import { INTERVALS } from "../../src/daemon/schedule.js";
+import { TWIN_CLAIMS_SYSTEM_PROMPT, TWIN_MERGE_SYSTEM_PROMPT } from "../../src/consolidate/index.js";
+import { TWIN_PROBES_SYSTEM_PROMPT } from "../../src/consolidate/prompt.js";
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
 import { createDaemonClient } from "../../src/http/client.js";
 import type { ConsolidateActionResult } from "../../src/http/types.js";
@@ -68,6 +70,7 @@ describe("consolidation daemon", () => {
       "topic_summaries",
       "merge_suggestions",
       "portrait",
+      "portrait_eval",
       "topic_files",
     ]);
     expect(kinds).toEqual(["topics", "status"]);
@@ -85,7 +88,7 @@ describe("consolidation daemon", () => {
     kinds.length = 0;
     const forced = await consolidate({ force: true });
     expect(forced.ok).toBe(true);
-    expect(forced.steps.map((step) => step.ok)).toEqual([true, true, true, true]);
+    expect(forced.steps.map((step) => step.ok)).toEqual([true, true, true, true, true]);
     expect(await leaseFinishedAt(drive)).not.toBe(finished);
     expect(kinds).toEqual(["topics", "status"]);
     unsubscribe();
@@ -278,27 +281,49 @@ describe("consolidation daemon", () => {
     expect(topics.topics.every((topic) => topic.summary === "")).toBe(true);
   });
 
-  it("regenerates the full portrait during a manual run", async () => {
+  it("feeds the day's sessions into the twin during a manual run", async () => {
     const dirs = await trackDirs();
     const clock = testClock();
     const drive = new MemoryDrive({ now: () => clock.now() });
-    const original = "# 数字分身\n\n## 工作\n保持原结构。\n";
-    const next = `${original}\n## 今天\n补上发布清单。\n`;
-    await drive.put({
-      path: "digital-twin/JOHN-DIGITAL-TWIN-latest.md",
-      bytes: Buffer.from(original, "utf8"),
-      mimeType: "text/markdown",
-    });
+    const versionLine = "版本 v2.0.0 · 2026-10-01 · 变更见 changelog";
+    const full = `# 数字分身 · 人格\n${versionLine}\n\n## 1. 一句话\n保持原结构。\n`;
+    const coding = `# 数字分身 · 编码\n${versionLine}\n\n## 4. 运维与命令\n给可粘贴的命令。\n`;
+    for (const [path, text] of [
+      ["digital-twin/JOHN-DIGITAL-TWIN-latest.md", full],
+      ["digital-twin/JOHN-TWIN-coding.md", coding],
+    ] as const) {
+      await drive.put({ path, bytes: Buffer.from(text, "utf8"), mimeType: "text/markdown" });
+    }
     await writeClaudeSession(dirs.sourceDir, [
       claudeLine("portrait-1", "user", "Plan the launch checklist", CLOCK_START.toISOString()),
       claudeLine("portrait-1", "assistant", "先列一个清单。", CLOCK_START.toISOString()),
     ]);
+    const claimInputs: string[] = [];
     const daemon = await startTracked(
       dirs,
       clock,
       drive,
       fakeBackend(async (request) => {
-        if (request.system.includes("数字分身")) return JSON.stringify({ changed: true, portrait: next });
+        if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT) {
+          claimInputs.push(request.user);
+          return JSON.stringify({
+            claims: [{ layer: "coding", project: "", confidence: "high", text: "发布前先列清单。" }],
+          });
+        }
+        if (request.system === TWIN_MERGE_SYSTEM_PROMPT) {
+          return JSON.stringify({
+            bump: "minor",
+            changelog: ["coding · 4 运维与命令：发布前先列清单"],
+            edits: [
+              {
+                layer: "coding",
+                heading: "## 4. 运维与命令",
+                text: "## 4. 运维与命令\n给可粘贴的命令。\n发布前先列清单。",
+              },
+            ],
+          });
+        }
+        if (request.system === TWIN_PROBES_SYSTEM_PROMPT) return JSON.stringify({ probes: [] });
         if (request.system.includes("话题概要")) {
           return JSON.stringify({ summary: "发布清单已整理", nextStep: "" });
         }
@@ -331,22 +356,21 @@ describe("consolidation daemon", () => {
       { id: "topic_summaries", ok: true },
       { id: "merge_suggestions", ok: true },
       { id: "portrait", ok: true },
+      { id: "portrait_eval", ok: true },
       { id: "topic_files", ok: true },
     ]);
-    expect((await drive.readPath("digital-twin/JOHN-DIGITAL-TWIN-latest.md"))?.bytes.toString("utf8")).toBe(
-      next,
-    );
+    expect(claimInputs.join("\n")).toContain("Plan the launch checklist");
+    expect(claimInputs.join("\n")).not.toContain("先列一个清单。");
+    const written = (await drive.readPath("digital-twin/JOHN-TWIN-coding.md"))?.bytes.toString("utf8");
+    expect(written?.split("\n")[1]).toBe("版本 v2.1.0 · 2026-10-18 · 变更见 changelog");
+    expect(written).toContain("发布前先列清单。");
+    expect((await drive.readPath("digital-twin/JOHN-DIGITAL-TWIN-latest.md"))?.bytes.toString("utf8")).toBe(full);
     expect(
-      (
-        await drive.readPath("digital-twin/consolidate-backup/JOHN-DIGITAL-TWIN-latest-2026-10-18.md")
-      )?.bytes.toString("utf8"),
-    ).toBe(original);
-    expect(
-      (
-        await drive.readPath("digital-twin/JOHN-DIGITAL-TWIN-v1.0.0-2026-10-18.md")
-      )?.bytes.toString("utf8"),
-    ).toBe(next);
-    expect(await readFile(join(dirs.homeDir, "portrait", "full.md"), "utf8")).toBe(next);
+      (await drive.readPath("digital-twin/consolidate-backup/JOHN-TWIN-coding-2026-10-18.md"))?.bytes.toString(
+        "utf8",
+      ),
+    ).toBe(coding);
+    expect(await readFile(join(dirs.homeDir, "portrait", "coding.md"), "utf8")).toBe(written ?? "");
   });
 });
 
