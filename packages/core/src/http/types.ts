@@ -510,6 +510,33 @@ export interface GoogleLogoutResult {
   message: string;
 }
 
+/**
+ * GET/PUT /api/oauth-client.
+ *
+ * 只暴露 client id 和是否有 secret，secret 本身永远不回显。
+ * `mode` 为 custom 时表示这台机器用自己的 Google Cloud 项目。
+ */
+export const OAuthClientPublicSchema = z.object({
+  mode: z.enum(["official", "custom"]),
+  clientId: z.string(),
+  hasClientSecret: z.boolean(),
+  /** 当前构建是否内置了官方凭据。没有内置时只能走 custom。 */
+  officialAvailable: z.boolean(),
+});
+
+export type OAuthClientPublic = z.infer<typeof OAuthClientPublicSchema>;
+
+/** PUT /api/oauth-client。两个字段都可省略：只改 id 时不必重贴 secret。 */
+export const OAuthClientPutSchema = z
+  .object({
+    mode: z.enum(["official", "custom"]),
+    clientId: z.string().trim().max(200).optional(),
+    clientSecret: z.string().trim().max(500).optional(),
+  })
+  .strict();
+
+export type OAuthClientPutBody = z.infer<typeof OAuthClientPutSchema>;
+
 export type { WebhookEventKind };
 
 export const DaemonEventSchema = z.object({

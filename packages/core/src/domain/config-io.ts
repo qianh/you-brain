@@ -9,6 +9,7 @@ import {
   createDefaultLocalConfig,
   LocalConfigSchema,
   platformPaths,
+  type DeviceRole,
   type LocalConfig,
   type YouBrainPaths,
 } from "./config.js";
@@ -101,6 +102,8 @@ export async function loadLocalConfig(options: {
   homeDir: string;
   platform: NodeJS.Platform;
   hostname?: string;
+  /** 只在首次创建配置文件时使用。已存在的配置不会被改写。 */
+  role?: DeviceRole;
   env?: NodeJS.ProcessEnv;
   configFile?: string;
 }): Promise<LoadedLocalConfig> {
@@ -116,6 +119,7 @@ export async function loadLocalConfig(options: {
     const config = createDefaultLocalConfig({
       hostname: options.hostname ?? osHostname(),
       dataDir: paths.dataDir,
+      ...(options.role ? { role: options.role } : {}),
     });
     await writeLocalConfig(configFile, config);
     return { config, paths, configFile, created: true };

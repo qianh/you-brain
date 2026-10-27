@@ -27,6 +27,8 @@ import type {
   LlmTestResult,
   GoogleLoginResult,
   GoogleLogoutResult,
+  OAuthClientPublic,
+  OAuthClientPutBody,
 } from "./types.js";
 
 /** Read and write ports for the local API. The daemon supplies the implementations. */
@@ -70,5 +72,8 @@ export interface HttpDeps {
   /** Optional so older test doubles keep compiling. The daemon always supplies both. */
   googleLogout?(): Promise<GoogleLogoutResult>;
   googleSwitch?(): Promise<GoogleLogoutResult>;
+  /** 自带 OAuth 凭据（每人自己的 Google Cloud 项目）。 */
+  readOAuthClient?(): Promise<OAuthClientPublic>;
+  writeOAuthClient?(body: OAuthClientPutBody): Promise<OAuthClientPublic>;
   events: EventSink;
 }

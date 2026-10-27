@@ -28,6 +28,8 @@ import type {
   WebhookPublic,
   WebhookPutBody,
   WebhookTestResult,
+  OAuthClientPublic,
+  OAuthClientPutBody,
 } from "@you-brain/core/http/types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 
@@ -65,6 +67,9 @@ export interface BrowserDaemon extends Omit<DaemonClient, "reminderAction" | "co
   googleLogin(): Promise<ActionMessage>;
   googleLogout(): Promise<ActionMessage>;
   googleSwitch(): Promise<ActionMessage>;
+  /** 自带 OAuth 凭据（每人自己的 Google Cloud 项目）。 */
+  oauthClient(): Promise<OAuthClientPublic>;
+  putOAuthClient(body: OAuthClientPutBody): Promise<OAuthClientPublic>;
   webhook(): Promise<WebhookPublic>;
   updateWebhook(body: WebhookPutBody): Promise<WebhookPublic>;
   testWebhook(): Promise<WebhookTestResult>;
@@ -172,6 +177,8 @@ export function createBrowserDaemon(options?: {
     googleLogin: () => request<ActionMessage>("POST", "/api/actions/google-login"),
     googleLogout: () => request<ActionMessage>("POST", "/api/actions/google-logout"),
     googleSwitch: () => request<ActionMessage>("POST", "/api/actions/google-switch"),
+    oauthClient: () => request<OAuthClientPublic>("GET", "/api/oauth-client"),
+    putOAuthClient: (body) => request<OAuthClientPublic>("PUT", "/api/oauth-client", body),
     webhook: () => request<WebhookPublic>("GET", "/api/webhook"),
     updateWebhook: (body) => request<WebhookPublic>("PUT", "/api/webhook", body),
     testWebhook: () => request<WebhookTestResult>("POST", "/api/actions/webhook-test"),

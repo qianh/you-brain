@@ -6,6 +6,7 @@ import {
   createLlmSecretStore,
   llmKeychainKey,
   llmKeychainService,
+  type SecretBackend,
 } from "./secret-store-factory.js";
 import type { MemoryKeychain, SecretStore } from "./secret-store.js";
 import type { CommandRunner } from "./platform-secrets.js";
@@ -16,6 +17,7 @@ export interface LlmSecretOptions {
   platform: NodeJS.Platform;
   runner?: CommandRunner;
   memory?: MemoryKeychain;
+  backend?: SecretBackend;
   storeFor?: (provider: LlmProvider) => SecretStore;
 }
 
@@ -26,6 +28,7 @@ function storeFor(provider: LlmProvider, options: LlmSecretOptions): SecretStore
     provider,
     ...(options.runner ? { runner: options.runner } : {}),
     ...(options.memory ? { memory: options.memory } : {}),
+    ...(options.backend ? { backend: options.backend } : {}),
   });
 }
 

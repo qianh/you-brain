@@ -13,7 +13,8 @@
     "check:desktop": "bun run --cwd apps/desktop check && bun run --cwd apps/desktop test && bun run --cwd apps/desktop test:bundle:linux",
     "build:daemon": "bun scripts/build-daemon.ts",
     "protocol:schemas": "bun scripts/gen-protocol-schemas.ts",
-    "install:app": "bun scripts/install-app.ts"
+    "install:app": "bun scripts/install-app.ts",
+    "build:server": "bun scripts/build-server.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.3.11",

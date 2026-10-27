@@ -11,6 +11,9 @@ export {
 } from "./platform-secrets.js";
 export {
   LLM_KEYCHAIN_ACCOUNT,
+  SECRET_BACKEND_ENV,
+  SECRETS_FILE_ENV,
+  DEFAULT_SECRETS_FILE,
   createConfigSecretStore,
   createLlmSecretStore,
   createNamedSecretStore,
@@ -19,8 +22,12 @@ export {
   llmKeychainKey,
   llmKeychainService,
   oauthClientSecretAccount,
+  resolveSecretBackend,
   type ConfigSecretStoreOptions,
+  type NamedSecretOptions,
+  type SecretBackend,
 } from "./secret-store-factory.js";
+export { FileSecretStore, fileSecretKey, type FileSecretStoreOptions } from "./file-secrets.js";
 export {
   BUNDLED_GOOGLE_OAUTH_CLIENT,
   MISSING_OFFICIAL_OAUTH_MESSAGE,
@@ -35,6 +42,13 @@ export {
   type OAuthLoopbackOptions,
   type OAuthLoopbackSession,
 } from "./oauth-loopback.js";
+export {
+  HEADLESS_CALLBACK_PORT,
+  describeSshTunnel,
+  headlessRedirectUri,
+  startHeadlessOAuthLoopback,
+  type HeadlessLoopbackOptions,
+} from "./headless-oauth.js";
 export {
   GOOGLE_DRIVE_SCOPE,
   GoogleOAuth,
@@ -78,6 +92,9 @@ export {
   type LlmSecretOptions,
 } from "./llm-secrets.js";
 export {
+  GOOGLE_CLIENT_ID_SUFFIX,
   clearUserOAuthCredentials,
+  isGoogleClientId,
   saveUserOAuthCredentials,
+  updateUserOAuthClientId,
 } from "./user-oauth.js";

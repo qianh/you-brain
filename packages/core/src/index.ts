@@ -9,6 +9,8 @@ export {
 } from "./daemon/index.js";
 
 export {
+  DEVICE_ROLES,
+  DeviceRoleSchema,
   ImageRefSchema,
   LEGACY_BACKFILL_SOURCES,
   LocalConfigSchema,
@@ -31,6 +33,7 @@ export {
 } from "./domain/index.js";
 
 export type {
+  DeviceRole,
   ImageRef,
   LoadedLocalConfig,
   LocalConfig,

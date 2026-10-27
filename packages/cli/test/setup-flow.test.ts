@@ -233,7 +233,11 @@ describe("setup BrainHub and official OAuth", () => {
       );
       expect(logs).not.toContain(MISSING_OFFICIAL_OAUTH_MESSAGE);
       expect(events).toEqual(["login"]);
-      expect(questions).toEqual(["Google 登录方式：1 官方  2 自带凭据 [1]："]);
+      expect(questions).toHaveLength(1);
+      expect(questions[0]).toContain("Google 登录方式");
+      expect(questions[0]).toContain("1 官方");
+      expect(questions[0]).toContain("2 自带凭据");
+      expect(questions[0]).toContain("[1]：");
     } finally {
       if (previousId === undefined) delete process.env.YOU_BRAIN_BUNDLED_OAUTH_CLIENT_ID;
       else process.env.YOU_BRAIN_BUNDLED_OAUTH_CLIENT_ID = previousId;

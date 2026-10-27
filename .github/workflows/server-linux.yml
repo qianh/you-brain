@@ -1,0 +1,45 @@
+name: server-linux
+
+# 服务器端 tar.gz。只能在 Linux 上出包：bun build --compile 不能交叉编译，
+# vendor 里的 onnxruntime-node / sharp 是本机原生二进制。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install JavaScript dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build the web UI
+        run: bun run --cwd apps/web build
+
+      # 官方 OAuth 凭据走仓库 Secret，与桌面端构建一致；缺省时产物不含内置凭据，
+      # 服务器上只能用 --oauth custom 自带凭据。
+      - name: Build the server bundle
+        env:
+          YOU_BRAIN_GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.YOU_BRAIN_GOOGLE_OAUTH_CLIENT_ID }}
+          YOU_BRAIN_GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.YOU_BRAIN_GOOGLE_OAUTH_CLIENT_SECRET }}
+        run: bun run build:server
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: you-brain-server-${{ matrix.arch }}
+          path: dist/server/*.tar.gz
+          if-no-files-found: error

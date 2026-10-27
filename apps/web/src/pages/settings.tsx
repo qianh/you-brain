@@ -16,6 +16,7 @@ import { ConsolidationSection } from "./settings/consolidation.js";
 import { IntegrationsSection } from "./settings/integrations.js";
 import { settingsNavItem } from "./settings/meta.js";
 import { ModelSection } from "./settings/model.js";
+import { OAuthClientSection } from "./settings/oauth.js";
 import { SettingsNav } from "./settings/nav.js";
 import { PortraitSection } from "./settings/portrait.js";
 import { RefineSection } from "./settings/refine.js";
@@ -151,7 +152,10 @@ function SectionBody({
   if (!draft || !rolesDraft) return null;
   if (section === "account") {
     return (
-      <AccountSection draft={draft} issues={draftApi.issues} onDraft={draftApi.editDraft} />
+      <>
+        <AccountSection draft={draft} issues={draftApi.issues} onDraft={draftApi.editDraft} />
+        <OAuthClientSection />
+      </>
     );
   }
   if (section === "model") {

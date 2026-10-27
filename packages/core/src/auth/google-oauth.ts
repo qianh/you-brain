@@ -12,6 +12,9 @@ import {
   resolveOfficialOAuthClient,
 } from "./official-oauth-client.js";
 import {
+  startHeadlessOAuthLoopback,
+} from "./headless-oauth.js";
+import {
   startOAuthLoopback,
   type OAuthLoopbackSession,
 } from "./oauth-loopback.js";
@@ -74,6 +77,11 @@ export interface GoogleOAuthOptions {
   clientId?: string;
   clientSecret?: string | null;
   clientSecretStore?: SecretStore;
+  /**
+   * 无界面机器：固定回调端口，先打印 SSH 隧道命令，不尝试拉起浏览器。
+   * 端口被占用时直接报错，不会回退到随机端口。
+   */
+  headless?: { port?: number; describeTunnel?: (port: number) => string | null };
   /** Overrides process.env for YOU_BRAIN_GOOGLE_* when resolving the official client. */
   env?: NodeJS.ProcessEnv;
 }
@@ -355,7 +363,17 @@ export class GoogleOAuth {
       }
     }
     const state = randomBytes(24).toString("hex");
-    const loopback = await this.#startLoopback(state, signal ? { signal } : {});
+    const loopback = await (this.#source.headless
+      ? startHeadlessOAuthLoopback(state, {
+          ...(signal ? { signal } : {}),
+          ...(this.#source.headless.port === undefined
+            ? {}
+            : { port: this.#source.headless.port }),
+          ...(this.#source.headless.describeTunnel
+            ? { describeTunnel: this.#source.headless.describeTunnel }
+            : {}),
+        })
+      : this.#startLoopback(state, signal ? { signal } : {}));
     const client = this.#createClient(
       config.clientId,
       config.clientSecret,

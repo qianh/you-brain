@@ -22,10 +22,13 @@ export {
   type Turn,
 } from "./session.js";
 export {
+  DEVICE_ROLES,
+  DeviceRoleSchema,
   LocalConfigSchema,
   OAUTH_MODES,
   OauthModeSchema,
   createDefaultLocalConfig,
+  type DeviceRole,
   type LocalConfig,
   type OauthMode,
 } from "./config.js";

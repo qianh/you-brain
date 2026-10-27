@@ -27,9 +27,17 @@ import {
 } from "../adapters/index.js";
 import {
   clearGoogleConnection,
+  clearUserOAuthCredentials,
   createConfigSecretStore,
+  createOAuthClientSecretStore,
   getLlmApiKey,
+  isUsableOfficialOAuthClient,
+  resolveOfficialOAuthClient,
+  resolveSecretBackend,
+  saveUserOAuthCredentials,
   setLlmApiKey,
+  updateUserOAuthClientId,
+  type SecretBackend,
 } from "../auth/index.js";
 import { applyCaptureRedaction } from "../capture/redact.js";
 import { renderSessionMarkdown } from "../capture/normalize.js";
@@ -39,6 +47,7 @@ import {
   assertSupportedPlatform,
   loadLocalConfig,
   writeLocalConfig,
+  type DeviceRole,
   type LocalConfig,
   type NormalizedSession,
   type SessionSource,
@@ -64,6 +73,8 @@ import type {
   GoogleLoginResult,
   GoogleLogoutResult,
   LlmTestResult,
+  OAuthClientPublic,
+  OAuthClientPutBody,
   SearchRequest,
   StatusResponse,
   SyncActionResult,
@@ -316,6 +327,8 @@ export interface DaemonOptions {
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
   hostname?: string;
+  /** 首次创建配置时的角色。已存在的 config.toml 以文件里的 role 为准。 */
+  role?: DeviceRole;
   clock?: DaemonClock;
   /** `undefined` tries Google Drive. `null` stays unauthorized without touching the keychain. */
   drive?: DrivePort | null;
@@ -337,8 +350,7 @@ export interface DaemonOptions {
   port?: number;
   /** Test injection. Defaults to the global fetch. Tests must not open a real connection. */
   webhookFetch?: WebhookFetch;
-  /** Test injection. Defaults to openGoogleDrive. Tests must not open a browser. */
-  googleOpen?: typeof openGoogleDrive;
+  /** Test injection. Defaults to openGoogleDrive. Tests must not open a browser. */  googleOpen?: typeof openGoogleDrive;
   /** Test injection. Defaults to the global fetch. Tests must not reach Google. */
   revokeFetch?: typeof fetch;
 }
@@ -594,6 +606,8 @@ export class YouBrainDaemon {
   #local!: LocalConfig;
   #paths!: YouBrainPaths;
   #configFile = "";
+  /** 无界面服务器上钥匙串不可用，改用文件后端。 */
+  #secretBackend: SecretBackend = {};
   #shared: SharedConfig = createDefaultSharedConfig();
   #roles: Roles = createDefaultRoles();
   #zone: ZoneSettings = {
@@ -779,11 +793,17 @@ export class YouBrainDaemon {
         platform: this.#platform,
         env: this.#env,
         ...(this.#options.hostname ? { hostname: this.#options.hostname } : {}),
+        ...(this.#options.role ? { role: this.#options.role } : {}),
       }),
     );
     this.#local = loaded.config;
     this.#paths = loaded.paths;
     this.#configFile = loaded.configFile;
+    this.#secretBackend = resolveSecretBackend({
+      env: this.#env,
+      dataDir: this.#paths.dataDir,
+      role: this.#local.role,
+    });
     const lock = await log.time("acquireDaemonLock", () => acquireDaemonLock(this.#paths.lockFile));
     this.#lockRelease = lock.release;
     this.#shared = await log.time("readShared", () =>
@@ -2398,17 +2418,26 @@ export class YouBrainDaemon {
     ]);
   }
 
+  /** 本机在 Drive 设备表里的类型。服务器模式不声明 capture：它没有可采集的 CLI 会话。 */
+  #kind(): "desktop" | "server" {
+    return this.#local.role === "server" ? "server" : "desktop";
+  }
+
+  #capabilities(): Array<"capture" | "refine" | "consolidate"> {
+    return this.#local.role === "server" ? ["refine", "consolidate"] : ["capture", "refine"];
+  }
+
   #rememberDevice(): void {
     if (!this.#store) return;
     const now = this.#clock.now().toISOString();
     this.#store.upsertDevice({
       deviceId: this.#local.deviceId,
       displayName: this.#local.displayName,
-      kind: "desktop",
+      kind: this.#kind(),
       platform: this.#platform,
       appVersion: this.#appVersion,
       protocolVersion: PROTOCOL_VERSION,
-      capabilities: ["capture", "refine"],
+      capabilities: this.#capabilities(),
       lastSeenAt: now,
       lastActiveAt: this.#activityForDevice(),
     });
@@ -2434,10 +2463,10 @@ export class YouBrainDaemon {
     return {
       deviceId: this.#local.deviceId,
       displayName: this.#local.displayName,
-      kind: "desktop",
+      kind: this.#kind(),
       platform: this.#platform,
       appVersion: this.#appVersion,
-      capabilities: ["capture", "refine"],
+      capabilities: this.#capabilities(),
     };
   }
 
@@ -2452,6 +2481,7 @@ export class YouBrainDaemon {
       configFile: this.#configFile,
       platform: this.#platform,
       interactive: false,
+      secretBackend: this.#secretBackend,
       ...(this.#options.secrets ? { secrets: this.#options.secrets } : {}),
     });
     this.#drive = opened?.drive ?? null;
@@ -2517,7 +2547,11 @@ export class YouBrainDaemon {
     try {
       const backend = await createLlmBackend({
         config: this.#shared.llm,
-        getApiKey: (provider) => getLlmApiKey(provider, { platform: this.#platform }),
+        getApiKey: (provider) =>
+          getLlmApiKey(provider, {
+            platform: this.#platform,
+            backend: this.#secretBackend,
+          }),
         dataDir: this.#paths.dataDir,
         env: this.#env,
         homeDir: this.#homeDir,
@@ -2534,7 +2568,10 @@ export class YouBrainDaemon {
   }
 
   async #writeLlmKey(body: LlmKeyPutBody): Promise<void> {
-    await setLlmApiKey(body.provider, body.apiKey, { platform: this.#platform });
+    await setLlmApiKey(body.provider, body.apiKey, {
+      platform: this.#platform,
+      backend: this.#secretBackend,
+    });
     // Startup builds the backend after the key may have been stored, so only rebuild once that has happened.
     if (
       this.#llmOverride === undefined &&
@@ -2579,6 +2616,9 @@ export class YouBrainDaemon {
         configFile: this.#configFile,
         platform: this.#platform,
         interactive: true,
+        secretBackend: this.#secretBackend,
+        // 服务器上没有浏览器：固定回调端口，先打印 SSH 隧道命令。
+        ...(this.#local.role === "server" ? { headless: {} } : {}),
         ...(this.#options.secrets ? { secrets: this.#options.secrets } : {}),
         // Stop cancels the browser wait, so the callback server does not hold the process open.
         signal: this.#abort.signal,
@@ -2628,7 +2668,11 @@ export class YouBrainDaemon {
   #secretStore(): SecretStore {
     return (
       this.#options.secrets ??
-      createConfigSecretStore({ platform: this.#platform, configFile: this.#configFile })
+      createConfigSecretStore({
+        platform: this.#platform,
+        configFile: this.#configFile,
+        backend: this.#secretBackend,
+      })
     );
   }
 
@@ -2707,16 +2751,93 @@ export class YouBrainDaemon {
     };
   }
 
+  /**
+   * 自带 OAuth 凭据的读写。
+   *
+   * 分发方式：每个人用自己的 Google Cloud 项目，不走内置官方凭据。secret 写进密钥
+   * 后端（桌面是钥匙串，服务器是 0600 文件），不回显。
+   */
+  #oauthClientSecretStore(): SecretStore {
+    return createOAuthClientSecretStore({
+      platform: this.#platform,
+      configFile: this.#configFile,
+      backend: this.#secretBackend,
+    });
+  }
+
+  async #oauthClientView(): Promise<OAuthClientPublic> {
+    const officialAvailable = isUsableOfficialOAuthClient(resolveOfficialOAuthClient(this.#env));
+    let hasClientSecret = false;
+    if (this.#local.oauth.mode === "custom") {
+      const stored = await this.#oauthClientSecretStore().get().catch(() => null);
+      hasClientSecret = Boolean(stored?.trim());
+    }
+    return {
+      mode: this.#local.oauth.mode,
+      clientId: this.#local.oauth.clientId,
+      hasClientSecret,
+      officialAvailable,
+    };
+  }
+
+  async #writeOAuthClient(body: OAuthClientPutBody): Promise<OAuthClientPublic> {
+    if (this.#loginFlow) {
+      throw new HttpError(409, "LOGIN_IN_PROGRESS", "登录进行中，请先在浏览器完成或取消授权");
+    }
+    const secrets = this.#oauthClientSecretStore();
+    let next = this.#local;
+    try {
+      if (body.mode === "official") {
+        // 切回官方：删掉自己的 secret，config 里不再留 client id。
+        if (this.#local.oauth.mode === "custom") {
+          next = await clearUserOAuthCredentials({ config: this.#local, secrets });
+        } else {
+          next = { ...this.#local, oauth: { mode: "official", clientId: "" } };
+        }
+      } else if (body.clientSecret) {
+        next = await saveUserOAuthCredentials({
+          config: this.#local,
+          clientId: body.clientId ?? this.#local.oauth.clientId,
+          clientSecret: body.clientSecret,
+          secrets,
+        });
+      } else {
+        // 只改 id，沿用已存的 secret。
+        next = await updateUserOAuthClientId({
+          config: this.#local,
+          clientId: body.clientId ?? this.#local.oauth.clientId,
+          secrets,
+        });
+      }
+    } catch (error) {
+      if (error instanceof YouBrainError) {
+        throw new HttpError(400, error.code, error.message);
+      }
+      throw error;
+    }
+    this.#local = next;
+    await writeLocalConfig(this.#configFile, next);
+    this.changes.publish("status", this.#clock.now().toISOString());
+    return this.#oauthClientView();
+  }
+
   /** Minimal connection check. Uses the request's values and never writes them to shared config. */
   async #testLlm(body: LlmTestBody): Promise<LlmTestResult> {
     if (LLM_PRESETS[body.provider].requiresApiKey) {
-      const key = await getLlmApiKey(body.provider, { platform: this.#platform });
+      const key = await getLlmApiKey(body.provider, {
+        platform: this.#platform,
+        backend: this.#secretBackend,
+      });
       if (!key) return { ok: false, message: "钥匙串里还没有这个服务商的 API Key。" };
     }
     try {
       const backend = await createLlmBackend({
         config: { provider: body.provider, model: body.model, baseUrl: body.baseUrl },
-        getApiKey: (provider) => getLlmApiKey(provider, { platform: this.#platform }),
+        getApiKey: (provider) =>
+          getLlmApiKey(provider, {
+            platform: this.#platform,
+            backend: this.#secretBackend,
+          }),
         dataDir: this.#paths.dataDir,
         env: this.#env,
         homeDir: this.#homeDir,
@@ -2775,6 +2896,8 @@ export class YouBrainDaemon {
       googleLogin: () => this.#googleLogin(),
       googleLogout: () => this.#googleLogout(),
       googleSwitch: () => this.#googleSwitch(),
+      readOAuthClient: () => this.#oauthClientView(),
+      writeOAuthClient: (body) => this.#writeOAuthClient(body),
       status: () => this.#status(),
       sync: () => this.#syncNow(),
       upload: (input) => this.#uploadNow(input),
@@ -3302,6 +3425,8 @@ export class YouBrainDaemon {
       pi: [] as string[],
       "t3-code": [] as string[],
     };
+    // 服务器上不存在这些 CLI 的会话目录。采集空转，只做提炼与沉淀。
+    if (this.#local.role === "server") return roots;
     for (const id of SESSION_SOURCES) {
       if (this.#options.sourceRoots) {
         roots[id] = [...(this.#options.sourceRoots[id] ?? [])];

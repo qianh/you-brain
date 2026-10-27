@@ -28,6 +28,7 @@ import type {
 } from "@you-brain/core/http";
 import { createLocalMcpServices, serveMcp } from "@you-brain/core/mcp";
 import { SearchService, inboxScopePrefixes, serveEmbedWorker, type Embedder } from "@you-brain/core/search";
+import { readDaemonEndpoint } from "@you-brain/core/http";
 import { SqliteStore } from "@you-brain/core/store";
 
 import {
@@ -152,6 +153,7 @@ program
   .option("--backfill", "确认首次回填")
   .option("--no-backfill", "跳过首次回填")
   .option("--display-name <name>", "设备显示名")
+  .option("--server", "服务器模式：无界面常开主设备，不采集本机会话")
   .action(async (opts: SetupCommandOptions) => {
     try {
       await runSetup(setupFlags(opts));
@@ -167,6 +169,12 @@ program
     try {
       const client = await connectDaemon();
       printStatus(await client.status());
+      // Web 界面只监听 127.0.0.1。服务器上需要知道端口才能开隧道。
+      const endpoint = await readDaemonEndpoint(runtimePaths().dataDir).catch(() => null);
+      if (endpoint) {
+        console.log(`Web 界面：http://127.0.0.1:${endpoint.port}`);
+        console.log(`  远程查看：ssh -N -L ${endpoint.port}:127.0.0.1:${endpoint.port} <用户>@<这台机器>`);
+      }
     } catch (error) {
       if (error instanceof CliError) {
         await printOfflineStatus();
@@ -404,6 +412,7 @@ interface SetupCommandOptions {
   integrations?: string | false;
   backfill?: boolean;
   displayName?: string;
+  server?: boolean;
 }
 
 function setupFlags(opts: SetupCommandOptions): SetupFlags {
@@ -432,6 +441,7 @@ function setupFlags(opts: SetupCommandOptions): SetupFlags {
     ...(skipIntegrations ? { skipIntegrations: true } : {}),
     ...(backfill !== undefined ? { backfill } : {}),
     ...(opts.displayName ? { displayName: opts.displayName } : {}),
+    ...(opts.server ? { role: "server" as const } : {}),
   };
 }
 

@@ -26,6 +26,7 @@ import {
   ConclusionActionBodySchema,
   LlmKeyPutSchema,
   LlmTestBodySchema,
+  OAuthClientPutSchema,
   PortraitCorrectionBodySchema,
   ReminderActionBodySchema,
   TodoActionBodySchema,
@@ -41,6 +42,7 @@ import {
   type GoogleLoginResult,
   type GoogleLogoutResult,
   type LlmTestResult,
+  type OAuthClientPublic,
   type PortraitCorrectionResult,
   type SecretStoredResponse,
   type SearchRequest,
@@ -190,6 +192,11 @@ export async function handleApi(
   }
   if (path === "/api/actions/google-switch") {
     return method(request, "POST", () => googleSwitch(context));
+  }
+  if (path === "/api/oauth-client") {
+    if (request.method === "GET") return readOAuthClient(context);
+    if (request.method === "PUT") return writeOAuthClient(request, context);
+    return methodNotAllowed("GET, PUT");
   }
   if (path === "/api/status") return method(request, "GET", () => status(context));
   if (path === "/api/reminders") return method(request, "GET", () => reminders(url, context));
@@ -556,6 +563,27 @@ async function testLlm(request: Request, context: ApiContext): Promise<Response>
 async function googleLogin(context: ApiContext): Promise<Response> {
   if (!context.deps.googleLogin) notSupported();
   const result: GoogleLoginResult = await context.deps.googleLogin();
+  return json(result);
+}
+
+async function readOAuthClient(context: ApiContext): Promise<Response> {
+  if (!context.deps.readOAuthClient) notSupported();
+  const body: OAuthClientPublic = await context.deps.readOAuthClient();
+  return json(body);
+}
+
+async function writeOAuthClient(request: Request, context: ApiContext): Promise<Response> {
+  if (!context.deps.writeOAuthClient) notSupported();
+  let body;
+  try {
+    body = OAuthClientPutSchema.parse(await readJson(request));
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      throw new HttpError(400, "INVALID_INPUT", error.message);
+    }
+    throw error;
+  }
+  const result: OAuthClientPublic = await context.deps.writeOAuthClient(body);
   return json(result);
 }
 

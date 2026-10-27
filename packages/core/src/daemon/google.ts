@@ -11,6 +11,7 @@ import {
   isInvalidGrant,
   type DriveIdentityClient,
   type GoogleOAuthOptions,
+  type SecretBackend,
   type SecretStore,
 } from "../auth/index.js";
 import { YouBrainError, writeLocalConfig, type LocalConfig } from "../domain/index.js";
@@ -24,6 +25,10 @@ export interface OpenGoogleDriveOptions {
   interactive: boolean;
   clientSecret?: string;
   secrets?: SecretStore;
+  /** 文件密钥后端。不传时走系统钥匙串。 */
+  secretBackend?: SecretBackend;
+  /** 无界面服务器：固定回调端口、打印 SSH 隧道命令、不拉起浏览器。 */
+  headless?: { port?: number; describeTunnel?: (port: number) => string | null };
   /** Passed through when resolving the official OAuth client. */
   env?: NodeJS.ProcessEnv;
   /** Aborting cancels an interactive login that is waiting for the browser. */
@@ -127,10 +132,12 @@ export async function openGoogleDrive(
     createConfigSecretStore({
       platform: options.platform,
       configFile: options.configFile,
+      ...(options.secretBackend ? { backend: options.secretBackend } : {}),
     });
   const official: GoogleOAuthOptions = {
     mode: "official",
     ...(options.env ? { env: options.env } : {}),
+    ...(options.headless ? { headless: options.headless } : {}),
   };
   const oauthOptions: GoogleOAuthOptions =
     options.local.oauth.mode === "custom"
@@ -141,7 +148,9 @@ export async function openGoogleDrive(
           clientSecretStore: createOAuthClientSecretStore({
             platform: options.platform,
             configFile: options.configFile,
+            ...(options.secretBackend ? { backend: options.secretBackend } : {}),
           }),
+          ...(options.headless ? { headless: options.headless } : {}),
         }
       : official;
   try {

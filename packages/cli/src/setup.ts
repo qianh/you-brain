@@ -17,16 +17,21 @@ import {
   createDefaultLocalConfig,
   loadLocalConfig,
   writeLocalConfig,
+  type DeviceRole,
   type LocalConfig,
   type SessionSource,
   type YouBrainPaths,
 } from "@you-brain/core";
 import {
+  GOOGLE_CLIENT_ID_SUFFIX,
   MISSING_OFFICIAL_OAUTH_MESSAGE,
   createOAuthClientSecretStore,
+  isGoogleClientId,
   isUsableOfficialOAuthClient,
   resolveOfficialOAuthClient,
+  resolveSecretBackend,
   setLlmApiKey,
+  type SecretBackend,
 } from "@you-brain/core/auth";
 import { captureSourceFilters, discoverSessions, getAdapter } from "@you-brain/core/adapters";
 import {
@@ -84,6 +89,8 @@ export interface SetupFlags {
   /** Undefined asks, unless --yes which backfills. */
   backfill?: boolean;
   displayName?: string;
+  /** `--server`：无界面常开主设备。 */
+  role?: DeviceRole;
 }
 
 export interface SetupHooks {
@@ -102,6 +109,8 @@ export interface SetupHooks {
   applyBrainHubMigration?: typeof applyBrainHubMigration;
   /** Test injection. CLI connection tests otherwise wait 90 seconds. */
   cliTimeoutMs?: number;
+  /** 覆盖密钥后端推断（服务器上用文件后端）。 */
+  secretBackend?: SecretBackend;
 }
 
 interface SetupIo {
@@ -119,6 +128,7 @@ interface SetupIo {
   planBrainHubMigration: (context: MigrateContext) => Promise<BrainHubMigrationPlan>;
   applyBrainHubMigration: typeof applyBrainHubMigration;
   cliTimeoutMs?: number;
+  secretBackend: SecretBackend;
 }
 
 const CLI_SETUP_TIMEOUT_MS = 90_000;
@@ -179,6 +189,7 @@ export async function runSetup(flags: SetupFlags, hooks: SetupHooks = {}): Promi
       createDefaultLocalConfig({
         hostname: flags.displayName ?? hostname(),
         dataDir: paths.dataDir,
+        role: flags.role ?? "desktop",
         ...(defaults.deviceId ? { deviceId: defaults.deviceId } : {}),
         ...(defaults.displayName && !flags.displayName
           ? { displayName: defaults.displayName }
@@ -201,6 +212,19 @@ export async function runSetup(flags: SetupFlags, hooks: SetupHooks = {}): Promi
         configFile: paths.configFile,
       })
     ).config;
+    // 角色是这台机器自己的设置，重复跑 setup 时允许显式切换。
+    if (flags.role && config.role !== flags.role) {
+      config = { ...config, role: flags.role };
+      await writeLocalConfig(paths.configFile, config);
+    }
+  }
+  // 角色确定后才能推断密钥后端：服务器默认写文件，不依赖桌面会话的钥匙串。
+  if (hooks.secretBackend === undefined && config.role === "server") {
+    io.secretBackend = resolveSecretBackend({
+      env: io.env,
+      dataDir: paths.dataDir,
+      role: config.role,
+    });
   }
   if (!progress.brainhub && !pendingTakeover) {
     progress.brainhub = true;
@@ -223,6 +247,8 @@ export async function runSetup(flags: SetupFlags, hooks: SetupHooks = {}): Promi
         platform: io.platform,
         interactive: !flags.yes,
         env: io.env,
+        secretBackend: io.secretBackend,
+        ...(config.role === "server" ? { headless: {} } : {}),
         ...(flags.clientSecret ? { clientSecret: flags.clientSecret } : {}),
       });
     } catch (error) {
@@ -293,32 +319,59 @@ export async function runSetup(flags: SetupFlags, hooks: SetupHooks = {}): Promi
   }
 
   if (!progress.sources || flags.sources.length > 0) {
-    shared = await configureSources(flags, shared, homeDir, io);
-    await saveShared(paths.dataDir, shared, drive);
+    if (config.role === "server") {
+      // 服务器上没有 CLI 会话可采集，全部关掉，避免扫描空转。
+      shared = disableAllSources(shared);
+      await saveShared(paths.dataDir, shared, drive);
+      io.log("服务器模式：不采集本机会话（采集来源全部关闭）。");
+    } else {
+      shared = await configureSources(flags, shared, homeDir, io);
+      await saveShared(paths.dataDir, shared, drive);
+    }
     progress.sources = true;
     await saveProgress(paths.dataDir, progress);
   }
 
   if (!progress.integrations || flags.integrations !== undefined) {
-    await configureIntegrations(
-      flags,
-      homeDir,
-      join(paths.dataDir, "managed-blocks.json"),
-      shared,
-      paths.dataDir,
-      io,
-    );
+    if (config.role === "server") {
+      io.log("服务器模式：跳过 AI 客户端接入。");
+    } else {
+      await configureIntegrations(
+        flags,
+        homeDir,
+        join(paths.dataDir, "managed-blocks.json"),
+        shared,
+        paths.dataDir,
+        io,
+      );
+    }
     progress.integrations = true;
     await saveProgress(paths.dataDir, progress);
   }
 
   if (!progress.backfill || flags.backfill !== undefined) {
-    await configureBackfill(flags, shared, config.displayName, paths.stateFile, io);
+    if (config.role === "server") {
+      io.log("服务器模式：跳过首次回填（本机没有会话）。");
+    } else {
+      await configureBackfill(flags, shared, config.displayName, paths.stateFile, io);
+    }
     progress.backfill = true;
     await saveProgress(paths.dataDir, progress);
   }
 
-  io.log("设置完成。下一步：you-brain daemon");
+  io.log(
+    config.role === "server"
+      ? "设置完成。下一步：you-brain service install（开机自启）"
+      : "设置完成。下一步：you-brain daemon",
+  );
+}
+
+function disableAllSources(shared: SharedConfig): SharedConfig {
+  const sources = structuredClone(shared.capture.sources);
+  for (const id of SESSION_SOURCES) {
+    sources[id] = { ...sources[id], enabled: false, paths: [] };
+  }
+  return parseSharedConfig({ ...shared, capture: { ...shared.capture, sources } });
 }
 
 function createIo(hooks: SetupHooks): SetupIo {
@@ -338,6 +391,8 @@ function createIo(hooks: SetupHooks): SetupIo {
     planBrainHubMigration: hooks.planBrainHubMigration ?? planBrainHubMigration,
     applyBrainHubMigration: hooks.applyBrainHubMigration ?? applyBrainHubMigration,
     ...(hooks.cliTimeoutMs === undefined ? {} : { cliTimeoutMs: hooks.cliTimeoutMs }),
+    secretBackend:
+      hooks.secretBackend ?? resolveSecretBackend({ env, dataDir: (hooks.paths ?? runtimePaths()).dataDir }),
   };
 }
 
@@ -374,7 +429,7 @@ async function configureGoogle(
   if (!flags.oauth && !flags.yes) {
     requireTty("Google 登录方式", io);
     for (;;) {
-      const answer = await io.ask("Google 登录方式：1 官方  2 自带凭据 [1]：", "1");
+      const answer = await io.ask(oauthModeQuestion(officialReady), officialReady ? "1" : "2");
       mode = answer === "2" ? "custom" : "official";
       if (mode === "official" && !officialReady) {
         io.log(MISSING_OFFICIAL_OAUTH_MESSAGE);
@@ -384,6 +439,13 @@ async function configureGoogle(
     }
   } else if (flags.oauth === "official" && !officialReady) {
     throw new CliError(MISSING_OFFICIAL_OAUTH_MESSAGE);
+  } else if (!flags.oauth && flags.yes && !officialReady && !flags.clientId) {
+    // --yes 且未内置官方凭据：不登录也能先把服务装起来，稍后在界面里配自带凭据。
+    io.log(
+      `${MISSING_OFFICIAL_OAUTH_MESSAGE}\n` +
+        "先跳过登录；之后在设置页「账户与 Drive → OAuth 凭据」里填自己的项目，" +
+        "或重跑：you-brain setup --oauth custom --client-id <id> --client-secret <secret>",
+    );
   }
   if (mode !== "official" && mode !== "custom") {
     throw new CliError("oauth 只能是 official 或 custom");
@@ -394,13 +456,26 @@ async function configureGoogle(
     requireTty("OAuth client id", io);
     clientId = await io.ask("OAuth client id：", "");
   }
+  if (mode === "custom" && !isGoogleClientId(clientId)) {
+    throw new CliError(
+      `OAuth client id 必须以 ${GOOGLE_CLIENT_ID_SUFFIX} 结尾，收到 ${clientId || "（空）"}`,
+    );
+  }
   if (mode === "custom" && flags.clientSecret) {
-    await createOAuthClientSecretStore({ platform, configFile }).set(flags.clientSecret);
+    await createOAuthClientSecretStore({
+      platform,
+      configFile,
+      backend: io.secretBackend,
+    }).set(flags.clientSecret);
   } else if (mode === "custom" && !flags.yes) {
     requireTty("OAuth client secret", io);
     const secret = await io.ask("OAuth client secret：", "");
     if (secret) {
-      await createOAuthClientSecretStore({ platform, configFile }).set(secret);
+      await createOAuthClientSecretStore({
+        platform,
+        configFile,
+        backend: io.secretBackend,
+      }).set(secret);
     }
   }
   const next: LocalConfig = {
@@ -409,6 +484,27 @@ async function configureGoogle(
   };
   await writeLocalConfig(configFile, next);
   return next;
+}
+
+/**
+ * 自带凭据是给多人分发的主路径，所以把在 GCP 里要做的事写在提示里。
+ * 关键点是 User type 选 Internal（有 Workspace）或发布到 Production，
+ * 否则 Testing 状态下 refresh token 只有 7 天。
+ */
+function oauthModeQuestion(officialReady: boolean): string {
+  const custom = [
+    "自带凭据：在 Google Cloud Console 建一个项目，",
+    "启用 Google Drive API，OAuth 客户端类型选「桌面应用」，",
+    `把 client id（以 ${GOOGLE_CLIENT_ID_SUFFIX} 结尾）和 client secret 填进来。`,
+    "User type 选 Internal（同 Workspace 域名），或把应用发布到 Production；",
+    "停留在 Testing 时授权每 7 天过期，需要重新登录。",
+  ].join("");
+  return [
+    "Google 登录方式",
+    officialReady ? "  1 官方" : "  1 官方（此构建未内置，不可用）",
+    `  2 ${custom}`,
+    `[${officialReady ? "1" : "2"}]：`,
+  ].join("\n");
 }
 
 const API_PROVIDERS = [
@@ -496,7 +592,11 @@ async function configureModel(
       baseUrl,
     },
   });
-  if (apiKey) await setLlmApiKey(provider, apiKey, { platform: io.platform });
+  if (apiKey)
+    await setLlmApiKey(provider, apiKey, {
+      platform: io.platform,
+      backend: io.secretBackend,
+    });
   if (apiKey || !preset.requiresApiKey) {
     const cliTimeoutMs = io.cliTimeoutMs ?? CLI_SETUP_TIMEOUT_MS;
     if (preset.kind === "cli" && isCliProvider(provider)) {
