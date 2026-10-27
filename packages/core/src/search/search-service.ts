@@ -54,6 +54,38 @@ interface ChunkRow {
   vector: Uint8Array | null;
 }
 
+/** A ranked candidate: cached vectors come as Float32Array, keyword-only rows have none. */
+interface RankRow {
+  drive_file_id: string;
+  drive_path: string;
+  source: string;
+  conversation_id: string;
+  started_at: string;
+  updated_at: string;
+  chunk_id: string;
+  vector: Float32Array | null;
+}
+
+interface ChunkMeta {
+  drive_file_id: string;
+  drive_path: string;
+  source: string;
+  conversation_id: string;
+  started_at: string;
+  updated_at: string;
+}
+
+/** A stored vector decoded once and kept resident between queries. */
+interface VectorRow extends ChunkMeta {
+  chunk_id: string;
+  vector: Float32Array;
+}
+
+interface VectorCache {
+  rows: VectorRow[];
+  keys: Set<string>;
+}
+
 /** A scored row still carrying where its text lives; text is fetched for the page only. */
 type RankedHit = SearchOutput["results"][number] & { fileId?: string; chunkId?: string };
 
@@ -141,6 +173,9 @@ const remoteUnavailable = {
 /** Query embeddings kept in memory. One entry is a few kilobytes. */
 const QUERY_VECTOR_CACHE = 64;
 
+/** Resident decoded vectors are kept only under this budget; beyond it every query re-reads. */
+const VECTOR_CACHE_MAX_BYTES = 128 * 1024 * 1024;
+
 /** Hits read from Drive per query; each costs one download. */
 const REMOTE_HITS = 6;
 const REMOTE_SEARCH_TIMEOUT_MS = 8_000;
@@ -180,26 +215,17 @@ function stripImages(markdown: string): string {
     .replace(/<img\b[^>]*>/giu, "[image omitted]");
 }
 
-function cosine(left: number[], right: number[]): number {
-  if (left.length !== right.length || left.length === 0) return -1;
+function dot(query: Float32Array, vector: Float32Array): number {
+  if (query.length !== vector.length || query.length === 0) return -1;
   let sum = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    const a = left[index];
-    const b = right[index];
-    if (a === undefined || b === undefined) return -1;
-    sum += a * b;
+  for (let index = 0; index < query.length; index += 1) {
+    sum += query[index]! * vector[index]!;
   }
   return sum;
 }
 
 function encodeVector(vector: number[]): Uint8Array {
   return new Uint8Array(new Float32Array(vector).buffer);
-}
-
-function decodeVector(blob: Uint8Array): number[] {
-  const copy = new Uint8Array(blob.byteLength);
-  copy.set(blob);
-  return [...new Float32Array(copy.buffer)];
 }
 
 function addWarning(
@@ -285,6 +311,74 @@ export class SearchService {
     // A new scope rebuilds the index so documents outside it are dropped.
     if (this.#scope) fingerprint.scope = [...this.#scope()].sort().join("|");
     return JSON.stringify(fingerprint);
+  }
+
+  #vectorCache: VectorCache | null = null;
+
+  /**
+   * Decoded vectors stay resident between queries. Reading all of them per query was the
+   * last multi-second cost of a hot search: the blob scan plus a per-chunk metadata seek
+   * ran on every request while cosine itself takes a hundred milliseconds. All writes go
+   * through #commit and #writeVectors, which clear this; a restart rebuilds it.
+   *
+   * Chunks of one file always share their metadata (they come from one frontmatter parse),
+   * so the build is two queries — one sequential scan of search_vectors, one per-file
+   * metadata pass — instead of joining the blob table row by row.
+   */
+  #vectorRows(): VectorCache | null {
+    if (this.#vectorCache !== null) return this.#vectorCache;
+    const vectors = this.#database
+      .prepare("SELECT drive_file_id, chunk_id, vector FROM search_vectors")
+      .all() as Array<{ drive_file_id: string; chunk_id: string; vector: Uint8Array }>;
+    const files = this.#database
+      .prepare(
+        `
+        SELECT DISTINCT drive_file_id, drive_path, source, conversation_id,
+               started_at, updated_at
+        FROM search_chunks
+      `,
+      )
+      .all() as ChunkMeta[];
+    const byFile = new Map(files.map((file) => [file.drive_file_id, file]));
+    const selectOne = this.#database.prepare(
+      `
+      SELECT drive_file_id, drive_path, source, conversation_id, started_at, updated_at
+      FROM search_chunks
+      WHERE drive_file_id = ? AND chunk_id = ?
+    `,
+    );
+    const rows: VectorRow[] = [];
+    for (const entry of vectors) {
+      let meta = byFile.get(entry.drive_file_id);
+      if (meta === undefined) {
+        const fetched = selectOne.get(entry.drive_file_id, entry.chunk_id) as
+          | ChunkMeta
+          | undefined;
+        if (fetched === undefined) continue;
+        meta = fetched;
+      }
+      const blob = new Uint8Array(entry.vector.byteLength);
+      blob.set(entry.vector);
+      rows.push({
+        drive_file_id: entry.drive_file_id,
+        drive_path: meta.drive_path,
+        source: meta.source,
+        conversation_id: meta.conversation_id,
+        started_at: meta.started_at,
+        updated_at: meta.updated_at,
+        chunk_id: entry.chunk_id,
+        vector: new Float32Array(blob.buffer),
+      });
+    }
+    const cache: VectorCache = {
+      rows,
+      keys: new Set(rows.map((row) => chunkKey(row.drive_file_id, row.chunk_id))),
+    };
+    // An outgrown library must not pin unbounded memory; return the rows for this query
+    // but leave the cache unset, so later queries rebuild (the pre-cache behavior).
+    if (rows.length * this.#dimensions * 4 > VECTOR_CACHE_MAX_BYTES) return cache;
+    this.#vectorCache = cache;
+    return cache;
   }
 
   /** True when semantic search is on and a stored chunk has no vector. */
@@ -582,6 +676,7 @@ export class SearchService {
       this.#clearPending();
     });
     commit();
+    this.#vectorCache = null;
   }
 
   status(): SearchStatus {
@@ -693,6 +788,7 @@ export class SearchService {
       }
     });
     write();
+    this.#vectorCache = null;
   }
 
   /**
@@ -850,46 +946,35 @@ export class SearchService {
     ensureSearchSchema(this.#database);
     // Two candidate sets instead of one full table scan.
     //
-    // Semantic ranking only has vectors to compare, so the join is inner: on a real
-    // library that is 19,780 of 143,965 chunks. Keyword ranking brings its own shortlist
-    // (`keywordScores` keeps the bm25 leaders), and only those rows need metadata — they
-    // are the chunks this device has not embedded yet.
+    // Semantic ranking only has vectors to compare: they come from the resident cache
+    // (#vectorRows), decoded once and reused until the next write. Keyword ranking brings
+    // its own shortlist (`keywordScores` keeps the bm25 leaders), and only those rows need
+    // metadata — they are the chunks this device has not embedded yet.
     //
     // Chunk text is never part of this: a full library carries far more text than the
     // page it returns, and stage 2 fetches it for the winners only.
-    const withVector = this.#database
-      .prepare(
-        `
-        SELECT c.drive_file_id, c.drive_path, c.source, c.conversation_id,
-               c.started_at, c.updated_at, c.content_sha256, c.chunk_id,
-               v.vector AS vector
-        FROM search_chunks c
-        JOIN search_vectors v
-          ON v.drive_file_id = c.drive_file_id AND v.chunk_id = c.chunk_id
-      `,
-      )
-      .all() as Array<Omit<ChunkRow, "text">>;
+    const cached = this.#semantic ? this.#vectorRows() : null;
+    const withVector: RankRow[] = cached ? cached.rows : [];
     // One bm25 pass feeds both the scores and the shortlist of chunks still waiting for a
     // vector; running the same match twice cost about a second per query.
     const keywordRows = keywordHits(this.#database, input.query);
     const lexical = keywordScoresFrom(keywordRows);
-    const rows: Array<Omit<ChunkRow, "text">> = withVector;
+    const rows: RankRow[] = [...withVector];
     if (keywordRows.length > 0) {
-      const known = new Set(withVector.map((row) => chunkKey(row.drive_file_id, row.chunk_id)));
-      const wanted = keywordRows.filter((hit) => !known.has(chunkKey(hit.drive_file_id, hit.chunk_id)));
+      const wanted = keywordRows.filter(
+        (hit) => cached === null || !cached.keys.has(chunkKey(hit.drive_file_id, hit.chunk_id)),
+      );
       if (wanted.length > 0) {
         const selectOne = this.#database.prepare(
           `
           SELECT drive_file_id, drive_path, source, conversation_id,
-                 started_at, updated_at, content_sha256, chunk_id
+                 started_at, updated_at, chunk_id
           FROM search_chunks
           WHERE drive_file_id = ? AND chunk_id = ?
         `,
         );
         for (const hit of wanted) {
-          const row = selectOne.get(hit.drive_file_id, hit.chunk_id) as
-            | Omit<ChunkRow, "text" | "vector">
-            | null;
+          const row = selectOne.get(hit.drive_file_id, hit.chunk_id) as RankRow | null;
           if (row) rows.push({ ...row, vector: null });
         }
       }
@@ -905,6 +990,7 @@ export class SearchService {
     } else if (this.#semantic && rows.length > 0) {
       addWarning(warnings, keywordFallback);
     }
+    const query = queryVector === null ? null : Float32Array.from(queryVector);
     const searchMode: SearchOutput["searchMode"] = queryVector
       ? "semantic"
       : "keyword";
@@ -916,9 +1002,8 @@ export class SearchService {
       )
       .map((row) => {
         const keyword = lexical.get(chunkKey(row.drive_file_id, row.chunk_id)) ?? 0;
-        const vector = row.vector ? decodeVector(row.vector) : null;
-        const semantic = queryVector && vector ? cosine(queryVector, vector) : 0;
-        const score = queryVector ? semantic * 0.85 + keyword * 0.15 : keyword;
+        const semantic = query !== null && row.vector !== null ? dot(query, row.vector) : 0;
+        const score = query !== null ? semantic * 0.85 + keyword * 0.15 : keyword;
         return {
           score: Number(score.toFixed(6)),
           source: row.source,

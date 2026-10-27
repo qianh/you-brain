@@ -625,4 +625,72 @@ describe("local hybrid search", () => {
     expect(result.results[0]?.conversationId).toBe("semantic-off");
     expect(result.warnings).toEqual([]);
   });
+
+  it("keeps repeated queries stable while the vector cache is resident", async () => {
+    const drive = new MemoryDrive();
+    await drive.put({
+      path: "inbox/mac/codex.md",
+      bytes: markdown({
+        source: "codex",
+        conversationId: "conversation-cache",
+        contentSha: "c".repeat(64),
+        text: "Use a canary rollout for production releases.",
+      }),
+      mimeType: "text/markdown",
+    });
+    const service = new SearchService({
+      drive,
+      embedder: new SemanticEmbedder(),
+      database: openDatabase(),
+    });
+
+    await service.sync();
+    const first = await service.search({ query: "release rollout", limit: 5 });
+    const second = await service.search({ query: "release rollout", limit: 5 });
+
+    expect(first.searchMode).toBe("semantic");
+    expect(second).toEqual(first);
+  });
+
+  it("picks up a document indexed after the vector cache is resident", async () => {
+    const drive = new MemoryDrive();
+    await drive.put({
+      path: "inbox/mac/codex.md",
+      bytes: markdown({
+        source: "codex",
+        conversationId: "conversation-first",
+        contentSha: "d".repeat(64),
+        text: "Use a canary rollout for production releases.",
+      }),
+      mimeType: "text/markdown",
+    });
+    const service = new SearchService({
+      drive,
+      embedder: new SemanticEmbedder(),
+      database: openDatabase(),
+    });
+
+    await service.sync();
+    const before = await service.search({ query: "portrait database", limit: 5 });
+    // Semantic mode ranks the whole library; the unrelated document ranks last at score 0.
+    expect(before.results.map((result) => result.conversationId)).toEqual([
+      "conversation-first",
+    ]);
+
+    await drive.put({
+      path: "inbox/mac/claude.md",
+      bytes: markdown({
+        source: "claude",
+        conversationId: "conversation-second",
+        contentSha: "e".repeat(64),
+        text: "The portrait database stores the merged twin.",
+      }),
+      mimeType: "text/markdown",
+    });
+    await service.sync();
+    const after = await service.search({ query: "portrait database", limit: 5 });
+
+    expect(after.searchMode).toBe("semantic");
+    expect(after.results[0]?.conversationId).toBe("conversation-second");
+  });
 });
