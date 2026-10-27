@@ -204,6 +204,7 @@ import {
 import { INTERVALS, intervalDue, pullInterval } from "./schedule.js";
 import {
   WEB_SESSION_BATCH,
+  WEB_SESSION_CONCURRENCY,
   countUnrefinedWebSessions,
   isWebInboxPath,
   listWebInbox,
@@ -1543,14 +1544,24 @@ export class YouBrainDaemon {
       idleMs: this.#shared.refine.idleMinutes * 60_000,
       blocked: (key) => this.#webRetryBlocked(key, now),
     }).slice(0, WEB_SESSION_BATCH);
-    for (const item of pending) {
-      if (this.#stopped || !this.#canProcessWebSessions()) return;
-      try {
-        await this.#refineWebSession(item);
-      } catch {
-        // One bad session must not stop the batch.
+    // Two refine calls at once drain a backlog twice as fast. A subscription CLI shares
+    // one work directory per call, so its queue stays sequential.
+    const concurrency =
+      this.#llm?.descriptor.kind === "cli" ? 1 : Math.min(WEB_SESSION_CONCURRENCY, pending.length);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (!this.#stopped && this.#canProcessWebSessions()) {
+        const item = pending[next];
+        if (item === undefined) return;
+        next += 1;
+        try {
+          await this.#refineWebSession(item);
+        } catch {
+          // One bad session must not stop the batch.
+        }
       }
-    }
+    };
+    await Promise.all(Array.from({ length: concurrency }, worker));
   }
 
   /**

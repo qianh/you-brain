@@ -1,6 +1,11 @@
 export const WEB_INBOX_PATH_PREFIX = "inbox/web-";
 export const WEB_INBOX_CURSOR_PREFIX = "webinbox:";
-export const WEB_SESSION_BATCH = 3;
+export const WEB_SESSION_BATCH = 6;
+/**
+ * Refine calls for the web queue run two at a time. Only API backends get this:
+ * a subscription CLI shares one work directory per call, so its queue stays sequential.
+ */
+export const WEB_SESSION_CONCURRENCY = 2;
 
 export interface WebInboxCursorStore {
   getCursor(key: string): string | null;

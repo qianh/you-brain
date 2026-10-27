@@ -10,6 +10,7 @@ import { MemoryDrive } from "../../src/drive/memory-drive.js";
 import type { TopicsResponse } from "../../src/http/types.js";
 import type { LlmBackend } from "../../src/llm/types.js";
 import { SqliteStore } from "../../src/store/sqlite-store.js";
+import { WEB_SESSION_BATCH } from "../../src/web-sessions/index.js";
 import {
   CLOCK_START,
   fakeBackend,
@@ -426,12 +427,12 @@ describe("web session processor", () => {
         const prompts: string[] = [];
         const device = await startDevice(box, clock, drive, "device-a", recordingBackend(prompts, "批量摘要"));
         await assignMain(device.daemon);
-        const markers = [
-          { id: "m1", age: 40, text: "MARKER_ONE" },
-          { id: "m2", age: 30, text: "MARKER_TWO" },
-          { id: "m3", age: 20, text: "MARKER_THREE" },
-          { id: "m4", age: 10, text: "MARKER_FOUR" },
-        ];
+        // One batch of the newest sessions plus the oldest one that has to wait a pass.
+        const markers = Array.from({ length: WEB_SESSION_BATCH }, (_, index) => ({
+          id: `m${index}`,
+          age: (WEB_SESSION_BATCH - index) * 10,
+          text: `MARKER_${WEB_SESSION_BATCH - index}`,
+        }));
         for (const marker of markers) {
           await putMarkdown(
             drive,
@@ -459,24 +460,21 @@ describe("web session processor", () => {
         // Refine runs detached from the tick, so wait for the pass to finish before
         // counting what the model was asked.
         await device.daemon.settled();
-        expect(prompts).toHaveLength(3);
-        // Newest first: the two most recent markers and the short body go in the first
-        // batch, so a conversation the user just finished does not wait behind old ones.
-        expect(prompts.join("\n")).toContain("MARKER_FOUR");
-        expect(prompts.join("\n")).toContain("MARKER_THREE");
+        expect(prompts).toHaveLength(WEB_SESSION_BATCH);
+        // Newest first: the most recent markers and the short body fill the first batch,
+        // so a conversation the user just finished does not wait behind old ones.
         expect(prompts.join("\n")).toContain("ONLY_ONE");
-        expect(prompts.join("\n")).not.toContain("MARKER_ONE");
-        expect(prompts.join("\n")).not.toContain("MARKER_TWO");
-        // Older markers are still queued behind the first batch.
+        expect(prompts.join("\n")).toContain("MARKER_1");
+        expect(prompts.join("\n")).not.toContain(`MARKER_${WEB_SESSION_BATCH}`);
+        // The oldest marker is still queued behind the first batch.
         const afterFirst = await readStatus(device.daemon);
         expect(afterFirst.web.pending).toBeGreaterThan(0);
-        expect(afterFirst.web.pending).toBeLessThan(5);
+        expect(afterFirst.web.pending).toBeLessThan(WEB_SESSION_BATCH);
 
         await clock.advance(60_000);
         await device.daemon.settled();
-        expect(prompts).toHaveLength(5);
-        expect(prompts.join("\n")).toContain("MARKER_ONE");
-        expect(prompts.join("\n")).toContain("MARKER_TWO");
+        expect(prompts).toHaveLength(WEB_SESSION_BATCH + 1);
+        expect(prompts.join("\n")).toContain(`MARKER_${WEB_SESSION_BATCH}`);
         // The short body reported five turns but only has one, so it is refined once and
         // its count is corrected on the same pass.
         expect(sessionRow(device.dirs, "short")?.refinedUpTo).toBe(1);
@@ -485,7 +483,7 @@ describe("web session processor", () => {
 
         await clock.advance(60_000);
         await device.daemon.settled();
-        expect(prompts).toHaveLength(5);
+        expect(prompts).toHaveLength(WEB_SESSION_BATCH + 1);
         expect(sessionRow(device.dirs, "short")?.msgCount).toBe(1);
         expect(sessionRow(device.dirs, "short")?.refinedUpTo).toBe(1);
         expect((await readStatus(device.daemon)).web.pending).toBe(0);
