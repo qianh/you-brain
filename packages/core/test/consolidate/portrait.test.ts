@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { platformPaths, portraitFile } from "../../src/domain/paths.js";
 import {
   PORTRAIT_EVAL_CURSOR,
+  PORTRAIT_MONTHLY_CURSOR,
   PORTRAIT_TURNS_CURSOR,
   TWIN_CLAIMS_JSON_SCHEMA,
   TWIN_CLAIMS_SYSTEM_PROMPT,
@@ -22,6 +23,7 @@ import {
   fillSnapshotPattern,
   pendingCorrections,
   portraitEvalStep,
+  portraitMonthlyStep,
   portraitStep,
   rebuildTwin,
   runConsolidation,
@@ -34,6 +36,7 @@ import {
   TWIN_EVAL_ANSWER_SYSTEM_PROMPT,
   TWIN_EVAL_JUDGE_SYSTEM_PROMPT,
   TWIN_FIX_SYSTEM_PROMPT,
+  TWIN_MONTHLY_SYSTEM_PROMPT,
   TWIN_PROBES_SYSTEM_PROMPT,
 } from "../../src/consolidate/prompt.js";
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
@@ -154,6 +157,7 @@ interface Replies {
   probes?: unknown;
   answers?: unknown;
   judge?: unknown;
+  monthly?: unknown;
 }
 
 /** Route each call by its system prompt. A string reply is sent as is. */
@@ -166,6 +170,7 @@ function model(replies: Replies) {
     if (request.system === TWIN_PROBES_SYSTEM_PROMPT) return pick(replies.probes ?? { probes: [] });
     if (request.system === TWIN_EVAL_ANSWER_SYSTEM_PROMPT) return pick(replies.answers ?? { answers: [] });
     if (request.system === TWIN_EVAL_JUDGE_SYSTEM_PROMPT) return pick(replies.judge ?? { results: [] });
+    if (request.system === TWIN_MONTHLY_SYSTEM_PROMPT) return pick(replies.monthly ?? { notes: [] });
     throw new Error(`unexpected prompt ${request.system.slice(0, 20)}`);
   };
 }
@@ -704,6 +709,83 @@ describe("portrait eval", () => {
         text: "保真评测得分从 1/1 降到 0/1；常驻层变长了，评测得分没有上升。答错的题：p01",
       },
     ]);
+  });
+});
+
+describe("portrait monthly comparison", () => {
+  const MONTH_AGO = "digital-twin/JOHN-DIGITAL-TWIN-v1.9.0-2026-09-20.md";
+
+  it("compares against the month-old snapshot and logs the changes", async () => {
+    const box = await world();
+    await seedTwin(box);
+    await seed(
+      box.drive,
+      MONTH_AGO,
+      "# 数字分身 · 人格\n版本 v1.9.0 · 2026-09-20 · 变更见 changelog\n\n## 3. 价值排序\n可靠优先。\n",
+    );
+    box.cursors.set(
+      PORTRAIT_EVAL_CURSOR,
+      JSON.stringify({ day: LOCAL_DAY, pass: 2, total: 2, full: 1, coding: 1 }),
+    );
+    box.cursors.set(
+      PORTRAIT_MONTHLY_CURSOR,
+      JSON.stringify({ day: "2026-09-23", pass: 1, total: 2 }),
+    );
+    const result = await run(
+      box,
+      model({ monthly: { notes: ["新增了「交付前先跑测试」的工程规则。"] } }),
+      { steps: [portraitMonthlyStep] },
+    );
+    expect(result.ok).toBe(true);
+    expect(box.requests).toHaveLength(1);
+    expect(box.requests[0]?.system).toBe(TWIN_MONTHLY_SYSTEM_PROMPT);
+    expect(box.requests[0]?.user).toContain("可靠优先。");
+    const log = await textAt(box.drive, CHANGELOG);
+    expect(log).toContain(`## 月度对比 · ${LOCAL_DAY}`);
+    expect(log).toContain("- 对比基准 2026-09-20（v1.9.0）");
+    expect(log).toContain("- 新增了「交付前先跑测试」的工程规则。");
+    expect(log).toContain("- 评测得分 1/2 → 2/2");
+    expect(JSON.parse(box.cursors.get(PORTRAIT_MONTHLY_CURSOR) ?? "{}")).toMatchObject({
+      day: LOCAL_DAY,
+      pass: 2,
+      total: 2,
+    });
+    expect(reminders(box.events)).toEqual([
+      {
+        kind: "portrait_monthly",
+        text: "数字分身月度对比：新增了「交付前先跑测试」的工程规则。（详见 changelog）",
+      },
+    ]);
+  });
+
+  it("starts the window without a baseline when no snapshot is old enough", async () => {
+    const box = await world();
+    await seedTwin(box);
+    // Only a recent snapshot exists: nothing to compare against yet.
+    await seed(
+      box.drive,
+      "digital-twin/JOHN-DIGITAL-TWIN-v2.0.0-2026-10-20.md",
+      "# 数字分身 · 人格\n版本 v2.0.0 · 2026-10-20 · 变更见 changelog\n\n## 1. 一句话\n先问再做。\n",
+    );
+    const result = await run(box, model({}), { steps: [portraitMonthlyStep] });
+    expect(result.ok).toBe(true);
+    expect(box.requests).toEqual([]);
+    expect(await textAt(box.drive, CHANGELOG)).toBe(null);
+    expect(JSON.parse(box.cursors.get(PORTRAIT_MONTHLY_CURSOR) ?? "{}")).toMatchObject({
+      day: LOCAL_DAY,
+    });
+  });
+
+  it("skips within the month", async () => {
+    const box = await world();
+    await seedTwin(box);
+    box.cursors.set(PORTRAIT_MONTHLY_CURSOR, JSON.stringify({ day: "2026-10-10", pass: 1, total: 2 }));
+    const result = await run(box, model({}), { steps: [portraitMonthlyStep] });
+    expect(result.ok).toBe(true);
+    expect(box.requests).toEqual([]);
+    expect(box.cursors.get(PORTRAIT_MONTHLY_CURSOR)).toBe(
+      JSON.stringify({ day: "2026-10-10", pass: 1, total: 2 }),
+    );
   });
 });
 

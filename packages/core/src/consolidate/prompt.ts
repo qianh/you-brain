@@ -5,6 +5,7 @@ import {
   TWIN_EDITS_JSON_SCHEMA,
   TWIN_EVAL_ANSWERS_JSON_SCHEMA,
   TWIN_EVAL_JUDGE_JSON_SCHEMA,
+  TWIN_MONTHLY_JSON_SCHEMA,
   TWIN_PROBES_JSON_SCHEMA,
 } from "./schema.js";
 import { clipUnits, textUnits } from "./text.js";
@@ -365,6 +366,25 @@ export function buildTwinEvalJudgePrompt(input: {
     JSON.stringify(TWIN_EVAL_JUDGE_JSON_SCHEMA),
   ].join("\n");
   return { system: TWIN_EVAL_JUDGE_SYSTEM_PROMPT, user };
+}
+
+export const TWIN_MONTHLY_SYSTEM_PROMPT = `你在对比同一个人「人格分身」一个月前后的两个版本。总结这一个月里新增、改变或删掉了哪些价值、规则和习惯，写成变化条目；措辞微调不算变化。评测得分的变化由调用方单独写，你不要提分数。每条一句话，最多 6 条，没有实质变化就输出空数组。只输出一个 JSON 对象，不要 Markdown，不要解释。JSON 键名保持英文。`;
+
+export function buildTwinMonthlyPrompt(input: {
+  before: string;
+  after: string;
+}): { system: string; user: string } {
+  const user = [
+    "## 一个月前",
+    input.before.trim() === "" ? "（空）" : input.before,
+    "",
+    "## 现在",
+    input.after.trim() === "" ? "（空）" : input.after,
+    "",
+    "## 输出 JSON schema",
+    JSON.stringify(TWIN_MONTHLY_JSON_SCHEMA),
+  ].join("\n");
+  return { system: TWIN_MONTHLY_SYSTEM_PROMPT, user };
 }
 
 function sectionSizes(layer: string, text: string): string[] {

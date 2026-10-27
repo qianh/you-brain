@@ -6,6 +6,7 @@ import {
   parseTwinClaims,
   parseTwinEdits,
   parseTwinJudge,
+  parseTwinMonthly,
   parseTwinProbes,
   type TwinClaim,
   type TwinEditsUpdate,
@@ -16,6 +17,7 @@ import {
   buildTwinEvalJudgePrompt,
   buildTwinFixPrompt,
   buildTwinMergePrompt,
+  buildTwinMonthlyPrompt,
   buildTwinProbesPrompt,
   type TwinPromptCorrection,
 } from "./prompt.js";
@@ -25,6 +27,7 @@ import {
   TWIN_EDITS_JSON_SCHEMA,
   TWIN_EVAL_ANSWERS_JSON_SCHEMA,
   TWIN_EVAL_JUDGE_JSON_SCHEMA,
+  TWIN_MONTHLY_JSON_SCHEMA,
   TWIN_PROBES_JSON_SCHEMA,
 } from "./schema.js";
 import type {
@@ -237,6 +240,79 @@ export const portraitEvalStep: ConsolidationStep = {
         text: `${notes.join("；")}。答错的题：${failed.join("、") || "无"}`,
       });
     }
+  },
+};
+
+export const PORTRAIT_MONTHLY_CURSOR = "portrait.monthly";
+/** How far apart monthly comparisons sit, in days (spec §8). */
+const MONTHLY_INTERVAL_DAYS = 30;
+
+function parseMonthlyCursor(raw: string | null): { day: string; pass: number; total: number } | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    if (typeof parsed.day !== "string") return null;
+    const number = (value: unknown) => (typeof value === "number" ? value : 0);
+    return { day: parsed.day, pass: number(parsed.pass), total: number(parsed.total) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Compare the full layer against the snapshot closest to a month back and note which
+ * values and rules moved, plus how the eval score changed (spec §8). The summary goes
+ * into the changelog and out through the portrait reminder channel.
+ */
+export const portraitMonthlyStep: ConsolidationStep = {
+  id: "portrait_monthly",
+  dependsOn: ["portrait_eval"],
+  async run(ctx) {
+    const portrait = ctx.portrait;
+    if (!portrait?.snapshots || !portrait.readSnapshot) return;
+    const last = parseMonthlyCursor(ctx.cursors.get(PORTRAIT_MONTHLY_CURSOR));
+    if (last && last.day > shiftDateKey(ctx.day, -MONTHLY_INTERVAL_DAYS)) return;
+    const files = await portrait.read();
+    if (!files.full) return;
+    const evalNow = parseEvalCursor(ctx.cursors.get(PORTRAIT_EVAL_CURSOR));
+    const target = shiftDateKey(ctx.day, -MONTHLY_INTERVAL_DAYS);
+    const snapshots = await portrait.snapshots();
+    const base = snapshots
+      .filter((snapshot) => snapshot.day !== "" && snapshot.day <= target)
+      .sort((left, right) => right.day.localeCompare(left.day))[0];
+    if (base === undefined) {
+      // Nothing a month old yet: start the window now so the next run has a baseline.
+      ctx.cursors.set(
+        PORTRAIT_MONTHLY_CURSOR,
+        JSON.stringify({ day: ctx.day, pass: evalNow?.pass ?? 0, total: evalNow?.total ?? 0 }),
+      );
+      return;
+    }
+    const before = await portrait.readSnapshot(base.file);
+    if (before === null) return;
+    const prompt = buildTwinMonthlyPrompt({ before, after: files.full.text });
+    const notes = await completeJson(ctx.llm, prompt, TWIN_MONTHLY_JSON_SCHEMA, parseTwinMonthly);
+    const lines = [`## 月度对比 · ${ctx.day}`, `- 对比基准 ${base.day}（v${base.version}）`];
+    if (notes.length === 0) lines.push("- 没有实质变化");
+    lines.push(...notes.map((note) => `- ${note}`));
+    if (last && last.total > 0 && evalNow !== null && evalNow.total > 0) {
+      lines.push(`- 评测得分 ${last.pass}/${last.total} → ${evalNow.pass}/${evalNow.total}`);
+    }
+    await portrait.appendChangelog(lines.join("\n"));
+    const headline = notes.slice(0, 2).join("；");
+    await ctx.emit("reminder.issued", {
+      reminderId: `portrait-monthly-${ctx.day}`,
+      kind: "portrait_monthly",
+      topicId: null,
+      text:
+        headline === ""
+          ? `数字分身月度对比：与 ${base.day} 相比没有实质变化`
+          : `数字分身月度对比：${headline}（详见 changelog）`,
+    });
+    ctx.cursors.set(
+      PORTRAIT_MONTHLY_CURSOR,
+      JSON.stringify({ day: ctx.day, pass: evalNow?.pass ?? last?.pass ?? 0, total: evalNow?.total ?? last?.total ?? 0 }),
+    );
   },
 };
 

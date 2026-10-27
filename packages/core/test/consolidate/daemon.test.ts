@@ -71,6 +71,7 @@ describe("consolidation daemon", () => {
       "merge_suggestions",
       "portrait",
       "portrait_eval",
+      "portrait_monthly",
       "topic_files",
     ]);
     expect(kinds).toEqual(["topics", "status"]);
@@ -88,7 +89,7 @@ describe("consolidation daemon", () => {
     kinds.length = 0;
     const forced = await consolidate({ force: true });
     expect(forced.ok).toBe(true);
-    expect(forced.steps.map((step) => step.ok)).toEqual([true, true, true, true, true]);
+    expect(forced.steps.map((step) => step.ok)).toEqual([true, true, true, true, true, true]);
     expect(await leaseFinishedAt(drive)).not.toBe(finished);
     expect(kinds).toEqual(["topics", "status"]);
     unsubscribe();
@@ -363,6 +364,7 @@ describe("consolidation daemon", () => {
       { id: "merge_suggestions", ok: true },
       { id: "portrait", ok: true },
       { id: "portrait_eval", ok: true },
+      { id: "portrait_monthly", ok: true },
       { id: "topic_files", ok: true },
     ]);
     expect(claimInputs.join("\n")).toContain("Plan the launch checklist");

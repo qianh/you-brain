@@ -7,7 +7,13 @@ import type { DrivePort } from "../drive/drive-port.js";
 import { classifyPortraitCorrections } from "../portrait/corrections.js";
 import type { PortraitConfig, PortraitService } from "../portrait/service.js";
 import { resolveDrivePath } from "../portrait/path.js";
-import type { ConsolidationPortrait, StoredTwinClaim, TwinFileRef, TwinProbe } from "./steps.js";
+import type {
+  ConsolidationPortrait,
+  StoredTwinClaim,
+  TwinFileRef,
+  TwinProbe,
+  TwinSnapshotRef,
+} from "./steps.js";
 import { TWIN_LAYERS, type TwinLayer } from "./twin.js";
 
 const MARKDOWN = "text/markdown";
@@ -115,7 +121,53 @@ export function createDrivePortrait(source: DrivePortraitSource): ConsolidationP
     async appendChangelog(entry) {
       await prependChangelog(source.drive, paths().changelog, entry);
     },
+    async snapshots() {
+      const pattern = resolveDrivePath(source.config().snapshotPattern, source.driveRoot);
+      const directory = posix.dirname(pattern);
+      const matcher = snapshotMatcher(posix.basename(pattern));
+      if (matcher === null) return [];
+      const star = posix.basename(pattern).indexOf("*");
+      const listPrefix = posix.join(directory, posix.basename(pattern).slice(0, star));
+      const out: TwinSnapshotRef[] = [];
+      for (const entry of await source.drive.list({ prefix: listPrefix })) {
+        if (posix.dirname(entry.path) !== directory) continue;
+        const match = matcher.exec(posix.basename(entry.path));
+        if (!match) continue;
+        out.push({ file: posix.basename(entry.path), version: match[1] ?? "", day: match[2] ?? "" });
+      }
+      out.sort(
+        (left, right) =>
+          left.day.localeCompare(right.day) || left.version.localeCompare(right.version),
+      );
+      return out;
+    },
+    async readSnapshot(file) {
+      if (file.includes("/") || file.includes("..")) return null;
+      const pattern = resolveDrivePath(source.config().snapshotPattern, source.driveRoot);
+      const directory = posix.dirname(pattern);
+      const object = await source.drive.readPath(posix.join(directory, file));
+      return object ? object.bytes.toString("utf8") : null;
+    },
   };
+}
+
+/**
+ * A regex from the snapshot pattern: the first `*` captures the version, the second the
+ * day — the same order {@link fillSnapshotPattern} writes them.
+ */
+function snapshotMatcher(basename: string): RegExp | null {
+  if ([...basename].filter((char) => char === "*").length !== 2) return null;
+  let index = 0;
+  const source = [...basename]
+    .map((char) => {
+      if (char === "*") {
+        index += 1;
+        return index === 1 ? "([0-9.]+)" : "(\\d{4}-\\d{2}-\\d{2})";
+      }
+      return char.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    })
+    .join("");
+  return new RegExp(`^${source}$`, "u");
 }
 
 export function pendingCorrections(

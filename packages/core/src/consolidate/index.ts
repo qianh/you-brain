@@ -71,6 +71,7 @@ export {
   consolidationSteps,
   mergeSuggestionsStep,
   portraitEvalStep,
+  portraitMonthlyStep,
   portraitStep,
   registerConsolidationStep,
   resetConsolidationSteps,
@@ -82,6 +83,7 @@ export {
   type StoredTwinClaim,
   type TwinFileRef,
   type TwinProbe,
+  type TwinSnapshotRef,
 } from "./steps.js";
 export {
   createDrivePortrait,
@@ -92,6 +94,7 @@ export {
 } from "./portrait-drive.js";
 export {
   PORTRAIT_EVAL_CURSOR,
+  PORTRAIT_MONTHLY_CURSOR,
   PORTRAIT_TURNS_CURSOR,
   cleanUserTurn,
   rebuildTwin,

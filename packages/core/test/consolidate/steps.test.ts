@@ -420,12 +420,14 @@ describe("merge suggestions", () => {
       "merge_suggestions",
       "portrait",
       "portrait_eval",
+      "portrait_monthly",
       "topic_files",
     ]);
     expect(result.steps[1]?.ok).toBe(true);
     expect(result.steps[2]).toEqual({ id: "portrait", ok: false, error: "依赖步骤失败" });
     expect(result.steps[3]).toEqual({ id: "portrait_eval", ok: false, error: "依赖步骤失败" });
-    expect(result.steps[4]).toEqual({ id: "topic_files", ok: false, error: "依赖步骤失败" });
+    expect(result.steps[4]).toEqual({ id: "portrait_monthly", ok: false, error: "依赖步骤失败" });
+    expect(result.steps[5]).toEqual({ id: "topic_files", ok: false, error: "依赖步骤失败" });
     expect(rewritten(events, "a")).toEqual([]);
     expect(JSON.parse(cursors.get(MERGE_SUGGESTIONS_CURSOR) ?? "").pairs).toEqual([
       { fromTopicId: "a", intoTopicId: "b", reason: "同一件事" },
@@ -504,6 +506,7 @@ describe("step runner", () => {
       "merge_suggestions",
       "portrait",
       "portrait_eval",
+      "portrait_monthly",
       "topic_files",
       "extra_step",
     ]);
@@ -520,6 +523,7 @@ describe("step runner", () => {
       "merge_suggestions",
       "portrait",
       "portrait_eval",
+      "portrait_monthly",
       "topic_files",
     ]);
   });

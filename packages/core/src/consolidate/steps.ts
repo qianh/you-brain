@@ -16,11 +16,11 @@ import {
 import type { TopicFilesResult } from "../topic-files/sync.js";
 import { MERGE_SUGGESTIONS_CURSOR } from "./suggestions.js";
 import type { TwinClaim } from "./normalize.js";
-import { portraitEvalStep, portraitStep } from "./portrait.js";
+import { portraitEvalStep, portraitMonthlyStep, portraitStep } from "./portrait.js";
 import { sameText } from "./text.js";
 import type { TwinLayer } from "./twin.js";
 
-export { portraitEvalStep, portraitStep };
+export { portraitEvalStep, portraitMonthlyStep, portraitStep };
 
 const MAX_ATTEMPTS = 2;
 const TOPIC_CONCURRENCY = 2;
@@ -40,6 +40,14 @@ export interface TwinProbe {
   layer: "persona" | "coding";
   situation: string;
   expect: string;
+}
+
+/** One dated snapshot of the full layer, parsed from the snapshot file name. */
+export interface TwinSnapshotRef {
+  /** Bare file name inside the snapshot directory, no separators. */
+  file: string;
+  version: string;
+  day: string;
 }
 
 export interface ConsolidationPortrait {
@@ -73,6 +81,10 @@ export interface ConsolidationPortrait {
   saveProbes(probes: readonly TwinProbe[]): Promise<void>;
   /** Prepend an entry to the changelog. */
   appendChangelog(entry: string): Promise<void>;
+  /** full snapshots written on change, oldest first. Absent where listing is unavailable. */
+  snapshots?(): Promise<TwinSnapshotRef[]>;
+  /** Read one snapshot by its bare file name. */
+  readSnapshot?(file: string): Promise<string | null>;
 }
 
 export interface ConsolidationContext {
@@ -125,6 +137,7 @@ export function consolidationSteps(): ConsolidationStep[] {
     mergeSuggestionsStep,
     portraitStep,
     portraitEvalStep,
+    portraitMonthlyStep,
     topicFilesStep,
     ...registeredSteps,
   ];

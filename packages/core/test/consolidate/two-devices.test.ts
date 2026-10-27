@@ -136,6 +136,7 @@ describe("consolidation across two devices", () => {
         "merge_suggestions",
         "portrait",
         "portrait_eval",
+        "portrait_monthly",
         "topic_files",
       ]);
       expect(summaryCalls).toBe(callsAfterSync);

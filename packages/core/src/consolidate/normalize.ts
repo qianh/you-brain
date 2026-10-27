@@ -59,6 +59,10 @@ const JudgeSchema = z.object({
   results: z.array(z.object({ id: z.string(), pass: z.boolean() })),
 });
 
+const MonthlySchema = z.object({
+  notes: z.array(z.string().min(1)).max(12),
+});
+
 export interface TopicRewrite {
   summary: string;
   nextStep: string;
@@ -141,6 +145,14 @@ export function parseTwinJudge(input: unknown): Map<string, boolean> {
   const results = new Map<string, boolean>();
   for (const item of JudgeSchema.parse(input).results) results.set(item.id.trim(), item.pass);
   return results;
+}
+
+/** Trimmed, non-empty notes, at most six. */
+export function parseTwinMonthly(input: unknown): string[] {
+  const notes = MonthlySchema.parse(input).notes
+    .map((note) => note.trim())
+    .filter((note) => note !== "");
+  return notes.slice(0, 6);
 }
 
 export function parseTopicRewrite(input: unknown): TopicRewrite {

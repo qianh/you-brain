@@ -115,6 +115,19 @@ export const TWIN_EVAL_JUDGE_JSON_SCHEMA: Record<string, unknown> = {
   },
 };
 
+export const TWIN_MONTHLY_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["notes"],
+  properties: {
+    notes: {
+      type: "array",
+      maxItems: 6,
+      items: { type: "string", minLength: 1 },
+    },
+  },
+};
+
 export const MERGE_SUGGESTIONS_JSON_SCHEMA: Record<string, unknown> = {
   type: "object",
   additionalProperties: false,

@@ -82,7 +82,7 @@
 - [x] **G3 三层合并**：`portrait` 步骤一次处理三个变体；`PORTRAIT_SYSTEM_PROMPT` 换成规格第 4 节的规则；纠正可以指向任一层
 - [x] **G4 写入前检查**：预算、记账措辞、敏感信息扫描、一轮修正、忽略版本行的变化判定、三层共用版本号、`changelog-latest.md`（规格第 5 节）
 - [x] **G5 变化通知**：`full` 或 `coding` 有实质变化时经现有提醒渠道发一句话加 Drive 链接（规格第 6 节）
-- [~] **G6 保真评测与周月对比**：每周用 `digital-twin/eval/probes.jsonl` 只读 `full` + `coding` 作答并判分，得分进 changelog 与周回顾（规格第 7、8 节）；周评测已实现，月度对比未做
+- [x] **G6 保真评测与周月对比**：每周用 `digital-twin/eval/probes.jsonl` 只读 `full` + `coding` 作答并判分，得分进 changelog 与周回顾（规格第 7、8 节）；周评测已实现，月度对比未做。月度对比已实现：`portrait_monthly` 沉淀步骤（依赖 `portrait_eval`，间隔 30 天）取一个月前最近的 full 快照对比，摘要变化条目 + 评测得分变化写进 changelog 并经提醒渠道发出；无足够老的快照时先记基线
 
 ## E. 后续功能（不在第一期，第一期以当前功能为主）
 
