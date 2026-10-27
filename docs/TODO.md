@@ -34,7 +34,7 @@
 - [x] **B5 网页会话处理设备**：`webProcessor` 角色真正生效——被指定设备负责处理网页版 AI 会话的提炼；角色切换的行为与状态展示
 - [x] **B6 服务器模式**：生成并安装 launchd / systemd 单元（`you-brain service install|uninstall|status`），与 `maintenance.ts` 的卸载清理对齐，使无界面机器可担任主设备
 - [x] **B7 虚拟设备协议**：`docs/protocol/` 协议文档，注册虚拟设备（`kind: virtual`）与对外发布所需的 API / 校验
-- [x] **B8 Linux 桌面打包**：`bundle-linux.sh`（运行时生成按 triple 的配置）、`web-dir`/`resolver` 的 `../lib/you-brain` 兜底（`native/layout.ts`）、托盘无 rect 时面板右上角降级、`xprintidle` 空闲读取、`workflow_dispatch` 工作流 `desktop-linux.yml`。未在真实 Linux 上出包：待手动触发工作流验证（arm runner 需账号开通）
+- [x] **B8 Linux 桌面打包**：`bundle-linux.sh`（运行时生成按 triple 的配置）、`web-dir`/`resolver` 的 `../lib/you-brain` 兜底（`native/layout.ts`）、托盘无 rect 时面板右上角降级、`xprintidle` 空闲读取、`workflow_dispatch` 工作流 `desktop-linux.yml`。未在真实 Linux 上出包：待手动触发工作流验证（本机 gh 未登录无法 dispatch，`gh auth login` 后 `gh workflow run desktop-linux.yml`；arm runner 需账号开通）
 - [x] **B9 设备移除传播**：拉取（首次，或任一页 `removedIds` 非空）后用 `devices/` 列表对账，删本地已不存在的虚拟设备行（物理设备/本机不动），list 失败则 pull 失败游标不推进；有删除时 daemon 发 `devices` SSE。已知：GoogleDrive 遇文件夹变更返回 reset 且 removedIds 为空时，当次不对账，下次带 removedIds 的拉取补上
 
 ## C. P2
@@ -73,6 +73,7 @@
 - [x] **F9 历史回灌的进度可见性**：`upload.pending` 与 `capture.parsed` 已在 `/api/status`，界面还没有展示；欠账大时用户看不出在跑。今日页统计卡下加「回灌进行中」状态行（`role=status`），只在上传或扫描有欠账时出现，中英文案齐全
 - [x] **F10 pull 在大量上传后变慢**：一次 pull 约 2-3 分钟，因为要消化自己刚上传的数百个变更；与上传分时后能跑，但 `lastSync` 周期仍是 2 分钟而非 1 分钟。事件文件写入时记录 md5 与行数（`sync.self.<fileId>`），pull 见到 md5 仍等于自己上次上传的文件直接跳过下载、行游标推到该行数；日文件只含本机事件（写入前已在本地应用过），跳过不丢任何内容。他人追加后 md5 不符，从该游标正常读增量
 - [x] **F11 网页会话队列消化慢**：`web.pending` 长期在 200 上下，每个会话一次模型调用。提炼批次 3 → 6，且 API 后端两路并发（worker 池，停机/门槛检查逐项生效）；订阅 CLI 共享同一个工作目录，保持串行。事件 id 用 ULID 随机熵、seq 分配同步，并发安全有测试锁定（`web-session-throughput.test.ts`）
+- [ ] **F24 重启后搜索索引全量重建**：daemon 重启后 `documents` 从 0 涨回 3,906（2026-10-27 两次实测，每次 25-70 分钟，嵌入也在重算）。机制：`changes.list` 的 pageToken 过期（HTTP 410）后客户端从 `startPageToken` 全量重推，`reset: true` 清空 `search_chunks` 重建（`google-drive.ts` 的 410 分支）。可考虑 reset 时按 md5 对账现库做增量，或至少把这次成本写进状态页让用户可预期
 
 ## G. 数字分身三层提炼（规格见 [数字分身提炼.md](./数字分身提炼.md)，取代外部例程「数字分身 inbox 提炼」）
 
