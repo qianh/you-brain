@@ -40,6 +40,19 @@ jobs:
       - name: Build the daemon
         run: bun run build:daemon
 
+      - name: Tolerate the static sidecar in ldd
+        run: |
+          # bun --compile 的单文件可执行没有动态段，ldd 以 1 退出；linuxdeploy 的
+          # gtk 插件把它当致命错误。包装一层：exit 1（静态可执行）视为无依赖。
+          sudo tee /usr/local/bin/ldd >/dev/null <<'EOF'
+          #!/bin/sh
+          /usr/bin/ldd "$@"
+          rc=$?
+          if [ "$rc" -eq 1 ]; then exit 0; fi
+          exit "$rc"
+          EOF
+          sudo chmod 755 /usr/local/bin/ldd
+
       - name: Bundle deb and AppImage
         run: sh apps/desktop/scripts/bundle-linux.sh --verbose
         env:
