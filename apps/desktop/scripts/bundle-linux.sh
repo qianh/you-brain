@@ -78,7 +78,8 @@ cat > "$config" << EOF
 EOF
 
 cd "$ROOT"
-bunx tauri build --bundles deb,appimage --target "$triple" --config "$config"
+# 额外参数原样透传给 tauri build（例如 --verbose 排查打包问题）。
+bunx tauri build --bundles deb,appimage --target "$triple" --config "$config" "$@"
 
 dest="$REPO/dist/app.noindex"
 mkdir -p "$dest"
