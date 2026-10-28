@@ -45,9 +45,9 @@ jobs:
         env:
           # linuxdeploy 自身是 AppImage，runner 上没有 FUSE，必须自解压运行。
           APPIMAGE_EXTRACT_AND_RUN: "1"
-          # vendor 里 onnxruntime 的 TensorRT 插件声明依赖 CUDA libcublas，
-          # runner 上没有；CPU 模式运行时不需要它，排除出 AppImage 部署。
-          LINUXDEPLOY_EXCLUDE_LIBS: libonnxruntime_providers_tensorrt.so,libcublas.so.13,libcublasLt.so.13
+          # vendor 里 onnxruntime 的 CUDA/TensorRT 插件声明依赖 CUDA libcublas 系列，
+          # runner 上没有；CPU 模式运行时不需要它们，排除出 AppImage 部署。
+          LINUXDEPLOY_EXCLUDE_LIBS: libonnxruntime_providers_tensorrt.so,libonnxruntime_providers_cuda.so,libcublas.so.13,libcublasLt.so.13
 
       - name: Verify the deb contains vendor, web, and the sidecar
         shell: sh
