@@ -48,8 +48,8 @@ import {
   splitTwin,
   twinBody,
   twinVersion,
-  withCodingIndex,
   withHeader,
+  withProjectsPointer,
   type TwinLayer,
   type TwinTexts,
   type VersionBump,
@@ -442,7 +442,7 @@ async function fixOnce(llm: LlmBackend, texts: TwinTexts, problems: readonly str
 }
 
 function withIndex(texts: TwinTexts): TwinTexts {
-  return { ...texts, coding: withCodingIndex(texts.coding, texts.projects) };
+  return { ...texts, coding: withProjectsPointer(texts.coding) };
 }
 
 type FinishOutcome =
@@ -537,9 +537,9 @@ async function writeTwin(
   };
 }
 
-/** Body without the version line and the generated project index. */
+/** Body without the version line and the generated projects pointer. */
 function substantive(text: string): string {
-  return twinBody(withCodingIndex(text, ""));
+  return twinBody(withProjectsPointer(text));
 }
 
 function textsOf(files: Record<TwinLayer, TwinFileRef | null>): TwinTexts {

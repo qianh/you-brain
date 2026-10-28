@@ -2,11 +2,17 @@
 export const TWIN_LAYERS = ["full", "coding", "projects"] as const;
 export type TwinLayer = (typeof TWIN_LAYERS)[number];
 
-export const TWIN_BUDGET = { full: 12_288, coding: 12_288, section: 4_096 } as const;
+/** The coding layer is injected into every CLI session as AGENTS.md / CLAUDE.md, so it stays far smaller than `full`. */
+export const TWIN_BUDGET = { full: 12_288, coding: 4_096, section: 4_096 } as const;
 
 /** Where CLIs find the project decisions. Stays a home-relative path so the scan never trips on it. */
 export const PROJECTS_LOCAL_PATH = "~/.you-brain/portrait/projects.md";
-const INDEX_PREFIX = "在下列项目里工作时";
+/** The one coding principle the program owns: it points at the projects file instead of listing projects. */
+export const PROJECTS_POINTER_LABEL = "- **项目说明**：";
+export const PROJECTS_POINTER = `${PROJECTS_POINTER_LABEL}在已有的具体项目里工作时，先读 [项目说明](${PROJECTS_LOCAL_PATH}) 里该项目的小节；新项目和简单对话不需要读。`;
+export const CODING_PRINCIPLES_HEADING = "## 核心原则";
+/** The head line older coding layers carried: a list of project names. Dropped when found. */
+const LEGACY_INDEX_PREFIX = "在下列项目里工作时";
 const ANY_VERSION = /v(\d+)\.(\d+)\.(\d+)/u;
 
 export const TWIN_TITLES: Record<TwinLayer, string> = {
@@ -30,14 +36,7 @@ export const TWIN_SKELETON: Record<TwinLayer, readonly string[]> = {
     "## 10. 世界观",
     "## 11. 生活",
   ],
-  coding: [
-    "## 1. 授权与边界",
-    "## 2. 先查证再动手",
-    "## 3. 实现原则",
-    "## 4. 运维与命令",
-    "## 5. 技术栈默认",
-    "## 6. AI 工具与本机环境",
-  ],
+  coding: [CODING_PRINCIPLES_HEADING, "## 默认与红线"],
   projects: [],
 };
 
@@ -210,37 +209,36 @@ function splitHead(head: string): { title: string | null; version: string | null
   return { title, version, rest: lines };
 }
 
-/** The coding layer's project index line, rebuilt from the projects section headings. */
-export function codingIndexLine(projects: string): string {
-  const groups = new Map<string, string[]>();
-  for (const section of splitTwin(projects).sections) {
-    const name = section.heading.replace(/^##\s+/u, "").trim();
-    if (name === "") continue;
-    const [project, ...rest] = name.split(" · ");
-    const key = (project ?? name).trim();
-    const list = groups.get(key) ?? [];
-    if (rest.length > 0) list.push(rest.join(" · ").trim());
-    groups.set(key, list);
-  }
-  if (groups.size === 0) return "";
-  const names = [...groups].map(([project, subs]) =>
-    subs.length === 0 ? project : `${project}（${subs.join(" / ")}）`,
-  );
-  return `${INDEX_PREFIX}，先读 \`${PROJECTS_LOCAL_PATH}\` 里对应的小节：${names.join("、")}。`;
-}
-
-/** Put the index line into the coding head right after the version line, replacing an older one. */
-export function withCodingIndex(coding: string, projects: string): string {
+/**
+ * Make sure the first principle under "核心原则" is the pointer to the projects file.
+ * Replaces an older copy, drops the legacy project-name index from the head, and
+ * creates the section when the coding layer has none.
+ */
+export function withProjectsPointer(coding: string): string {
   const doc = splitTwin(coding);
   const head = splitHead(doc.head);
-  const rest = head.rest.filter((line) => !line.startsWith(INDEX_PREFIX));
-  while (rest[0]?.trim() === "") rest.shift();
-  const index = codingIndexLine(projects);
+  const rest = head.rest.filter((line) => !line.startsWith(LEGACY_INDEX_PREFIX));
   const lines = [head.title ?? TWIN_TITLES.coding];
   if (head.version !== null) lines.push(head.version);
-  if (index !== "") lines.push("", index);
   if (rest.length > 0) lines.push("", ...rest);
-  return joinTwin({ head: lines.join("\n"), sections: doc.sections });
+  const sections = doc.sections.map((section) => ({
+    heading: section.heading,
+    text: section.text
+      .split("\n")
+      .filter((line) => !line.startsWith(PROJECTS_POINTER_LABEL))
+      .join("\n"),
+  }));
+  const index = sections.findIndex((section) => section.heading === CODING_PRINCIPLES_HEADING);
+  if (index < 0) {
+    sections.unshift({
+      heading: CODING_PRINCIPLES_HEADING,
+      text: `${CODING_PRINCIPLES_HEADING}\n${PROJECTS_POINTER}`,
+    });
+  } else {
+    const [heading = CODING_PRINCIPLES_HEADING, ...body] = (sections[index]?.text ?? "").split("\n");
+    sections[index] = { heading: CODING_PRINCIPLES_HEADING, text: [heading, PROJECTS_POINTER, ...body].join("\n") };
+  }
+  return joinTwin({ head: lines.join("\n"), sections });
 }
 
 export function byteLength(text: string): number {

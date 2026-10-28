@@ -18,7 +18,6 @@ import {
   changedLayers,
   checkTwin,
   cleanUserTurn,
-  codingIndexLine,
   createDrivePortrait,
   fillSnapshotPattern,
   pendingCorrections,
@@ -28,8 +27,8 @@ import {
   rebuildTwin,
   runConsolidation,
   twinVersion,
-  withCodingIndex,
   withHeader,
+  withProjectsPointer,
   type ConsolidationPortrait,
 } from "../../src/consolidate/index.js";
 import {
@@ -61,7 +60,8 @@ const PROBES = "digital-twin/eval/probes.jsonl";
 const VERSION_LINE = "版本 v2.0.0 · 2026-10-20 · 变更见 changelog";
 
 const FULL_TEXT = `# 数字分身 · 人格\n${VERSION_LINE}\n\n## 1. 一句话\n先问再做。\n\n## 3. 价值排序\n${"可靠优先。".repeat(20)}\n`;
-const CODING_TEXT = `# 数字分身 · 编码\n${VERSION_LINE}\n\n在下列项目里工作时，先读 \`~/.you-brain/portrait/projects.md\` 里对应的小节：甲。\n\n## 1. 授权与边界\n提问不等于授权改代码。\n\n## 5. 技术栈默认\n${"Python 用 uv。".repeat(10)}\n`;
+const POINTER = "- **项目说明**：在已有的具体项目里工作时，先读 [项目说明](~/.you-brain/portrait/projects.md) 里该项目的小节；新项目和简单对话不需要读。";
+const CODING_TEXT = `# 数字分身 · 编码\n${VERSION_LINE}\n\n## 核心原则\n${POINTER}\n\n## 1. 授权与边界\n提问不等于授权改代码。\n\n## 5. 技术栈默认\n${"Python 用 uv。".repeat(10)}\n`;
 const PROJECTS_TEXT = `# 数字分身 · 项目决定\n${VERSION_LINE}\n\n## 甲\n甲的口径。\n`;
 
 const homes: string[] = [];
@@ -276,7 +276,7 @@ describe("twin documents", () => {
     const lines = text.split("\n");
     expect(lines[0]).toBe("# 数字分身 · 编码");
     expect(lines[1]).toBe(`版本 v2.1.0 · ${LOCAL_DAY} · 变更见 changelog`);
-    expect(lines[3]).toStartWith("在下列项目里工作时");
+    expect(lines[3]).toBe("## 核心原则");
     expect(withHeader("projects", "## 甲\n口径\n", "1.0.0", LOCAL_DAY)).toStartWith(
       `# 数字分身 · 项目决定\n版本 v1.0.0 · ${LOCAL_DAY} · 变更见 changelog\n\n## 甲`,
     );
@@ -290,20 +290,27 @@ describe("twin documents", () => {
     expect(twinVersion({ full: "# 无版本\n" })).toEqual([0, 0, 0]);
   });
 
-  it("groups project subsections in the coding index line", () => {
-    const projects = "# p\n\n## 询报价 · 审批\na\n\n## 询报价 · 海外履约\nb\n\n## wwl\nc\n";
-    expect(codingIndexLine(projects)).toBe(
-      "在下列项目里工作时，先读 `~/.you-brain/portrait/projects.md` 里对应的小节：询报价（审批 / 海外履约）、wwl。",
-    );
-    const coding = withCodingIndex(CODING_TEXT, projects);
-    expect(coding).toContain("询报价（审批 / 海外履约）、wwl。");
-    expect(coding).not.toContain("对应的小节：甲。");
-    expect(coding.split("\n").slice(0, 4)).toEqual([
+  it("keeps one projects pointer as the first coding principle", () => {
+    const withOld = `# 数字分身 · 编码\n${VERSION_LINE}\n\n在下列项目里工作时，先读 \`~/.you-brain/portrait/projects.md\` 里对应的小节：甲。\n\n## 核心原则\n- **项目说明**：旧写法\n- **先证据**：先查再动手。\n\n## 默认与红线\n- 技术栈：Python。\n`;
+    const coding = withProjectsPointer(withOld);
+    expect(coding.split("\n").slice(0, 6)).toEqual([
       "# 数字分身 · 编码",
       VERSION_LINE,
       "",
-      codingIndexLine(projects),
+      "## 核心原则",
+      POINTER,
+      "- **先证据**：先查再动手。",
     ]);
+    expect(coding).not.toContain("旧写法");
+    expect(coding).not.toContain("在下列项目里工作时");
+    expect(withProjectsPointer(coding)).toBe(coding);
+  });
+
+  it("creates the principles section when the coding layer has none", () => {
+    const coding = withProjectsPointer(CODING_TEXT.replace(`## 核心原则\n${POINTER}\n\n`, ""));
+    expect(coding).toContain("## 核心原则\n- **项目说明**：");
+    expect(coding.indexOf("## 核心原则")).toBeLessThan(coding.indexOf("## 1. 授权与边界"));
+    expect(coding).not.toContain("对应的小节：甲");
   });
 
   it("ignores the version line when deciding what changed", () => {
@@ -429,7 +436,8 @@ describe("portrait consolidation", () => {
     const coding = await textAt(box.drive, CODING);
     expect(coding?.split("\n")[1]).toBe(`版本 v2.1.0 · ${LOCAL_DAY} · 变更见 changelog`);
     expect(coding).toContain("交付前先跑测试。");
-    expect(coding).toContain("对应的小节：甲。");
+    expect(coding).toContain(POINTER);
+    expect(coding).not.toContain("对应的小节");
     expect(await textAt(box.drive, FULL)).toBe(FULL_TEXT);
     expect(await textAt(box.drive, PROJECTS)).toBe(PROJECTS_TEXT);
     expect(await textAt(box.drive, `digital-twin/consolidate-backup/JOHN-TWIN-coding-${LOCAL_DAY}.md`)).toBe(
@@ -477,8 +485,7 @@ describe("portrait consolidation", () => {
     expect(result.ok).toBe(true);
     expect(await textAt(box.drive, PROJECTS)).toContain("## 乙\n按单号去重。");
     const coding = await textAt(box.drive, CODING);
-    expect(coding).toContain("对应的小节：甲、乙。");
-    expect(coding?.split("\n")[1]).toBe(`版本 v2.1.0 · ${LOCAL_DAY} · 变更见 changelog`);
+    expect(coding).toBe(CODING_TEXT);
     expect(reminders(box.events)).toEqual([]);
 
     box.events.push(correction("corr-1", "full", "一句话改成先查证"));
@@ -822,7 +829,7 @@ describe("portrait rebuild", () => {
     const fixRequests = box.requests.filter((request) => request.system === TWIN_FIX_SYSTEM_PROMPT);
     expect(fixRequests).toHaveLength(3);
     expect(fixRequests[0]?.user).toContain("- coding ## 3. 实现原则：");
-    expect(fixRequests[0]?.user).toContain("超过 12288 字节预算，要压到 11000 字节以内");
+    expect(fixRequests[0]?.user).toContain("超过 4096 字节预算，要压到 3600 字节以内");
     expect(lines.filter((line) => line.startsWith("收尾修正第"))).toHaveLength(2);
     expect(await textAt(box.drive, CODING)).toContain("## 3. 实现原则\n交付前先跑测试。");
   });
@@ -872,7 +879,8 @@ describe("portrait rebuild", () => {
     expect(full).toContain("## 11. 生活");
     expect(full).not.toContain("旧规则");
     const coding = await textAt(box.drive, CODING);
-    expect(coding).toContain("对应的小节：甲。");
+    expect(coding).toContain(POINTER);
+    expect(coding).not.toContain("对应的小节");
     expect(coding).toContain("## 5. 技术栈默认\n交付前先跑测试。");
     expect(await textAt(box.drive, PROJECTS)).toBe(
       `# 数字分身 · 项目决定\n版本 v2.0.0 · ${LOCAL_DAY} · 变更见 changelog\n\n## 甲\n按单号去重。\n`,
