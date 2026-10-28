@@ -14,7 +14,16 @@ import { useDaemon } from "../daemon-context.js";
 import { settingsHref } from "../lib/route.js";
 import { useRoute } from "../router.js";
 import { BlockList } from "./knowledge/blocks-view.js";
-import { defaultPageId, fuzzyFilter, flattenTree, relativeTime, type FlatPage } from "./knowledge/logic.js";
+import { KindPicker, type BlockEditorCallbacks } from "./knowledge/block-editor.js";
+import {
+  firstNewBlockId,
+  blockMarkdown,
+  defaultPageId,
+  fuzzyFilter,
+  flattenTree,
+  relativeTime,
+  type FlatPage,
+} from "./knowledge/logic.js";
 
 export function KnowledgePage() {
   const { client, t, language } = useDaemon();
@@ -31,6 +40,10 @@ export function KnowledgePage() {
   const [hits, setHits] = useState<Array<{ pageId: string; title: string; excerpt: string }> | null>(null);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  const [addOpen, setAddOpen] = useState(false);
+  const [titleEditing, setTitleEditing] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [busy, setBusy] = useState(false);
 
   const selectedId = location.id;
 
@@ -160,6 +173,62 @@ export function KnowledgePage() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // —— 编辑回调:每次写操作都返回刷新后的页面,直接替换本地视图 ——
+  const [editingId, setEditingId] = useState<string | null>(null);
+
+  const editor: BlockEditorCallbacks = useMemo(() => {
+    const run = async <T extends { page: NotionPageView }>(action: () => Promise<T>): Promise<void> => {
+      if (!page) return;
+      setBusy(true);
+      try {
+        const result = await action();
+        const created = firstNewBlockId(page.blocks, result.page.blocks);
+        setPage(result.page);
+        if (created) setEditingId(created);
+      } catch (error) {
+        push({
+          message: error instanceof Error ? error.message : String(error),
+          tone: "danger",
+        });
+      } finally {
+        setBusy(false);
+      }
+    };
+    return {
+      busy,
+      update: (blockId, markdown, kind, checked) =>
+        run(() =>
+          client.notionUpdateBlock({
+            blockId,
+            markdown,
+            ...(kind ? { kind } : {}),
+            ...(checked === undefined ? {} : { checked }),
+          }),
+        ),
+      remove: (blockId) => run(() => client.notionDeleteBlock({ blockId })),
+      move: (blockId, direction) => run(() => client.notionMoveBlock({ blockId, direction })),
+      duplicate: (blockId) => run(() => client.notionDuplicateBlock({ blockId })),
+      toggleTodo: (block) => {
+        if (block.kind !== "todo") return Promise.resolve();
+        return run(() =>
+          client.notionUpdateBlock({
+            blockId: block.id,
+            markdown: blockMarkdown(block),
+            checked: !block.checked,
+          }),
+        );
+      },
+      addBelow: (afterBlockId, kind) =>
+        run(() =>
+          client.notionAppendBlock({
+            ...(afterBlockId ? { afterBlockId } : { pageId: page?.id ?? "" }),
+            markdown: "",
+            kind,
+          }),
+        ),
+    };
+  }, [busy, client, page, push]);
+
   const flat = useMemo(() => flattenTree(roots ?? []), [roots]);
 
   const toggleCollapse = useCallback((id: string) => {
@@ -259,7 +328,50 @@ export function KnowledgePage() {
             {page.coverUrl ? <div className="knowledge-cover" /> : null}
             <header className="knowledge-page-head">
               {page.icon ? <span className="knowledge-page-icon">{page.icon}</span> : null}
-              <h1>{page.title}</h1>
+              {titleEditing ? (
+                <form
+                  className="knowledge-title-form"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (titleDraft.trim() === "" || !page) return;
+                    setBusy(true);
+                    void client
+                      .notionPatchTitle({ pageId: page.id, title: titleDraft.trim() })
+                      .then((result) => {
+                        setPage(result.page);
+                        setTitleEditing(false);
+                      })
+                      .catch((error) =>
+                        push({
+                          message: error instanceof Error ? error.message : String(error),
+                          tone: "danger",
+                        }),
+                      )
+                      .finally(() => setBusy(false));
+                  }}
+                >
+                  <input
+                    className="knowledge-title-input"
+                    value={titleDraft}
+                    autoFocus
+                    onChange={(event) => setTitleDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") setTitleEditing(false);
+                    }}
+                  />
+                </form>
+              ) : (
+                <h1
+                  className="knowledge-title-editable"
+                  title={t("knowledgeEdit")}
+                  onClick={() => {
+                    setTitleDraft(page.title);
+                    setTitleEditing(true);
+                  }}
+                >
+                  {page.title}
+                </h1>
+              )}
               {page.properties && Object.keys(page.properties).length > 0 ? (
                 <dl className="knowledge-properties">
                   {Object.entries(page.properties).map(([name, value]) => (
@@ -276,7 +388,26 @@ export function KnowledgePage() {
                 blocks={page.blocks}
                 t={t}
                 assetBase={(blockId) => client.notionAssetUrl(blockId)}
+                editor={editor}
+                editingId={editingId}
               />
+              <div className="knowledge-add-block">
+                {addOpen ? (
+                  <KindPicker
+                    t={t}
+                    allowDivider
+                    onPick={(kind) => {
+                      setAddOpen(false);
+                      void editor.addBelow(null, kind);
+                    }}
+                    onClose={() => setAddOpen(false)}
+                  />
+                ) : (
+                  <button type="button" className="knowledge-add-trigger" onClick={() => setAddOpen(true)}>
+                    ＋ {t("knowledgeAddBlock")}
+                  </button>
+                )}
+              </div>
             </div>
             <footer className="knowledge-page-foot">{t("knowledgeBacklinksHint")}</footer>
           </article>

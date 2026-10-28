@@ -26,7 +26,13 @@ import {
   ConclusionActionBodySchema,
   LlmKeyPutSchema,
   LlmTestBodySchema,
+  NotionAppendBlockSchema,
+  NotionDeleteBlockSchema,
+  NotionDuplicateBlockSchema,
   NotionKeyPutSchema,
+  NotionMoveBlockSchema,
+  NotionPatchTitleSchema,
+  NotionUpdateBlockSchema,
   OAuthClientPutSchema,
   PortraitCorrectionBodySchema,
   ReminderActionBodySchema,
@@ -216,6 +222,24 @@ export async function handleApi(
     return method(request, "GET", () => notionDatabase(url, context));
   }
   if (path === "/api/notion/asset") return method(request, "GET", () => notionAsset(url, context));
+  if (path === "/api/actions/notion-update-block") {
+    return method(request, "POST", () => notionMutation(request, context, "notionUpdateBlock", NotionUpdateBlockSchema));
+  }
+  if (path === "/api/actions/notion-append-block") {
+    return method(request, "POST", () => notionMutation(request, context, "notionAppendBlock", NotionAppendBlockSchema));
+  }
+  if (path === "/api/actions/notion-delete-block") {
+    return method(request, "POST", () => notionMutation(request, context, "notionDeleteBlock", NotionDeleteBlockSchema));
+  }
+  if (path === "/api/actions/notion-move-block") {
+    return method(request, "POST", () => notionMutation(request, context, "notionMoveBlock", NotionMoveBlockSchema));
+  }
+  if (path === "/api/actions/notion-duplicate-block") {
+    return method(request, "POST", () => notionMutation(request, context, "notionDuplicateBlock", NotionDuplicateBlockSchema));
+  }
+  if (path === "/api/actions/notion-patch-title") {
+    return method(request, "POST", () => notionMutation(request, context, "notionPatchTitle", NotionPatchTitleSchema));
+  }
   if (path === "/api/status") return method(request, "GET", () => status(context));
   if (path === "/api/reminders") return method(request, "GET", () => reminders(url, context));
   if (path === "/api/activity") return method(request, "POST", () => activity(request, context));
@@ -681,8 +705,34 @@ async function notionDatabase(url: URL, context: ApiContext): Promise<Response> 
   return json(database);
 }
 
-async function notionAsset(url: URL, context: ApiContext): Promise<Response> {
-  if (!context.deps.notionAsset) notSupported();
+/** 通用 Notion 写操作:校验 body → 调 deps → 广播 notion 变更 → 返回刷新后的页面。 */
+async function notionMutation<
+  K extends "notionUpdateBlock" | "notionAppendBlock" | "notionDeleteBlock" | "notionMoveBlock" | "notionDuplicateBlock" | "notionPatchTitle",
+  S extends z.ZodType,
+>(
+  request: Request,
+  context: ApiContext,
+  method: K,
+  schema: S,
+): Promise<Response> {
+  if (!context.deps[method]) notSupported();
+  let body: unknown;
+  try {
+    body = schema.parse(await readJson(request));
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      throw new HttpError(400, "INVALID_INPUT", error.issues[0]?.message ?? "请求体不合法");
+    }
+    throw error;
+  }
+  const result = await (
+    context.deps[method] as (input: unknown) => Promise<{ page: unknown }>
+  )(body);
+  publish(context.hub, ["notion"]);
+  return json(result);
+}
+
+async function notionAsset(url: URL, context: ApiContext): Promise<Response> {  if (!context.deps.notionAsset) notSupported();
   const blockId = url.searchParams.get("block");
   if (blockId === null || blockId.trim() === "") {
     throw new HttpError(400, "INVALID_INPUT", "缺少 block");

@@ -3,11 +3,13 @@ import { useState, type ReactNode } from "react";
 import type { NotionBlockModel, NotionSegment } from "@you-brain/core/http/types.js";
 
 import type { MessageKey } from "../../i18n/messages.js";
+import { EditableRow, type BlockEditorCallbacks } from "./block-editor.js";
 
 /**
  * Read-only Notion block renderer.
  * Consumes the flattened block model produced by the daemon sync
  * (`packages/core/src/notion/model.ts`), never raw API payloads.
+ * 传入 editor 时升级为可编辑(悬停手柄、turn-into、增删移动)。
  */
 
 export type Translate = (key: MessageKey, vars?: Record<string, string | number>) => string;
@@ -61,10 +63,14 @@ export function BlockList({
   blocks,
   t,
   assetBase,
+  editor,
+  editingId,
 }: {
   blocks: readonly NotionBlockModel[];
   t: Translate;
   assetBase: (blockId: string) => string;
+  editor?: BlockEditorCallbacks | undefined;
+  editingId?: string | null | undefined;
 }): ReactNode {
   const out: ReactNode[] = [];
   let numberedIndex = 0;
@@ -76,17 +82,32 @@ export function BlockList({
     } else {
       numberedIndex = 0;
     }
-    out.push(
+    const view =
       block.kind === "numbered" ? (
         <BlockView
           key={block.id}
           block={block}
           t={t}
           assetBase={assetBase}
+          editor={editor}
           numberedIndex={numberedIndex}
         />
       ) : (
-        <BlockView key={block.id} block={block} t={t} assetBase={assetBase} />
+        <BlockView key={block.id} block={block} t={t} assetBase={assetBase} editor={editor} />
+      );
+    out.push(
+      editor ? (
+        <EditableRow
+          key={`row-${block.id}`}
+          block={block}
+          editor={editor}
+          t={t}
+          initialEditing={editingId === block.id}
+        >
+          {view}
+        </EditableRow>
+      ) : (
+        view
       ),
     );
   }
@@ -97,19 +118,21 @@ export function BlockView({
   block,
   t,
   assetBase,
+  editor,
   numberedIndex,
 }: {
   block: NotionBlockModel;
   t: Translate;
   assetBase: (blockId: string) => string;
-  numberedIndex?: number;
+  editor?: BlockEditorCallbacks | undefined;
+  numberedIndex?: number | undefined;
 }): ReactNode {
   switch (block.kind) {
     case "paragraph":
       return (
         <p className="nb-p">
           <RichText segments={block.segments} />
-          {block.children.length > 0 && <BlockList blocks={block.children} t={t} assetBase={assetBase} />}
+          {block.children.length > 0 && <BlockList blocks={block.children} t={t} assetBase={assetBase} editor={editor} />}
         </p>
       );
     case "heading": {
@@ -123,7 +146,7 @@ export function BlockView({
           <span className="nb-bullet">•</span>
           <div className="nb-li-body">
             <RichText segments={block.segments} />
-            {block.children.length > 0 && <BlockList blocks={block.children} t={t} assetBase={assetBase} />}
+            {block.children.length > 0 && <BlockList blocks={block.children} t={t} assetBase={assetBase} editor={editor} />}
           </div>
         </div>
       );
@@ -133,17 +156,24 @@ export function BlockView({
           <span className="nb-number">{numberedIndex ?? 1}.</span>
           <div className="nb-li-body">
             <RichText segments={block.segments} />
-            {block.children.length > 0 && <BlockList blocks={block.children} t={t} assetBase={assetBase} />}
+            {block.children.length > 0 && <BlockList blocks={block.children} t={t} assetBase={assetBase} editor={editor} />}
           </div>
         </div>
       );
     case "todo":
       return (
         <div className="nb-li nb-todo">
-          <input type="checkbox" className="nb-checkbox" checked={block.checked} readOnly disabled />
+          <input
+            type="checkbox"
+            className="nb-checkbox"
+            checked={block.checked}
+            readOnly={!editor}
+            disabled={!editor}
+            onChange={() => editor?.toggleTodo(block)}
+          />
           <div className={block.checked ? "nb-li-body is-checked" : "nb-li-body"}>
             <RichText segments={block.segments} />
-            {block.children.length > 0 && <BlockList blocks={block.children} t={t} assetBase={assetBase} />}
+            {block.children.length > 0 && <BlockList blocks={block.children} t={t} assetBase={assetBase} editor={editor} />}
           </div>
         </div>
       );
@@ -154,7 +184,7 @@ export function BlockView({
             <RichText segments={block.segments} />
           </summary>
           <div className="nb-toggle-body">
-            <BlockList blocks={block.children} t={t} assetBase={assetBase} />
+            <BlockList blocks={block.children} t={t} assetBase={assetBase} editor={editor} />
           </div>
         </details>
       );
@@ -164,7 +194,7 @@ export function BlockView({
           <span className="nb-callout-icon">{block.emoji ?? "💡"}</span>
           <div>
             <RichText segments={block.segments} />
-            {block.children.length > 0 && <BlockList blocks={block.children} t={t} assetBase={assetBase} />}
+            {block.children.length > 0 && <BlockList blocks={block.children} t={t} assetBase={assetBase} editor={editor} />}
           </div>
         </div>
       );
@@ -172,7 +202,7 @@ export function BlockView({
       return (
         <blockquote className="nb-quote">
           <RichText segments={block.segments} />
-          {block.children.length > 0 && <BlockList blocks={block.children} t={t} assetBase={assetBase} />}
+          {block.children.length > 0 && <BlockList blocks={block.children} t={t} assetBase={assetBase} editor={editor} />}
         </blockquote>
       );
     case "code":
@@ -260,13 +290,13 @@ export function BlockView({
     case "column_list":
       return (
         <div className="nb-columns">
-          <BlockList blocks={block.children} t={t} assetBase={assetBase} />
+          <BlockList blocks={block.children} t={t} assetBase={assetBase} editor={editor} />
         </div>
       );
     case "column":
       return (
         <div className="nb-column" {...(block.widthRatio ? { style: { flexBasis: `${Math.round(block.widthRatio * 100)}%` } } : {})}>
-          <BlockList blocks={block.children} t={t} assetBase={assetBase} />
+          <BlockList blocks={block.children} t={t} assetBase={assetBase} editor={editor} />
         </div>
       );
     case "table":
@@ -291,7 +321,7 @@ export function BlockView({
     case "synced":
       return (
         <div className="nb-synced">
-          <BlockList blocks={block.children} t={t} assetBase={assetBase} />
+          <BlockList blocks={block.children} t={t} assetBase={assetBase} editor={editor} />
         </div>
       );
     case "unknown":

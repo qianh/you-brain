@@ -3007,6 +3007,24 @@ export class YouBrainDaemon {
       notionDatabase: (databaseId) =>
         Promise.resolve(this.#requireNotion().databaseView(databaseId)),
       notionAsset: (blockId) => this.#requireNotion().asset(blockId),
+      notionUpdateBlock: async (body) => ({
+        page: await this.#requireNotion().updateBlock(body.blockId, body.markdown, body.kind, body.checked),
+      }),
+      notionAppendBlock: async (body) => ({
+        page: await this.#requireNotion().appendBlock(body),
+      }),
+      notionDeleteBlock: async (body) => ({
+        page: await this.#requireNotion().deleteBlock(body.blockId),
+      }),
+      notionMoveBlock: async (body) => ({
+        page: await this.#requireNotion().moveBlock(body.blockId, body.direction),
+      }),
+      notionDuplicateBlock: async (body) => ({
+        page: await this.#requireNotion().duplicateBlock(body.blockId),
+      }),
+      notionPatchTitle: async (body) => ({
+        page: await this.#requireNotion().patchTitle(body.pageId, body.title),
+      }),
       status: () => this.#status(),
       sync: () => this.#syncNow(),
       upload: (input) => this.#uploadNow(input),

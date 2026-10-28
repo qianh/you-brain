@@ -1,4 +1,118 @@
-import type { NotionTreeNodeView } from "@you-brain/core/http/types.js";
+import type { NotionBlockModel, NotionSegment, NotionTreeNodeView } from "@you-brain/core/http/types.js";
+
+export type TurnIntoKind =
+  | "paragraph"
+  | "heading1"
+  | "heading2"
+  | "heading3"
+  | "bulleted"
+  | "numbered"
+  | "todo"
+  | "quote"
+  | "callout"
+  | "toggle"
+  | "code";
+
+/** 「添加块」菜单的条目(divider 无文本)。 */
+export const BLOCK_KINDS: Array<{ kind: TurnIntoKind | "divider"; labelKey: string }> = [
+  { kind: "paragraph", labelKey: "knowledgeTypeParagraph" },
+  { kind: "heading1", labelKey: "knowledgeTypeHeading1" },
+  { kind: "heading2", labelKey: "knowledgeTypeHeading2" },
+  { kind: "heading3", labelKey: "knowledgeTypeHeading3" },
+  { kind: "bulleted", labelKey: "knowledgeTypeBulleted" },
+  { kind: "numbered", labelKey: "knowledgeTypeNumbered" },
+  { kind: "todo", labelKey: "knowledgeTypeTodo" },
+  { kind: "quote", labelKey: "knowledgeTypeQuote" },
+  { kind: "callout", labelKey: "knowledgeTypeCallout" },
+  { kind: "toggle", labelKey: "knowledgeTypeToggle" },
+  { kind: "code", labelKey: "knowledgeTypeCode" },
+  { kind: "divider", labelKey: "knowledgeTypeDivider" },
+];
+
+/** 块的行内内容能否编辑(与 core 的 EDITABLE_KINDS 对齐)。 */
+export function isEditableBlock(block: NotionBlockModel): boolean {
+  return [
+    "paragraph",
+    "heading",
+    "bulleted",
+    "numbered",
+    "todo",
+    "quote",
+    "callout",
+    "toggle",
+    "code",
+  ].includes(block.kind);
+}
+
+/** 移动/复制需要整块复制,带子块的块会丢子树,禁止。 */
+export function canMoveBlock(block: NotionBlockModel): boolean {
+  return isEditableBlock(block) && block.children.length === 0;
+}
+
+/** 块文本 → 编辑框预填的 markdown(code 块是裸文本)。 */
+export function blockMarkdown(block: NotionBlockModel): string {
+  if (block.kind === "code") return block.text;
+  const segments = segmentsOf(block);
+  return segmentsToMarkdown(segments);
+}
+
+function segmentsOf(block: NotionBlockModel): NotionSegment[] {
+  switch (block.kind) {
+    case "paragraph":
+    case "quote":
+    case "callout":
+    case "toggle":
+    case "bulleted":
+    case "numbered":
+    case "heading":
+    case "todo":
+      return block.segments;
+    case "equation":
+      return [{ text: block.expression, href: null, bold: false, italic: false, strikethrough: false, underline: false, code: false, color: "default" }];
+    default:
+      return [];
+  }
+}
+
+/** 与 core 的 segmentsToMarkdown 保持同一语法(`` ` ``、**、*、~~、[text](url))。 */
+export function segmentsToMarkdown(segments: readonly NotionSegment[]): string {
+  let out = "";
+  for (const segment of segments) {
+    let text = segment.text;
+    if (segment.code) text = `\`${text}\``;
+    if (segment.bold) text = `**${text}**`;
+    if (segment.italic) text = `*${text}*`;
+    if (segment.strikethrough) text = `~~${text}~~`;
+    if (segment.href) text = `[${text}](${segment.href})`;
+    out += text;
+  }
+  return out;
+}
+
+/** 找出刷新后新增的块(用于创建后自动进入编辑)。 */
+export function firstNewBlockId(
+  oldBlocks: readonly NotionBlockModel[],
+  newBlocks: readonly NotionBlockModel[],
+): string | null {
+  const known = new Set(collectIds(oldBlocks));
+  const find = (models: readonly NotionBlockModel[]): string | null => {
+    for (const model of models) {
+      if (!known.has(model.id)) return model.id;
+      const nested = find(model.children);
+      if (nested) return nested;
+    }
+    return null;
+  };
+  return find(newBlocks);
+}
+
+function collectIds(models: readonly NotionBlockModel[], into: string[] = []): string[] {
+  for (const model of models) {
+    into.push(model.id);
+    collectIds(model.children, into);
+  }
+  return into;
+}
 
 export interface FlatPage {
   id: string;

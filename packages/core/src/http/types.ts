@@ -651,6 +651,67 @@ export interface NotionAsset {
   contentType: string;
 }
 
+/** POST /api/actions/notion-update-block。返回刷新后的页面视图。 */
+export const NotionUpdateBlockSchema = z
+  .object({
+    blockId: z.string().min(1),
+    markdown: z.string().max(20_000),
+    /** turn-into:同时切换块类型。 */
+    kind: z
+      .enum(["paragraph", "heading1", "heading2", "heading3", "bulleted", "numbered", "todo", "quote", "callout", "toggle", "code"])
+      .optional(),
+    /** to_do 勾选覆盖;省略时保持原状。 */
+    checked: z.boolean().optional(),
+  })
+  .strict();
+
+export type NotionUpdateBlockBody = z.infer<typeof NotionUpdateBlockSchema>;
+
+/** POST /api/actions/notion-append-block。 */
+export const NotionAppendBlockSchema = z
+  .object({
+    pageId: z.string().min(1).optional(),
+    afterBlockId: z.string().min(1).optional(),
+    markdown: z.string().max(20_000),
+    kind: z
+      .enum(["paragraph", "heading1", "heading2", "heading3", "bulleted", "numbered", "todo", "quote", "callout", "toggle", "code", "divider"])
+      .optional(),
+  })
+  .strict()
+  .refine((value) => value.pageId !== undefined || value.afterBlockId !== undefined, {
+    message: "缺少 pageId 或 afterBlockId",
+  });
+
+export type NotionAppendBlockBody = z.infer<typeof NotionAppendBlockSchema>;
+
+export const NotionDeleteBlockSchema = z
+  .object({ blockId: z.string().min(1) })
+  .strict();
+
+export type NotionDeleteBlockBody = z.infer<typeof NotionDeleteBlockSchema>;
+
+export const NotionMoveBlockSchema = z
+  .object({ blockId: z.string().min(1), direction: z.enum(["up", "down"]) })
+  .strict();
+
+export type NotionMoveBlockBody = z.infer<typeof NotionMoveBlockSchema>;
+
+export const NotionDuplicateBlockSchema = z
+  .object({ blockId: z.string().min(1) })
+  .strict();
+
+export type NotionDuplicateBlockBody = z.infer<typeof NotionDuplicateBlockSchema>;
+
+export const NotionPatchTitleSchema = z
+  .object({ pageId: z.string().min(1), title: z.string().min(1).max(2_000) })
+  .strict();
+
+export type NotionPatchTitleBody = z.infer<typeof NotionPatchTitleSchema>;
+
+export interface NotionPageMutationResult {
+  page: NotionPageView;
+}
+
 /** 同步后的页面视图:块渲染模型 + 给 LLM/MCP 用的 markdown。 */
 export interface NotionPageView {
   id: string;

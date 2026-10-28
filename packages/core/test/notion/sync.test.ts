@@ -91,6 +91,20 @@ const PAGES: Record<string, PageDef> = {
   },
 };
 
+/** patchTitle 会改写 fixture;每个用例前恢复,防用例间污染。 */
+function resetFixture(): void {
+  const rowA = PAGES[ROW_PAGE_A];
+  if (rowA) {
+    rowA.title = "第一行";
+    rowA.lastEdited = "2026-10-03T00:00:00.000Z";
+    rowA.properties = {
+      名称: { type: "title", title: [text("第一行")] },
+      状态: { type: "select", select: { name: "进行中" } },
+      优先级: { type: "number", number: 2 },
+    };
+  }
+}
+
 const TABLE_ROWS = [
   ["列一", "列二"],
   ["甲", "乙"],
@@ -146,11 +160,31 @@ function databaseObject(): Record<string, unknown> {
 
 function fakeFetch() {
   const calls: string[] = [];
-  const impl: typeof fetch = async (input, init) => {
+  // 写操作的可变状态:覆盖、删除、插入,让重取 children 反映真实改动。
+  const state = {
+    overrides: new Map<string, Record<string, unknown>>(),
+    deleted: new Set<string>(),
+    inserted: new Map<string, Array<{ after: string | null; block: Record<string, unknown> }>>(),
+  };
+  const serveChildren = (base: Array<Record<string, unknown>>, parentId: string) => {
+    let list = [...base];
+    for (const ins of state.inserted.get(parentId) ?? []) {
+      const idx = ins.after === null ? list.length : list.findIndex((b) => b.id === ins.after);
+      list.splice(idx + 1, 0, ins.block);
+    }
+    list = list
+      .filter((b) => !state.deleted.has(String(b.id)))
+      .map((b) => {
+        const override = state.overrides.get(String(b.id));
+        return override ? { ...b, ...override } : b;
+      });
+    return list;
+  };
+  const impl = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const url = String(input);
     const path = new URL(url).pathname.replace(/^\/v1/u, "");
-    void init;
-    const key = `${(init?.method as string) ?? "GET"} ${path}`;
+    const method = (init?.method as string) ?? "GET";
+    const key = `${method} ${path}`;
     calls.push(key);
     const json = (body: unknown, status = 200): Response =>
       new Response(JSON.stringify(body), {
@@ -169,26 +203,29 @@ function fakeFetch() {
         next_cursor: start + 3 < all.length ? "next" : null,
       });
     }
-    const blockMatch = /^GET \/blocks\/([^/]+)\/children/u.exec(key);
-    if (blockMatch) {
-      const id = decodeURIComponent(blockMatch[1] ?? "");
+    const blockChildrenMatch = /^GET \/blocks\/([^/]+)\/children/u.exec(key);
+    if (blockChildrenMatch) {
+      const id = decodeURIComponent(blockChildrenMatch[1] ?? "");
       if (id === ROOT_PAGE) {
-        return json({ results: PAGES[ROOT_PAGE]?.blocks ?? [], has_more: false, next_cursor: null });
+        return json({ results: serveChildren(PAGES[ROOT_PAGE]?.blocks ?? [], ROOT_PAGE), has_more: false, next_cursor: null });
       }
       if (id === CHILD_PAGE) {
-        return json({ results: PAGES[CHILD_PAGE]?.blocks ?? [], has_more: false, next_cursor: null });
+        return json({ results: serveChildren(PAGES[CHILD_PAGE]?.blocks ?? [], CHILD_PAGE), has_more: false, next_cursor: null });
       }
       if (id === TABLE_BLOCK_ID) {
         return json({
-          results: TABLE_ROWS.map((cells, index) => ({
-            object: "block",
-            id: `row-${index}`,
-            type: "table_row",
-            has_children: false,
-            table_row: {
-              cells: cells.map((value) => [text(value)]),
-            },
-          })),
+          results: serveChildren(
+            TABLE_ROWS.map((cells, index) => ({
+              object: "block",
+              id: `row-${index}`,
+              type: "table_row",
+              has_children: false,
+              table_row: {
+                cells: cells.map((value) => [text(value)]),
+              },
+            })),
+            id,
+          ),
           has_more: false,
           next_cursor: null,
         });
@@ -197,24 +234,80 @@ function fakeFetch() {
     }
     if (key === `GET /databases/${DATABASE}`) return json(databaseObject());
     if (key === `POST /databases/${DATABASE}/query`) {
+      const rowA = PAGES[ROW_PAGE_A];
+      const rowB = PAGES[ROW_PAGE_B];
       return json({
-        results: [PAGES[ROW_PAGE_A], PAGES[ROW_PAGE_B]].map((def) => ({
-          object: "page",
-          id: def.id,
-          created_time: def.created,
-          last_edited_time: def.lastEdited,
-          properties: def.properties,
-        })),
+        results: [rowA, rowB]
+          .filter((def) => def !== undefined)
+          .map((def) => ({
+            object: "page",
+            id: def.id,
+            created_time: def.created,
+            last_edited_time: def.lastEdited,
+            properties: def.properties,
+          })),
         has_more: false,
         next_cursor: null,
       });
+    }
+    const pageMatch = /^GET \/pages\/([^/]+)$/u.exec(key);
+    if (pageMatch) {
+      const id = decodeURIComponent(pageMatch[1] ?? "");
+      const def = PAGES[id];
+      if (!def) return json({ code: "object_not_found", message: "not found" }, 404);
+      return json(apiPage(def));
+    }
+    const updateBlockMatch = /^PATCH \/blocks\/([^/]+)$/u.exec(key);
+    if (updateBlockMatch) {
+      const id = decodeURIComponent(updateBlockMatch[1] ?? "");
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      state.overrides.set(id, body);
+      return json({ object: "block", id, ...body });
+    }
+    const appendMatch = /^PATCH \/blocks\/([^/]+)\/children$/u.exec(key);
+    if (appendMatch) {
+      const id = decodeURIComponent(appendMatch[1] ?? "");
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        children: Array<Record<string, unknown>>;
+        after?: string;
+      };
+      const after = body.after ?? null;
+      const list = state.inserted.get(id) ?? [];
+      body.children.forEach((child, index) => {
+        // 真实 API 会分配块 id;fake 里补上,页面树才挂得起来。
+        const withId = child.id ? child : { ...child, id: `new-${state.inserted.size}-${list.length + index}` };
+        list.push({ after, block: withId });
+      });
+      state.inserted.set(id, list);
+      return json({ results: body.children });
+    }
+    const deleteMatch = /^DELETE \/blocks\/([^/]+)$/u.exec(key);
+    if (deleteMatch) {
+      state.deleted.add(decodeURIComponent(deleteMatch[1] ?? ""));
+      return json({ object: "block", id: deleteMatch[1], archived: true });
+    }
+    const patchPageMatch = /^PATCH \/pages\/([^/]+)$/u.exec(key);
+    if (patchPageMatch) {
+      const id = decodeURIComponent(patchPageMatch[1] ?? "");
+      const def = PAGES[id];
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        properties: Record<string, { title: Array<{ text: { content: string } }> }>;
+      };
+      if (def) {
+        const props = (def.properties ??= {});
+        for (const [name, value] of Object.entries(body.properties)) {
+          props[name] = { type: "title", title: value.title.map((part) => text(part.text.content)) };
+        }
+        def.lastEdited = "2026-10-30T00:00:00.000Z";
+      }
+      return json(def ? apiPage(def) : { id });
     }
     if (key === "GET /users/me") {
       return json({ name: "you-brain", bot: { workspace_name: "John 的工作区" } });
     }
     return json({ code: "object_not_found", message: "not found" }, 404);
-  };
-  return { fetchImpl: impl, calls };
+  });
+  return { fetchImpl: impl as unknown as typeof fetch, calls, state };
 }
 
 function client(fetchImpl: typeof fetch): NotionApiClient {
@@ -231,6 +324,7 @@ describe("notion sync", () => {
   let fetches: ReturnType<typeof fakeFetch>;
 
   beforeEach(async () => {
+    resetFixture();
     dataDir = await mkdtemp(join(tmpdir(), "notion-test-"));
     const { NotionIndex } = await import("../../src/notion/store.js");
     index = new NotionIndex(join(dataDir, "notion-index.sqlite"));
@@ -346,10 +440,107 @@ describe("notion model", () => {
   });
 });
 
+
+function findModel(models: import("../../src/notion/model.js").NotionBlockModel[], id: string) {
+  const visit = (list: import("../../src/notion/model.js").NotionBlockModel[]): import("../../src/notion/model.js").NotionBlockModel | null => {
+    for (const model of list) {
+      if (model.id === id) return model;
+      const nested = visit(model.children);
+      if (nested) return nested;
+    }
+    return null;
+  };
+  return visit(models);
+}
+
+describe("notion write path", () => {
+  let dataDir: string;
+  let fake: ReturnType<typeof fakeFetch>;
+
+  const prepare = async (): Promise<NotionService> => {
+    const { NotionIndex } = await import("../../src/notion/store.js");
+    const { NotionSync } = await import("../../src/notion/sync.js");
+    const index = new NotionIndex(join(dataDir, "notion-index.sqlite"));
+    await new NotionSync(client(fake.fetchImpl), index).syncAll();
+    index.close();
+    const service = new NotionService({
+      dataDir,
+      platform: "darwin",
+      memory: new MemoryKeychain(),
+      fetch: fake.fetchImpl,
+    });
+    await service.setToken("secret_test");
+    return service;
+  };
+
+  beforeEach(async () => {
+    resetFixture();
+    dataDir = await mkdtemp(join(tmpdir(), "notion-write-"));
+    fake = fakeFetch();
+  });
+
+  test("编辑段落:markdown 渲染成粗体并回读", async () => {
+    const service = await prepare();
+    const view = await service.updateBlock("p1", "**加粗** 你好");
+    const model = findModel(view.blocks, "p1");
+    expect(model && model.kind === "paragraph" ? model.segments[0]?.bold : false).toBe(true);
+    // view.markdown 是给 LLM 的纯文本;markdown 标注在块的 segment 上(上面已断言)。
+    expect(view.markdown).toContain("加粗 你好");
+  });
+
+  test("turn-into:标题变文本,追加新块落在正确位置", async () => {
+    const service = await prepare();
+    const turned = await service.updateBlock("h1", "计划", "paragraph");
+    const model = findModel(turned.blocks, "h1");
+    expect(model?.kind).toBe("paragraph");
+
+    const appended = await service.appendBlock({ afterBlockId: "p1", markdown: "新段落", kind: "todo" });
+    const ids = appended.blocks.map((block) => block.id);
+    expect(ids.indexOf("p1")).toBeGreaterThanOrEqual(0);
+    // 新块在 p1 之后、h1 之前
+    const newId = ids.find((id) => !["p1", "h1", "todo1", "tbl"].includes(id));
+    expect(newId).toBeTruthy();
+    if (newId) {
+      expect(ids.indexOf(newId)).toBe(ids.indexOf("p1") + 1);
+      const model = findModel(appended.blocks, newId);
+      expect(model?.kind).toBe("todo");
+    }
+  });
+
+  test("移动:上移后顺序交换;带子块的块拒绝移动", async () => {
+    const service = await prepare();
+    const moved = await service.moveBlock("h1", "up");
+    expect(moved.blocks.map((block) => block.id)[0]).toBe("h1");
+    // 复制+删除的移动语义:副本拿到新 id(真实 Notion 同样如此),内容仍是原 p1 的。
+    const movedCopy = moved.blocks[1];
+    expect(movedCopy && movedCopy.kind === "paragraph" ? movedCopy.segments[0]?.text : "").toBe("你好,");
+
+    // todo1 往下移,邻居是表格(行在 rows 不在 children,但同样不可编辑重建)→ 拒绝。
+    await expect(service.moveBlock("todo1", "down")).rejects.toThrow("暂不支持");
+  });
+
+  test("删除与标题", async () => {
+    const service = await prepare();
+    const removed = await service.deleteBlock("todo1");
+    expect(findModel(removed.blocks, "todo1")).toBeNull();
+
+    const renamed = await service.patchTitle(ROW_PAGE_A, "改过的标题");
+    expect(renamed.title).toBe("改过的标题");
+  });
+
+  test("to_do 勾选切换", async () => {
+    const service = await prepare();
+    const view = await service.updateBlock("todo1", "写周报", undefined, true);
+    const model = findModel(view.blocks, "todo1");
+    expect(model && model.kind === "todo" ? model.checked : false).toBe(true);
+  });
+});
+
 describe("notion service", () => {
   let dataDir: string;
 
   beforeEach(async () => {
+    resetFixture();
     dataDir = await mkdtemp(join(tmpdir(), "notion-svc-"));
   });
 

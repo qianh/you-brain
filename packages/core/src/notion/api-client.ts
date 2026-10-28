@@ -95,7 +95,7 @@ export class NotionApiClient {
   }
 
   async #request<T>(
-    method: "GET" | "POST" | "PATCH",
+    method: "GET" | "POST" | "PATCH" | "DELETE",
     path: string,
     body?: unknown,
   ): Promise<T> {
@@ -189,6 +189,35 @@ export class NotionApiClient {
       cursor = response.has_more && response.next_cursor ? response.next_cursor : undefined;
     } while (cursor);
     return blocks;
+  }
+
+  /** Update a block's content. `body` must carry the block's own `type` key. */
+  async updateBlock(blockId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.#request("PATCH", `/blocks/${blockId}`, body);
+  }
+
+  /** Append blocks under a page/block, optionally right after a given block. */
+  async appendBlocks(
+    parentId: string,
+    children: Array<Record<string, unknown>>,
+    afterBlockId?: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    const response = await this.#request<{ results: Array<Record<string, unknown>> }>(
+      "PATCH",
+      `/blocks/${parentId}/children`,
+      afterBlockId ? { children, after: afterBlockId } : { children },
+    );
+    return response.results;
+  }
+
+  /** Archive (soft-delete) a block. */
+  async deleteBlock(blockId: string): Promise<void> {
+    await this.#request("DELETE", `/blocks/${blockId}`);
+  }
+
+  /** Update a page's title (first title property) or other properties. */
+  async updatePage(pageId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.#request("PATCH", `/pages/${pageId}`, body);
   }
 
   async page(pageId: string): Promise<Record<string, unknown>> {

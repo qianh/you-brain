@@ -1,5 +1,5 @@
 import type { NotionApiClient, NotionPageStub } from "./api-client.js";
-import { propertiesToPlainText } from "./api-client.js";
+import { propertiesToPlainText, titleOfPage } from "./api-client.js";
 import {
   buildBlockModel,
   tableRowCells,
@@ -108,6 +108,41 @@ export class NotionSync {
 
   #isDirty(stub: NotionPageStub): boolean {
     return this.#index.meta(`synced:${stub.id}`) !== stub.lastEditedTime;
+  }
+
+  /** Re-fetch one page's content right away (used after a local write). */
+  async resyncPage(pageId: string): Promise<void> {
+    const page = this.#index
+      .listPages()
+      .find((candidate) => candidate.pageId === pageId);
+    if (!page) return;
+    const full = await this.#client.page(pageId);
+    const properties = (full.properties ?? {}) as Record<string, unknown>;
+    const stub: NotionPageStub = {
+      id: pageId,
+      object: "page",
+      parentId: page.parentId,
+      parentKind: page.parentKind === "database" ? "database" : page.parentKind === "workspace" ? "workspace" : page.parentKind === "page" ? "page" : "other",
+      title: titleOfPage(full) || page.title,
+      icon: page.icon,
+      coverUrl: page.coverUrl,
+      lastEditedTime: typeof full.last_edited_time === "string" ? full.last_edited_time : page.lastEditedTime,
+      createdTime: page.createdAt,
+      archived: false,
+      propertyText: page.parentKind === "database" ? propertiesToPlainText(properties) : "",
+    };
+    this.#index.upsertPage({
+      pageId,
+      object: "page",
+      parentKind: stub.parentKind,
+      parentId: stub.parentId,
+      title: stub.title,
+      icon: stub.icon,
+      coverUrl: stub.coverUrl,
+      lastEditedTime: stub.lastEditedTime,
+      createdAt: stub.createdTime,
+    });
+    await this.#syncPage(stub);
   }
 
   #markSynced(stub: NotionPageStub, at: string): void {

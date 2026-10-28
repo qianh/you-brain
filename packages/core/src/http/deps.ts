@@ -29,13 +29,20 @@ import type {
   GoogleLogoutResult,
   NotionAsset,
   NotionDatabaseView,
+  NotionDeleteBlockBody,
+  NotionDuplicateBlockBody,
   NotionKeyPutBody,
+  NotionMoveBlockBody,
+  NotionPageMutationResult,
   NotionPageView,
+  NotionAppendBlockBody,
+  NotionPatchTitleBody,
   NotionSearchView,
   NotionStatusView,
   NotionSyncResult,
   NotionTestResult,
   NotionTreeView,
+  NotionUpdateBlockBody,
   OAuthClientPublic,
   OAuthClientPutBody,
 } from "./types.js";
@@ -94,5 +101,11 @@ export interface HttpDeps {
   notionSearch?(query: string, limit?: number): Promise<NotionSearchView>;
   notionDatabase?(databaseId: string): Promise<NotionDatabaseView | null>;
   notionAsset?(blockId: string): Promise<NotionAsset | null>;
+  notionUpdateBlock?(body: NotionUpdateBlockBody): Promise<NotionPageMutationResult>;
+  notionAppendBlock?(body: NotionAppendBlockBody): Promise<NotionPageMutationResult>;
+  notionDeleteBlock?(body: NotionDeleteBlockBody): Promise<NotionPageMutationResult>;
+  notionMoveBlock?(body: NotionMoveBlockBody): Promise<NotionPageMutationResult>;
+  notionDuplicateBlock?(body: NotionDuplicateBlockBody): Promise<NotionPageMutationResult>;
+  notionPatchTitle?(body: NotionPatchTitleBody): Promise<NotionPageMutationResult>;
   events: EventSink;
 }

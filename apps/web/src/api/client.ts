@@ -26,13 +26,20 @@ import type {
   VirtualDeviceResponse,
   RemoveDeviceResponse,
   NotionDatabaseView,
+  NotionDeleteBlockBody,
+  NotionDuplicateBlockBody,
   NotionKeyPutBody,
+  NotionMoveBlockBody,
+  NotionPageMutationResult,
   NotionPageView,
+  NotionAppendBlockBody,
+  NotionPatchTitleBody,
   NotionSearchView,
   NotionStatusView,
   NotionSyncResult,
   NotionTestResult,
   NotionTreeView,
+  NotionUpdateBlockBody,
   WebhookPublic,
   WebhookPutBody,
   WebhookTestResult,
@@ -92,6 +99,13 @@ export interface BrowserDaemon extends Omit<DaemonClient, "reminderAction" | "co
   notionSync(): Promise<NotionSyncResult>;
   notionTest(): Promise<NotionTestResult>;
   putNotionKey(body: NotionKeyPutBody): Promise<void>;
+  /** 编辑块内容(可选 turn-into)/增删/移动/复制/改标题,均返回刷新后的页面。 */
+  notionUpdateBlock(body: NotionUpdateBlockBody): Promise<NotionPageMutationResult>;
+  notionAppendBlock(body: NotionAppendBlockBody): Promise<NotionPageMutationResult>;
+  notionDeleteBlock(body: NotionDeleteBlockBody): Promise<NotionPageMutationResult>;
+  notionMoveBlock(body: NotionMoveBlockBody): Promise<NotionPageMutationResult>;
+  notionDuplicateBlock(body: NotionDuplicateBlockBody): Promise<NotionPageMutationResult>;
+  notionPatchTitle(body: NotionPatchTitleBody): Promise<NotionPageMutationResult>;
   /** 同源相对路径,直接放进 <img src> / <a href>。 */
   notionAssetUrl(blockId: string): string;
 }
@@ -217,6 +231,18 @@ export function createBrowserDaemon(options?: {
     putNotionKey: async (body: NotionKeyPutBody) => {
       await request("PUT", "/api/secrets/notion", body);
     },
+    notionUpdateBlock: (body: NotionUpdateBlockBody) =>
+      request<NotionPageMutationResult>("POST", "/api/actions/notion-update-block", body),
+    notionAppendBlock: (body: NotionAppendBlockBody) =>
+      request<NotionPageMutationResult>("POST", "/api/actions/notion-append-block", body),
+    notionDeleteBlock: (body: NotionDeleteBlockBody) =>
+      request<NotionPageMutationResult>("POST", "/api/actions/notion-delete-block", body),
+    notionMoveBlock: (body: NotionMoveBlockBody) =>
+      request<NotionPageMutationResult>("POST", "/api/actions/notion-move-block", body),
+    notionDuplicateBlock: (body: NotionDuplicateBlockBody) =>
+      request<NotionPageMutationResult>("POST", "/api/actions/notion-duplicate-block", body),
+    notionPatchTitle: (body: NotionPatchTitleBody) =>
+      request<NotionPageMutationResult>("POST", "/api/actions/notion-patch-title", body),
     notionAssetUrl: (blockId: string) => `/api/notion/asset?block=${encodeURIComponent(blockId)}`,
   };
 }

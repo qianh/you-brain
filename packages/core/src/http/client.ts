@@ -35,13 +35,20 @@ import {
   type WebhookPutBody,
   type WebhookTestResult,
   type NotionDatabaseView,
+  type NotionDeleteBlockBody,
+  type NotionDuplicateBlockBody,
   type NotionKeyPutBody,
+  type NotionMoveBlockBody,
+  type NotionPageMutationResult,
   type NotionPageView,
+  type NotionAppendBlockBody,
+  type NotionPatchTitleBody,
   type NotionSearchView,
   type NotionStatusView,
   type NotionSyncResult,
   type NotionTestResult,
   type NotionTreeView,
+  type NotionUpdateBlockBody,
 } from "./types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 
@@ -96,6 +103,13 @@ export interface DaemonClient {
   notionSync(): Promise<NotionSyncResult>;
   notionTest(): Promise<NotionTestResult>;
   putNotionKey(body: NotionKeyPutBody): Promise<void>;
+  /** 编辑块内容,可选同时 turn-into。返回刷新后的页面。 */
+  notionUpdateBlock(body: NotionUpdateBlockBody): Promise<NotionPageMutationResult>;
+  notionAppendBlock(body: NotionAppendBlockBody): Promise<NotionPageMutationResult>;
+  notionDeleteBlock(body: NotionDeleteBlockBody): Promise<NotionPageMutationResult>;
+  notionMoveBlock(body: NotionMoveBlockBody): Promise<NotionPageMutationResult>;
+  notionDuplicateBlock(body: NotionDuplicateBlockBody): Promise<NotionPageMutationResult>;
+  notionPatchTitle(body: NotionPatchTitleBody): Promise<NotionPageMutationResult>;
   /** 只拼 URL;二进制由调用方自行 fetch(浏览器同源 / CLI 拿绝对地址)。 */
   notionAssetUrl(blockId: string): string;
   events(
@@ -203,6 +217,12 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     notionSync: () => request("POST", "/api/actions/notion-sync"),
     notionTest: () => request("POST", "/api/actions/notion-test"),
     putNotionKey: (body) => request("PUT", "/api/secrets/notion", body),
+    notionUpdateBlock: (body) => request("POST", "/api/actions/notion-update-block", body),
+    notionAppendBlock: (body) => request("POST", "/api/actions/notion-append-block", body),
+    notionDeleteBlock: (body) => request("POST", "/api/actions/notion-delete-block", body),
+    notionMoveBlock: (body) => request("POST", "/api/actions/notion-move-block", body),
+    notionDuplicateBlock: (body) => request("POST", "/api/actions/notion-duplicate-block", body),
+    notionPatchTitle: (body) => request("POST", "/api/actions/notion-patch-title", body),
     notionAssetUrl: (blockId) =>
       `${baseUrl}/api/notion/asset?block=${encodeURIComponent(blockId)}`,
     events: (listener, eventOptions) =>
