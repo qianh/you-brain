@@ -38,6 +38,9 @@ jobs:
 
       - name: Bundle deb and AppImage
         run: sh apps/desktop/scripts/bundle-linux.sh
+        env:
+          # linuxdeploy 自身是 AppImage，runner 上没有 FUSE，必须自解压运行。
+          APPIMAGE_EXTRACT_AND_RUN: "1"
 
       - name: Verify the deb contains vendor, web, and the sidecar
         shell: sh
