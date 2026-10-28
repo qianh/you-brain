@@ -77,7 +77,7 @@
 
 ## G. 数字分身三层提炼（规格见 [数字分身提炼.md](./数字分身提炼.md)，取代外部例程「数字分身 inbox 提炼」）
 
-- [!] **G0 迁移准备**：不再手工上传草稿，改由 `you-brain portrait-rebuild` 从 Drive 现有分身重建三层（v2.0.0，旧文件先备份到 `consolidate-backup/`）；Drive 上 `shared.json` 的 `portrait.variants` 已去掉 `brief`、加上 `projects`；待办：停掉外部例程「数字分身·日增量」
+- [x] **G0 迁移准备**：不再手工上传草稿，改由 `you-brain portrait-rebuild` 从 Drive 现有分身重建三层（v2.0.0，旧文件先备份到 `consolidate-backup/`）；Drive 上 `shared.json` 的 `portrait.variants` 已去掉 `brief`、加上 `projects`。外部例程「数字分身·日增量 / 周对比 / 月对比」已于 2026-10-27 21:14 由 bot 侧全部暂停（导出包 `~/Downloads/twin-pipeline-export.tar.gz` 的 routines.md 有原文与 cron），两边不会再同时改同一份 latest。遗留参考：外部 claims（10/20–10/27，`{claim,section,confidence,evidence_grade,source_files,notes}` 格式）与新管线 `{layer,project,confidence,text,day}` 不兼容，直接放进 Drive `claims/` 会被解析丢弃；要复用需先做一次语义转换（section → layer/project、confidence 0–1 → high/low），属于可选迁移
 - [x] **G1 变体与 skill**：`DEFAULT_PORTRAIT_VARIANTS` 去掉 `brief`、加上 `projects`，同步 `packages/cli/src/maintenance.ts`、`packages/cli/src/setup.ts`；`skills/you-brain-portrait/SKILL.md` 改为 `full` / `coding` / `projects`
 - [x] **G2 主张抽取**：输入改为当天会话里用户本人的发言加未应用纠正；抽出的主张带 `layer` 与 `confidence`，写 `digital-twin/claims/YYYY-MM-DD.jsonl`，拿不准的写 `claims/pending.jsonl`（规格第 3 节）
 - [x] **G3 三层合并**：`portrait` 步骤一次处理三个变体；`PORTRAIT_SYSTEM_PROMPT` 换成规格第 4 节的规则；纠正可以指向任一层
