@@ -88,7 +88,7 @@
 ## E. 后续功能（不在第一期，第一期以当前功能为主）
 
 - [x] **E1 知识库（Notion）**：作为会话之外的第二类数字资产接入，术语见 `CONTEXT.md`。2026-10-29 从 Obsidian vault 改为 Notion 接入（方向变更：数据留在 Notion 云端，不走 Drive 复制，接力天然满足）
-  - 已实现：只读接入。daemon 内置 Notion 同步引擎（集成令牌走系统钥匙串，`/api/secrets/notion`），增量拉取页面/块/数据库到本地 `notion-index.sqlite`（trigram FTS，中文可搜）；每 15 分钟后台增量同步，SSE `notion` 事件。Web「知识库」页复刻 Notion 阅读体验：页面树、块渲染（标题/列表/待办/callout/代码/表格/分栏/图片附件经同源代理，仅放行 Notion 自有域名）、⌘P 快速切换、侧栏全文搜索、数据库表格视图。MCP 暴露 `search_notion` / `get_notion_page`。设置 → 集成里有令牌配置、连接测试与手动同步
+  - 已实现：只读接入。daemon 内置 Notion 同步引擎（集成令牌走系统钥匙串，`/api/secrets/notion`），增量拉取页面/块/数据库到本地 `notion-index.sqlite`（trigram FTS，中文可搜）；每 5 分钟后台增量同步，SSE `notion` 事件。Web「知识库」页复刻 Notion 阅读体验：页面树、块渲染（标题/列表/待办/callout/代码/表格/分栏/图片附件经同源代理，仅放行 Notion 自有域名）、⌘P 快速切换、侧栏全文搜索、数据库表格视图。MCP 暴露 `search_notion` / `get_notion_page`。设置 → 集成里有令牌配置、连接测试与手动同步
   - 已定（不变）：只读，编辑回 Notion；可搜索、可供 MCP 查询，后续接数字分身蒸馏（纳入范围按页面圈定，蒸馏管线接入时实现）；手机暂不接入
   - 未定/后续：①蒸馏输入的纳入范围（哪些页面喂分身）②对外部图片的直连加载（现在 Notion 域名走代理、外域直接由浏览器加载）③database 视图的筛选/排序 ④wiki 数据库（data source 新版 API）兼容
   - 遗留自 Obsidian 方案的 Drive 复制讨论（If-Match 并发、三方合并等）随方案废弃，不再相关

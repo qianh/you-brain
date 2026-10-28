@@ -15,8 +15,8 @@ export const INTERVALS = {
   consolidationMs: 10 * 60_000,
   portraitMs: 24 * 60 * 60_000,
   searchMs: 60_000,
-  /** Notion 知识库轮询。增量同步很省请求,15 分钟足够新。 */
-  notionMs: 15 * 60_000,
+  /** Notion 知识库轮询。无变化时每轮只有一次 search 调用,5 分钟很安全。 */
+  notionMs: 5 * 60_000,
   outputDebounceMs: 10_000,
   watchDebounceMs: 250,
   /** Quiet period after the last topic-book change before Drive topic files sync. */
