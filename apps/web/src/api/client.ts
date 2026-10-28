@@ -25,6 +25,14 @@ import type {
   VirtualDeviceCreateBody,
   VirtualDeviceResponse,
   RemoveDeviceResponse,
+  NotionDatabaseView,
+  NotionKeyPutBody,
+  NotionPageView,
+  NotionSearchView,
+  NotionStatusView,
+  NotionSyncResult,
+  NotionTestResult,
+  NotionTreeView,
   WebhookPublic,
   WebhookPutBody,
   WebhookTestResult,
@@ -75,6 +83,17 @@ export interface BrowserDaemon extends Omit<DaemonClient, "reminderAction" | "co
   testWebhook(): Promise<WebhookTestResult>;
   reminderAction(reminderId: string, action: ReminderActionName, until?: string): Promise<ReminderView>;
   consolidate(body?: { force?: boolean }): Promise<ConsolidateActionResult>;
+  /** 知识库(Notion,只读)。 */
+  notionStatus(): Promise<NotionStatusView>;
+  notionTree(): Promise<NotionTreeView>;
+  notionPage(pageId: string): Promise<NotionPageView>;
+  notionSearch(query: string, limit?: number): Promise<NotionSearchView>;
+  notionDatabase(databaseId: string): Promise<NotionDatabaseView>;
+  notionSync(): Promise<NotionSyncResult>;
+  notionTest(): Promise<NotionTestResult>;
+  putNotionKey(body: NotionKeyPutBody): Promise<void>;
+  /** 同源相对路径,直接放进 <img src> / <a href>。 */
+  notionAssetUrl(blockId: string): string;
 }
 
 export function readDaemonToken(): string {
@@ -182,6 +201,23 @@ export function createBrowserDaemon(options?: {
     webhook: () => request<WebhookPublic>("GET", "/api/webhook"),
     updateWebhook: (body) => request<WebhookPublic>("PUT", "/api/webhook", body),
     testWebhook: () => request<WebhookTestResult>("POST", "/api/actions/webhook-test"),
+    notionStatus: () => request<NotionStatusView>("GET", "/api/notion"),
+    notionTree: () => request<NotionTreeView>("GET", "/api/notion/tree"),
+    notionPage: (pageId: string) =>
+      request<NotionPageView>("GET", `/api/notion/page?id=${encodeURIComponent(pageId)}`),
+    notionSearch: (query: string, limit?: number) =>
+      request<NotionSearchView>(
+        "GET",
+        `/api/notion/search?q=${encodeURIComponent(query)}${limit === undefined ? "" : `&limit=${limit}`}`,
+      ),
+    notionDatabase: (databaseId: string) =>
+      request<NotionDatabaseView>("GET", `/api/notion/database?id=${encodeURIComponent(databaseId)}`),
+    notionSync: () => request<NotionSyncResult>("POST", "/api/actions/notion-sync"),
+    notionTest: () => request<NotionTestResult>("POST", "/api/actions/notion-test"),
+    putNotionKey: async (body: NotionKeyPutBody) => {
+      await request("PUT", "/api/secrets/notion", body);
+    },
+    notionAssetUrl: (blockId: string) => `/api/notion/asset?block=${encodeURIComponent(blockId)}`,
   };
 }
 

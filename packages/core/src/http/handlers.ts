@@ -26,6 +26,7 @@ import {
   ConclusionActionBodySchema,
   LlmKeyPutSchema,
   LlmTestBodySchema,
+  NotionKeyPutSchema,
   OAuthClientPutSchema,
   PortraitCorrectionBodySchema,
   ReminderActionBodySchema,
@@ -198,6 +199,23 @@ export async function handleApi(
     if (request.method === "PUT") return writeOAuthClient(request, context);
     return methodNotAllowed("GET, PUT");
   }
+  if (path === "/api/notion") return method(request, "GET", () => notionStatus(context));
+  if (path === "/api/secrets/notion") {
+    return method(request, "PUT", () => writeNotionSecret(request, context));
+  }
+  if (path === "/api/actions/notion-test") {
+    return method(request, "POST", () => notionTest(context));
+  }
+  if (path === "/api/actions/notion-sync") {
+    return method(request, "POST", () => notionSync(context));
+  }
+  if (path === "/api/notion/tree") return method(request, "GET", () => notionTree(context));
+  if (path === "/api/notion/page") return method(request, "GET", () => notionPage(url, context));
+  if (path === "/api/notion/search") return method(request, "GET", () => notionSearch(url, context));
+  if (path === "/api/notion/database") {
+    return method(request, "GET", () => notionDatabase(url, context));
+  }
+  if (path === "/api/notion/asset") return method(request, "GET", () => notionAsset(url, context));
   if (path === "/api/status") return method(request, "GET", () => status(context));
   if (path === "/api/reminders") return method(request, "GET", () => reminders(url, context));
   if (path === "/api/activity") return method(request, "POST", () => activity(request, context));
@@ -597,6 +615,88 @@ async function googleSwitch(context: ApiContext): Promise<Response> {
   if (!context.deps.googleSwitch) notSupported();
   const result: GoogleLogoutResult = await context.deps.googleSwitch();
   return json(result);
+}
+
+// --- 知识库（Notion，只读） ---------------------------------------------
+
+async function notionStatus(context: ApiContext): Promise<Response> {
+  if (!context.deps.notionStatus) notSupported();
+  return json(await context.deps.notionStatus());
+}
+
+async function writeNotionSecret(request: Request, context: ApiContext): Promise<Response> {
+  if (!context.deps.writeNotionKey) notSupported();
+  const body = NotionKeyPutSchema.parse(await readJson(request));
+  await context.deps.writeNotionKey(body);
+  const response: SecretStoredResponse = { stored: true, echoed: false, hasSecret: true };
+  return json(response);
+}
+
+async function notionTest(context: ApiContext): Promise<Response> {
+  if (!context.deps.notionTest) notSupported();
+  return json(await context.deps.notionTest());
+}
+
+async function notionSync(context: ApiContext): Promise<Response> {
+  if (!context.deps.notionSync) notSupported();
+  const result = await context.deps.notionSync();
+  publish(context.hub, ["notion", "status"]);
+  return json(result);
+}
+
+async function notionTree(context: ApiContext): Promise<Response> {
+  if (!context.deps.notionTree) notSupported();
+  return json(await context.deps.notionTree());
+}
+
+async function notionPage(url: URL, context: ApiContext): Promise<Response> {
+  if (!context.deps.notionPage) notSupported();
+  const id = url.searchParams.get("id");
+  if (id === null || id.trim() === "") throw new HttpError(400, "INVALID_INPUT", "缺少 id");
+  const page = await context.deps.notionPage(id.trim());
+  if (!page) return apiError(404, "NOT_FOUND", "页面不存在,先同步知识库");
+  return json(page);
+}
+
+async function notionSearch(url: URL, context: ApiContext): Promise<Response> {
+  if (!context.deps.notionSearch) notSupported();
+  const q = url.searchParams.get("q");
+  if (q === null || q.trim() === "") throw new HttpError(400, "INVALID_INPUT", "缺少搜索词");
+  const limitRaw = url.searchParams.get("limit");
+  let limit: number | undefined;
+  if (limitRaw !== null) {
+    const parsed = SEARCH_LIMIT.safeParse(limitRaw);
+    if (!parsed.success) throw new HttpError(400, "INVALID_INPUT", "limit 必须是 1 到 50 的整数");
+    limit = parsed.data;
+  }
+  return json(await context.deps.notionSearch(q, limit));
+}
+
+async function notionDatabase(url: URL, context: ApiContext): Promise<Response> {
+  if (!context.deps.notionDatabase) notSupported();
+  const id = url.searchParams.get("id");
+  if (id === null || id.trim() === "") throw new HttpError(400, "INVALID_INPUT", "缺少 id");
+  const database = await context.deps.notionDatabase(id.trim());
+  if (!database) return apiError(404, "NOT_FOUND", "数据库不存在,先同步知识库");
+  return json(database);
+}
+
+async function notionAsset(url: URL, context: ApiContext): Promise<Response> {
+  if (!context.deps.notionAsset) notSupported();
+  const blockId = url.searchParams.get("block");
+  if (blockId === null || blockId.trim() === "") {
+    throw new HttpError(400, "INVALID_INPUT", "缺少 block");
+  }
+  const asset = await context.deps.notionAsset(blockId.trim());
+  if (!asset) return apiError(404, "NOT_FOUND", "附件不存在或已过期,重新同步后重试");
+  return new Response(asset.bytes, {
+    headers: {
+      "content-type": asset.contentType,
+      "cache-control": "private, max-age=3600",
+      // Notion 附件可能来自网页剪藏,当作不可信内容沙箱化。
+      "content-security-policy": "sandbox",
+    },
+  });
 }
 
 async function config(context: ApiContext): Promise<Response> {

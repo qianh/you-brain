@@ -106,7 +106,9 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const reload = useCallback(
-    async (scope: "today" | "topics" | "status" | "devices" | "all" = "all"): Promise<boolean> => {
+    async (
+      scope: "today" | "topics" | "status" | "devices" | "all" = "all",
+    ): Promise<boolean> => {
       const currentLanguage = languageRef.current;
       try {
         if (scope === "all") {
@@ -177,6 +179,8 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
         try {
           await client.events((event) => {
             if (event.kind === "ready" || event.kind === "portrait") return;
+            // 知识库页自己管理刷新;这里只处理会话域的变更。
+            if (event.kind === "notion") return;
             void reload(event.kind);
           }, { signal: controller.signal });
           setStreamError(null);

@@ -439,3 +439,50 @@
 @media (prefers-reduced-motion: reduce) {
   .settings-save { animation: none; }
 }
+
+/* Notion(知识库) */
+
+.notion-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4) var(--sp-4);
+}
+
+.notion-label {
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.notion-token-row {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.notion-input {
+  flex: 1;
+  min-width: 220px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.notion-input:focus {
+  outline: 2px solid var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.notion-status {
+  display: flex;
+  gap: var(--sp-4);
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: var(--text-2);
+}

@@ -27,6 +27,15 @@ import type {
   LlmTestResult,
   GoogleLoginResult,
   GoogleLogoutResult,
+  NotionAsset,
+  NotionDatabaseView,
+  NotionKeyPutBody,
+  NotionPageView,
+  NotionSearchView,
+  NotionStatusView,
+  NotionSyncResult,
+  NotionTestResult,
+  NotionTreeView,
   OAuthClientPublic,
   OAuthClientPutBody,
 } from "./types.js";
@@ -75,5 +84,15 @@ export interface HttpDeps {
   /** 自带 OAuth 凭据（每人自己的 Google Cloud 项目）。 */
   readOAuthClient?(): Promise<OAuthClientPublic>;
   writeOAuthClient?(body: OAuthClientPutBody): Promise<OAuthClientPublic>;
+  /** 知识库（Notion，只读）。The daemon always supplies these. */
+  notionStatus?(): Promise<NotionStatusView>;
+  notionTest?(): Promise<NotionTestResult>;
+  writeNotionKey?(body: NotionKeyPutBody): Promise<void>;
+  notionSync?(): Promise<NotionSyncResult>;
+  notionTree?(): Promise<NotionTreeView>;
+  notionPage?(pageId: string): Promise<NotionPageView | null>;
+  notionSearch?(query: string, limit?: number): Promise<NotionSearchView>;
+  notionDatabase?(databaseId: string): Promise<NotionDatabaseView | null>;
+  notionAsset?(blockId: string): Promise<NotionAsset | null>;
   events: EventSink;
 }

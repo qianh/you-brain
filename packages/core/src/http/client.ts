@@ -34,6 +34,14 @@ import {
   type WebhookPublic,
   type WebhookPutBody,
   type WebhookTestResult,
+  type NotionDatabaseView,
+  type NotionKeyPutBody,
+  type NotionPageView,
+  type NotionSearchView,
+  type NotionStatusView,
+  type NotionSyncResult,
+  type NotionTestResult,
+  type NotionTreeView,
 } from "./types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 
@@ -79,6 +87,17 @@ export interface DaemonClient {
   upload(body?: UploadActionInput): Promise<UploadActionResult>;
   todo(body: TodoActionBody): Promise<ActionResponse>;
   conclusion(body: ConclusionActionBody): Promise<ActionResponse>;
+  /** 知识库（Notion，只读）。 */
+  notionStatus(): Promise<NotionStatusView>;
+  notionTree(): Promise<NotionTreeView>;
+  notionPage(pageId: string): Promise<NotionPageView>;
+  notionSearch(query: string, limit?: number): Promise<NotionSearchView>;
+  notionDatabase(databaseId: string): Promise<NotionDatabaseView>;
+  notionSync(): Promise<NotionSyncResult>;
+  notionTest(): Promise<NotionTestResult>;
+  putNotionKey(body: NotionKeyPutBody): Promise<void>;
+  /** 只拼 URL;二进制由调用方自行 fetch(浏览器同源 / CLI 拿绝对地址)。 */
+  notionAssetUrl(blockId: string): string;
   events(
     listener: (event: DaemonEvent) => void,
     options?: { signal?: AbortSignal },
@@ -170,6 +189,22 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     upload: (body) => request("POST", "/api/actions/upload", body ?? {}),
     todo: (body) => request("POST", "/api/actions/todo", body),
     conclusion: (body) => request("POST", "/api/actions/conclusion", body),
+    notionStatus: () => request("GET", "/api/notion"),
+    notionTree: () => request("GET", "/api/notion/tree"),
+    notionPage: (pageId) =>
+      request("GET", `/api/notion/page?id=${encodeURIComponent(pageId)}`),
+    notionSearch: (query, limit) =>
+      request(
+        "GET",
+        `/api/notion/search?q=${encodeURIComponent(query)}${limit === undefined ? "" : `&limit=${limit}`}`,
+      ),
+    notionDatabase: (databaseId) =>
+      request("GET", `/api/notion/database?id=${encodeURIComponent(databaseId)}`),
+    notionSync: () => request("POST", "/api/actions/notion-sync"),
+    notionTest: () => request("POST", "/api/actions/notion-test"),
+    putNotionKey: (body) => request("PUT", "/api/secrets/notion", body),
+    notionAssetUrl: (blockId) =>
+      `${baseUrl}/api/notion/asset?block=${encodeURIComponent(blockId)}`,
     events: (listener, eventOptions) =>
       readEvents(fetchImpl, baseUrl, options.token, listener, eventOptions?.signal),
   };

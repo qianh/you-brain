@@ -169,6 +169,7 @@ import {
 } from "../upload/schedule.js";
 import { UploadService } from "../upload/upload-service.js";
 import type { UploadIndex } from "../upload/types.js";
+import { NotionService } from "../notion/service.js";
 import {
   captureGeneration,
   captureWorkerBinary,
@@ -627,6 +628,7 @@ export class YouBrainDaemon {
   #searchDb: Database | null = null;
   #searchSemantic: boolean | null = null;
   #embedderClose: (() => Promise<void>) | null = null;
+  #notion: NotionService | null = null;
   #uploader: UploadService | null = null;
   #portrait: PortraitService | null = null;
   #coding: CodingInjection | null = null;
@@ -685,6 +687,7 @@ export class YouBrainDaemon {
   #lastPortrait: number | null = null;
   #lastSearch: number | null = null;
   #lastVector: number | null = null;
+  #lastNotionSync: number | null = null;
   #lastReminders: number | null = null;
   #lastConsolidation: number | null = null;
   #lastWebSessions: number | null = null;
@@ -937,6 +940,32 @@ export class YouBrainDaemon {
     await log.time("ensureCoding", () => this.#ensureCoding());
     // Model warnings and the search index settle after Drive, so status changes again here.
     this.changes.publish("status", this.#clock.now().toISOString());
+    // 知识库挂载是纯内存工作;钥匙串探测和首次同步留给后台 tick,
+    // 启动路径既不等待网络也不等待 security CLI。
+    if (this.#paths) {
+      try {
+        await log.time("mountNotion", () => this.#mountNotion());
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "failed";
+        console.error(`startup: notion ${message}`);
+      }
+    }
+  }
+
+  async #mountNotion(): Promise<void> {
+    if (!this.#paths) return;
+    this.#notion ??= new NotionService({
+      dataDir: this.#paths.dataDir,
+      platform: this.#platform,
+      backend: this.#secretBackend,
+    });
+  }
+
+  #requireNotion(): NotionService {
+    if (!this.#notion) {
+      throw new HttpError(503, "NOTION_UNAVAILABLE", "知识库服务未就绪");
+    }
+    return this.#notion;
   }
 
   /**
@@ -1090,6 +1119,8 @@ export class YouBrainDaemon {
         this.#searchDb = null;
         this.#search = null;
         this.#searchSemantic = null;
+        this.#notion?.close();
+        this.#notion = null;
         this.#store?.close();
         this.#store = null;
         if (this.#resetStateOnStop && this.#paths) {
@@ -1228,6 +1259,22 @@ export class YouBrainDaemon {
         .finally(() => {
           this.#backfillJob = null;
         });
+    }
+    if (this.#notion) {
+      if (intervalDue(this.#lastNotionSync, now, INTERVALS.notionMs)) {
+        this.#lastNotionSync = this.#clock.nowMs();
+        try {
+          // 单轮预算收紧,别让首轮大导入把一个 tick 占满。
+          if (await this.#notion.hasToken()) {
+            const summary = await this.#notion.sync(15_000);
+            if (summary.pagesSynced > 0 || summary.databasesSynced > 0 || summary.removed > 0) {
+              this.changes.publish("notion", this.#clock.now().toISOString());
+            }
+          }
+        } catch {
+          // 限流或令牌失效都不是致命的;状态里能看到 lastError。
+        }
+      }
     }
     if (
       this.#portrait &&
@@ -2932,6 +2979,34 @@ export class YouBrainDaemon {
       googleSwitch: () => this.#googleSwitch(),
       readOAuthClient: () => this.#oauthClientView(),
       writeOAuthClient: (body) => this.#writeOAuthClient(body),
+      notionStatus: () => this.#requireNotion().status(),
+      notionTest: () => this.#requireNotion().testConnection(),
+      writeNotionKey: async (body) => {
+        const notion = this.#requireNotion();
+        await notion.setToken(body.token);
+        // 保存令牌后立刻同步一次,界面马上有数据。
+        try {
+          await notion.sync();
+        } catch {
+          // 首次同步失败不打断保存;错误显示在状态里。
+        }
+        this.changes.publish("notion", this.#clock.now().toISOString());
+        this.changes.publish("status", this.#clock.now().toISOString());
+      },
+      notionSync: async () => {
+        const summary = await this.#requireNotion().sync();
+        this.changes.publish("notion", this.#clock.now().toISOString());
+        return summary;
+      },
+      notionTree: async () => ({ roots: await this.#requireNotion().tree() }),
+      notionPage: (pageId) => this.#requireNotion().page(pageId),
+      notionSearch: (query, limit) => {
+        const hits = this.#requireNotion().search(query, limit ?? 20);
+        return Promise.resolve({ query, hits });
+      },
+      notionDatabase: (databaseId) =>
+        Promise.resolve(this.#requireNotion().databaseView(databaseId)),
+      notionAsset: (blockId) => this.#requireNotion().asset(blockId),
       status: () => this.#status(),
       sync: () => this.#syncNow(),
       upload: (input) => this.#uploadNow(input),

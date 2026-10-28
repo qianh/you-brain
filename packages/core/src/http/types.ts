@@ -16,6 +16,9 @@ import {
 
 import { SessionSourceSchema } from "../domain/session.js";
 import { WebhookEventKindSchema, type WebhookEventKind } from "../webhook/kinds.js";
+import type { NotionBlockModel } from "../notion/model.js";
+
+export type { NotionBlockModel, NotionSegment } from "../notion/model.js";
 import { z } from "zod";
 
 export interface ApiErrorBody {
@@ -563,11 +566,109 @@ export const OAuthClientPutSchema = z
 
 export type OAuthClientPutBody = z.infer<typeof OAuthClientPutSchema>;
 
+// ---------------------------------------------------------------------------
+// Notion(知识库,Notion 数据接入,只读)
+// ---------------------------------------------------------------------------
+
+export interface NotionStatusView {
+  hasToken: boolean;
+  pages: number;
+  lastSyncAt: string | null;
+  lastError: string | null;
+  syncing: boolean;
+  lastRun?: {
+    objectsSeen: number;
+    pagesSynced: number;
+    databasesSynced: number;
+    removed: number;
+    failed: number;
+    pending: number;
+    error: string | null;
+  };
+}
+
+/** PUT /api/secrets/notion。集成令牌进系统钥匙串,永远不回显。 */
+export const NotionKeyPutSchema = z
+  .object({ token: z.string().trim().min(10) })
+  .strict();
+
+export type NotionKeyPutBody = z.infer<typeof NotionKeyPutSchema>;
+
+export interface NotionTestResult {
+  ok: boolean;
+  name?: string;
+  workspaceName?: string | null;
+  error?: string;
+}
+
+export interface NotionSyncResult {
+  objectsSeen: number;
+  pagesSynced: number;
+  databasesSynced: number;
+  removed: number;
+  failed: number;
+  pending: number;
+  error: string | null;
+}
+
+export interface NotionTreeNodeView {
+  id: string;
+  object: "page" | "database";
+  title: string;
+  icon: string | null;
+  children: NotionTreeNodeView[];
+}
+
+export interface NotionTreeView {
+  roots: NotionTreeNodeView[];
+}
+
+export interface NotionSearchHitView {
+  pageId: string;
+  title: string;
+  excerpt: string;
+}
+
+export interface NotionSearchView {
+  query: string;
+  hits: NotionSearchHitView[];
+}
+
+export interface NotionDatabaseView {
+  databaseId: string;
+  title: string;
+  columns: Array<{ name: string; type: string }>;
+  rows: Array<{
+    id: string;
+    title: string;
+    icon: string | null;
+    cells: Array<{ name: string; type: string; text: string }>;
+  }>;
+}
+
+export interface NotionAsset {
+  bytes: Uint8Array;
+  contentType: string;
+}
+
+/** 同步后的页面视图:块渲染模型 + 给 LLM/MCP 用的 markdown。 */
+export interface NotionPageView {
+  id: string;
+  title: string;
+  icon: string | null;
+  coverUrl: string | null;
+  lastEditedTime: string;
+  blocks: NotionBlockModel[];
+  markdown: string;
+  /** 数据库行的属性(已拍平),普通页面没有这个字段。 */
+  properties?: Record<string, string>;
+}
+
 export type { WebhookEventKind };
 
 export const DaemonEventSchema = z.object({
   id: z.number().int().nonnegative(),
-  kind: z.enum(["ready", "topics", "today", "status", "portrait", "devices"]),
+  kind: z.enum(["ready", "topics", "today", "status", "portrait", "devices", "notion"]),
   at: z.string().min(1),
 });
 

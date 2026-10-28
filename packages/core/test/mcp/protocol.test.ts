@@ -6,6 +6,7 @@ import { createMcpServer, createToolHandlers, type McpServices } from "../../src
 
 const TOOLS = [
   "add_portrait_correction",
+  "get_notion_page",
   "get_portrait",
   "get_portrait_corrections",
   "get_reminders",
@@ -14,6 +15,7 @@ const TOOLS = [
   "get_topic",
   "get_topics",
   "hub_status",
+  "search_notion",
   "search_sessions",
   "update_topic",
   "upload_sessions",
@@ -52,11 +54,28 @@ function services(): McpServices & {
     content: "complete session",
     updatedAt: "2026-07-20T00:00:00.000Z",
   }));
+  const notionSearch = mock(async () => ({
+    query: "roadmap",
+    hits: [
+      { pageId: "page-1", title: "Roadmap", excerpt: "… 二季度计划 …" },
+    ],
+  }));
+  const notionPage = mock(async () => ({
+    id: "page-1",
+    title: "Roadmap",
+    icon: "🗺️",
+    coverUrl: null,
+    lastEditedTime: "2026-10-01T00:00:00.000Z",
+    blocks: [],
+    markdown: "# Roadmap",
+  }));
   return {
     uploadSessions,
     searchSessions,
     getPortrait,
     getSession,
+    notionSearch,
+    notionPage,
     hubStatus: async () => ({ drive: { reachable: true }, warnings: [] }),
     getToday: async () => ({ date: "2026-07-20", timeZone: "UTC", sessions: [] }),
     getTopics: async () => ({ topics: [] }),

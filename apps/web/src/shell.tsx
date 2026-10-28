@@ -23,6 +23,7 @@ import type { MessageKey } from "./i18n/messages.js";
 const TABS: ReadonlyArray<{ key: MessageKey; href: string; icon: IconName }> = [
   { key: "navToday", href: "/today", icon: "calendar" },
   { key: "topicsBook", href: "/topics", icon: "book" },
+  { key: "navKnowledge", href: "/knowledge", icon: "book-open" },
   { key: "navPortrait", href: "/portrait", icon: "user" },
   { key: "navDevices", href: "/devices", icon: "laptop" },
   { key: "navStatus", href: "/status", icon: "activity" },

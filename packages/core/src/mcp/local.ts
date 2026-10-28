@@ -85,6 +85,14 @@ export function createLocalMcpServices(options: LocalMcpOptions): McpServices {
     getSession(input) {
       return readInboxSession(options.drive, input);
     },
+    notionSearch(input: { query: string; limit?: number }) {
+      const params = new URLSearchParams({ q: input.query });
+      if (input.limit !== undefined) params.set("limit", String(input.limit));
+      return call("GET", `/api/notion/search?${params.toString()}`);
+    },
+    notionPage(input: { pageId: string }) {
+      return call("GET", `/api/notion/page?id=${encodeURIComponent(input.pageId)}`);
+    },
     async getPortrait(input) {
       const variant = input.variant ?? "full";
       const portrait = await readPortraitFile(options.portraitDir, variant);

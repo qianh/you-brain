@@ -10,6 +10,7 @@ import { TopicsPage } from "./pages/topics.js";
 import { PortraitPage } from "./pages/portrait.js";
 import { SearchPage } from "./pages/search.js";
 import { DevicesPage } from "./pages/devices.js";
+import { KnowledgePage } from "./pages/knowledge.js";
 import { SettingsPage } from "./pages/settings.js";
 import { StatusPage } from "./pages/status.js";
 import { Router, useRoute } from "./router.js";
@@ -43,7 +44,9 @@ function Frame() {
         ? t("brand")
         : location.pathname === "/topics" || location.pathname === "/topics/history"
           ? t("topicsBook")
-            : location.pathname === "/portrait"
+            : location.pathname === "/knowledge"
+              ? t("navKnowledge")
+              : location.pathname === "/portrait"
               ? t("navPortrait")
               : location.pathname === "/search"
                 ? t("navSearch")
@@ -71,6 +74,7 @@ function Frame() {
   if (location.pathname === "/" || location.pathname === "/today") page = <TodayPage />;
   else if (location.pathname === "/topics") page = <TopicsPage zone="active" />;
   else if (location.pathname === "/topics/history") page = <TopicsPage zone="history" />;
+  else if (location.pathname === "/knowledge") page = <KnowledgePage />;
   else if (location.pathname === "/portrait") page = <PortraitPage />;
   else if (location.pathname === "/search") page = <SearchPage />;
   else if (location.pathname === "/devices") page = <DevicesPage />;

@@ -10,6 +10,8 @@ import {
 
 import type {
   ActionResponse,
+  NotionPageView,
+  NotionSearchView,
   PortraitCorrectionResult,
   PortraitCorrectionsResponse,
   PortraitResponse,
@@ -92,6 +94,9 @@ export interface McpServices {
     text: string;
   }): Promise<PortraitCorrectionResult>;
   getPortraitCorrections(input: { variant?: string }): Promise<PortraitCorrectionsResponse>;
+  /** 知识库（Notion，只读）。 */
+  notionSearch(input: { query: string; limit?: number }): Promise<NotionSearchView>;
+  notionPage(input: { pageId: string }): Promise<NotionPageView>;
 }
 
 type ToolResult = {
@@ -201,6 +206,39 @@ export function createToolHandlers(services: McpServices) {
           ...(input.limit !== undefined ? { limit: input.limit } : {}),
         });
         return success(output, JSON.stringify(output, null, 2));
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    search_notion: async (input: {
+      query: string;
+      limit?: number | undefined;
+    }): Promise<ToolResult> => {
+      try {
+        const output = await services.notionSearch({
+          query: input.query,
+          ...(input.limit !== undefined ? { limit: input.limit } : {}),
+        });
+        const text =
+          output.hits.length === 0
+            ? `知识库没有匹配「${output.query}」的页面。`
+            : output.hits
+                .map((hit) => `${hit.title}（${hit.pageId}）\n  ${hit.excerpt.replaceAll("\n", " ")}`)
+                .join("\n");
+        return success(output, text);
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    get_notion_page: async (input: {
+      page_id: string;
+    }): Promise<ToolResult> => {
+      try {
+        const output = await services.notionPage({ pageId: input.page_id });
+        return success(
+          { pageId: output.id, title: output.title },
+          output.markdown,
+        );
       } catch (error) {
         return failure(error);
       }
@@ -364,6 +402,27 @@ export function createMcpServer(services: McpServices): McpServer {
       },
     },
     handlers.search_sessions,
+  );
+  server.registerTool(
+    "search_notion",
+    {
+      description: "在 Notion 知识库里全文搜索页面,返回标题、页面 ID 和摘要",
+      inputSchema: {
+        query: z.string().min(1),
+        limit: z.number().int().min(1).max(50).optional(),
+      },
+    },
+    handlers.search_notion,
+  );
+  server.registerTool(
+    "get_notion_page",
+    {
+      description: "读取一篇 Notion 知识库页面,返回 markdown 正文",
+      inputSchema: {
+        page_id: z.string().min(1),
+      },
+    },
+    handlers.get_notion_page,
   );
   server.registerTool(
     "get_portrait",
