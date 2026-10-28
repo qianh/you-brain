@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 
 import {
+  captureFileStamp,
   captureGeneration,
   collectCaptureHits,
   type CaptureScanRequest,
@@ -17,6 +18,21 @@ afterEach(async () => {
 });
 
 describe("capture scan metadata", () => {
+  it("stamps a row-backed database with its write-ahead log", async () => {
+    const root = await mkdtemp(join(tmpdir(), "you-brain-capture-wal-"));
+    roots.push(root);
+    const database = join(root, "db.sqlite");
+    await writeFile(database, "db");
+    const withoutWal = await captureFileStamp(`${database}#session-1`);
+    await writeFile(`${database}-wal`, "more rows");
+    const withWal = await captureFileStamp(`${database}#session-1`);
+    expect(withoutWal?.stamp).toBeString();
+    expect(withWal?.stamp).not.toBe(withoutWal?.stamp);
+    expect(withWal?.bytes).toBeGreaterThan(withoutWal?.bytes ?? 0);
+    // The same row in an unchanged log keeps its stamp, so the next scan skips it.
+    expect((await captureFileStamp(`${database}#session-1`))?.stamp).toBe(withWal?.stamp);
+  });
+
   it("returns the same session on a second pass without parsing it again", async () => {
     const root = await mkdtemp(join(tmpdir(), "you-brain-capture-scan-"));
     roots.push(root);

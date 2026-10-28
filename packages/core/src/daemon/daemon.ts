@@ -1718,6 +1718,7 @@ export class YouBrainDaemon {
         gemini: roots["gemini-cli"],
         pi: roots.pi,
         t3: roots["t3-code"],
+        zcode: roots.zcode,
       },
       cursors: this.#captureCursors(),
     };
@@ -3095,6 +3096,30 @@ export class YouBrainDaemon {
     };
   }
 
+  /** Per-source capture state: the newest live session of each source and how many it holds. */
+  #captureRows(): NonNullable<StatusResponse["captures"]> {
+    const rows = new Map<
+      SessionSource,
+      { source: SessionSource; lastCaptureAt: string | null; sessionCount: number }
+    >();
+    for (const live of this.#live.values()) {
+      const row = rows.get(live.source) ?? {
+        source: live.source,
+        lastCaptureAt: null,
+        sessionCount: 0,
+      };
+      row.sessionCount += 1;
+      if (live.updatedAt && (row.lastCaptureAt === null || live.updatedAt > row.lastCaptureAt)) {
+        row.lastCaptureAt = live.updatedAt;
+      }
+      rows.set(live.source, row);
+    }
+    return SESSION_SOURCES.flatMap((source) => {
+      const row = rows.get(source);
+      return row ? [row] : [];
+    });
+  }
+
   async #status(): Promise<StatusResponse> {
     const pending = this.#retry.pending();
     const warnings: StatusResponse["warnings"] = [];
@@ -3170,6 +3195,7 @@ export class YouBrainDaemon {
         lastError: pending[0]?.reason ?? null,
       },
       capture: { parsed: this.#lastScanParsed },
+      captures: this.#captureRows(),
       upload: {
         pending: [...this.#live.values()].filter((live) => live.schedule.dirtySince !== null).length,
         slowestMs: this.#uploadSlowestMs,
@@ -3499,6 +3525,7 @@ export class YouBrainDaemon {
       "gemini-cli": [] as string[],
       pi: [] as string[],
       "t3-code": [] as string[],
+      zcode: [] as string[],
     };
     // 服务器上不存在这些 CLI 的会话目录。采集空转，只做提炼与沉淀。
     if (this.#local.role === "server") return roots;

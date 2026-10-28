@@ -111,7 +111,26 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("failed to build you-brain")
-        .run(|_app, _event| {});
+        .run(|app, event| handle_run_event(app, event));
+}
+
+/// A menu-bar app has no Dock icon, so opening it again while it runs shows nothing
+/// unless the reopen event is answered. macOS delivers it when the app is launched a
+/// second time (Finder, `open -a you-brain`); answering with the main window is what
+/// the user expects from double-clicking an app.
+fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    #[cfg(target_os = "macos")]
+    if let tauri::RunEvent::Reopen {
+        has_visible_windows, ..
+    } = event
+    {
+        if !has_visible_windows {
+            show_main(app);
+        }
+        return;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, event);
 }
 
 fn install_tray(app: &tauri::App) -> tauri::Result<()> {

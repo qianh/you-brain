@@ -332,6 +332,15 @@ export interface StatusResponse {
     /** Session files parsed by the last scan. Zero means every file was unchanged. */
     parsed: number;
   };
+  /**
+   * Per-source capture state: the newest session each source holds and how many.
+   * Absent on older daemons; the status page then shows every source as never captured.
+   */
+  captures?: Array<{
+    source: string;
+    lastCaptureAt: string | null;
+    sessionCount: number;
+  }>;
   upload?: {
     /** Sessions waiting in the live map: captured but not yet on Drive. */
     pending: number;

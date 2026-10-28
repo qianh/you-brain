@@ -10,7 +10,7 @@ import {
 } from "../../src/domain/session.js";
 
 describe("session domain", () => {
-  it("accepts the local sources, including gemini-cli, pi, and t3-code", () => {
+  it("accepts the local sources, including gemini-cli, pi, t3-code, and zcode", () => {
     expect(SESSION_SOURCES).toEqual([
       "claude-code",
       "codex",
@@ -19,10 +19,12 @@ describe("session domain", () => {
       "gemini-cli",
       "pi",
       "t3-code",
+      "zcode",
     ]);
     expect(SessionSourceSchema.parse("gemini-cli")).toBe("gemini-cli");
     expect(SessionSourceSchema.parse("pi")).toBe("pi");
     expect(SessionSourceSchema.parse("t3-code")).toBe("t3-code");
+    expect(SessionSourceSchema.parse("zcode")).toBe("zcode");
     expect(() => SessionSourceSchema.parse("gemini")).toThrow();
     expect(LEGACY_BACKFILL_SOURCES).toEqual([
       "claude-code",

@@ -1,4 +1,4 @@
-export const SEARCH_SOURCES = ["claude-code", "codex", "grok-build", "cursor", "gemini-cli", "pi", "t3-code"] as const;
+export const SEARCH_SOURCES = ["claude-code", "codex", "grok-build", "cursor", "gemini-cli", "pi", "t3-code", "zcode"] as const;
 
 export type SearchSource = (typeof SEARCH_SOURCES)[number];
 

@@ -74,7 +74,15 @@ export async function captureFileStamp(
     const info = await stat(filePath);
     if (!info.isDirectory()) {
       const stamp = `f:${info.mtimeMs}:${info.size}`;
-      return { stamp: row ? `${stamp}#${row}` : stamp, bytes: info.size };
+      if (!row) return { stamp, bytes: info.size };
+      // A row-backed source is a live SQLite database. In WAL mode new rows land in
+      // `<database>-wal` and the main file only changes on checkpoint, so the log is
+      // part of the stamp; otherwise a running CLI would look untouched.
+      const wal = await stat(`${filePath}-wal`).catch(() => null);
+      return {
+        stamp: wal ? `${stamp}:${wal.mtimeMs}:${wal.size}#${row}` : `${stamp}#${row}`,
+        bytes: info.size + (wal?.size ?? 0),
+      };
     }
     const history = await stat(join(path, "chat_history.jsonl"));
     const summary = await stat(join(path, "summary.json"));

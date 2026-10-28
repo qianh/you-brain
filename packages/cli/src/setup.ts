@@ -879,6 +879,7 @@ async function configureBackfill(
       gemini: shared.capture.sources["gemini-cli"].paths,
       pi: shared.capture.sources.pi.paths,
       t3: shared.capture.sources["t3-code"].paths,
+      zcode: shared.capture.sources.zcode.paths,
     },
   });
   const counts = new Map<string, number>();

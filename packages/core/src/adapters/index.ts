@@ -1,8 +1,6 @@
 import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { Database } from "bun:sqlite";
-
 import { applyCaptureRedaction } from "../capture/redact.js";
 import type { NormalizedSession, SessionSource } from "../domain/session.js";
 import { allowCapturePath } from "./filter.js";
@@ -13,7 +11,9 @@ import { parseGeminiSession } from "./gemini.js";
 import { globFiles } from "./glob.js";
 import { parseGrokSession } from "./grok.js";
 import { parsePiSession } from "./pi.js";
-import { isImportedThread, parseT3Session, t3SourcePath } from "./t3.js";
+import { getAdapter } from "./registry.js";
+import { parseT3Session } from "./t3.js";
+import { parseZcodeSession } from "./zcode.js";
 import type {
   AdapterOptions,
   AdapterResult,
@@ -29,6 +29,7 @@ export { parseGeminiSession, geminiAdapter } from "./gemini.js";
 export { parseGrokSession, grokAdapter } from "./grok.js";
 export { parsePiSession, piAdapter } from "./pi.js";
 export { parseT3Session, t3Adapter, isImportedThread, parseT3Path } from "./t3.js";
+export { parseZcodeSession, zcodeAdapter, parseZcodePath } from "./zcode.js";
 export {
   clearContinuationIndex,
   continuationByPrefix,
@@ -103,35 +104,15 @@ async function incrementalFiles(
 }
 
 /**
- * One path per live T3 thread. T3 keeps every transcript in one database, so the
- * unit of work is a row, not a file: `<database>#<threadId>`.
+ * One path per live row for a database-backed source. T3 and ZCode keep every
+ * transcript in one SQLite database, so the unit of work is a row, not a file:
+ * `<database>#<rowId>`. The adapter owns the listing; this only collects it.
  */
-async function t3ThreadPaths(roots: string[]): Promise<string[]> {
+async function rowPaths(source: SessionSource, roots: string[]): Promise<string[]> {
+  const adapter = getAdapter(source);
+  if (!adapter) return [];
   const paths: string[] = [];
-  for (const root of roots) {
-    const database = join(root, "state.sqlite");
-    let db: Database;
-    try {
-      db = new Database(database, { readonly: true });
-    } catch {
-      continue;
-    }
-    try {
-      const rows = db
-        .query<{ thread_id: string }, []>(
-          `SELECT thread_id FROM projection_threads WHERE deleted_at IS NULL`,
-        )
-        .all();
-      for (const row of rows) {
-        if (isImportedThread(row.thread_id)) continue;
-        paths.push(t3SourcePath(database, row.thread_id));
-      }
-    } catch {
-      // Not a T3 database, or an older schema without threads.
-    } finally {
-      db.close();
-    }
-  }
+  for await (const file of adapter.discover(roots)) paths.push(file.path);
   return paths;
 }
 
@@ -146,6 +127,7 @@ export async function discoverSessions(
     gemini: emptyStatus(),
     pi: emptyStatus(),
     t3: emptyStatus(),
+    zcode: emptyStatus(),
   };
   const output: DiscoveryResult = {
     sessions: [],
@@ -315,7 +297,7 @@ export async function discoverSessions(
     const paths = visible(
       "t3-code",
       await incrementalFiles(
-        await t3ThreadPaths(options.paths.t3 ?? []),
+        await rowPaths("t3-code", options.paths.t3 ?? []),
         options.modifiedAfter?.["t3-code"],
         includePaths,
       ),
@@ -326,6 +308,26 @@ export async function discoverSessions(
         name: "t3" as const,
         path,
         parse: () => parseT3Session(path, parserOptions),
+      })),
+    );
+  }
+
+  if (!stopped() && options.sources.includes("zcode")) {
+    // ZCode also lists its own sessions: one row per session, not one file per directory.
+    const paths = visible(
+      "zcode",
+      await incrementalFiles(
+        await rowPaths("zcode", options.paths.zcode ?? []),
+        options.modifiedAfter?.zcode,
+        includePaths,
+      ),
+    );
+    status.zcode.discovered = paths.length;
+    work.push(
+      ...paths.map((path) => ({
+        name: "zcode" as const,
+        path,
+        parse: () => parseZcodeSession(path, parserOptions),
       })),
     );
   }
@@ -391,5 +393,7 @@ export async function parseSourceFile(
       return parsePiSession(path, options);
     case "t3-code":
       return parseT3Session(path, options);
+    case "zcode":
+      return parseZcodeSession(path, options);
   }
 }

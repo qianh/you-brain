@@ -268,6 +268,42 @@
                 "exclude"
               ],
               "type": "object"
+            },
+            "zcode": {
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "exclude": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "include": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "paths": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "enabled",
+                "paths",
+                "include",
+                "exclude"
+              ],
+              "type": "object"
             }
           },
           "required": [
@@ -277,7 +313,8 @@
             "cursor",
             "gemini-cli",
             "pi",
-            "t3-code"
+            "t3-code",
+            "zcode"
           ],
           "type": "object"
         }

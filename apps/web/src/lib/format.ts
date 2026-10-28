@@ -10,6 +10,7 @@ const SOURCE_LABELS: Record<string, string> = {
   "gemini-cli": "Gemini CLI",
   pi: "Pi",
   "t3-code": "T3 Code",
+  zcode: "ZCode",
 };
 
 export function sourceLabel(source: string): string {

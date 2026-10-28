@@ -10,6 +10,7 @@ export const CAPTURE_SOURCE_IDS = [
   "gemini-cli",
   "pi",
   "t3-code",
+  "zcode",
 ] as const;
 
 export const CaptureSourceIdSchema = z.enum(CAPTURE_SOURCE_IDS);

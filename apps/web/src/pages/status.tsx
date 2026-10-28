@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { SharedConfig } from "@you-brain/protocol";
+import { CAPTURE_SOURCE_IDS } from "@you-brain/protocol";
 
 import { BrowserDaemonError } from "../api/client.js";
 import { Button } from "../components/button.js";
@@ -295,13 +296,7 @@ function consolidationHint(
 function sourceEnabled(config: SharedConfig | null): Record<string, boolean> | null {
   if (!config) return null;
   const sources = config.capture.sources;
-  return {
-    "claude-code": sources["claude-code"].enabled,
-    codex: sources.codex.enabled,
-    "grok-build": sources["grok-build"].enabled,
-    cursor: sources.cursor.enabled,
-    "gemini-cli": sources["gemini-cli"].enabled,
-  };
+  return Object.fromEntries(CAPTURE_SOURCE_IDS.map((id) => [id, sources[id].enabled]));
 }
 
 function LogRow({

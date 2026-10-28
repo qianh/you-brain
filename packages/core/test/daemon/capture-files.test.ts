@@ -60,6 +60,25 @@ async function open(
 }
 
 describe("capture file fingerprints", () => {
+  it("reports the newest session and the count per source on the status payload", async () => {
+    const dirs = await makeDaemonDirs("you-brain-capture-status-");
+    roots.push(dirs.root);
+    const clock = testClock();
+    const drive = new MemoryDrive({ now: () => clock.now() });
+    await writeFile(join(dirs.sourceDir, "one.jsonl"), `${claudeLine("one", "first question")}\n`);
+    await writeFile(join(dirs.sourceDir, "two.jsonl"), `${claudeLine("two", "second question")}\n`);
+
+    const daemon = await open(dirs, {
+      clock,
+      drive,
+      sourceRoots: { "claude-code": [dirs.sourceDir] },
+    });
+
+    expect((await readStatus(daemon)).captures).toEqual([
+      { source: "claude-code", lastCaptureAt: "2026-10-18T02:00:00.000Z", sessionCount: 2 },
+    ]);
+  });
+
   it("persists them so a restart does not re-parse unchanged files", async () => {
     const dirs = await makeDaemonDirs("you-brain-capture-files-");
     roots.push(dirs.root);

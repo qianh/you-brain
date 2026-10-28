@@ -65,6 +65,7 @@ function captureSources(): Record<CaptureSourceId, CaptureSourceConfig> {
     "gemini-cli": captureSource(),
     pi: captureSource(),
     "t3-code": captureSource(),
+    zcode: captureSource(),
   };
 }
 
@@ -96,6 +97,7 @@ const SharedConfigObjectSchema = z.object({
       "gemini-cli": CaptureSourceConfigSchema,
       pi: CaptureSourceConfigSchema,
       "t3-code": CaptureSourceConfigSchema,
+      zcode: CaptureSourceConfigSchema,
     }),
     keepToolCalls: z.boolean(),
     includeSubagents: z.boolean(),

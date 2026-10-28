@@ -96,6 +96,7 @@ export interface DiscoveryOptions {
     gemini?: string[];
     pi?: string[];
     t3?: string[];
+    zcode?: string[];
   };
   modifiedAfter?: Partial<Record<SessionSource, string>>;
   includePaths?: string[];
@@ -140,7 +141,7 @@ export interface DiscoveryResult {
   malformed: number;
   warnings: Array<{ code: string; message: string }>;
   status: Record<
-    "claude" | "codex" | "grok" | "cursor" | "gemini" | "pi" | "t3",
+    "claude" | "codex" | "grok" | "cursor" | "gemini" | "pi" | "t3" | "zcode",
     DiscoveryStatus
   >;
 }

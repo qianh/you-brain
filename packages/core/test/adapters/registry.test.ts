@@ -19,7 +19,7 @@ const fixture = (...parts: string[]) =>
   resolve(import.meta.dirname, "..", "fixtures", ...parts);
 
 describe("adapter registry", () => {
-  it("registers the seven built-in sources and their default roots", () => {
+  it("registers the eight built-in sources and their default roots", () => {
     expect(listAdapters().map((adapter) => adapter.id)).toEqual([
       "claude-code",
       "codex",
@@ -28,6 +28,7 @@ describe("adapter registry", () => {
       "gemini-cli",
       "pi",
       "t3-code",
+      "zcode",
     ]);
     expect(claudeAdapter.defaultRoots("/Users/me")).toEqual([
       "/Users/me/.claude/projects",
@@ -49,6 +50,9 @@ describe("adapter registry", () => {
     ]);
     expect(getAdapter("t3-code")?.defaultRoots("/Users/me")).toEqual([
       "/Users/me/.t3/userdata",
+    ]);
+    expect(getAdapter("zcode")?.defaultRoots("/Users/me")).toEqual([
+      "/Users/me/.zcode/cli/db",
     ]);
   });
 

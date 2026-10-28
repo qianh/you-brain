@@ -261,6 +261,7 @@ describe("capture views", () => {
       "gemini-cli",
       "pi",
       "t3-code",
+      "zcode",
     ]);
   });
 });

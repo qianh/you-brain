@@ -46,6 +46,7 @@ const SOURCES: Record<string, string> = {
   "gemini-cli": "Gemini CLI",
   pi: "Pi",
   "t3-code": "T3 Code",
+  zcode: "ZCode",
 };
 
 const EN_STATUS: Record<TopicStatus, string> = {

@@ -42,6 +42,7 @@ const sources: SessionSource[] = [
   "gemini-cli",
   "pi",
   "t3-code",
+  "zcode",
 ];
 const paths = {
   claude: [join(home, ".claude", "projects")],
@@ -51,6 +52,7 @@ const paths = {
   gemini: [join(home, ".gemini", "tmp")],
   pi: [join(home, ".pi", "agent", "sessions")],
   t3: [join(home, ".t3", "userdata")],
+  zcode: [join(home, ".zcode", "cli", "db")],
 };
 
 console.log("扫描本机源目录…");
