@@ -34,7 +34,7 @@
 - [x] **B5 网页会话处理设备**：`webProcessor` 角色真正生效——被指定设备负责处理网页版 AI 会话的提炼；角色切换的行为与状态展示
 - [x] **B6 服务器模式**：生成并安装 launchd / systemd 单元（`you-brain service install|uninstall|status`），与 `maintenance.ts` 的卸载清理对齐，使无界面机器可担任主设备
 - [x] **B7 虚拟设备协议**：`docs/protocol/` 协议文档，注册虚拟设备（`kind: virtual`）与对外发布所需的 API / 校验
-- [x] **B8 Linux 桌面打包**：`bundle-linux.sh`（运行时生成按 triple 的配置）、`web-dir`/`resolver` 的 `../lib/you-brain` 兜底（`native/layout.ts`）、托盘无 rect 时面板右上角降级、`xprintidle` 空闲读取、`workflow_dispatch` 工作流 `desktop-linux.yml`。未在真实 Linux 上出包：待手动触发工作流验证（本机 gh 未登录无法 dispatch，`gh auth login` 后 `gh workflow run desktop-linux.yml`；arm runner 需账号开通）
+- [x] **B8 Linux 桌面打包**：`bundle-linux.sh`（运行时生成按 triple 的配置）、`web-dir`/`resolver` 的 `../lib/you-brain` 兜底（`native/layout.ts`）、托盘无 rect 时面板右上角降级、`xprintidle` 空闲读取、`workflow_dispatch` 工作流 `desktop-linux.yml`。**已在真实 Linux 出包（2026-10-28，run 40650751042，x86_64 与 aarch64 全绿）**，deb 内含 vendor（539 文件）/web/daemon，CUDA 插件已不在包内。链路上修了四件事：① linuxdeploy 是 AppImage，runner 无 FUSE，加 `APPIMAGE_EXTRACT_AND_RUN=1` 并补装 libfuse2/libfuse2t64；② bun `--compile` 的单文件 sidecar 让 ldd 以 1 退出、gtk 插件当致命错误，CI 放 ldd 包装器把 exit 1 视为无依赖；③ vendor 里 onnxruntime 的 CUDA/TensorRT provider 声明依赖 libcublas，`LINUXDEPLOY_EXCLUDE_LIBS` 只免复制不免扫描，最终在 `build-daemon.ts` 的 pruneVendor 从源头删除（Mac 本来就没有）；④ `bundle-linux.sh` 透传额外参数。遗留：deb/AppImage 尚未装到真实 Linux 机器运行（归 D4 的服务器/真机验收）
 - [x] **B9 设备移除传播**：拉取（首次，或任一页 `removedIds` 非空）后用 `devices/` 列表对账，删本地已不存在的虚拟设备行（物理设备/本机不动），list 失败则 pull 失败游标不推进；有删除时 daemon 发 `devices` SSE。已知：GoogleDrive 遇文件夹变更返回 reset 且 removedIds 为空时，当次不对账，下次带 removedIds 的拉取补上
 
 ## C. P2
