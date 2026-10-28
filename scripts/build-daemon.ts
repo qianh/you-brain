@@ -220,6 +220,20 @@ function hostNative(triple: string): { platform: string; arch: string } {
 async function pruneVendor(vendorModules: string, triple: string): Promise<void> {
   const native = hostNative(triple);
   await keepOnnxHost(join(vendorModules, "onnxruntime-node", "bin"), native);
+  // CUDA/TensorRT 执行 provider 是 GPU 专用插件，CPU 模式不加载；AppImage 的
+  // linuxdeploy 还会因为它们声明依赖 CUDA libcublas 而拒绝打包。Mac 的 vendor
+  // 里本来就没有这几个文件，删不到时是空操作。
+  const onnxHostDir = join(
+    vendorModules,
+    "onnxruntime-node",
+    "bin",
+    "napi-v6",
+    native.platform,
+    native.arch,
+  );
+  for (const provider of ["libonnxruntime_providers_cuda.so", "libonnxruntime_providers_tensorrt.so"]) {
+    await rm(join(onnxHostDir, provider), { force: true });
+  }
   await rm(join(vendorModules, "onnxruntime-web"), { recursive: true, force: true });
   await rm(join(vendorModules, "onnxruntime-node", "script"), { recursive: true, force: true });
   await rm(join(vendorModules, "onnxruntime-node", "lib"), { recursive: true, force: true });
