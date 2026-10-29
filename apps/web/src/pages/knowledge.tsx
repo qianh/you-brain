@@ -25,13 +25,48 @@ import {
   type FlatPage,
 } from "./knowledge/logic.js";
 
+interface KnowledgeCache {
+  roots: NotionTreeNodeView[] | null;
+  status: NotionStatusView | null;
+  pageId: string | null;
+  page: NotionPageView | null;
+}
+
+const CACHE_KEY = "you-brain:knowledge:v1";
+
+function readKnowledgeCache(): KnowledgeCache {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return { roots: null, status: null, pageId: null, page: null };
+    const parsed = JSON.parse(raw) as Partial<KnowledgeCache>;
+    return {
+      roots: Array.isArray(parsed.roots) ? parsed.roots : null,
+      status: parsed.status ?? null,
+      pageId: typeof parsed.pageId === "string" ? parsed.pageId : null,
+      page: parsed.page ?? null,
+    };
+  } catch {
+    return { roots: null, status: null, pageId: null, page: null };
+  }
+}
+
+function writeKnowledgeCache(patch: Partial<KnowledgeCache>): void {
+  try {
+    const current = readKnowledgeCache();
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ ...current, ...patch }));
+  } catch {
+    // 隐私模式等写不进就算了,只影响下次的秒开。
+  }
+}
+
 export function KnowledgePage() {
   const { client, t, language } = useDaemon();
   const { push } = useToast();
   const { location, navigate } = useRoute();
+  const cached = useRef(readKnowledgeCache());
 
-  const [status, setStatus] = useState<NotionStatusView | null>(null);
-  const [roots, setRoots] = useState<NotionTreeNodeView[] | null>(null);
+  const [status, setStatus] = useState<NotionStatusView | null>(cached.current.status);
+  const [roots, setRoots] = useState<NotionTreeNodeView[] | null>(cached.current.roots);
   const [page, setPage] = useState<NotionPageView | null>(null);
   const [database, setDatabase] = useState<NotionDatabaseView | null>(null);
   const [loading, setLoading] = useState(false);
@@ -53,8 +88,10 @@ export function KnowledgePage() {
     if (nextStatus.hasToken) {
       const tree = await client.notionTree();
       setRoots(tree.roots);
+      writeKnowledgeCache({ status: nextStatus, roots: tree.roots });
     } else {
       setRoots([]);
+      writeKnowledgeCache({ status: nextStatus, roots: [] });
     }
     return nextStatus;
   }, [client]);
@@ -62,11 +99,13 @@ export function KnowledgePage() {
   useEffect(() => {
     let alive = true;
     void refreshMeta().catch(() => {
-      if (alive) setRoots([]);
+      // 刷新失败时保留缓存渲染;完全没有缓存才落到空态。
+      if (alive && roots === null) setRoots([]);
     });
     return () => {
       alive = false;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshMeta]);
 
   // 打开选中的页面或数据库。
@@ -76,6 +115,15 @@ export function KnowledgePage() {
       setPage(null);
       setDatabase(null);
       return;
+    }
+    // 秒开:缓存里正好是这一页就先渲染,下面的请求继续刷新。
+    if (
+      cached.current.pageId === selectedId &&
+      cached.current.page &&
+      page === null &&
+      !loading
+    ) {
+      setPage(cached.current.page);
     }
     setLoading(true);
     void (async () => {
@@ -91,6 +139,7 @@ export function KnowledgePage() {
           if (!alive) return;
           setPage(detail);
           setDatabase(null);
+          writeKnowledgeCache({ pageId: selectedId, page: detail });
         }
       } catch {
         if (alive) {

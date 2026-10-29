@@ -953,12 +953,16 @@ export class YouBrainDaemon {
   }
 
   async #mountNotion(): Promise<void> {
-    if (!this.#paths) return;
-    this.#notion ??= new NotionService({
-      dataDir: this.#paths.dataDir,
-      platform: this.#platform,
-      backend: this.#secretBackend,
-    });
+    if (!this.#notion) return;
+    if (await this.#notion.hasToken()) {
+      try {
+        await this.#notion.sync();
+        this.changes.publish("notion", this.#clock.now().toISOString());
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "failed";
+        console.error(`startup: notion sync ${message}`);
+      }
+    }
   }
 
   #requireNotion(): NotionService {
@@ -2933,6 +2937,15 @@ export class YouBrainDaemon {
   #deps(): HttpDeps {
     const store = this.#store;
     if (!store) throw new YouBrainError("INVALID_INPUT", "store is not open");
+    // 知识库只依赖本地数据目录,不等 Drive;HTTP 一起来,树/状态就能响应,
+    // 首轮同步仍在 #mountNotion 的后台序列里。
+    if (this.#paths) {
+      this.#notion ??= new NotionService({
+        dataDir: this.#paths.dataDir,
+        platform: this.#platform,
+        backend: this.#secretBackend,
+      });
+    }
     const readers = createStoreReaders(store, this.#zone);
     return {
       today: () => readers.today(),
