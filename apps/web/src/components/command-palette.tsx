@@ -131,10 +131,10 @@ export function CommandPalette({
     const jumps: Array<{ href: string; label: string; icon: IconName }> = [
       { href: "/today", label: t("navToday"), icon: "calendar" },
       { href: "/topics", label: t("topicsBook"), icon: "book" },
-      { href: "/portrait", label: t("navPortrait"), icon: "user" },
+      { href: "/settings?section=portrait", label: t("navPortrait"), icon: "user" },
       { href: "/search", label: t("navSearch"), icon: "search" },
-      { href: "/devices", label: t("navDevices"), icon: "laptop" },
-      { href: "/status", label: t("navStatus"), icon: "activity" },
+      { href: "/settings?section=devices", label: t("navDevices"), icon: "laptop" },
+      { href: "/settings?section=status", label: t("navStatus"), icon: "activity" },
       { href: settingsHref("account"), label: t("navSettings"), icon: "settings" },
     ];
     for (const jump of jumps) {

@@ -15,7 +15,7 @@ import { RoleSection } from "./devices/role-section.js";
 
 type RolePatch = { mainDevice?: string | null; webProcessor?: string | null };
 
-export function DevicesPage() {
+export function DevicesPage({ embedded = false }: { embedded?: boolean } = {}) {
   const { t, language, devices, roles, status, client, replaceRoles, timeZone, loading, error, reload } = useDaemon();
   const { push } = useToast();
   const rolesRef = useRef(roles);
@@ -62,7 +62,7 @@ export function DevicesPage() {
 
   return (
     <div className="devices-page">
-      <PageHeader title={t("devices")} description={t("devicesLead")} />
+      {embedded ? null : <PageHeader title={t("devices")} description={t("devicesLead")} />}
       {waiting ? (
         delayed ? (
           <DevicesSkeleton />

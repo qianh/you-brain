@@ -12,6 +12,8 @@ export interface SettingsNavItem {
 export const SETTINGS_NAV: readonly SettingsNavItem[] = [
   { id: "account", label: "groupAccountDrive", hint: "accountHint", icon: "user" },
   { id: "model", label: "groupModel", hint: "modelHint", icon: "cpu" },
+  { id: "status", label: "navStatus", hint: "statusHint", icon: "activity" },
+  { id: "devices", label: "navDevices", hint: "devicesHint", icon: "laptop" },
   { id: "capture", label: "navCapture", hint: "captureHint", icon: "inbox" },
   { id: "refine", label: "navRefine", hint: "refineHint", icon: "sparkles" },
   { id: "consolidation", label: "navConsolidation", hint: "consolidationHint", icon: "bell" },

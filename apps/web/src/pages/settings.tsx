@@ -15,7 +15,10 @@ import { CaptureSection } from "./settings/capture.js";
 import { ConsolidationSection } from "./settings/consolidation.js";
 import { IntegrationsSection } from "./settings/integrations.js";
 import { settingsNavItem } from "./settings/meta.js";
+import { DevicesPage } from "./devices.js";
 import { ModelSection } from "./settings/model.js";
+import { PortraitPage } from "./portrait.js";
+import { StatusPage } from "./status.js";
 import { OAuthClientSection } from "./settings/oauth.js";
 import { SettingsNav } from "./settings/nav.js";
 import { PortraitSection } from "./settings/portrait.js";
@@ -149,7 +152,22 @@ function SectionBody({
   savedProvider: string;
 }) {
   const { draft, rolesDraft } = draftApi;
+  // 这三页不依赖设置草稿,直接渲染迁移过来的页面内容。
+  if (section === "status") return <StatusPage embedded />;
+  if (section === "devices") return <DevicesPage embedded />;
   if (!draft || !rolesDraft) return null;
+  if (section === "portrait") {
+    return (
+      <>
+        <PortraitPage embedded />
+        <PortraitSection
+          draft={draft}
+          issues={draftApi.issues}
+          onDraft={draftApi.editDraft}
+        />
+      </>
+    );
+  }
   if (section === "account") {
     return (
       <>
@@ -187,7 +205,6 @@ function SectionBody({
       />
     );
   }
-  if (section === "portrait") return <PortraitSection draft={draft} issues={draftApi.issues} onDraft={draftApi.editDraft} />;
   if (section === "integrations") return <IntegrationsSection draft={draft} onDraft={draftApi.editDraft} />;
   return <AppearanceSection draft={draft} onAppearance={draftApi.persistAppearance} />;
 }

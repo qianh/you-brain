@@ -1,5 +1,5 @@
 export const zh = {
-  brand: "you-brain",
+  brand: "U-Brain",
   tagline: "记忆中枢",
   skip: "跳到内容",
   navToday: "今日",
@@ -341,7 +341,7 @@ export const zh = {
   historyHint: "可以搜索，也可以重新激活。",
   portraitHint: "人格、编码和项目决定三个变体。这里只读。",
   devicesHint: "同一 Google 账号下的设备。主设备负责全局沉淀。",
-  statusHint: "采集、同步、提炼和最近的错误。",
+  statusHint: "连接、同步和各来源的采集。",
   todayHint: "今天所有设备和来源的会话。",
   panelWindowHint: "面板只放今天、提醒和状态。完整记录在主窗口。",
   showMoreCount: "显示更多 {count} 项",
@@ -404,7 +404,7 @@ export const zh = {
 } as const;
 
 export const en: { [K in keyof typeof zh]: string } = {
-  brand: "you-brain",
+  brand: "U-Brain",
   tagline: "Memory hub",
   skip: "Skip to content",
   navToday: "Today",

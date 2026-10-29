@@ -84,7 +84,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![open_main_window, quit])
         .setup(|app| {
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            // 常驻 Dock 图标:应用是用户的主入口,不再隐藏为纯菜单栏进程。
+            app.set_activation_policy(tauri::ActivationPolicy::Regular);
 
             app.manage(ShellState {
                 endpoint: Mutex::new(None),

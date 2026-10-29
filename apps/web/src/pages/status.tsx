@@ -36,7 +36,7 @@ import {
   withDriveSignedOutWarning,
 } from "./status/logic.js";
 
-export function StatusPage() {
+export function StatusPage({ embedded = false }: { embedded?: boolean } = {}) {
   const { t, language, status, config, timeZone, loading, error, reload, client } = useDaemon();
   const { navigate } = useRoute();
   const { push } = useToast();
@@ -152,6 +152,7 @@ export function StatusPage() {
 
   return (
     <div className="status-page">
+      {embedded ? null : (
       <PageHeader
         title={t("statusPage")}
         description={t("statusLead")}
@@ -173,6 +174,7 @@ export function StatusPage() {
           ) : null
         }
       />
+      )}
       {screen === "loading" ? (
         delayed ? (
           <StatusSkeleton />

@@ -1,6 +1,8 @@
 export const SETTINGS_SECTIONS = [
   "account",
   "model",
+  "status",
+  "devices",
   "capture",
   "refine",
   "consolidation",

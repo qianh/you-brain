@@ -55,7 +55,7 @@ function useActiveHeading(ids: readonly string[]): [string | null, (id: string) 
   return [active, setActive];
 }
 
-export function PortraitPage() {
+export function PortraitPage({ embedded = false }: { embedded?: boolean } = {}) {
   const { t, language, config, client, status, roles } = useDaemon();
   const { navigate } = useRoute();
   const { push } = useToast();
@@ -113,9 +113,9 @@ export function PortraitPage() {
     push({ message: ok ? success : t("portraitCopyFailed"), tone: ok ? "success" : "danger" });
   }
 
-  return (
-    <Page>
-      <div className="portrait-page">
+  const pageBody = (
+    <div className="portrait-page">
+        {embedded ? null : (
         <PageHeader
           title={t("portrait")}
           description={t("portraitLead")}
@@ -128,6 +128,7 @@ export function PortraitPage() {
             />
           }
         />
+        )}
         {error ? (
           <Banner
             tone="danger"
@@ -199,6 +200,6 @@ export function PortraitPage() {
           </div>
         ) : null}
       </div>
-    </Page>
   );
+  return embedded ? pageBody : <Page>{pageBody}</Page>;
 }

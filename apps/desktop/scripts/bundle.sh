@@ -7,7 +7,7 @@
 # Always target that triple unless the caller passed --target, so externalBin
 # does not pick the x86_64 placeholder when rustup's default host is x86_64.
 #
-# Publish a single you-brain.app at $REPO/dist/app.noindex/. The .noindex suffix
+# Publish a single U-Brain.app at $REPO/dist/app.noindex/. The .noindex suffix
 # keeps Spotlight from indexing the build tree. Nothing under target/ is left
 # as an .app, and this script never writes /Applications.
 #
@@ -40,7 +40,7 @@ export ROOT REPO
 VENDOR="$REPO/dist/daemon/aarch64-apple-darwin/vendor"
 WEB="$REPO/dist/daemon/aarch64-apple-darwin/web"
 TARGET_TRIPLE=aarch64-apple-darwin
-APP_NAME=you-brain.app
+APP_NAME=U-Brain.app
 DEST_DIR="$REPO/dist/app.noindex"
 TARGET_ROOT="$ROOT/src-tauri/target"
 VOLUMES_ROOT="${VOLUMES_ROOT:-/Volumes}"
@@ -54,7 +54,7 @@ remove_tree() {
 }
 
 # Drop leftover bundles before tauri build so an interrupted run cannot keep
-# an older you-brain.app in the two historical locations or under dist/.
+# an older U-Brain.app in the two historical locations or under dist/.
 remove_stale_apps() {
   remove_tree "$TARGET_ROOT/$TARGET_TRIPLE/release/bundle/macos/$APP_NAME"
   remove_tree "$TARGET_ROOT/release/bundle/macos/$APP_NAME"
@@ -281,4 +281,4 @@ fi
 
 FINAL="$DEST_DIR/$APP_NAME"
 echo "$FINAL"
-echo "osascript -e 'quit app \"you-brain\"'; rm -rf /Applications/you-brain.app; cp -R $FINAL /Applications/"
+echo "osascript -e 'quit app \"U-Brain\"'; rm -rf /Applications/U-Brain.app /Applications/you-brain.app; cp -R $FINAL /Applications/"

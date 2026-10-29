@@ -24,9 +24,6 @@ const TABS: ReadonlyArray<{ key: MessageKey; href: string; icon: IconName }> = [
   { key: "navToday", href: "/today", icon: "calendar" },
   { key: "topicsBook", href: "/topics", icon: "book" },
   { key: "navKnowledge", href: "/knowledge", icon: "book-open" },
-  { key: "navPortrait", href: "/portrait", icon: "user" },
-  { key: "navDevices", href: "/devices", icon: "laptop" },
-  { key: "navStatus", href: "/status", icon: "activity" },
 ];
 
 function RouteFade({ pathname, children }: { pathname: string; children: ReactNode }) {
@@ -180,7 +177,7 @@ export function Shell({ children }: { children: ReactNode }) {
               <Kbd>{chord("K")}</Kbd>
             </button>
           </Tooltip>
-          <StatusCapsule kind={kind} label={capsuleText(kind, capsuleWarningCount(status), t)} onClick={() => navigate("/status")} />
+          <StatusCapsule kind={kind} label={capsuleText(kind, capsuleWarningCount(status), t)} onClick={() => navigate(settingsHref("status"))} />
           <Tooltip content={t("reload")} shortcut={chord("R")}>
             <button
               type="button"
