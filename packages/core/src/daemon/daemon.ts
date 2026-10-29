@@ -3021,7 +3021,13 @@ export class YouBrainDaemon {
         Promise.resolve(this.#requireNotion().databaseView(databaseId)),
       notionAsset: (blockId) => this.#requireNotion().asset(blockId),
       notionUpdateBlock: async (body) => ({
-        page: await this.#requireNotion().updateBlock(body.blockId, body.markdown, body.kind, body.checked),
+        page: await this.#requireNotion().updateBlock(
+          body.blockId,
+          body.markdown,
+          body.kind,
+          body.checked,
+          body.rich,
+        ),
       }),
       notionAppendBlock: async (body) => ({
         page: await this.#requireNotion().appendBlock(body),
@@ -3038,6 +3044,16 @@ export class YouBrainDaemon {
       notionPatchTitle: async (body) => ({
         page: await this.#requireNotion().patchTitle(body.pageId, body.title),
       }),
+      notionCreatePage: async (body) => {
+        const created = await this.#requireNotion().createPage(body);
+        this.changes.publish("notion", this.#clock.now().toISOString());
+        return created;
+      },
+      notionArchivePage: async (body) => {
+        const result = await this.#requireNotion().archivePage(body.pageId);
+        this.changes.publish("notion", this.#clock.now().toISOString());
+        return { roots: result.roots };
+      },
       status: () => this.#status(),
       sync: () => this.#syncNow(),
       upload: (input) => this.#uploadNow(input),

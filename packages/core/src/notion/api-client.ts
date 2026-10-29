@@ -220,6 +220,19 @@ export class NotionApiClient {
     return this.#request("PATCH", `/pages/${pageId}`, body);
   }
 
+  /** Create a page under an existing page. Returns the full page object. */
+  async createPage(parentPageId: string, title: string): Promise<Record<string, unknown>> {
+    return this.#request("POST", "/pages", {
+      parent: { type: "page_id", page_id: parentPageId },
+      properties: { title: { title: [{ type: "text", text: { content: title } }] } },
+    });
+  }
+
+  /** Archive (soft-delete) a page or a database. */
+  async archivePage(pageId: string): Promise<void> {
+    await this.#request("DELETE", `/blocks/${pageId}`);
+  }
+
   async page(pageId: string): Promise<Record<string, unknown>> {
     return this.#request("GET", `/pages/${pageId}`);
   }

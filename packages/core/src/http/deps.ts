@@ -27,7 +27,11 @@ import type {
   LlmTestResult,
   GoogleLoginResult,
   GoogleLogoutResult,
+  NotionArchivePageBody,
+  NotionArchivePageResult,
   NotionAsset,
+  NotionCreatePageBody,
+  NotionCreatePageResult,
   NotionDatabaseView,
   NotionDeleteBlockBody,
   NotionDuplicateBlockBody,
@@ -107,5 +111,7 @@ export interface HttpDeps {
   notionMoveBlock?(body: NotionMoveBlockBody): Promise<NotionPageMutationResult>;
   notionDuplicateBlock?(body: NotionDuplicateBlockBody): Promise<NotionPageMutationResult>;
   notionPatchTitle?(body: NotionPatchTitleBody): Promise<NotionPageMutationResult>;
+  notionCreatePage?(body: NotionCreatePageBody): Promise<NotionCreatePageResult>;
+  notionArchivePage?(body: NotionArchivePageBody): Promise<NotionArchivePageResult>;
   events: EventSink;
 }

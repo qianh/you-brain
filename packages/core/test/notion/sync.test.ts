@@ -192,15 +192,17 @@ function fakeFetch() {
         headers: { "content-type": "application/json" },
       });
     if (key === "POST /search") {
+      // 有状态分页:cursor 是注入的序号,模拟真实 API 的不透明游标。
       const body = JSON.parse(String(init?.body ?? "{}")) as { start_cursor?: string };
       const all = Object.values(PAGES).map((def) => apiPage(def));
       all.push(databaseObject());
-      const start = body.start_cursor === "next" ? 3 : 0;
+      const start = Number(body.start_cursor ?? "0");
       const slice = all.slice(start, start + 3);
+      const more = start + 3 < all.length;
       return json({
         results: slice,
-        has_more: start + 3 < all.length,
-        next_cursor: start + 3 < all.length ? "next" : null,
+        has_more: more,
+        next_cursor: more ? String(start + 3) : null,
       });
     }
     const blockChildrenMatch = /^GET \/blocks\/([^/]+)\/children/u.exec(key);
@@ -256,6 +258,32 @@ function fakeFetch() {
       const def = PAGES[id];
       if (!def) return json({ code: "object_not_found", message: "not found" }, 404);
       return json(apiPage(def));
+    }
+    if (key === "POST /pages") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as {
+        parent: { page_id: string };
+        properties: { title: { title: Array<{ text: { content: string } }> } };
+      };
+      const id = `new-page-${Object.keys(PAGES).length + 1}`;
+      const title = body.properties.title.title[0]?.text.content ?? "";
+      PAGES[id] = {
+        id,
+        parent: { type: "page_id", page_id: body.parent.page_id },
+        title,
+        lastEdited: "2026-10-30T01:00:00.000Z",
+        created: "2026-10-30T01:00:00.000Z",
+        blocks: [],
+        properties: { title: { type: "title", title: [text(title)] } },
+      };
+      return json({
+        object: "page",
+        id,
+        parent: { type: "page_id", page_id: body.parent.page_id },
+        archived: false,
+        created_time: "2026-10-30T01:00:00.000Z",
+        last_edited_time: "2026-10-30T01:00:00.000Z",
+        properties: PAGES[id]?.properties,
+      });
     }
     const updateBlockMatch = /^PATCH \/blocks\/([^/]+)$/u.exec(key);
     if (updateBlockMatch) {
@@ -526,6 +554,24 @@ describe("notion write path", () => {
 
     const renamed = await service.patchTitle(ROW_PAGE_A, "改过的标题");
     expect(renamed.title).toBe("改过的标题");
+  });
+
+  test("新建页面与删除页面", async () => {
+    const service = await prepare();
+    const created = await service.createPage({ title: "新笔记" });
+    expect(created.pageId).toBeTruthy();
+    // 索引立刻可见(不等下一轮全量同步)
+    const roots = await service.tree();
+    const root = roots[0];
+    expect(root?.children.some((node) => node.title === "新笔记")).toBe(true);
+    // 视图可打开(空内容)
+    expect(created.view?.title).toBe("新笔记");
+
+    // 归档:索引里消失
+    await service.archivePage(created.pageId);
+    const after = await service.tree();
+    expect(after[0]?.children.some((node) => node.title === "新笔记")).toBe(false);
+    delete PAGES[created.pageId];
   });
 
   test("to_do 勾选切换", async () => {

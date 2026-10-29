@@ -387,7 +387,7 @@ export class NotionService {
   }
 
   /** Build the PATCH body matching the block's own type. */
-  #patchBody(model: NotionBlockModel, markdown: string): Record<string, unknown> {
+  #patchBody(model: NotionBlockModel, markdown: string, rich?: NotionSegment[]): Record<string, unknown> {
     if (model.kind === "code") {
       return {
         type: "code",
@@ -397,7 +397,9 @@ export class NotionService {
         },
       };
     }
-    const richText = segmentsToRichText(markdownToSegments(markdown));
+    const richText = segmentsToRichText(
+      rich && rich.length > 0 ? rich : markdownToSegments(markdown),
+    );
     const types: Record<string, string> = {
       paragraph: "paragraph",
       heading: `heading_${model.kind === "heading" ? model.level : 1}`,
@@ -482,6 +484,7 @@ export class NotionService {
     markdown: string,
     turnInto?: TurnIntoKind | undefined,
     checkedOverride?: boolean | undefined,
+    rich?: NotionSegment[] | undefined,
   ): Promise<NotionPageView> {
     const pageId = this.#pageOfBlock(blockId);
     const model = this.#blockModel(pageId, blockId);
@@ -494,7 +497,7 @@ export class NotionService {
     this.#assertEditable(target);
     const client = await this.#openClient();
     if (!client) throw new YouBrainError("INVALID_INPUT", "还没有保存 Notion 集成令牌");
-    const body = this.#patchBody(target, markdown.trim());
+    const body = this.#patchBody(target, markdown.trim(), rich);
     if (checkedOverride !== undefined) {
       const payload = body[typeof body.type === "string" ? body.type : ""] as
         | Record<string, unknown>
@@ -514,13 +517,14 @@ export class NotionService {
       afterBlockId?: string | undefined;
       markdown: string;
       kind?: string | undefined;
+      rich?: NotionSegment[] | undefined;
     },
   ): Promise<NotionPageView> {
     const client = await this.#openClient();
     if (!client) throw new YouBrainError("INVALID_INPUT", "还没有保存 Notion 集成令牌");
     const pageId = input.pageId ?? (input.afterBlockId ? this.#pageOfBlock(input.afterBlockId) : null);
     if (!pageId) throw new YouBrainError("INVALID_INPUT", "缺少 pageId 或 afterBlockId");
-    const child = this.#newBlockChild(input.kind ?? "paragraph", input.markdown);
+    const child = this.#newBlockChild(input.kind ?? "paragraph", input.markdown, input.rich);
     // afterBlockId 是兄弟:父级取它的父级,靠 `after` 参数定位插入点。
     const parentId = input.afterBlockId
       ? (this.#locate(pageId, input.afterBlockId)?.parentId ?? pageId)
@@ -533,8 +537,10 @@ export class NotionService {
   }
 
   /** Fresh block payload for the "add block" menu kinds. */
-  #newBlockChild(kind: string, markdown: string): Record<string, unknown> {
-    const richText = segmentsToRichText(markdownToSegments(markdown));
+  #newBlockChild(kind: string, markdown: string, rich?: NotionSegment[]): Record<string, unknown> {
+    const richText = segmentsToRichText(
+      rich && rich.length > 0 ? rich : markdownToSegments(markdown),
+    );
     switch (kind) {
       case "bulleted":
         return { object: "block", type: "bulleted_list_item", bulleted_list_item: { rich_text: richText } };
@@ -650,6 +656,58 @@ export class NotionService {
     const view = await this.page(pageId);
     if (!view) throw new YouBrainError("INVALID_INPUT", "页面刷新失败");
     return view;
+  }
+
+  /**
+   * Create a page under an existing one and register it in the index right
+   * away, so the sidebar shows it without waiting for the next full sync
+   * (content fills in on the next sync pass).
+   */
+  async createPage(input: { parentId?: string | undefined; title: string }): Promise<{
+    pageId: string;
+    view: NotionPageView | null;
+  }> {
+    const client = await this.#openClient();
+    if (!client) throw new YouBrainError("INVALID_INPUT", "还没有保存 Notion 集成令牌");
+    const parentId = input.parentId ?? (await this.#firstRootId());
+    if (!parentId) {
+      throw new YouBrainError("INVALID_INPUT", "还没有可用的父页面:先在 Notion 里把一个页面共享给集成");
+    }
+    const created = await client.createPage(parentId, input.title);
+    const pageId = String(created.id ?? "");
+    if (pageId === "") throw new YouBrainError("INVALID_INPUT", "Notion 没有返回新页面 id");
+    this.#openIndex().upsertPage({
+      pageId,
+      object: "page",
+      parentKind: "page",
+      parentId,
+      title: input.title,
+      icon: null,
+      coverUrl: null,
+      lastEditedTime: String(created.last_edited_time ?? new Date().toISOString()),
+      createdAt: String(created.created_time ?? new Date().toISOString()),
+    });
+    try {
+      await this.#syncEngine().resyncPage(pageId);
+    } catch {
+      // 新页面还没有内容;索引里已有标题,下一轮全量同步补内容。
+    }
+    return { pageId, view: await this.page(pageId) };
+  }
+
+  /** Archive a page (soft-delete in Notion) and remove it from the index. */
+  async archivePage(pageId: string): Promise<{ roots: NotionTreeNode[] }> {
+    const client = await this.#openClient();
+    if (!client) throw new YouBrainError("INVALID_INPUT", "还没有保存 Notion 集成令牌");
+    await client.archivePage(pageId);
+    this.#openIndex().dropPage(pageId);
+    return { roots: await this.tree() };
+  }
+
+  async #firstRootId(): Promise<string | null> {
+    const roots = await this.tree();
+    const first = roots.find((node) => node.object === "page") ?? roots[0];
+    return first ? first.id : null;
   }
 
   /** Locate a block within the page tree, together with its parent id and siblings. */

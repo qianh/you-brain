@@ -19,6 +19,17 @@ import { WebhookEventKindSchema, type WebhookEventKind } from "../webhook/kinds.
 import type { NotionBlockModel } from "../notion/model.js";
 
 export type { NotionBlockModel, NotionSegment } from "../notion/model.js";
+
+export const NotionSegmentSchema = z.object({
+  text: z.string(),
+  href: z.string().nullable(),
+  bold: z.boolean(),
+  italic: z.boolean(),
+  strikethrough: z.boolean(),
+  underline: z.boolean(),
+  code: z.boolean(),
+  color: z.string(),
+});
 import { z } from "zod";
 
 export interface ApiErrorBody {
@@ -662,6 +673,8 @@ export const NotionUpdateBlockSchema = z
       .optional(),
     /** to_do 勾选覆盖;省略时保持原状。 */
     checked: z.boolean().optional(),
+    /** 所见即所得编辑直接提交富文本段落;省略时按 markdown 解析。 */
+    rich: z.array(NotionSegmentSchema).max(200).optional(),
   })
   .strict();
 
@@ -676,6 +689,7 @@ export const NotionAppendBlockSchema = z
     kind: z
       .enum(["paragraph", "heading1", "heading2", "heading3", "bulleted", "numbered", "todo", "quote", "callout", "toggle", "code", "divider"])
       .optional(),
+    rich: z.array(NotionSegmentSchema).max(200).optional(),
   })
   .strict()
   .refine((value) => value.pageId !== undefined || value.afterBlockId !== undefined, {
@@ -708,8 +722,32 @@ export const NotionPatchTitleSchema = z
 
 export type NotionPatchTitleBody = z.infer<typeof NotionPatchTitleSchema>;
 
+export const NotionCreatePageSchema = z
+  .object({
+    parentId: z.string().min(1).optional(),
+    title: z.string().min(1).max(2_000),
+  })
+  .strict();
+
+export type NotionCreatePageBody = z.infer<typeof NotionCreatePageSchema>;
+
+export const NotionArchivePageSchema = z
+  .object({ pageId: z.string().min(1) })
+  .strict();
+
+export type NotionArchivePageBody = z.infer<typeof NotionArchivePageSchema>;
+
 export interface NotionPageMutationResult {
   page: NotionPageView;
+}
+
+export interface NotionCreatePageResult {
+  pageId: string;
+  view: NotionPageView | null;
+}
+
+export interface NotionArchivePageResult {
+  roots: NotionTreeNodeView[];
 }
 
 /** 同步后的页面视图:块渲染模型 + 给 LLM/MCP 用的 markdown。 */

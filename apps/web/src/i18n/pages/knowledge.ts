@@ -61,6 +61,15 @@ export const zh = {
   knowledgeTypeToggle: "折叠列表",
   knowledgeTypeCode: "代码块",
   knowledgeTypeDivider: "分隔线",
+  knowledgeEditablePlaceholder: "输入文字,按 / 选择类型",
+  knowledgeBlockMenu: "块操作",
+  knowledgeCheck: "勾选",
+  knowledgeUncheck: "取消勾选",
+  knowledgeNewPage: "新建页面",
+  knowledgeNewSubpage: "新建子页面",
+  knowledgePageMenu: "页面操作",
+  knowledgeRename: "重命名",
+  knowledgeDeletePageConfirm: "删除这个页面?在 Notion 里它会进入废纸篓。",
 } as const;
 
 export const en: { [K in keyof typeof zh]: string } = {
@@ -126,4 +135,13 @@ export const en: { [K in keyof typeof zh]: string } = {
   knowledgeTypeToggle: "Toggle list",
   knowledgeTypeCode: "Code",
   knowledgeTypeDivider: "Divider",
+  knowledgeEditablePlaceholder: "Type something, press / for types",
+  knowledgeBlockMenu: "Block actions",
+  knowledgeCheck: "Check",
+  knowledgeUncheck: "Uncheck",
+  knowledgeNewPage: "New page",
+  knowledgeNewSubpage: "New subpage",
+  knowledgePageMenu: "Page actions",
+  knowledgeRename: "Rename",
+  knowledgeDeletePageConfirm: "Delete this page? It goes to Notion's trash.",
 };

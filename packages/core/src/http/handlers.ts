@@ -27,6 +27,8 @@ import {
   LlmKeyPutSchema,
   LlmTestBodySchema,
   NotionAppendBlockSchema,
+  NotionArchivePageSchema,
+  NotionCreatePageSchema,
   NotionDeleteBlockSchema,
   NotionDuplicateBlockSchema,
   NotionKeyPutSchema,
@@ -239,6 +241,12 @@ export async function handleApi(
   }
   if (path === "/api/actions/notion-patch-title") {
     return method(request, "POST", () => notionMutation(request, context, "notionPatchTitle", NotionPatchTitleSchema));
+  }
+  if (path === "/api/actions/notion-create-page") {
+    return method(request, "POST", () => notionMutation(request, context, "notionCreatePage", NotionCreatePageSchema));
+  }
+  if (path === "/api/actions/notion-archive-page") {
+    return method(request, "POST", () => notionMutation(request, context, "notionArchivePage", NotionArchivePageSchema));
   }
   if (path === "/api/status") return method(request, "GET", () => status(context));
   if (path === "/api/reminders") return method(request, "GET", () => reminders(url, context));
@@ -707,7 +715,15 @@ async function notionDatabase(url: URL, context: ApiContext): Promise<Response> 
 
 /** 通用 Notion 写操作:校验 body → 调 deps → 广播 notion 变更 → 返回刷新后的页面。 */
 async function notionMutation<
-  K extends "notionUpdateBlock" | "notionAppendBlock" | "notionDeleteBlock" | "notionMoveBlock" | "notionDuplicateBlock" | "notionPatchTitle",
+  K extends
+    | "notionUpdateBlock"
+    | "notionAppendBlock"
+    | "notionDeleteBlock"
+    | "notionMoveBlock"
+    | "notionDuplicateBlock"
+    | "notionPatchTitle"
+    | "notionCreatePage"
+    | "notionArchivePage",
   S extends z.ZodType,
 >(
   request: Request,
@@ -726,7 +742,7 @@ async function notionMutation<
     throw error;
   }
   const result = await (
-    context.deps[method] as (input: unknown) => Promise<{ page: unknown }>
+    context.deps[method] as (input: unknown) => Promise<unknown>
   )(body);
   publish(context.hub, ["notion"]);
   return json(result);

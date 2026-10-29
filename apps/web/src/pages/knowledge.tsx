@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type {
+  NotionBlockModel,
   NotionDatabaseView,
+  NotionPageMutationResult,
   NotionPageView,
+  NotionSegment,
   NotionStatusView,
   NotionTreeNodeView,
 } from "@you-brain/core/http/types.js";
@@ -14,7 +17,7 @@ import { useDaemon } from "../daemon-context.js";
 import { settingsHref } from "../lib/route.js";
 import { useRoute } from "../router.js";
 import { BlockList } from "./knowledge/blocks-view.js";
-import { KindPicker, type BlockEditorCallbacks } from "./knowledge/block-editor.js";
+import { KindPicker, type BlockEditorCallbacks, type FocusRequest, type Translate } from "./knowledge/block-editor.js";
 import {
   firstNewBlockId,
   blockMarkdown,
@@ -79,6 +82,8 @@ export function KnowledgePage() {
   const [titleEditing, setTitleEditing] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [focus, setFocus] = useState<FocusRequest | null>(null);
+  const [focusNonce, setFocusNonce] = useState(0);
 
   const selectedId = location.id;
 
@@ -223,60 +228,170 @@ export function KnowledgePage() {
   }, []);
 
   // —— 编辑回调:每次写操作都返回刷新后的页面,直接替换本地视图 ——
-  const [editingId, setEditingId] = useState<string | null>(null);
-
-  const editor: BlockEditorCallbacks = useMemo(() => {
-    const run = async <T extends { page: NotionPageView }>(action: () => Promise<T>): Promise<void> => {
-      if (!page) return;
+  const run = useCallback(
+    async (action: () => Promise<unknown>): Promise<unknown> => {
       setBusy(true);
       try {
         const result = await action();
-        const created = firstNewBlockId(page.blocks, result.page.blocks);
-        setPage(result.page);
-        if (created) setEditingId(created);
+        await refreshMeta();
+        if (selectedId) {
+          const detail = await client.notionPage(selectedId);
+          setPage(detail);
+          writeKnowledgeCache({ pageId: selectedId, page: detail });
+          return result;
+        }
+        return result;
       } catch (error) {
         push({
           message: error instanceof Error ? error.message : String(error),
           tone: "danger",
         });
+        return null;
       } finally {
         setBusy(false);
       }
+    },
+    [client, push, refreshMeta, selectedId],
+  );
+
+  const textLength = useCallback((blocks: readonly NotionBlockModel[], id: string): number => {
+    const visit = (list: readonly NotionBlockModel[]): number => {
+      for (const model of list) {
+        if (model.id === id) return blockTextLength(model);
+        const nested = visit(model.children);
+        if (nested >= 0) return nested;
+      }
+      return -1;
     };
+    return visit(blocks);
+  }, []);
+
+  const editor: BlockEditorCallbacks = useMemo(() => {
+    void run;
     return {
       busy,
-      update: (blockId, markdown, kind, checked) =>
-        run(() =>
-          client.notionUpdateBlock({
-            blockId,
-            markdown,
-            ...(kind ? { kind } : {}),
-            ...(checked === undefined ? {} : { checked }),
-          }),
-        ),
-      remove: (blockId) => run(() => client.notionDeleteBlock({ blockId })),
-      move: (blockId, direction) => run(() => client.notionMoveBlock({ blockId, direction })),
-      duplicate: (blockId) => run(() => client.notionDuplicateBlock({ blockId })),
+      focus,
+      onFocusHandled: () => setFocus(null),
+      saveSegments: (block, segments) => {
+        const action = (): Promise<unknown> => {
+          if (segments.length === 0 || segments.every((segment) => segment.text === "")) {
+            return client.notionDeleteBlock({ blockId: block.id });
+          }
+          return client.notionUpdateBlock({
+            blockId: block.id,
+            markdown: "",
+            rich: segments,
+          });
+        };
+        void run(action);
+        return Promise.resolve();
+      },
+      saveCode: (blockId, text) => {
+        void run(() => client.notionUpdateBlock({ blockId, markdown: text }));
+        return Promise.resolve();
+      },
+      remove: (blockId) => {
+        void run(() => client.notionDeleteBlock({ blockId }));
+        return Promise.resolve();
+      },
+      move: (blockId, direction) => {
+        void run(() => client.notionMoveBlock({ blockId, direction }));
+        return Promise.resolve();
+      },
+      duplicate: (blockId) => {
+        void run(() => client.notionDuplicateBlock({ blockId }));
+        return Promise.resolve();
+      },
       toggleTodo: (block) => {
         if (block.kind !== "todo") return Promise.resolve();
-        return run(() =>
+        void run(() =>
           client.notionUpdateBlock({
             blockId: block.id,
             markdown: blockMarkdown(block),
             checked: !block.checked,
           }),
         );
+        return Promise.resolve();
       },
-      addBelow: (afterBlockId, kind) =>
-        run(() =>
+      addBelow: (afterBlockId, kind) => {
+        const before = page;
+        return run(() =>
           client.notionAppendBlock({
             ...(afterBlockId ? { afterBlockId } : { pageId: page?.id ?? "" }),
             markdown: "",
             kind,
           }),
-        ),
+        ).then((raw) => {
+          const result = raw as NotionPageMutationResult | null;
+          if (before && result) {
+            const created = firstNewBlockId(before.blocks, result.page.blocks);
+            if (created) {
+              setFocus({ blockId: created, at: "start" });
+              setFocusNonce((value) => value + 1);
+            }
+          }
+        });
+      },
+      split: (block, head, tail) => {
+        const before = page;
+        const kind =
+          block.kind === "heading"
+            ? ("paragraph" as const)
+            : block.kind === "todo"
+              ? ("todo" as const)
+              : (block.kind as "paragraph" | "bulleted" | "numbered" | "todo" | "quote" | "callout" | "toggle");
+        return run(async () => {
+          await client.notionUpdateBlock({
+            blockId: block.id,
+            markdown: "",
+            rich: head,
+          });
+          await client.notionAppendBlock({
+            afterBlockId: block.id,
+            markdown: "",
+            kind,
+            rich: tail,
+          });
+        }).then((raw) => {
+          const result = raw as NotionPageMutationResult | null;
+          if (before && result) {
+            const created = firstNewBlockId(before.blocks, result.page.blocks);
+            if (created) {
+              setFocus({ blockId: created, at: "start" });
+              setFocusNonce((value) => value + 1);
+            }
+          }
+        });
+      },
+      merge: (block, prevId) => {
+        const prevLen = page ? Math.max(0, textLength(page.blocks, prevId)) : 0;
+        return run(async () => {
+          const prevSegments = segmentsOfBlock(page?.blocks ?? [], prevId);
+          const curSegments = segmentsOfBlock(page?.blocks ?? [], block.id);
+          const merged = [...prevSegments, ...curSegments.filter((segment) => segment.text !== "")];
+          await client.notionUpdateBlock({
+            blockId: prevId,
+            markdown: "",
+            rich: merged,
+          });
+          await client.notionDeleteBlock({ blockId: block.id });
+        }).then(() => {
+          setFocus({ blockId: prevId, at: prevLen });
+          setFocusNonce((value) => value + 1);
+        });
+      },
+      turnInto: (block, kind) => {
+        void run(() =>
+          client.notionUpdateBlock({
+            blockId: block.id,
+            markdown: blockMarkdown(block),
+            kind,
+          }),
+        );
+        return Promise.resolve();
+      },
     };
-  }, [busy, client, page, push]);
+  }, [busy, client, focus, page, push, run, textLength]);
 
   const flat = useMemo(() => flattenTree(roots ?? []), [roots]);
 
@@ -304,13 +419,41 @@ export function KnowledgePage() {
   return (
     <div className="knowledge">
       <aside className="knowledge-sidebar">
-        <input
-          className="knowledge-search"
-          type="search"
-          placeholder={t("knowledgeSidebarSearch")}
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
+        <div className="knowledge-sidebar-actions">
+          <input
+            className="knowledge-search"
+            type="search"
+            placeholder={t("knowledgeSidebarSearch")}
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+          />
+          <button
+            type="button"
+            className="knowledge-new-page"
+            title={t("knowledgeNewPage")}
+            disabled={busy}
+            onClick={() => {
+              setBusy(true);
+              void client
+                .notionCreatePage({ title: t("knowledgeUntitled") })
+                .then(async (created) => {
+                  await refreshMeta();
+                  open(created.pageId);
+                  setTitleDraft(created.view?.title ?? t("knowledgeUntitled"));
+                  setTitleEditing(true);
+                })
+                .catch((error) =>
+                  push({
+                    message: error instanceof Error ? error.message : String(error),
+                    tone: "danger",
+                  }),
+                )
+                .finally(() => setBusy(false));
+            }}
+          >
+            ＋ {t("knowledgeNewPage")}
+          </button>
+        </div>
         <nav className="knowledge-tree" aria-label={t("navKnowledge")}>
           {hits !== null ? (
             <div className="knowledge-search-results">
@@ -343,6 +486,70 @@ export function KnowledgePage() {
               onToggle={toggleCollapse}
               onOpen={open}
               untitled={t("knowledgeUntitled")}
+              onCreateChild={(parentId) => {
+                setBusy(true);
+                void client
+                  .notionCreatePage({ parentId, title: t("knowledgeUntitled") })
+                  .then(async (created) => {
+                    await refreshMeta();
+                    open(created.pageId);
+                    setTitleDraft(created.view?.title ?? t("knowledgeUntitled"));
+                    setTitleEditing(true);
+                  })
+                  .catch((error) =>
+                    push({
+                      message: error instanceof Error ? error.message : String(error),
+                      tone: "danger",
+                    }),
+                  )
+                  .finally(() => setBusy(false));
+              }}
+              onRename={(id, current) => {
+                const next = window.prompt(t("knowledgeRename"), current);
+                if (next === null || next.trim() === "" || next === current) return;
+                setBusy(true);
+                void client
+                  .notionPatchTitle({ pageId: id, title: next.trim() })
+                  .then(async () => {
+                    await refreshMeta();
+                    if (selectedId === id && page) {
+                      const detail = await client.notionPage(id);
+                      setPage(detail);
+                      writeKnowledgeCache({ pageId: id, page: detail });
+                    }
+                  })
+                  .catch((error) =>
+                    push({
+                      message: error instanceof Error ? error.message : String(error),
+                      tone: "danger",
+                    }),
+                  )
+                  .finally(() => setBusy(false));
+              }}
+              onDelete={(id) => {
+                if (!window.confirm(t("knowledgeDeletePageConfirm"))) return;
+                setBusy(true);
+                void client
+                  .notionArchivePage({ pageId: id })
+                  .then(async (result) => {
+                    await refreshMeta();
+                    setRoots(result.roots);
+                    if (selectedId === id) {
+                      const fallback = defaultPageId(result.roots);
+                      if (fallback) open(fallback);
+                      else navigate("/knowledge");
+                    }
+                  })
+                  .catch((error) =>
+                    push({
+                      message: error instanceof Error ? error.message : String(error),
+                      tone: "danger",
+                    }),
+                  )
+                  .finally(() => setBusy(false));
+              }}
+              busy={busy}
+              t={t}
             />
           )}
         </nav>
@@ -438,7 +645,8 @@ export function KnowledgePage() {
                 t={t}
                 assetBase={(blockId) => client.notionAssetUrl(blockId)}
                 editor={editor}
-                editingId={editingId}
+                focus={focus === null ? null : { ...focus }}
+                onFocusHandled={() => setFocus(null)}
               />
               <div className="knowledge-add-block">
                 {addOpen ? (
@@ -495,6 +703,11 @@ function TreeNodes({
   onOpen,
   depth = 0,
   untitled,
+  onCreateChild,
+  onRename,
+  onDelete,
+  busy,
+  t,
 }: {
   nodes: readonly NotionTreeNodeView[];
   selectedId: string | null;
@@ -503,7 +716,13 @@ function TreeNodes({
   onOpen: (id: string) => void;
   depth?: number;
   untitled: string;
+  onCreateChild: (parentId: string) => void;
+  onRename: (id: string, current: string) => void;
+  onDelete: (id: string) => void;
+  busy: boolean;
+  t: Translate;
 }): ReactNode {
+  const [menuFor, setMenuFor] = useState<string | null>(null);
   return (
     <>
       {nodes.map((node) => {
@@ -511,7 +730,11 @@ function TreeNodes({
         const isCollapsed = collapsed.has(node.id);
         return (
           <div key={node.id}>
-            <div className="knowledge-tree-row" style={{ paddingLeft: `${8 + depth * 14}px` }}>
+            <div
+              className="knowledge-tree-row"
+              style={{ paddingLeft: `${8 + depth * 14}px` }}
+              onMouseLeave={() => setMenuFor((value) => (value === node.id ? null : value))}
+            >
               {hasChildren ? (
                 <button
                   type="button"
@@ -533,6 +756,52 @@ function TreeNodes({
                   {node.icon ?? (node.object === "database" ? "🗂" : "📄")} {node.title || untitled}
                 </span>
               </button>
+              <button
+                type="button"
+                className="knowledge-tree-more"
+                aria-label={t("knowledgePageMenu")}
+                onClick={() => setMenuFor((value) => (value === node.id ? null : node.id))}
+              >
+                ⋯
+              </button>
+              {menuFor === node.id ? (
+                <div className="nb-menu knowledge-tree-menu" role="menu">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={busy || node.object !== "page"}
+                    onClick={() => {
+                      setMenuFor(null);
+                      onCreateChild(node.id);
+                    }}
+                  >
+                    ＋ {t("knowledgeNewSubpage")}
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={busy}
+                    onClick={() => {
+                      setMenuFor(null);
+                      onRename(node.id, node.title);
+                    }}
+                  >
+                    ✎ {t("knowledgeRename")}
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="is-danger"
+                    disabled={busy}
+                    onClick={() => {
+                      setMenuFor(null);
+                      onDelete(node.id);
+                    }}
+                  >
+                    🗑 {t("knowledgeDelete")}
+                  </button>
+                </div>
+              ) : null}
             </div>
             {hasChildren && !isCollapsed ? (
               <TreeNodes
@@ -543,6 +812,11 @@ function TreeNodes({
                 onOpen={onOpen}
                 depth={depth + 1}
                 untitled={untitled}
+                onCreateChild={onCreateChild}
+                onRename={onRename}
+                onDelete={onDelete}
+                busy={busy}
+                t={t}
               />
             ) : null}
           </div>
@@ -674,6 +948,37 @@ function DatabaseView({
       )}
     </div>
   );
+}
+
+function segmentsOfBlock(blocks: readonly NotionBlockModel[], id: string): NotionSegment[] {
+  for (const model of blocks) {
+    if (model.id === id) {
+      if (
+        model.kind === "paragraph" ||
+        model.kind === "quote" ||
+        model.kind === "callout" ||
+        model.kind === "toggle" ||
+        model.kind === "bulleted" ||
+        model.kind === "numbered" ||
+        model.kind === "todo" ||
+        model.kind === "heading"
+      ) {
+        return model.segments;
+      }
+      return [];
+    }
+    const nested = segmentsOfBlock(model.children, id);
+    if (nested.length > 0) return nested;
+  }
+  return [];
+}
+
+function blockTextLength(model: NotionBlockModel): number {
+  const segments = segmentsOfBlock([model], model.id);
+  if (segments.length > 0) {
+    return segments.reduce((sum, segment) => sum + segment.text.length, 0);
+  }
+  return model.kind === "code" ? model.text.length : 0;
 }
 
 function findNode(nodes: readonly NotionTreeNodeView[], id: string): NotionTreeNodeView | null {

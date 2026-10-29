@@ -56,7 +56,7 @@ export function blockMarkdown(block: NotionBlockModel): string {
   return segmentsToMarkdown(segments);
 }
 
-function segmentsOf(block: NotionBlockModel): NotionSegment[] {
+export function segmentsOf(block: NotionBlockModel): NotionSegment[] {
   switch (block.kind) {
     case "paragraph":
     case "quote":

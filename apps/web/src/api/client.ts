@@ -25,6 +25,10 @@ import type {
   VirtualDeviceCreateBody,
   VirtualDeviceResponse,
   RemoveDeviceResponse,
+  NotionArchivePageBody,
+  NotionArchivePageResult,
+  NotionCreatePageBody,
+  NotionCreatePageResult,
   NotionDatabaseView,
   NotionDeleteBlockBody,
   NotionDuplicateBlockBody,
@@ -106,6 +110,8 @@ export interface BrowserDaemon extends Omit<DaemonClient, "reminderAction" | "co
   notionMoveBlock(body: NotionMoveBlockBody): Promise<NotionPageMutationResult>;
   notionDuplicateBlock(body: NotionDuplicateBlockBody): Promise<NotionPageMutationResult>;
   notionPatchTitle(body: NotionPatchTitleBody): Promise<NotionPageMutationResult>;
+  notionCreatePage(body: NotionCreatePageBody): Promise<NotionCreatePageResult>;
+  notionArchivePage(body: NotionArchivePageBody): Promise<NotionArchivePageResult>;
   /** 同源相对路径,直接放进 <img src> / <a href>。 */
   notionAssetUrl(blockId: string): string;
 }
@@ -243,6 +249,10 @@ export function createBrowserDaemon(options?: {
       request<NotionPageMutationResult>("POST", "/api/actions/notion-duplicate-block", body),
     notionPatchTitle: (body: NotionPatchTitleBody) =>
       request<NotionPageMutationResult>("POST", "/api/actions/notion-patch-title", body),
+    notionCreatePage: (body: NotionCreatePageBody) =>
+      request<NotionCreatePageResult>("POST", "/api/actions/notion-create-page", body),
+    notionArchivePage: (body: NotionArchivePageBody) =>
+      request<NotionArchivePageResult>("POST", "/api/actions/notion-archive-page", body),
     notionAssetUrl: (blockId: string) => `/api/notion/asset?block=${encodeURIComponent(blockId)}`,
   };
 }

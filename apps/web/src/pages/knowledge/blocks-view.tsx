@@ -3,7 +3,8 @@ import { useState, type ReactNode } from "react";
 import type { NotionBlockModel, NotionSegment } from "@you-brain/core/http/types.js";
 
 import type { MessageKey } from "../../i18n/messages.js";
-import { EditableRow, type BlockEditorCallbacks } from "./block-editor.js";
+import { EditableRow, type BlockEditorCallbacks, type FocusRequest } from "./block-editor.js";
+import { isEditableBlock } from "./logic.js";
 
 /**
  * Read-only Notion block renderer.
@@ -64,23 +65,55 @@ export function BlockList({
   t,
   assetBase,
   editor,
-  editingId,
+  focus,
+  onFocusHandled,
 }: {
   blocks: readonly NotionBlockModel[];
   t: Translate;
   assetBase: (blockId: string) => string;
   editor?: BlockEditorCallbacks | undefined;
-  editingId?: string | null | undefined;
+  focus?: FocusRequest | null | undefined;
+  onFocusHandled?: (() => void) | undefined;
 }): ReactNode {
   const out: ReactNode[] = [];
   let numberedIndex = 0;
-  for (let index = 0; index < blocks.length; index++) {
-    const block = blocks[index];
-    if (!block) continue;
+  let prevEditableId: string | null = null;
+  for (const block of blocks) {
     if (block.kind === "numbered") {
       numberedIndex += 1;
     } else {
       numberedIndex = 0;
+    }
+    const focusProps =
+      editor && focus ? { focus, onFocusHandled } : {};
+    if (editor && isEditableBlock(block)) {
+      const nested =
+        block.children.length > 0 ? (
+          <BlockList
+            blocks={block.children}
+            t={t}
+            assetBase={assetBase}
+            editor={editor}
+            focus={focus}
+            onFocusHandled={onFocusHandled}
+          />
+        ) : null;
+      out.push(
+        <EditableRow
+          key={`row-${block.id}`}
+          block={block}
+          editor={editor}
+          t={t}
+          prevEditableId={prevEditableId}
+          numberedIndex={block.kind === "numbered" ? numberedIndex : undefined}
+          chrome={chromeFor(block, numberedIndex, editor, t)}
+          {...focusProps}
+        >
+          {nested}
+        </EditableRow>,
+      );
+      prevEditableId = block.id;
+      continue;
     }
     const view =
       block.kind === "numbered" ? (
@@ -102,7 +135,8 @@ export function BlockList({
           block={block}
           editor={editor}
           t={t}
-          initialEditing={editingId === block.id}
+          prevEditableId={prevEditableId}
+          {...focusProps}
         >
           {view}
         </EditableRow>
@@ -112,6 +146,36 @@ export function BlockList({
     );
   }
   return <>{out}</>;
+}
+
+function chromeFor(
+  block: NotionBlockModel,
+  numberedIndex: number,
+  editor: BlockEditorCallbacks,
+  t: Translate,
+): ReactNode {
+  switch (block.kind) {
+    case "bulleted":
+      return <span className="nb-bullet">•</span>;
+    case "numbered":
+      return <span className="nb-number">{numberedIndex}.</span>;
+    case "todo":
+      return (
+        <input
+          type="checkbox"
+          className="nb-checkbox"
+          checked={block.checked}
+          onChange={() => void editor.toggleTodo(block)}
+          disabled={editor.busy}
+        />
+      );
+    case "callout":
+      return <span className="nb-callout-icon">{block.emoji ?? "💡"}</span>;
+    case "toggle":
+      return <span className="nb-toggle-arrow">▸</span>;
+    default:
+      return null;
+  }
 }
 
 export function BlockView({
