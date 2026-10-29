@@ -18,6 +18,7 @@ import { ReminderList } from "./reminders/list.js";
 import { isUnreachableError } from "./status/logic.js";
 import { TodayGroups } from "./today/groups.js";
 import { StartGuide } from "./today/guide.js";
+import { countBySource, filterSessions } from "./today/model.js";
 import {
   arrivedKeys,
   emptyCaptureView,
@@ -43,7 +44,12 @@ export function TodayPage() {
   // the first screen. Show the first few and keep the rest one click away.
   const [showAllReminders, setShowAllReminders] = useState(false);
   const [mode, setMode] = useState<TodayMode>(() => readTodayMode(storage()));
+  // magpie 式筛选:来源 tab + 关键字。
+  const [sourceFilter, setSourceFilter] = useState<string | "all">("all");
+  const [sessionQuery, setSessionQuery] = useState("");
   const sessions = today?.sessions ?? [];
+  const filteredSessions = filterSessions(sessions, sourceFilter, sessionQuery);
+  const sourceCounts = countBySource(sessions);
   const arrived = useArrived(sessions.map((session) => session.sessionKey));
   const showSkeleton = useDelayed(loading && today === null, 150);
   const offline = !loading && today === null && isUnreachableError(error);
@@ -230,12 +236,17 @@ export function TodayPage() {
               <div ref={sessionsRef}>
                 <TodayGroups
                   mode={mode}
-                  sessions={sessions}
+                  sessions={filteredSessions}
                   devices={devices}
                   language={language}
                   timeZone={timeZone}
                   topics={topics}
                   arrived={arrived}
+                  sourceCounts={sourceCounts}
+                  sourceFilter={sourceFilter}
+                  onSourceFilter={setSourceFilter}
+                  query={sessionQuery}
+                  onQuery={setSessionQuery}
                 />
               </div>
             )}

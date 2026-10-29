@@ -6,6 +6,8 @@ import {
   formatCount,
   formatTodayHeading,
   groupSessionsByHour,
+  countBySource,
+  filterSessions,
   guideCopy,
   guideSteps,
   foldGuideSteps,
@@ -297,5 +299,32 @@ describe("guideCopy", () => {
     expect(guideCopy(drive("checking")).action).toBeNull();
     expect(guideCopy(drive("connected", "john@example.com")).action).toBe("todayGuideDriveConnectedAction");
     expect(guideCopy(drive("offline", "john@example.com")).action).not.toBeNull();
+  });
+});
+
+
+describe("magpie 式来源筛选", () => {
+  const sessions = [
+    { source: "zcode", title: "采集与同步", summary: "推送代码" },
+    { source: "zcode", title: "窗口修复", summary: "" },
+    { source: "pi", title: "采集修复", summary: "LSUIElement" },
+    { source: "claude-code", title: "打包", summary: "U-Brain.app" },
+  ];
+
+  test("countBySource 按计数降序", () => {
+    expect(countBySource(sessions)).toEqual([
+      { source: "zcode", count: 2 },
+      { source: "claude-code", count: 1 },
+      { source: "pi", count: 1 },
+    ]);
+  });
+
+  test("filterSessions:来源 + 关键字(标题或摘要,大小写不敏感)", () => {
+    expect(filterSessions(sessions, "all", "")).toHaveLength(4);
+    expect(filterSessions(sessions, "zcode", "")).toHaveLength(2);
+    expect(filterSessions(sessions, "all", "采集")).toHaveLength(2);
+    expect(filterSessions(sessions, "all", "U-Brain")).toHaveLength(1);
+    expect(filterSessions(sessions, "pi", "采集")).toHaveLength(1);
+    expect(filterSessions(sessions, "zcode", "U-Brain")).toHaveLength(0);
   });
 });

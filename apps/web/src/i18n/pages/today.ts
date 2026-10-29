@@ -1,4 +1,9 @@
 export const zh = {
+  todaySourceFilter: "按来源筛选会话",
+  todaySourceAll: "全部",
+  todayNoMatch: "没有匹配的会话。",
+  todayGroupCollapse: "折叠这个话题",
+  todayGroupExpand: "展开这个话题",
   todayStatSessions: "今日会话",
   todayRemindersShowAll: "展开另外 {count} 条",
   todayRemindersCollapse: "收起提醒",
@@ -50,6 +55,11 @@ export const zh = {
 } as const;
 
 export const en: { [K in keyof typeof zh]: string } = {
+  todaySourceFilter: "Filter sessions by source",
+  todaySourceAll: "All",
+  todayNoMatch: "No sessions match.",
+  todayGroupCollapse: "Collapse this topic",
+  todayGroupExpand: "Expand this topic",
   todayStatSessions: "Sessions",
   todayRemindersShowAll: "Show {count} more",
   todayRemindersCollapse: "Collapse",

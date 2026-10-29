@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type { TodaySession } from "@you-brain/core/http/types.js";
 import type { TopicListItem } from "@you-brain/core/http/types.js";
 
@@ -7,9 +7,10 @@ import { Card, Section } from "../../components/card.js";
 import { Chip } from "../../components/chip.js";
 import { Icon } from "../../components/icons.js";
 import { SessionRow, toSessionCard } from "../../components/session-row.js";
+import { SourceTile } from "../../components/tile.js";
 import { ShowMore } from "../../components/show-more.js";
 import { useRelativeTime } from "../../components/use-relative-time.js";
-import { formatDateTime, type Language } from "../../lib/format.js";
+import { formatDateTime, sourceLabel, type Language } from "../../lib/format.js";
 import type { NamedDevice } from "../../lib/format.js";
 import { groupSessionsByTopic } from "../../lib/group.js";
 import { rowsBeforeToggle, toggleAnchorIndex } from "../../components/show-more-nav.js";
@@ -21,6 +22,12 @@ import { groupSessionsByHour, latestMoment, topicZone, type TodayMode } from "./
 
 const LIMIT = 5;
 
+export interface SourceCount {
+  source: string;
+  count: number;
+}
+
+/** magpie 风格的会话区:来源筛选 tab + 搜索框 + 可折叠话题分组。 */
 export function TodayGroups({
   mode,
   sessions,
@@ -29,6 +36,11 @@ export function TodayGroups({
   timeZone,
   topics,
   arrived,
+  sourceCounts,
+  sourceFilter,
+  onSourceFilter,
+  query,
+  onQuery,
 }: {
   mode: TodayMode;
   sessions: readonly TodaySession[];
@@ -37,13 +49,50 @@ export function TodayGroups({
   timeZone: string;
   topics: readonly TopicListItem[];
   arrived: ReadonlySet<string>;
+  sourceCounts: readonly SourceCount[];
+  sourceFilter: string | "all";
+  onSourceFilter: (value: string | "all") => void;
+  query: string;
+  onQuery: (value: string) => void;
 }) {
   useSessionArrows();
   const { t } = useDaemon();
+  const hasFilters = sourceFilter !== "all" || query.trim() !== "";
+  const toolbar =
+    mode === "topic" ? (
+      <div className="today-toolbar">
+        <div className="today-source-tabs" role="tablist" aria-label={t("todaySourceFilter")}>
+          <SourceTab
+            active={sourceFilter === "all"}
+            count={sourceCounts.reduce((sum, entry) => sum + entry.count, 0)}
+            label={t("todaySourceAll")}
+            onClick={() => onSourceFilter("all")}
+          />
+          {sourceCounts.map((entry) => (
+            <SourceTab
+              key={entry.source}
+              source={entry.source}
+              active={sourceFilter === entry.source}
+              count={entry.count}
+              label={sourceLabel(entry.source)}
+              onClick={() => onSourceFilter(entry.source)}
+            />
+          ))}
+        </div>
+        <input
+          className="today-session-search"
+          type="search"
+          placeholder={t("searchPlaceholder")}
+          value={query}
+          onChange={(event) => onQuery(event.target.value)}
+        />
+      </div>
+    ) : null;
   if (mode === "time") {
     const groups = groupSessionsByHour(sessions, timeZone, t("todayUnknownHour"));
     return (
       <div className="today-groups">
+        {toolbar}
         {groups.map((group) => (
           <Section key={group.key} title={<span className="today-hour">{group.label}</span>} hint={<Chip>{group.sessions.length}</Chip>}>
             <Card>
@@ -70,6 +119,10 @@ export function TodayGroups({
   const groups = groupSessionsByTopic(sessions, t("unassigned"));
   return (
     <div className="today-groups">
+      {toolbar}
+      {groups.length === 0 && hasFilters ? (
+        <p className="today-quiet">{t("todayNoMatch")}</p>
+      ) : null}
       {groups.map((group) => (
         <TopicGroup
           key={group.topicId ?? "none"}
@@ -84,6 +137,34 @@ export function TodayGroups({
         />
       ))}
     </div>
+  );
+}
+
+function SourceTab({
+  source,
+  label,
+  count,
+  active,
+  onClick,
+}: {
+  source?: string;
+  label: string;
+  count: number;
+  active: boolean;
+  onClick: () => void;
+}): ReactNode {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      className={active ? "today-source-tab is-active" : "today-source-tab"}
+      onClick={onClick}
+    >
+      {source ? <SourceTile source={source} size="sm" /> : null}
+      <span>{label}</span>
+      <span className="today-source-count">{count}</span>
+    </button>
   );
 }
 
@@ -108,6 +189,7 @@ function TopicGroup({
 }) {
   const { t } = useDaemon();
   const { navigate } = useRoute();
+  const [collapsed, setCollapsed] = useState(false);
   const latest = latestMoment(sessions);
   const relative = useRelativeTime(latest, language, timeZone);
   const absolute = formatDateTime(latest, language, timeZone);
@@ -124,9 +206,23 @@ function TopicGroup({
         <Icon name="chevron-right" size={14} />
       </button>
     );
+  const header = (
+    <>
+      <button
+        type="button"
+        className={collapsed ? "today-group-caret is-collapsed" : "today-group-caret"}
+        aria-label={collapsed ? t("todayGroupExpand") : t("todayGroupCollapse")}
+        aria-expanded={!collapsed}
+        onClick={() => setCollapsed((value) => !value)}
+      >
+        ▾
+      </button>
+      {title}
+    </>
+  );
   return (
     <Section
-      title={title}
+      title={<span className="today-group-head">{header}</span>}
       hint={<Chip>{sessions.length}</Chip>}
       actions={
         <time className="today-group-time" dateTime={latest ?? undefined} title={absolute}>
@@ -134,21 +230,23 @@ function TopicGroup({
         </time>
       }
     >
-      <Card>
-        <ShowMore items={sessions} limit={LIMIT}>
-          {(session) => (
-            <SessionRow
-              key={session.sessionKey}
-              variant="today"
-              session={toSessionCard(session)}
-              devices={devices}
-              timeZone={timeZone}
-              language={language}
-              arrived={arrived.has(session.sessionKey)}
-            />
-          )}
-        </ShowMore>
-      </Card>
+      {collapsed ? null : (
+        <Card>
+          <ShowMore items={sessions} limit={LIMIT}>
+            {(session) => (
+              <SessionRow
+                key={session.sessionKey}
+                variant="today"
+                session={toSessionCard(session)}
+                devices={devices}
+                timeZone={timeZone}
+                language={language}
+                arrived={arrived.has(session.sessionKey)}
+              />
+            )}
+          </ShowMore>
+        </Card>
+      )}
     </Section>
   );
 }

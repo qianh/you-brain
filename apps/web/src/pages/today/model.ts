@@ -288,3 +288,33 @@ export function topicZone(
 ): "active" | "history" {
   return topics.find((topic) => topic.topicId === topicId)?.zone ?? "active";
 }
+
+/** magpie 式来源筛选:某来源的会话数(用于 tab 上的计数)。 */
+export function countBySource(
+  sessions: ReadonlyArray<{ source: string }>,
+): Array<{ source: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const session of sessions) {
+    counts.set(session.source, (counts.get(session.source) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([source, count]) => ({ source, count }))
+    .sort((a, b) => b.count - a.count || a.source.localeCompare(b.source));
+}
+
+/** 按来源与关键字过滤会话(命中标题或摘要,大小写不敏感)。 */
+export function filterSessions<S extends { source: string; title: string; summary: string }>(
+  sessions: readonly S[],
+  source: string | "all",
+  query: string,
+): S[] {
+  const needle = query.trim().toLowerCase();
+  return sessions.filter((session) => {
+    if (source !== "all" && session.source !== source) return false;
+    if (needle === "") return true;
+    return (
+      session.title.toLowerCase().includes(needle) ||
+      session.summary.toLowerCase().includes(needle)
+    );
+  });
+}
