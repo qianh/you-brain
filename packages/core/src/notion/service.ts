@@ -387,13 +387,14 @@ export class NotionService {
   }
 
   /** Build the PATCH body matching the block's own type. */
-  #patchBody(model: NotionBlockModel, markdown: string, rich?: NotionSegment[]): Record<string, unknown> {
+  #patchBody(model: NotionBlockModel, markdown: string, rich?: NotionSegment[], languageOverride?: string): Record<string, unknown> {
     if (model.kind === "code") {
+      const language = languageOverride ?? model.language;
       return {
         type: "code",
         code: {
           rich_text: [{ type: "text", text: { content: markdown } }],
-          ...(model.language ? { language: model.language } : {}),
+          ...(language ? { language } : {}),
         },
       };
     }
@@ -485,6 +486,7 @@ export class NotionService {
     turnInto?: TurnIntoKind | undefined,
     checkedOverride?: boolean | undefined,
     rich?: NotionSegment[] | undefined,
+    languageOverride?: string | undefined,
   ): Promise<NotionPageView> {
     const pageId = this.#pageOfBlock(blockId);
     const model = this.#blockModel(pageId, blockId);
@@ -497,7 +499,7 @@ export class NotionService {
     this.#assertEditable(target);
     const client = await this.#openClient();
     if (!client) throw new YouBrainError("INVALID_INPUT", "还没有保存 Notion 集成令牌");
-    const body = this.#patchBody(target, markdown.trim(), rich);
+    const body = this.#patchBody(target, markdown.trim(), rich, languageOverride);
     if (checkedOverride !== undefined) {
       const payload = body[typeof body.type === "string" ? body.type : ""] as
         | Record<string, unknown>
@@ -699,8 +701,15 @@ export class NotionService {
   async archivePage(pageId: string): Promise<{ roots: NotionTreeNode[] }> {
     const client = await this.#openClient();
     if (!client) throw new YouBrainError("INVALID_INPUT", "还没有保存 Notion 集成令牌");
-    await client.archivePage(pageId);
-    this.#openIndex().dropPage(pageId);
+    try {
+      await client.archivePage(pageId);
+    } catch (error) {
+      // Notion 拒绝重复归档;它已经不在了,本地清掉即视为删除成功。
+      const message = error instanceof NotionApiError ? error.message : "";
+      if (!(error instanceof NotionApiError && /archived/i.test(message))) throw error;
+    }
+    // Notion 归档会级联整棵子树;本地也要级联删,否则子页面会浮到顶层。
+    this.#openIndex().dropSubtree(pageId);
     return { roots: await this.tree() };
   }
 

@@ -120,6 +120,10 @@ export class NotionIndex {
       .run(key, value);
   }
 
+  deleteMeta(key: string): void {
+    this.#db.query("DELETE FROM meta WHERE key = ?").run(key);
+  }
+
   upsertPage(page: NotionPageRow): void {
     this.#db
       .query(
@@ -155,6 +159,32 @@ export class NotionIndex {
       this.#db.query("DELETE FROM pages WHERE page_id = ?").run(pageId);
       this.#db.query("DELETE FROM blocks WHERE page_id = ?").run(pageId);
       this.#db.query("DELETE FROM notion_fts WHERE page_id = ?").run(pageId);
+    });
+    write();
+  }
+
+  /**
+   * Drop a page and every descendant. Notion archives a whole subtree when the
+   * root goes to the trash; dropping just the root would orphan the children
+   * and promote them to the top of the tree view.
+   */
+  dropSubtree(pageId: string): void {
+    const write = this.#db.transaction(() => {
+      const rows = this.#db
+        .query<{ id: string }, [string]>(
+          `WITH RECURSIVE sub(id) AS (
+             SELECT page_id FROM pages WHERE page_id = ?
+             UNION ALL
+             SELECT p.page_id FROM pages p JOIN sub ON p.parent_id = sub.id
+           )
+           SELECT id FROM sub`,
+        )
+        .all(pageId);
+      for (const row of rows) {
+        this.#db.query("DELETE FROM pages WHERE page_id = ?").run(row.id);
+        this.#db.query("DELETE FROM blocks WHERE page_id = ?").run(row.id);
+        this.#db.query("DELETE FROM notion_fts WHERE page_id = ?").run(row.id);
+      }
     });
     write();
   }

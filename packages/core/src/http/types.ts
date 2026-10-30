@@ -675,6 +675,8 @@ export const NotionUpdateBlockSchema = z
     checked: z.boolean().optional(),
     /** 所见即所得编辑直接提交富文本段落;省略时按 markdown 解析。 */
     rich: z.array(NotionSegmentSchema).max(200).optional(),
+    /** 代码块语言覆盖;省略时保持原状。 */
+    language: z.string().max(64).optional(),
   })
   .strict();
 

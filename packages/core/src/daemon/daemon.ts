@@ -220,6 +220,10 @@ const APP_VERSION = "0.1.0";
 const BACKFILL_CURSOR = "capture.backfill";
 /** A stuck Drive read must not hold `/api/status` longer than the shell's read timeout. */
 const STATUS_DRIVE_WAIT_MS = 1_000;
+/** `/api/status` 聚合是秒级操作;这个窗口内的重复调用共享同一份结果。 */
+const STATUS_CACHE_MS = 1_000;
+/** 沉淀租约文件一天才写一次;读它是 Drive 网络往返,不必每次状态都打。 */
+const CONSOLIDATION_CACHE_MS = 30_000;
 /** Inbox files downloaded at the same time while draining the index queue. */
 const INBOX_READ_CONCURRENCY = 8;
 /**
@@ -708,6 +712,9 @@ export class YouBrainDaemon {
   #preservedLoaded = false;
   #lastSyncAt: string | null = null;
   #lastSyncError: { message: string; at: string } | null = null;
+  #statusCache: { at: number; value: StatusResponse } | null = null;
+  #statusInFlight: Promise<StatusResponse> | null = null;
+  #consolidationCache: { at: number; value: StatusResponse["consolidation"] } | null = null;
   /** Config push failures per file. A success clears `#lastSyncError` only when it is this push's error. */
   #configPushErrors: Record<"shared" | "roles", { message: string; at: string } | null> = {
     shared: null,
@@ -3027,6 +3034,7 @@ export class YouBrainDaemon {
           body.kind,
           body.checked,
           body.rich,
+          body.language,
         ),
       }),
       notionAppendBlock: async (body) => ({
@@ -3054,7 +3062,24 @@ export class YouBrainDaemon {
         this.changes.publish("notion", this.#clock.now().toISOString());
         return { roots: result.roots };
       },
-      status: () => this.#status(),
+      status: () => {
+        // 聚合一次要跑全量会话/采集/Drive 检查(秒级);短缓存让启动和
+        // SSE 风暴里的并发调用共享同一份结果,而不是各自重算。
+        const now = this.#clock.nowMs();
+        if (this.#statusCache && now - this.#statusCache.at < STATUS_CACHE_MS) {
+          return Promise.resolve(this.#statusCache.value);
+        }
+        if (this.#statusInFlight) return this.#statusInFlight;
+        this.#statusInFlight = this.#status()
+          .then((value) => {
+            this.#statusCache = { at: this.#clock.nowMs(), value };
+            return value;
+          })
+          .finally(() => {
+            this.#statusInFlight = null;
+          });
+        return this.#statusInFlight;
+      },
       sync: () => this.#syncNow(),
       upload: (input) => this.#uploadNow(input),
       consolidate: (input) => this.#run(() => this.#consolidate({ manual: true, force: input.force === true })),
@@ -3467,6 +3492,10 @@ export class YouBrainDaemon {
     if (!this.#roles.consolidation.enabled) {
       return { enabled: false, lastFinishedAt: null, stale: false, status: "disabled" };
     }
+    const now = this.#clock.nowMs();
+    if (this.#consolidationCache && now - this.#consolidationCache.at < CONSOLIDATION_CACHE_MS) {
+      return this.#consolidationCache.value;
+    }
     const idle = this.#withLastRun({
       enabled: true,
       lastFinishedAt: null,
@@ -3486,12 +3515,14 @@ export class YouBrainDaemon {
       if (!finished) return idle;
       const ms = Date.parse(finished);
       const stale = Number.isNaN(ms) ? false : this.#clock.nowMs() - ms > INTERVALS.portraitMs;
-      return this.#withLastRun({
+      const value = this.#withLastRun({
         enabled: true,
         lastFinishedAt: finished,
         stale,
         status: stale ? "stale" : "ok",
       });
+      this.#consolidationCache = { at: now, value };
+      return value;
     } catch {
       return idle;
     }

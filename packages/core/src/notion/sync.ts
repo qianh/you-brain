@@ -72,6 +72,26 @@ export class NotionSync {
       for (const stub of stubs.values()) {
         if (!stub.archived) this.#index.upsertPage(toPageRow(stub));
       }
+      // Notion search never returns archived or unshared objects, so anything
+      // still indexed but absent from this pass is gone server-side. But
+      // search is also eventually consistent and transiently misses pages, so
+      // one absence only strikes; two consecutive absences drop the row.
+      const seen = new Set(stubs.keys());
+      for (const row of this.#index.listPages()) {
+        const missingKey = `missing:${row.pageId}`;
+        if (seen.has(row.pageId)) {
+          this.#index.setMeta(missingKey, "");
+          continue;
+        }
+        const strike = this.#index.meta(missingKey);
+        if (strike !== null && strike !== "") {
+          this.#index.dropPage(row.pageId);
+          this.#index.setMeta(missingKey, "");
+          summary.removed += 1;
+        } else {
+          this.#index.setMeta(missingKey, new Date().toISOString());
+        }
+      }
 
       // Oldest first so backfills read roughly chronologically.
       const dirty = [...stubs.values()]
@@ -107,7 +127,17 @@ export class NotionSync {
   }
 
   #isDirty(stub: NotionPageStub): boolean {
-    return this.#index.meta(`synced:${stub.id}`) !== stub.lastEditedTime;
+    if (this.#index.meta(`synced:${stub.id}`) !== stub.lastEditedTime) return true;
+    // 内容丢失兜底:时间戳没变,但块没了(被误清或并发写丢)。真空页一定带
+    // empty 标记,数据库行正文在属性里,两者都不是的就是丢了,重拉一次。
+    if (
+      stub.parentKind !== "database" &&
+      this.#index.meta(`empty:${stub.id}`) === null &&
+      this.#index.pageBlocks(stub.id).length === 0
+    ) {
+      return true;
+    }
+    return false;
   }
 
   /** Re-fetch one page's content right away (used after a local write). */
@@ -160,6 +190,26 @@ export class NotionSync {
       });
     };
     flatten(roots, null);
+    // Appending child blocks does NOT bump the page's last_edited_time, so a
+    // page caught mid-write (created empty, content still being pushed) would
+    // be pinned empty forever if we marked it synced here. Only trust an empty
+    // fetch after seeing it empty twice; otherwise re-check next pass. Database
+    // rows are exempt — their body is legitimately empty, content lives in
+    // properties.
+    if (
+      storeRows.length === 0 &&
+      stub.parentKind !== "database" &&
+      this.#index.meta(`empty:${stub.id}`) === null
+    ) {
+      this.#index.setMeta(`empty:${stub.id}`, new Date().toISOString());
+      return;
+    }
+    // empty 标记语义:"" = 确认真空,null = 上轮有内容(用于丢块自愈判断)。
+    if (storeRows.length === 0) {
+      this.#index.setMeta(`empty:${stub.id}`, "");
+    } else {
+      this.#index.deleteMeta(`empty:${stub.id}`);
+    }
     // A database row's content lives in its properties, not its body — keep
     // that text so search covers rows too.
     this.#index.replaceBlocks(stub.id, storeRows, stub.propertyText);

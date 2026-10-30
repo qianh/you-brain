@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { MemoryKeychain } from "../../src/auth/secret-store.js";
 import { NotionApiClient } from "../../src/notion/api-client.js";
 import { buildBlockModel, blocksToMarkdown, tableRowCells } from "../../src/notion/model.js";
-import { NotionService } from "../../src/notion/service.js";
+import { NotionService, type NotionTreeNode } from "../../src/notion/service.js";
 import { NotionSync } from "../../src/notion/sync.js";
 
 // ---------------------------------------------------------------------------
@@ -28,6 +28,8 @@ interface PageDef {
   lastEdited: string;
   created: string;
   archived?: boolean;
+  /** 真实 Notion 搜索不返回已归档对象;置位后 /search 跳过它。 */
+  hiddenFromSearch?: boolean;
   blocks: Array<Record<string, unknown>>;
   properties?: Record<string, unknown>;
 }
@@ -103,6 +105,12 @@ function resetFixture(): void {
       优先级: { type: "number", number: 2 },
     };
   }
+  const child = PAGES[CHILD_PAGE];
+  if (child) {
+    child.archived = false;
+    child.hiddenFromSearch = false;
+    child.lastEdited = "2026-10-02T00:00:00.000Z";
+  }
 }
 
 const TABLE_ROWS = [
@@ -165,6 +173,8 @@ function fakeFetch() {
     overrides: new Map<string, Record<string, unknown>>(),
     deleted: new Set<string>(),
     inserted: new Map<string, Array<{ after: string | null; block: Record<string, unknown> }>>(),
+    /** 模拟导入竞态:页面已建、内容还没推。 */
+    emptyPages: new Set<string>(),
   };
   const serveChildren = (base: Array<Record<string, unknown>>, parentId: string) => {
     let list = [...base];
@@ -194,7 +204,9 @@ function fakeFetch() {
     if (key === "POST /search") {
       // 有状态分页:cursor 是注入的序号,模拟真实 API 的不透明游标。
       const body = JSON.parse(String(init?.body ?? "{}")) as { start_cursor?: string };
-      const all = Object.values(PAGES).map((def) => apiPage(def));
+      const all = Object.values(PAGES)
+        .filter((def) => def.hiddenFromSearch !== true)
+        .map((def) => apiPage(def));
       all.push(databaseObject());
       const start = Number(body.start_cursor ?? "0");
       const slice = all.slice(start, start + 3);
@@ -212,6 +224,7 @@ function fakeFetch() {
         return json({ results: serveChildren(PAGES[ROOT_PAGE]?.blocks ?? [], ROOT_PAGE), has_more: false, next_cursor: null });
       }
       if (id === CHILD_PAGE) {
+        if (state.emptyPages.has(id)) return json({ results: [], has_more: false, next_cursor: null });
         return json({ results: serveChildren(PAGES[CHILD_PAGE]?.blocks ?? [], CHILD_PAGE), has_more: false, next_cursor: null });
       }
       if (id === TABLE_BLOCK_ID) {
@@ -311,8 +324,20 @@ function fakeFetch() {
     }
     const deleteMatch = /^DELETE \/blocks\/([^/]+)$/u.exec(key);
     if (deleteMatch) {
-      state.deleted.add(decodeURIComponent(deleteMatch[1] ?? ""));
-      return json({ object: "block", id: deleteMatch[1], archived: true });
+      const id = decodeURIComponent(deleteMatch[1] ?? "");
+      // 真实 Notion 拒绝重复归档。
+      if (state.deleted.has(id)) {
+        return json(
+          {
+            object: "error",
+            code: "validation_error",
+            message: "Can't edit block that is archived. You must unarchive the block before editing.",
+          },
+          400,
+        );
+      }
+      state.deleted.add(id);
+      return json({ object: "block", id, archived: true });
     }
     const patchPageMatch = /^PATCH \/pages\/([^/]+)$/u.exec(key);
     if (patchPageMatch) {
@@ -424,6 +449,78 @@ describe("notion sync", () => {
     const hits = index.search("周报", 10);
     expect(hits).toHaveLength(1);
     expect(hits[0]?.title).toBe("工作区首页");
+  });
+
+  test("幽灵清理:连续两轮缺席才移除", async () => {
+    const sync = new NotionSync(client(fetches.fetchImpl), index);
+    await sync.syncAll();
+    // 真实 Notion 归档后搜索就查不到;索引里的残留行必须被 diff 清掉。
+    const child = PAGES[CHILD_PAGE];
+    if (child) child.hiddenFromSearch = true;
+    // 第一轮缺席:只记一笔,不删(搜索是最终一致的,会瞬时漏页)
+    const first = await sync.syncAll();
+    expect(first.removed).toBe(0);
+    expect(index.pageLastEdited(CHILD_PAGE)).not.toBeNull();
+    // 第二轮缺席:确认真被删,清掉
+    const second = await sync.syncAll();
+    expect(second.removed).toBe(1);
+    expect(index.pageLastEdited(CHILD_PAGE)).toBeNull();
+    expect(index.countPages()).toBe(4);
+  });
+
+  test("瞬时漏页不清内容", async () => {
+    const sync = new NotionSync(client(fetches.fetchImpl), index);
+    await sync.syncAll();
+    const child = PAGES[CHILD_PAGE];
+    if (child) child.hiddenFromSearch = true;
+    await sync.syncAll(); // 一次缺席:只记一笔
+    expect(index.pageLastEdited(CHILD_PAGE)).not.toBeNull();
+    if (child) child.hiddenFromSearch = false;
+    await sync.syncAll(); // 搜索恢复:行和内容原样保留
+    expect(index.pageLastEdited(CHILD_PAGE)).not.toBeNull();
+    expect(index.pageBlocks(CHILD_PAGE).length).toBeGreaterThan(0);
+  });
+
+  test("误删后自愈:块丢了会被重拉", async () => {
+    const sync = new NotionSync(client(fetches.fetchImpl), index);
+    await sync.syncAll();
+    const child = PAGES[CHILD_PAGE];
+    if (child) child.hiddenFromSearch = true;
+    await sync.syncAll();
+    await sync.syncAll(); // 两轮缺席:行被清,marker 残留
+    expect(index.pageLastEdited(CHILD_PAGE)).toBeNull();
+    if (child) child.hiddenFromSearch = false;
+    await sync.syncAll(); // 搜索恢复:元数据回来,内容也要重拉
+    expect(index.pageLastEdited(CHILD_PAGE)).not.toBeNull();
+    expect(index.pageBlocks(CHILD_PAGE).length).toBeGreaterThan(0);
+  });
+
+  test("空页复查:导入竞态拉空后不永久钉空", async () => {
+    const sync = new NotionSync(client(fetches.fetchImpl), index);
+    // 第一轮:页面已建、内容还没推(追加子块不会 bump last_edited_time)
+    fetches.state.emptyPages.add(CHILD_PAGE);
+    await sync.syncAll();
+    expect(index.meta(`synced:${CHILD_PAGE}`)).toBeNull();
+    expect(index.meta(`empty:${CHILD_PAGE}`)).not.toBeNull();
+    // 第二轮:内容已推完,正常落块
+    fetches.state.emptyPages.delete(CHILD_PAGE);
+    await sync.syncAll();
+    expect(index.pageBlocks(CHILD_PAGE).length).toBeGreaterThan(0);
+    expect(index.meta(`synced:${CHILD_PAGE}`)).not.toBeNull();
+    // 第三轮:干净页不再重复拉
+    const before = fetches.calls.filter((call) => call.startsWith("GET /blocks/")).length;
+    await sync.syncAll();
+    const after = fetches.calls.filter((call) => call.startsWith("GET /blocks/")).length;
+    expect(after - before).toBe(0);
+  });
+
+  test("连续两轮拉空才认定真空页", async () => {
+    const sync = new NotionSync(client(fetches.fetchImpl), index);
+    fetches.state.emptyPages.add(CHILD_PAGE);
+    await sync.syncAll();
+    await sync.syncAll();
+    expect(index.meta(`synced:${CHILD_PAGE}`)).not.toBeNull();
+    expect(index.pageBlocks(CHILD_PAGE)).toHaveLength(0);
   });
 });
 
@@ -568,10 +665,26 @@ describe("notion write path", () => {
     expect(created.view?.title).toBe("新笔记");
 
     // 归档:索引里消失
+    const child = await service.createPage({ parentId: created.pageId, title: "子页" });
+    expect(child.pageId).toBeTruthy();
     await service.archivePage(created.pageId);
     const after = await service.tree();
-    expect(after[0]?.children.some((node) => node.title === "新笔记")).toBe(false);
+    // 级联:父页面删掉后,子页面不能变成孤儿浮到顶层
+    const titles: string[] = [];
+    const visit = (nodes: NotionTreeNode[]): void => {
+      for (const node of nodes) {
+        titles.push(node.title);
+        visit(node.children);
+      }
+    };
+    visit(after);
+    expect(titles).not.toContain("新笔记");
+    expect(titles).not.toContain("子页");
+
+    // 重复归档(页面在 Notion 侧已删):不报错,幂等成功
+    await expect(service.archivePage(created.pageId)).resolves.toBeTruthy();
     delete PAGES[created.pageId];
+    delete PAGES[child.pageId];
   });
 
   test("to_do 勾选切换", async () => {
