@@ -31,6 +31,42 @@ export interface DaemonSnapshot {
   reminders: ReminderView[];
 }
 
+const BOOT_SNAPSHOT_KEY = "you-brain.boot-snapshot";
+
+/**
+ * 上次成功启动的快照持久化在 localStorage:再次打开时先用它渲染
+ * (stale-while-revalidate),boot 屏只在第一次真的没有缓存时出现。
+ */
+function readBootSnapshot(): DaemonSnapshot | null {
+  try {
+    const raw = localStorage.getItem(BOOT_SNAPSHOT_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<DaemonSnapshot> | null;
+    if (!parsed || typeof parsed !== "object") return null;
+    if (!parsed.config || !parsed.roles || !parsed.status) return null;
+    return {
+      config: parsed.config,
+      roles: parsed.roles,
+      today: parsed.today ?? null,
+      topics: Array.isArray(parsed.topics) ? parsed.topics : [],
+      devices: Array.isArray(parsed.devices) ? parsed.devices : [],
+      status: parsed.status,
+      reminders: Array.isArray(parsed.reminders) ? parsed.reminders : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeBootSnapshot(snapshot: DaemonSnapshot): void {
+  try {
+    if (!snapshot.config || !snapshot.roles || !snapshot.status) return;
+    localStorage.setItem(BOOT_SNAPSHOT_KEY, JSON.stringify(snapshot));
+  } catch {
+    // 存不下就算了(隐私模式/超限),只影响下次启动的秒开。
+  }
+}
+
 interface DaemonValue extends DaemonSnapshot {
   client: BrowserDaemon;
   language: Language;
@@ -75,19 +111,23 @@ const DRIVE_CHECK_POLL_MS = 3000;
 
 export function DaemonProvider({ children }: { children: ReactNode }) {
   const client = useMemo(() => createBrowserDaemon(), []);
-  const [snapshot, setSnapshot] = useState<DaemonSnapshot>({
-    config: null,
-    roles: null,
-    today: null,
-    topics: [],
-    devices: [],
-    status: null,
-    reminders: [],
-  });
+  const hydrated = useMemo(() => readBootSnapshot(), []);
+  const [snapshot, setSnapshot] = useState<DaemonSnapshot>(
+    hydrated ?? {
+      config: null,
+      roles: null,
+      today: null,
+      topics: [],
+      devices: [],
+      status: null,
+      reminders: [],
+    },
+  );
   const [language, setLanguageState] = useState<Language>("zh");
   const languageRef = useRef<Language>("zh");
   const userChoseLanguage = useRef(false);
-  const [loading, setLoading] = useState(true);
+  // 有缓存快照就不挡 boot 屏:后台刷新会在数据到达后覆盖。
+  const [loading, setLoading] = useState(hydrated === null);
   const [error, setError] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [detailRevision, setDetailRevision] = useState(0);
@@ -123,7 +163,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
           ]);
           if (!alive.current) return false;
           applyLanguage(config);
-          setSnapshot({
+          const next: DaemonSnapshot = {
             config,
             roles,
             today,
@@ -131,7 +171,9 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
             devices: devices.devices,
             status,
             reminders: reminders.reminders,
-          });
+          };
+          setSnapshot(next);
+          writeBootSnapshot(next);
           setError(null);
           return true;
         }

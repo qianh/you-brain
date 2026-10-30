@@ -8,7 +8,8 @@
 
 .portrait-layout {
   display: grid;
-  grid-template-columns: minmax(0, var(--read-max)) minmax(calc(var(--sp-10) * 5), calc(var(--sp-10) * 6 + var(--sp-5)));
+  /* 文档列吃满剩余宽度,目录列保持紧凑——正文随窗口自适应。 */
+  grid-template-columns: minmax(0, 1fr) minmax(calc(var(--sp-10) * 5), calc(var(--sp-10) * 6 + var(--sp-5)));
   gap: var(--sp-6);
   align-items: start;
   justify-content: center;
@@ -24,7 +25,6 @@
 
 .card.portrait-doc {
   width: 100%;
-  max-width: var(--read-max);
   padding: var(--sp-8);
 }
 

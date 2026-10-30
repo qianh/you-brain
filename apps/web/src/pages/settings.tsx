@@ -81,7 +81,13 @@ export function SettingsPage() {
             id="settings-panel"
             role="tabpanel"
             ref={mainRef}
-            className={dirty ? "settings-main has-dirty" : "settings-main"}
+            className={[
+              "settings-main",
+              section === "portrait" ? "settings-main-wide" : "",
+              dirty ? "has-dirty" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
           >
             {pendingLoad ? (
               loadError ? (

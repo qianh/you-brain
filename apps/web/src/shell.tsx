@@ -71,6 +71,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const [palette, setPalette] = useState(requested === "palette");
   const preset = requested === "palette" ? (readQuery(href, "pq") ?? "") : "";
   const settings = location.pathname === "/settings";
+  const knowledge = location.pathname === "/knowledge";
   const overlayTitlebar = typeof window !== "undefined" && window.__TAURI__ !== undefined && /Mac/.test(navigator.platform);
   const mod = shortcutMod(typeof navigator === "undefined" ? "" : navigator.platform);
   const chord = (key: string): string => `${modLabel(mod)}${mod === "meta" ? "" : "+"}${key}`;
@@ -204,7 +205,7 @@ export function Shell({ children }: { children: ReactNode }) {
           </Tooltip>
         </div>
       </header>
-      <main id="content" className="main">
+      <main id="content" className={settings || knowledge ? "main main-wide" : "main"}>
         {error && !offlineHome ? (
           <Banner tone="danger" action={<Button size="sm" onClick={() => void refresh()}>{t("retry")}</Button>}>
             {error}

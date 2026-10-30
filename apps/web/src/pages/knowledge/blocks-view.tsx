@@ -3,6 +3,7 @@ import { useState, type ReactNode } from "react";
 import type { NotionBlockModel, NotionSegment } from "@you-brain/core/http/types.js";
 
 import type { MessageKey } from "../../i18n/messages.js";
+import { highlightCode } from "../../lib/highlight.js";
 import { EditableRow, type BlockEditorCallbacks, type FocusRequest } from "./block-editor.js";
 import { isEditableBlock } from "./logic.js";
 
@@ -274,7 +275,7 @@ export function BlockView({
         <figure className="nb-code">
           <figcaption>{block.language}</figcaption>
           <pre>
-            <code>{block.text}</code>
+            <code dangerouslySetInnerHTML={{ __html: highlightCode(block.text, block.language) }} />
           </pre>
         </figure>
       );

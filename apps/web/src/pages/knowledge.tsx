@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
 
 import type {
   NotionBlockModel,
@@ -11,13 +20,15 @@ import type {
 } from "@you-brain/core/http/types.js";
 
 import { Button } from "../components/button.js";
+import { ConfirmDialog, Dialog } from "../components/dialog.js";
 import { Icon } from "../components/icons.js";
+import { Input } from "../components/input.js";
 import { useToast } from "../components/toast.js";
 import { useDaemon } from "../daemon-context.js";
 import { settingsHref } from "../lib/route.js";
 import { useRoute } from "../router.js";
 import { BlockList } from "./knowledge/blocks-view.js";
-import { KindPicker, type BlockEditorCallbacks, type FocusRequest, type Translate } from "./knowledge/block-editor.js";
+import { type BlockEditorCallbacks, type FocusRequest, type Translate } from "./knowledge/block-editor.js";
 import {
   firstNewBlockId,
   blockMarkdown,
@@ -78,11 +89,37 @@ export function KnowledgePage() {
   const [hits, setHits] = useState<Array<{ pageId: string; title: string; excerpt: string }> | null>(null);
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
-  const [addOpen, setAddOpen] = useState(false);
   const [titleEditing, setTitleEditing] = useState(false);
+  // 文末空段落创建中:幽灵行先藏,防止两行同屏。
+  const [tailPending, setTailPending] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [focus, setFocus] = useState<FocusRequest | null>(null);
+  // Tauri 的 WKWebView 不支持 window.confirm/prompt,确认与改名走 Dialog。
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [rename, setRename] = useState<{ id: string; current: string } | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const raw = Number(localStorage.getItem("knowledge-sidebar-w"));
+    return Number.isFinite(raw) && raw >= 200 && raw <= 520 ? raw : 264;
+  });
+  const [resizing, setResizing] = useState(false);
+  const startResize = (event: ReactMouseEvent<HTMLDivElement>): void => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    const clamp = (value: number): number => Math.min(520, Math.max(200, value));
+    const onMove = (move: MouseEvent): void => setSidebarWidth(clamp(startWidth + move.clientX - startX));
+    const onUp = (move: MouseEvent): void => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      setResizing(false);
+      localStorage.setItem("knowledge-sidebar-w", String(clamp(startWidth + move.clientX - startX)));
+    };
+    setResizing(true);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
   const [focusNonce, setFocusNonce] = useState(0);
 
   const selectedId = location.id;
@@ -112,6 +149,17 @@ export function KnowledgePage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshMeta]);
+
+  // 标题编辑框:点外面就收起(丢弃未保存的草稿,Esc 亦同)。
+  useEffect(() => {
+    if (!titleEditing) return;
+    const onDown = (event: MouseEvent): void => {
+      const form = document.querySelector(".knowledge-title-form");
+      if (form && !form.contains(event.target as Node)) setTitleEditing(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [titleEditing]);
 
   // 打开选中的页面或数据库。
   useEffect(() => {
@@ -273,21 +321,28 @@ export function KnowledgePage() {
       focus,
       onFocusHandled: () => setFocus(null),
       saveSegments: (block, segments) => {
-        const action = (): Promise<unknown> => {
-          if (segments.length === 0 || segments.every((segment) => segment.text === "")) {
-            return client.notionDeleteBlock({ blockId: block.id });
-          }
-          return client.notionUpdateBlock({
+        // Notion 语义:空块失焦保留(等 Backspace/合并去删),否则文末空行
+        // 一失焦就被删,幽灵行跟着闪现,来回跳。
+        if (segments.length === 0 || segments.every((segment) => segment.text === "")) {
+          return Promise.resolve();
+        }
+        void run(() =>
+          client.notionUpdateBlock({
             blockId: block.id,
             markdown: "",
             rich: segments,
-          });
-        };
-        void run(action);
+          }),
+        );
         return Promise.resolve();
       },
-      saveCode: (blockId, text) => {
-        void run(() => client.notionUpdateBlock({ blockId, markdown: text }));
+      saveCode: (blockId, text, language) => {
+        void run(() =>
+          client.notionUpdateBlock({
+            blockId,
+            markdown: text,
+            ...(language ? { language } : {}),
+          }),
+        );
         return Promise.resolve();
       },
       remove: (blockId) => {
@@ -393,6 +448,33 @@ export function KnowledgePage() {
     };
   }, [busy, client, focus, page, push, run, textLength]);
 
+  // Notion 式文末行:最后一行是空段落就聚焦它,否则追加一个新空段落。
+  const blocks = page?.blocks ?? [];
+  const lastBlock = blocks[blocks.length - 1];
+  // 文末已经是空段落时,它自己就是"文末行",幽灵行不再渲染——永远只有一行。
+  const tailIsEmptyParagraph =
+    lastBlock !== undefined &&
+    lastBlock.kind === "paragraph" &&
+    lastBlock.children.length === 0 &&
+    lastBlock.segments.every((segment) => segment.text.trim() === "");
+  const tailLine = useCallback((): void => {
+    const blocks = page?.blocks ?? [];
+    const last = blocks[blocks.length - 1];
+    const emptyTail =
+      last !== undefined &&
+      last.kind === "paragraph" &&
+      last.children.length === 0 &&
+      last.segments.every((segment) => segment.text.trim() === "");
+    if (last && emptyTail) {
+      setFocus({ blockId: last.id, at: "end" });
+      setFocusNonce((value) => value + 1);
+    } else {
+      // 立刻藏掉幽灵行:数据重拉回来之前,它和新空段落会短暂同屏成两行。
+      setTailPending(true);
+      void editor.addBelow(null, "paragraph").finally(() => setTailPending(false));
+    }
+  }, [editor, page]);
+
   const flat = useMemo(() => flattenTree(roots ?? []), [roots]);
 
   const toggleCollapse = useCallback((id: string) => {
@@ -417,8 +499,17 @@ export function KnowledgePage() {
   }
 
   return (
-    <div className="knowledge">
+    <div
+      className="knowledge"
+      style={{ "--knowledge-sidebar-w": `${sidebarWidth}px` } as CSSProperties}
+    >
       <aside className="knowledge-sidebar">
+        <div
+          className={"knowledge-resizer" + (resizing ? " is-dragging" : "")}
+          onMouseDown={startResize}
+          role="separator"
+          aria-orientation="vertical"
+        />
         <div className="knowledge-sidebar-actions">
           <input
             className="knowledge-search"
@@ -505,54 +596,102 @@ export function KnowledgePage() {
                   .finally(() => setBusy(false));
               }}
               onRename={(id, current) => {
-                const next = window.prompt(t("knowledgeRename"), current);
-                if (next === null || next.trim() === "" || next === current) return;
-                setBusy(true);
-                void client
-                  .notionPatchTitle({ pageId: id, title: next.trim() })
-                  .then(async () => {
-                    await refreshMeta();
-                    if (selectedId === id && page) {
-                      const detail = await client.notionPage(id);
-                      setPage(detail);
-                      writeKnowledgeCache({ pageId: id, page: detail });
-                    }
-                  })
-                  .catch((error) =>
-                    push({
-                      message: error instanceof Error ? error.message : String(error),
-                      tone: "danger",
-                    }),
-                  )
-                  .finally(() => setBusy(false));
+                setRenameDraft(current);
+                setRename({ id, current });
               }}
               onDelete={(id) => {
-                if (!window.confirm(t("knowledgeDeletePageConfirm"))) return;
-                setBusy(true);
-                void client
-                  .notionArchivePage({ pageId: id })
-                  .then(async (result) => {
-                    await refreshMeta();
-                    setRoots(result.roots);
-                    if (selectedId === id) {
-                      const fallback = defaultPageId(result.roots);
-                      if (fallback) open(fallback);
-                      else navigate("/knowledge");
-                    }
-                  })
-                  .catch((error) =>
-                    push({
-                      message: error instanceof Error ? error.message : String(error),
-                      tone: "danger",
-                    }),
-                  )
-                  .finally(() => setBusy(false));
+                setConfirmDelete(id);
               }}
               busy={busy}
               t={t}
             />
           )}
         </nav>
+        <ConfirmDialog
+          open={confirmDelete !== null}
+          tone="danger"
+          title={t("knowledgeDelete")}
+          description={t("knowledgeDeletePageConfirm")}
+          confirmLabel={t("knowledgeDelete")}
+          cancelLabel={t("cancel")}
+          loading={busy}
+          onClose={() => setConfirmDelete(null)}
+          onConfirm={() => {
+            const id = confirmDelete;
+            if (!id) return;
+            setBusy(true);
+            void client
+              .notionArchivePage({ pageId: id })
+              .then(async (result) => {
+                setConfirmDelete(null);
+                await refreshMeta();
+                setRoots(result.roots);
+                if (selectedId === id) {
+                  const fallback = defaultPageId(result.roots);
+                  if (fallback) open(fallback);
+                  else navigate("/knowledge");
+                }
+              })
+              .catch((error) =>
+                push({
+                  message: error instanceof Error ? error.message : String(error),
+                  tone: "danger",
+                }),
+              )
+              .finally(() => setBusy(false));
+          }}
+        />
+        <Dialog
+          open={rename !== null}
+          onClose={() => setRename(null)}
+          title={t("knowledgeRename")}
+          initialFocus="first"
+          footer={
+            <>
+              <Button variant="ghost" data-cancel="" onClick={() => setRename(null)}>
+                {t("cancel")}
+              </Button>
+              <Button
+                loading={busy}
+                onClick={() => {
+                  const target = rename;
+                  const next = renameDraft.trim();
+                  if (!target || next === "" || next === target.current) {
+                    setRename(null);
+                    return;
+                  }
+                  setBusy(true);
+                  void client
+                    .notionPatchTitle({ pageId: target.id, title: next })
+                    .then(async () => {
+                      setRename(null);
+                      await refreshMeta();
+                      if (selectedId === target.id && page) {
+                        const detail = await client.notionPage(target.id);
+                        setPage(detail);
+                        writeKnowledgeCache({ pageId: target.id, page: detail });
+                      }
+                    })
+                    .catch((error) =>
+                      push({
+                        message: error instanceof Error ? error.message : String(error),
+                        tone: "danger",
+                      }),
+                    )
+                    .finally(() => setBusy(false));
+                }}
+              >
+                {t("knowledgeSave")}
+              </Button>
+            </>
+          }
+        >
+          <Input
+            label={t("knowledgeRename")}
+            value={renameDraft}
+            onChange={(event) => setRenameDraft(event.target.value)}
+          />
+        </Dialog>
         <footer className="knowledge-footer">
           <div className="knowledge-footer-meta">
             {status
@@ -639,7 +778,16 @@ export function KnowledgePage() {
                 </dl>
               ) : null}
             </header>
-            <div className="knowledge-blocks">
+            <div
+              className="knowledge-blocks"
+              onClick={(event) => {
+                // Notion 习惯:点正文空白处,光标落到文末可编辑行。
+                const target = event.target as HTMLElement;
+                if (target.closest("a, button, [contenteditable], .nb-menu, .nb-code, .knowledge-properties, .knowledge-title-form")) return;
+                if (target !== event.currentTarget) return;
+                tailLine();
+              }}
+            >
               <BlockList
                 blocks={page.blocks}
                 t={t}
@@ -648,25 +796,19 @@ export function KnowledgePage() {
                 focus={focus === null ? null : { ...focus }}
                 onFocusHandled={() => setFocus(null)}
               />
-              <div className="knowledge-add-block">
-                {addOpen ? (
-                  <KindPicker
-                    t={t}
-                    allowDivider
-                    onPick={(kind) => {
-                      setAddOpen(false);
-                      void editor.addBelow(null, kind);
-                    }}
-                    onClose={() => setAddOpen(false)}
-                  />
-                ) : (
-                  <button type="button" className="knowledge-add-trigger" onClick={() => setAddOpen(true)}>
-                    ＋ {t("knowledgeAddBlock")}
-                  </button>
-                )}
-              </div>
+              {/* Notion 式末尾幽灵行:仅当文末不是空段落且无创建中的空段时显示,保证永远只有一行。 */}
+              {!tailIsEmptyParagraph && !tailPending ? (
+                <div
+                  className="knowledge-new-line"
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    tailLine();
+                  }}
+                >
+                  <div className="knowledge-new-line-body">{t("knowledgeNewBlockHint")}</div>
+                </div>
+              ) : null}
             </div>
-            <footer className="knowledge-page-foot">{t("knowledgeBacklinksHint")}</footer>
           </article>
         ) : loading ? (
           <p className="knowledge-hint">{t("knowledgeLoading")}</p>

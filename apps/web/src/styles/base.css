@@ -100,6 +100,11 @@ h3 {
   padding: var(--sp-4) var(--page-pad) var(--sp-10);
 }
 
+/* 设置页(数字分身等)跟随窗口宽度;其余页面保持 1040 的阅读宽度。 */
+.main-wide {
+  width: 100%;
+}
+
 /* Resting state is fully opaque. The enter class is removed when the
    animation ends, motion is reduced, or the window hides, so a cancelled
    transition cannot leave the page half transparent. */
