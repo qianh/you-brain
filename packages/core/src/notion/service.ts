@@ -158,6 +158,11 @@ export class NotionService {
     return (await this.#openClient()) !== null;
   }
 
+  /** 上一轮还有正文没拉完。没有跑过时不算积压,避免空转。 */
+  hasPending(): boolean {
+    return (this.#lastRun?.pending ?? 0) > 0;
+  }
+
   async testConnection(): Promise<{ ok: true; name: string; workspaceName: string | null } | { ok: false; error: string }> {
     const client = await this.#openClient();
     if (!client) return { ok: false, error: "还没有保存 Notion 集成令牌" };

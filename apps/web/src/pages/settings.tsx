@@ -82,7 +82,7 @@ export function SettingsPage() {
             ref={mainRef}
             className={[
               "settings-main",
-              section === "portrait" ? "settings-main-wide" : "",
+              section === "portrait" || section === "status" ? "settings-main-wide" : "",
               dirty ? "has-dirty" : "",
             ]
               .filter(Boolean)

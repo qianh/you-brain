@@ -26,14 +26,16 @@ export interface NotionSyncOptions {
 
 const MAX_DEPTH = 6;
 const MAX_BLOCKS_PER_PAGE = 800;
+/** 同时拉几页正文。Notion 普通工作区平均每秒 3 次请求，这一路正好用满。 */
+const CONTENT_CONCURRENCY = 3;
 
 /**
  * Incremental workspace sync.
  *
  * Pass 1 lists everything the integration can see (cheap pagination) and
  * reconciles the tree. Pass 2 refetches content only for pages whose
- * last_edited_time moved, bounded by a time budget so a large first import
- * spreads over several passes instead of hammering the API.
+ * last_edited_time moved. Content pages run a few at a time so a first import
+ * finishes inside one pass instead of restarting the listing on every tick.
  */
 export class NotionSync {
   readonly #client: NotionApiClient;
@@ -98,25 +100,35 @@ export class NotionSync {
         .filter((stub) => !stub.archived && this.#isDirty(stub))
         .sort((a, b) => a.createdTime.localeCompare(b.createdTime));
 
-      for (const stub of dirty) {
-        if (Date.now() - startedAt >= budgetMs) {
-          summary.pending = dirty.length - (summary.pagesSynced + summary.databasesSynced + summary.failed);
-          return summary;
-        }
-        try {
-          if (stub.object === "database") {
-            await this.#syncDatabase(stub.id);
-            summary.databasesSynced += 1;
-          } else {
-            await this.#syncPage(stub);
-            summary.pagesSynced += 1;
+      let cursor = 0;
+      const worker = async (): Promise<void> => {
+        while (cursor < dirty.length) {
+          if (Date.now() - startedAt >= budgetMs) return;
+          const stub = dirty[cursor];
+          cursor += 1;
+          if (!stub) return;
+          try {
+            if (stub.object === "database") {
+              await this.#syncDatabase(stub.id);
+              summary.databasesSynced += 1;
+            } else {
+              await this.#syncPage(stub);
+              summary.pagesSynced += 1;
+            }
+          } catch (error) {
+            summary.failed += 1;
+            // Record the failure so one broken page cannot loop the sync forever.
+            this.#markSynced(stub, stub.lastEditedTime);
+            this.#index.setMeta(`failed:${stub.id}`, error instanceof Error ? error.message : String(error));
           }
-        } catch (error) {
-          summary.failed += 1;
-          // Record the failure so one broken page cannot loop the sync forever.
-          this.#markSynced(stub, stub.lastEditedTime);
-          this.#index.setMeta(`failed:${stub.id}`, error instanceof Error ? error.message : String(error));
         }
+      };
+      const workers = Math.min(CONTENT_CONCURRENCY, dirty.length);
+      await Promise.all(Array.from({ length: workers }, () => worker()));
+      const done = summary.pagesSynced + summary.databasesSynced + summary.failed;
+      if (done < dirty.length) {
+        summary.pending = dirty.length - done;
+        return summary;
       }
       this.#index.setMeta("lastSyncAt", new Date().toISOString());
       return summary;

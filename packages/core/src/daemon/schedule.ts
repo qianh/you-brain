@@ -15,8 +15,10 @@ export const INTERVALS = {
   consolidationMs: 10 * 60_000,
   portraitMs: 24 * 60 * 60_000,
   searchMs: 60_000,
-  /** Notion 知识库轮询。无变化时每轮只有一次 search 调用,5 分钟很安全。 */
+  /** 知识库已经跟上时的轮询间隔。首次导入不走这个间隔,见 notionBackfillMs。 */
   notionMs: 5 * 60_000,
+  /** 还有正文没拉完时,下一轮隔这么久再继续,把 tick 让给上传和同步。 */
+  notionBackfillMs: 1_000,
   outputDebounceMs: 10_000,
   watchDebounceMs: 250,
   /** Quiet period after the last topic-book change before Drive topic files sync. */

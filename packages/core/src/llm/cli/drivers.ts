@@ -186,8 +186,9 @@ const grokDriver: CliDriver = {
         GROK_DISALLOWED_TOOLS,
         "--no-subagents",
         "--disable-web-search",
+        // 1 会在写出结果前用完，grok 以 "max turns reached" 退出。
         "--max-turns",
-        "1",
+        "4",
         "--no-plan",
         "--no-memory",
         "--no-auto-update",

@@ -753,6 +753,7 @@ export class YouBrainDaemon {
    */
   #webJob: Promise<void> | null = null;
   #backfillJob: Promise<void> | null = null;
+  #notionJob: Promise<void> | null = null;
   /**
    * Uploading runs on its own loop, not inside the tick.
    *
@@ -961,15 +962,8 @@ export class YouBrainDaemon {
 
   async #mountNotion(): Promise<void> {
     if (!this.#notion) return;
-    if (await this.#notion.hasToken()) {
-      try {
-        await this.#notion.sync();
-        this.changes.publish("notion", this.#clock.now().toISOString());
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "failed";
-        console.error(`startup: notion sync ${message}`);
-      }
-    }
+    // 首次同步交给后台的 5 分钟任务,启动路径不等待 Notion 网络。
+    await this.#notion.hasToken();
   }
 
   #requireNotion(): NotionService {
@@ -1066,7 +1060,7 @@ export class YouBrainDaemon {
     // know that nothing is still writing. A pass can be started by the tick it overlaps,
     // so keep draining until none is left.
     for (let round = 0; round < 8; round += 1) {
-      const jobs = [this.#webJob, this.#backfillJob, this.#uploadJob].filter(
+      const jobs = [this.#webJob, this.#backfillJob, this.#uploadJob, this.#notionJob].filter(
         (job): job is Promise<void> => job !== null,
       );
       if (jobs.length === 0) break;
@@ -1194,6 +1188,28 @@ export class YouBrainDaemon {
     }
   }
 
+  /**
+   * 首次导入一次跑完当前积压,预算 5 分钟。跟上之后回到 5 分钟轮询。
+   * 请求速度由并行度和 Notion 的 429 退避一起守着。
+   */
+  #notionInterval(): number {
+    return this.#notion?.hasPending() ? INTERVALS.notionBackfillMs : INTERVALS.notionMs;
+  }
+
+  async #syncNotion(): Promise<void> {
+    if (!this.#notion || !(await this.#notion.hasToken())) return;
+    const summary = await this.#notion.sync(5 * 60_000);
+    if (
+      summary.pagesSynced > 0 ||
+      summary.databasesSynced > 0 ||
+      summary.removed > 0 ||
+      summary.pending > 0
+    ) {
+      this.changes.publish("notion", this.#clock.now().toISOString());
+    }
+    if (summary.pending > 0) this.#lastNotionSync = this.#clock.nowMs();
+  }
+
   /** Text sync runs on the interval, or right away while documents are still queued. */
   #searchTextDue(now: number): boolean {
     return this.#searchTextDirty || intervalDue(this.#lastSearch, now, INTERVALS.searchMs);
@@ -1271,21 +1287,15 @@ export class YouBrainDaemon {
           this.#backfillJob = null;
         });
     }
-    if (this.#notion) {
-      if (intervalDue(this.#lastNotionSync, now, INTERVALS.notionMs)) {
-        this.#lastNotionSync = this.#clock.nowMs();
-        try {
-          // 单轮预算收紧,别让首轮大导入把一个 tick 占满。
-          if (await this.#notion.hasToken()) {
-            const summary = await this.#notion.sync(15_000);
-            if (summary.pagesSynced > 0 || summary.databasesSynced > 0 || summary.removed > 0) {
-              this.changes.publish("notion", this.#clock.now().toISOString());
-            }
-          }
-        } catch {
+    if (this.#notion && this.#notionJob === null && intervalDue(this.#lastNotionSync, now, this.#notionInterval())) {
+      this.#lastNotionSync = this.#clock.nowMs();
+      this.#notionJob = this.#syncNotion()
+        .catch(() => {
           // 限流或令牌失效都不是致命的;状态里能看到 lastError。
-        }
-      }
+        })
+        .finally(() => {
+          this.#notionJob = null;
+        });
     }
     if (
       this.#portrait &&

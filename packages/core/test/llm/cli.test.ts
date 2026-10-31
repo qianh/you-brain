@@ -293,7 +293,7 @@ const DRIVERS: DriverCase[] = [
       ["--disallowed-tools"],
       ["--no-subagents"],
       ["--disable-web-search"],
-      ["--max-turns", "1"],
+      ["--max-turns", "4"],
       ["--no-plan"],
       ["--no-memory"],
       ["--effort", "low"],
