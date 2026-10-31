@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { extractToc, isSafeHref, parseInline, parseMarkdown, shouldShowToc, slugify } from "../../src/lib/markdown.js";
+import { extractToc, groupSectionsByPrefix, isSafeHref, parseInline, parseMarkdown, shouldShowToc, slugify } from "../../src/lib/markdown.js";
 
 describe("parseInline", () => {
   test("keeps emphasis, code, and safe links", () => {
@@ -156,5 +156,56 @@ describe("extractToc 按前缀聚合", () => {
     // 单条与无分隔的不聚合
     expect(toc[4]).toMatchObject({ text: "GM2主订单", level: 2 });
     expect(toc[5]).toMatchObject({ text: "单独 · 只出现一次", level: 2 });
+  });
+});
+
+describe("groupSectionsByPrefix 正文聚合", () => {
+  const source = [
+    "# 项目决定",
+    "",
+    "## ashare-ledger · 定位",
+    "定位内容",
+    "",
+    "## ashare-ledger · 估值",
+    "估值内容",
+    "",
+    "## BrainHub",
+    "BrainHub 内容",
+    "",
+    "## 孤单 · 只有一条",
+    "孤单内容",
+  ].join("\n");
+
+  test("连续同前缀章节收拢为项目标题 + 子标题", () => {
+    const blocks = groupSectionsByPrefix(parseMarkdown(source));
+    const headings = blocks
+      .filter((b) => b.kind === "heading")
+      .map((b) => (b.kind === "heading" ? { level: b.level, text: b.text, hasId: b.id !== "" } : null));
+    expect(headings).toEqual([
+      { level: 1, text: "项目决定", hasId: true },
+      { level: 2, text: "ashare-ledger", hasId: true },
+      { level: 3, text: "定位", hasId: true },
+      { level: 3, text: "估值", hasId: true },
+      { level: 2, text: "BrainHub", hasId: true },
+      { level: 2, text: "孤单 · 只有一条", hasId: true },
+    ]);
+    // 内容顺序保持
+    expect(blocks.map((b) => (b.kind === "paragraph" ? b.text : null)).filter(Boolean)).toEqual([
+      "定位内容",
+      "估值内容",
+      "BrainHub 内容",
+      "孤单内容",
+    ]);
+    // 锚点 id 不变(TOC 跳转有效)
+    const grouped = blocks.filter((b) => b.kind === "heading" && b.level === 3);
+    const sourceH2 = parseMarkdown(source).filter((b) => b.kind === "heading" && b.level === 2 && b.text.includes("估值"));
+    expect(grouped[1]?.kind === "heading" && sourceH2[0]?.kind === "heading" ? grouped[1].id : null).toBe(
+      sourceH2[0]?.kind === "heading" ? sourceH2[0].id : null,
+    );
+  });
+
+  test("只有一条的同前缀不拆父标题", () => {
+    const blocks = groupSectionsByPrefix(parseMarkdown(["## A · 一次", "内容"].join("\n")));
+    expect(blocks[0]).toMatchObject({ kind: "heading", level: 2, text: "A · 一次" });
   });
 });

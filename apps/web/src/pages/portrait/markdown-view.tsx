@@ -1,6 +1,6 @@
 import { InlineText } from "../../components/ui.js";
 import { Icon } from "../../components/icons.js";
-import { parseMarkdown, type MarkdownBlock } from "../../lib/markdown.js";
+import { parsePortraitMarkdown, type MarkdownBlock } from "../../lib/markdown.js";
 
 function alignOf(align: ReadonlyArray<"left" | "center" | "right">, index: number): "left" | "center" | "right" {
   return align[index] ?? "left";
@@ -100,7 +100,7 @@ function BlockView({ block }: { block: MarkdownBlock }) {
 }
 
 export function PortraitMarkdown({ source }: { source: string }) {
-  const blocks = parseMarkdown(source);
+  const blocks = parsePortraitMarkdown(source);
   if (blocks.length === 0) return null;
   return (
     <div className="portrait-prose">

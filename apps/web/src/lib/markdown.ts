@@ -57,6 +57,78 @@ export function extractToc(blocks: readonly MarkdownBlock[]): TocItem[] {
 }
 
 /**
+ * 正文聚合:连续的「## A · B」章节(连续 ≥2 条)收拢为
+ * 「## A」项目标题 + 「### B」子标题,锚点与内容顺序不变。
+ */
+export function groupSectionsByPrefix(blocks: readonly MarkdownBlock[]): MarkdownBlock[] {
+  const out: MarkdownBlock[] = [];
+  // run:正在聚合的同前缀章节;按"章节"为单位暂存,聚合与否只数章节数。
+  let run: {
+    prefix: string;
+    sections: Array<{ heading: MarkdownBlock; sub: MarkdownBlock | null; body: MarkdownBlock[] }>;
+  } | null = null;
+
+  const flushRun = (): void => {
+    if (!run) return;
+    const grouped = run.sections.length >= 2;
+    for (const [index, section] of run.sections.entries()) {
+      if (grouped) {
+        // 父标题每组只发一次,占用组首原锚点;组首自己的子标题换新锚点,内容一条不丢。
+        if (index === 0) {
+          const heading = section.heading;
+          if (heading.kind === "heading") out.push({ ...heading, text: run.prefix });
+        }
+        if (section.sub) out.push(section.sub);
+      } else {
+        out.push(section.heading);
+      }
+      for (const block of section.body) out.push(block);
+    }
+    run = null;
+  };
+
+  for (const block of blocks) {
+    if (block.kind === "heading" && block.level === 2) {
+      const prefix = sectionPrefix(block.text);
+      if (prefix !== null) {
+        const samePrefix = run !== null && run.prefix === prefix;
+        if (!samePrefix) flushRun();
+        const sub = block.text.slice(prefix.length).replace(/^[^\p{Letter}\p{Number}]+/u, "").trim();
+        run ??= { prefix, sections: [] };
+        run.sections.push({
+          heading: block,
+          sub: sub ? { ...block, level: 3, text: sub, ...(samePrefix ? {} : { id: `${block.id}-sub` }) } : null,
+          body: [],
+        });
+        continue;
+      }
+    }
+    if (block.kind === "heading") {
+      flushRun();
+      out.push(block);
+      continue;
+    }
+    // 非标题内容属于当前章节;不在聚合段时直接输出。
+    if (run) run.sections[run.sections.length - 1]?.body.push(block);
+    else out.push(block);
+  }
+  flushRun();
+  return out;
+}
+
+/** 「A · B」的前缀 A;没有「·」分隔的标题返回 null。 */
+function sectionPrefix(text: string): string | null {
+  const match = plainInline(text).match(/^(.{1,40}?)\s*·\s*\S/u);
+  const prefix = match?.[1]?.trim();
+  return prefix ? prefix : null;
+}
+
+/** 数字分身文档的统一解析入口:正文按项目前缀聚合,目录与渲染共用。 */
+export function parsePortraitMarkdown(source: string): MarkdownBlock[] {
+  return groupSectionsByPrefix(parseMarkdown(source));
+}
+
+/**
  * 「ashare-ledger · 定位」这类标题按前缀聚合:前缀出现两次以上时,
  * 前缀成为虚拟父项(跳到组内第一条),子项缩进一级——目录按项目归组。
  */

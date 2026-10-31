@@ -14,7 +14,7 @@ import { Skeleton } from "../components/skeleton.js";
 import { useToast } from "../components/toast.js";
 import { useDelayed } from "../components/use-delayed.js";
 import { variantName } from "../lib/format.js";
-import { extractToc, parseMarkdown } from "../lib/markdown.js";
+import { extractToc, parsePortraitMarkdown } from "../lib/markdown.js";
 import { settingsHref } from "../lib/route.js";
 import { countReadingChars, formatReadingCount, portraitEmptyCopy, writeClipboard } from "./portrait/logic.js";
 import { PortraitMarkdown } from "./portrait/markdown-view.js";
@@ -102,7 +102,7 @@ export function PortraitPage({ embedded = false }: { embedded?: boolean } = {}) 
   const ready = !loading && error === null && body !== null && loadedFor === variant;
   const content = ready && body ? body.content : "";
   const empty = ready && content.trim() === "";
-  const toc = useMemo(() => extractToc(parseMarkdown(content)), [content]);
+  const toc = useMemo(() => extractToc(parsePortraitMarkdown(content)), [content]);
   // 虚拟父项与组首子项共用锚点;高亮追踪只观察真实标题。
   const ids = useMemo(() => toc.filter((item) => !item.virtual).map((item) => item.id), [toc]);
   const [activeId, setActiveId] = useActiveHeading(ids);
