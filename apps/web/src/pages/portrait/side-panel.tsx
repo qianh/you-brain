@@ -50,7 +50,7 @@ export function PortraitSide({
                 {toc.map((item) => {
                   const current = item.id === activeId;
                   return (
-                    <li key={item.id}>
+                    <li key={item.virtual ? `${item.id}-v` : item.id}>
                       <a
                         href={`#${item.id}`}
                         data-level={item.level}

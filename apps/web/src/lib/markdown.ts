@@ -17,6 +17,8 @@ export interface TocItem {
   id: string;
   level: 1 | 2 | 3;
   text: string;
+  /** 「A · B」聚合出的虚拟父项:没有自己的锚点,点击跳到组内第一条。 */
+  virtual?: boolean;
 }
 
 const SAFE_HREF = /^(?:https?:\/\/|mailto:)/iu;
@@ -51,7 +53,45 @@ export function extractToc(blocks: readonly MarkdownBlock[]): TocItem[] {
     if (block.kind !== "heading") continue;
     items.push({ id: block.id, level: block.level, text: plainInline(block.text) });
   }
-  return items;
+  return groupTocByPrefix(items);
+}
+
+/**
+ * 「ashare-ledger · 定位」这类标题按前缀聚合:前缀出现两次以上时,
+ * 前缀成为虚拟父项(跳到组内第一条),子项缩进一级——目录按项目归组。
+ */
+function groupTocByPrefix(items: readonly TocItem[]): TocItem[] {
+  const counts = new Map<string, number>();
+  for (const item of items) {
+    const prefix = tocPrefix(item.text);
+    if (prefix !== null) counts.set(prefix, (counts.get(prefix) ?? 0) + 1);
+  }
+  const out: TocItem[] = [];
+  const emitted = new Set<string>();
+  for (const item of items) {
+    const prefix = tocPrefix(item.text);
+    if (prefix === null || (counts.get(prefix) ?? 0) < 2) {
+      out.push(item);
+      continue;
+    }
+    if (!emitted.has(prefix)) {
+      emitted.add(prefix);
+      out.push({ id: item.id, level: item.level, text: prefix, virtual: true });
+    }
+    out.push({
+      id: item.id,
+      level: (item.level === 3 ? 3 : item.level + 1) as 1 | 2 | 3,
+      text: item.text.slice(prefix.length).replace(/^[^\p{Letter}\p{Number}]+/u, "").trim() || item.text,
+    });
+  }
+  return out;
+}
+
+/** 「A · B」的前缀 A;没有「·」分隔的标题返回 null。 */
+function tocPrefix(text: string): string | null {
+  const match = text.match(/^(.{1,40}?)\s*·\s*\S/u);
+  const prefix = match?.[1]?.trim();
+  return prefix ? prefix : null;
 }
 
 export function shouldShowToc(items: readonly TocItem[]): boolean {

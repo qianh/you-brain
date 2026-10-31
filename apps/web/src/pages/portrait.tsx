@@ -103,7 +103,8 @@ export function PortraitPage({ embedded = false }: { embedded?: boolean } = {}) 
   const content = ready && body ? body.content : "";
   const empty = ready && content.trim() === "";
   const toc = useMemo(() => extractToc(parseMarkdown(content)), [content]);
-  const ids = useMemo(() => toc.map((item) => item.id), [toc]);
+  // 虚拟父项与组首子项共用锚点;高亮追踪只观察真实标题。
+  const ids = useMemo(() => toc.filter((item) => !item.virtual).map((item) => item.id), [toc]);
   const [activeId, setActiveId] = useActiveHeading(ids);
   const words = formatReadingCount(countReadingChars(content), language);
   const emptyCopy = portraitEmptyCopy({ consolidation: status?.consolidation, time: roles?.consolidation.time });

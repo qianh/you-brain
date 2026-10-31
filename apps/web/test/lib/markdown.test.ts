@@ -139,3 +139,22 @@ describe("parseMarkdown", () => {
     expect(JSON.stringify(blocks)).not.toContain('"kind":"link"');
   });
 });
+
+describe("extractToc 按前缀聚合", () => {
+  const blocks = parseMarkdown(
+    ["# 项目决定", "", "## ashare-ledger · 定位", "内容a", "", "## ashare-ledger · 估值", "内容b", "", "## GM2主订单", "内容c", "", "## 单独 · 只出现一次", "内容d"].join("\n"),
+  );
+
+  test("出现两次以上的前缀成为虚拟父项,子项缩进", () => {
+    const toc = extractToc(blocks);
+    expect(toc[0]).toEqual({ id: expect.any(String), level: 1, text: "项目决定" });
+    // ashare-ledger 父项(虚拟,锚到第一条)
+    expect(toc[1]).toMatchObject({ text: "ashare-ledger", level: 2, virtual: true });
+    expect(toc[2]).toMatchObject({ text: "定位", level: 3 });
+    expect(toc[3]).toMatchObject({ text: "估值", level: 3 });
+    expect(toc[1]?.id).toBe(toc[2]?.id);
+    // 单条与无分隔的不聚合
+    expect(toc[4]).toMatchObject({ text: "GM2主订单", level: 2 });
+    expect(toc[5]).toMatchObject({ text: "单独 · 只出现一次", level: 2 });
+  });
+});
