@@ -113,20 +113,25 @@ export function PortraitPage({ embedded = false }: { embedded?: boolean } = {}) 
     push({ message: ok ? success : t("portraitCopyFailed"), tone: ok ? "success" : "danger" });
   }
 
+  const variantSwitcher = (
+    <Segmented
+      label={t("portrait")}
+      value={variant}
+      options={variants.map((item) => ({ value: item.id, label: variantName(item.id, language) }))}
+      onChange={setVariant}
+    />
+  );
+
   const pageBody = (
     <div className="portrait-page">
-        {embedded ? null : (
+        {/* 独立路由用完整页头;嵌入设置页时区块标题在外层,这里只补变体切换器。 */}
+        {embedded ? (
+          <div className="portrait-embedded-head">{variantSwitcher}</div>
+        ) : (
         <PageHeader
           title={t("portrait")}
           description={t("portraitLead")}
-          actions={
-            <Segmented
-              label={t("portrait")}
-              value={variant}
-              options={variants.map((item) => ({ value: item.id, label: variantName(item.id, language) }))}
-              onChange={setVariant}
-            />
-          }
+          actions={variantSwitcher}
         />
         )}
         {error ? (

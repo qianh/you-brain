@@ -513,3 +513,8 @@
 @media (prefers-reduced-motion: reduce) {
   .portrait-side-fold > summary svg { transition: none; }
 }
+
+.portrait-embedded-head {
+  display: flex;
+  align-items: center;
+}
