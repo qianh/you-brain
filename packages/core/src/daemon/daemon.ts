@@ -189,7 +189,7 @@ import {
 } from "./clock.js";
 import { ACTIVITY_EPOCH, decideDelivery } from "../reminders/delivery.js";
 import { allocateCopied, appendCopied } from "./events.js";
-import { moveStateAside, signOutGoogle } from "./account-switch.js";
+import { moveStateAside, revokeStoredGrant, takeGoogleCredential } from "./account-switch.js";
 import { openGoogleDrive } from "./google.js";
 import { acquireDaemonLock } from "./lock.js";
 import { createStartupLog, type StartupLog } from "./startup-log.js";
@@ -216,7 +216,7 @@ import {
   rememberWebInbox,
 } from "../web-sessions/index.js";
 import { frontmatter, parseWebSession } from "../web-sessions/parse.js";
-import { describeSyncFailure } from "./sync-error.js";
+import { describeSyncFailure, isDriveUnreachable } from "./sync-error.js";
 import type { SecretStore } from "../auth/index.js";
 
 const APP_VERSION = "0.1.0";
@@ -330,6 +330,10 @@ function inboxPendingEntry(file: InboxPendingFile): DriveEntry {
 
 /** Cursor holding the Google account this device's local data belongs to, set at sign-out. */
 const DRIVE_ACCOUNT_CURSOR = "account.drive";
+/** How long a reachability check waits before Drive counts as unreachable. */
+const DRIVE_PROBE_MS = 5_000;
+/** A failed sync does not probe again until this long after the last check. */
+const DRIVE_PROBE_GAP_MS = 15_000;
 /** Stop proceeds even if Drive or the model probe is still hanging. */
 const BACKGROUND_STOP_MS = 3_000;
 
@@ -629,6 +633,8 @@ export class YouBrainDaemon {
   #store: SqliteStore | null = null;
   #drive: DrivePort | null = null;
   #driveReachable = false;
+  #driveProbe: Promise<void> | null = null;
+  #driveProbedAt = 0;
   #sync: ProtocolSync | null = null;
   #log: EventLog | null = null;
   #search: SearchService | null = null;
@@ -676,6 +682,8 @@ export class YouBrainDaemon {
   #driveKnown = false;
   /** Set while an interactive Google login waits for the browser. Only one runs at a time. */
   #loginFlow: Promise<string> | null = null;
+  /** In-flight revocation at Google. Sign-out does not wait for it. */
+  #revokeJob: Promise<void> | null = null;
   /** 无界面登录时拿到的授权链接，等 #googleLogin 返回时一并交给界面。 */
   #pendingAuthorization: { url: string; tunnel: string | null } | undefined;
   /** Set once a switch has signed out. Stop then moves the state database aside. */
@@ -719,6 +727,9 @@ export class YouBrainDaemon {
   #lastSyncError: { message: string; at: string } | null = null;
   #statusCache: { at: number; value: StatusResponse } | null = null;
   #statusInFlight: Promise<StatusResponse> | null = null;
+  /** Bumps when account state changes, so a status read already in flight cannot refill a stale cache. */
+  #statusEpoch = 0;
+  #statusInFlightEpoch = 0;
   #consolidationCache: { at: number; value: StatusResponse["consolidation"] } | null = null;
   /** Config push failures per file. A success clears `#lastSyncError` only when it is this push's error. */
   #configPushErrors: Record<"shared" | "roles", { message: string; at: string } | null> = {
@@ -923,15 +934,16 @@ export class YouBrainDaemon {
       if (this.#drive && this.#store) {
         await this.#connectDrive(log, consent, managedStatePath);
       } else {
-        this.#driveReachable = false;
+        this.#setDriveReachable(false);
       }
     } catch (error) {
-      this.#driveReachable = false;
+      this.#setDriveReachable(false);
       const message = error instanceof Error ? error.message : "failed";
       console.error(`startup: background ${message}`);
     } finally {
       this.#driveKnown = true;
-      // Pages loaded during startup hold the "unknown" Drive state until told otherwise.
+      // The status read during startup cached `reachable: null`. Drop it before telling pages to refresh.
+      this.#forgetStatus();
       this.changes.publish("status", this.#clock.now().toISOString());
     }
     if (this.#stopped) return;
@@ -1029,16 +1041,15 @@ export class YouBrainDaemon {
       managedStatePath,
     });
     const sync = this.#sync;
-    if (!sync) {
-      this.#driveReachable = false;
-    } else {
+    if (sync) {
       try {
         await log.time("syncRegister", () =>
           sync.register({ lastActiveAt: this.#activityForDevice() }),
         );
-        if (!this.#stopped) this.#driveReachable = true;
+        if (!this.#stopped) this.#setDriveReachable(true);
       } catch {
-        this.#driveReachable = false;
+        // Registration writes protocol and device files. Check Drive itself before saying it is down.
+        if (!this.#stopped) await this.#confirmDrive();
       }
       if (!this.#stopped) this.#rememberDevice();
     }
@@ -1072,6 +1083,7 @@ export class YouBrainDaemon {
       await Promise.all(jobs);
       await this.#chain;
     }
+    if (this.#revokeJob) await this.#revokeJob;
     await this.#output?.whenIdle();
   }
 
@@ -1083,6 +1095,10 @@ export class YouBrainDaemon {
   async #stopBody(): Promise<void> {
     this.#stopped = true;
     this.#abort.abort();
+    // Revocation is best effort and must not hold the process. The abort above cancels it.
+    if (this.#revokeJob) {
+      await Promise.race([this.#revokeJob, delay(BACKGROUND_STOP_MS)]);
+    }
     this.#deck?.stop();
     this.#webhookTimer?.cancel();
     this.#webhookTimer = null;
@@ -1241,9 +1257,9 @@ export class YouBrainDaemon {
       if (this.#sync && intervalDue(this.#lastFlush, now, INTERVALS.flushMs)) {
         try {
           await this.#sync.flush();
-          this.#driveReachable = true;
-        } catch {
-          this.#driveReachable = false;
+          this.#setDriveReachable(true);
+        } catch (error) {
+          await this.#reviewDrive(error);
         }
         this.#lastFlush = this.#clock.nowMs();
       }
@@ -1261,6 +1277,7 @@ export class YouBrainDaemon {
           if (pulled.applied > 0) this.#scheduleWebhook();
         } catch (error) {
           this.#rememberSyncFailure(error);
+          await this.#reviewDrive(error);
         }
         this.#restoreLocalActivity();
         this.#lastPull = this.#clock.nowMs();
@@ -2478,9 +2495,9 @@ export class YouBrainDaemon {
     if (this.#sync) {
       try {
         await this.#sync.heartbeat({ lastActiveAt: this.#activityForDevice() });
-        this.#driveReachable = true;
-      } catch {
-        this.#driveReachable = false;
+        this.#setDriveReachable(true);
+      } catch (error) {
+        await this.#reviewDrive(error);
       }
       this.#retryConfigPush();
     }
@@ -2573,7 +2590,7 @@ export class YouBrainDaemon {
   async #openDrive(): Promise<void> {
     if (this.#options.drive !== undefined) {
       this.#drive = this.#options.drive;
-      this.#driveReachable = this.#options.drive !== null;
+      this.#setDriveReachable(this.#options.drive !== null);
       return;
     }
     const opened = await openGoogleDrive({
@@ -2586,7 +2603,7 @@ export class YouBrainDaemon {
     });
     this.#drive = opened?.drive ?? null;
     if (opened) this.#local = opened.config;
-    this.#driveReachable = opened !== null;
+    this.#setDriveReachable(opened !== null);
   }
 
   async #mountSearch(): Promise<void> {
@@ -2765,6 +2782,7 @@ export class YouBrainDaemon {
     }
     this.#local = opened.config;
     this.#drive = opened.drive;
+    this.#forgetStatus();
     try {
       // Same portrait paths as start(). The consent store is file-backed, so a new instance is equivalent.
       await this.#connectDrive(
@@ -2773,7 +2791,6 @@ export class YouBrainDaemon {
         join(this.#paths.dataDir, "managed-blocks.json"),
       );
     } catch (error) {
-      this.#driveReachable = false;
       console.error(`login: drive ${error instanceof Error ? error.message : "failed"}`);
     }
     this.changes.publish("status");
@@ -2794,15 +2811,41 @@ export class YouBrainDaemon {
     );
   }
 
-  /** Deletes the stored grant and the Drive binding in the config file. Local data stays. */
-  async #dropGrant(): Promise<boolean> {
-    const revoked = await signOutGoogle({
-      secrets: this.#secretStore(),
-      ...(this.#options.revokeFetch ? { fetcher: this.#options.revokeFetch } : {}),
-    });
+  /**
+   * Deletes the stored grant and the Drive binding in the config file. Local data stays.
+   * Google is told afterwards and does not delay the caller.
+   */
+  async #dropGrant(): Promise<void> {
+    const serialized = await takeGoogleCredential(this.#secretStore());
     this.#local = clearGoogleConnection(this.#local);
+    this.#forgetStatus();
     await writeLocalConfig(this.#configFile, this.#local);
-    return revoked;
+    this.#revokeInBackground(serialized);
+  }
+
+  /** Drops a cached status so the next read sees an account or Drive change immediately. */
+  #forgetStatus(): void {
+    this.#statusEpoch += 1;
+    this.#statusCache = null;
+  }
+
+  #setDriveReachable(reachable: boolean): void {
+    if (this.#driveReachable === reachable) return;
+    this.#driveReachable = reachable;
+    this.#forgetStatus();
+  }
+
+  /** Tells Google to revoke a grant that is already gone from this device. */
+  #revokeInBackground(serialized: string | null): void {
+    const job = revokeStoredGrant({
+      serialized,
+      signal: this.#abort.signal,
+      ...(this.#options.revokeFetch ? { fetcher: this.#options.revokeFetch } : {}),
+    }).then(() => undefined);
+    this.#revokeJob = job;
+    void job.finally(() => {
+      if (this.#revokeJob === job) this.#revokeJob = null;
+    });
   }
 
   /** Stops every Drive-backed service. The next login builds them again. */
@@ -2813,14 +2856,14 @@ export class YouBrainDaemon {
     this.#search = null;
     this.#searchSemantic = null;
     this.#drive = null;
-    this.#driveReachable = false;
+    this.#setDriveReachable(false);
   }
 
   /**
    * Signs out of Google and keeps all local data. The account is remembered so a later
    * login can only resume with the same one. Returns null when nobody was signed in.
    */
-  async #signOut(): Promise<{ email: string; revoked: boolean } | null> {
+  async #signOut(): Promise<{ email: string } | null> {
     if (this.#loginFlow) {
       throw new HttpError(409, "LOGIN_IN_PROGRESS", "登录进行中，请先在浏览器完成或取消授权");
     }
@@ -2834,9 +2877,9 @@ export class YouBrainDaemon {
       if (!this.#drive && account.email === "") return null;
       this.#unmountDrive();
       if (account.permissionId) store.setCursor(DRIVE_ACCOUNT_CURSOR, account.permissionId);
-      const revoked = await this.#dropGrant();
+      await this.#dropGrant();
       this.changes.publish("status");
-      return { email: account.email, revoked };
+      return { email: account.email };
     });
   }
 
@@ -2844,12 +2887,7 @@ export class YouBrainDaemon {
     const done = await this.#signOut();
     if (!done) return { ok: true, message: "当前没有登录的 Google 账号" };
     const who = done.email ? `已退出 ${done.email}` : "已退出";
-    return {
-      ok: true,
-      message: done.revoked
-        ? `${who}，本机数据已保留`
-        : `${who}，本机数据已保留；未能通知 Google 撤销授权，可在 Google 账号的安全设置里手动移除`,
-    };
+    return { ok: true, message: `${who}，本机数据已保留` };
   }
 
   /**
@@ -3099,16 +3137,23 @@ export class YouBrainDaemon {
         if (this.#statusCache && now - this.#statusCache.at < STATUS_CACHE_MS) {
           return Promise.resolve(this.#statusCache.value);
         }
-        if (this.#statusInFlight) return this.#statusInFlight;
-        this.#statusInFlight = this.#status()
+        if (this.#statusInFlight && this.#statusEpoch === this.#statusInFlightEpoch) {
+          return this.#statusInFlight;
+        }
+        const epoch = this.#statusEpoch;
+        const flight = this.#status()
           .then((value) => {
-            this.#statusCache = { at: this.#clock.nowMs(), value };
+            if (epoch === this.#statusEpoch) {
+              this.#statusCache = { at: this.#clock.nowMs(), value };
+            }
             return value;
           })
           .finally(() => {
-            this.#statusInFlight = null;
+            if (this.#statusInFlight === flight) this.#statusInFlight = null;
           });
-        return this.#statusInFlight;
+        this.#statusInFlight = flight;
+        this.#statusInFlightEpoch = epoch;
+        return flight;
       },
       sync: () => this.#syncNow(),
       upload: (input) => this.#uploadNow(input),
@@ -3300,6 +3345,7 @@ export class YouBrainDaemon {
         if (pulled && pulled.applied > 0) this.#scheduleWebhook();
       } catch (error) {
         this.#rememberSyncFailure(error);
+        await this.#reviewDrive(error);
         throw new Error(this.#lastSyncError?.message ?? "同步失败");
       }
     });
@@ -3308,16 +3354,58 @@ export class YouBrainDaemon {
 
   #rememberSyncSuccess(): void {
     this.#lastSyncAt = this.#clock.now().toISOString();
-    this.#driveReachable = true;
+    this.#setDriveReachable(true);
     this.#lastSyncError = null;
+    this.#forgetStatus();
   }
 
   #rememberSyncFailure(error: unknown): void {
-    this.#driveReachable = false;
     this.#lastSyncError = {
       message: describeSyncFailure(error),
       at: this.#clock.now().toISOString(),
     };
+    this.#forgetStatus();
+  }
+
+  /**
+   * A sync or upload failure only changes the reachable flag when it looks like
+   * Drive itself is unreachable, and a direct check then fails too.
+   */
+  async #reviewDrive(error: unknown): Promise<void> {
+    if (!isDriveUnreachable(error)) return;
+    await this.#confirmDrive();
+  }
+
+  /** One light Drive call. This is the reachable flag, not the sync result. */
+  async #confirmDrive(): Promise<void> {
+    const drive = this.#drive;
+    if (!drive) {
+      this.#setDriveReachable(false);
+      return;
+    }
+    const now = this.#clock.nowMs();
+    if (this.#driveProbe) return this.#driveProbe;
+    if (this.#driveProbedAt !== 0 && now - this.#driveProbedAt < DRIVE_PROBE_GAP_MS) return;
+    this.#driveProbedAt = now;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const job = Promise.race([
+      drive.startPageToken(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("drive probe timed out")), DRIVE_PROBE_MS);
+      }),
+    ]).then(
+      () => {
+        if (this.#drive === drive) this.#setDriveReachable(true);
+      },
+      () => {
+        if (this.#drive === drive) this.#setDriveReachable(false);
+      },
+    );
+    this.#driveProbe = job.finally(() => {
+      if (timer) clearTimeout(timer);
+      if (this.#driveProbe === job) this.#driveProbe = null;
+    });
+    return this.#driveProbe;
   }
 
   async #uploadNow(input: UploadActionInput): Promise<UploadActionResult> {

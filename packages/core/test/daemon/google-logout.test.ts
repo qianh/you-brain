@@ -46,17 +46,41 @@ describe("Google sign-out and account switch", () => {
     expect(existsSync(join(h.dirs.dataDir, "state.sqlite"))).toBe(true);
   });
 
-  it("still signs out when Google cannot be reached, and says so", async () => {
+  it("still signs out when Google cannot be reached", async () => {
     const h = await harness({ revokeFails: true });
     await login(h, "john@example.com", "perm-john");
 
     const response = await post(h.daemon, "/api/actions/google-logout");
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { ok: boolean; message: string };
-    expect(body.message).toContain("已退出 john@example.com");
-    expect(body.message).toContain("未能通知 Google 撤销授权");
+    expect(await response.json()).toEqual({
+      ok: true,
+      message: "已退出 john@example.com，本机数据已保留",
+    });
     expect(await h.secrets.get()).toBeNull();
     expect((await readStatus(h.daemon)).drive.accountEmail).toBeNull();
+    await h.daemon.settled();
+    expect(h.revoked).toEqual(["token=refresh-1"]);
+  });
+
+  it("returns once the local grant is gone and does not wait for Google", async () => {
+    const h = await harness({ revokeHangs: true });
+    await login(h, "john@example.com", "perm-john");
+
+    const started = Date.now();
+    const response = await post(h.daemon, "/api/actions/google-logout");
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      message: "已退出 john@example.com，本机数据已保留",
+    });
+    expect(await h.secrets.get()).toBeNull();
+    expect((await readStatus(h.daemon)).drive.accountEmail).toBeNull();
+    expect(h.revoked).toEqual([]);
+
+    h.releaseRevoke();
+    await h.daemon.settled();
+    expect(h.revoked).toEqual(["token=refresh-1"]);
   });
 
   it("reports nothing to do when nobody is signed in", async () => {
@@ -142,17 +166,21 @@ interface Harness {
   drive: MemoryDrive;
   secrets: MemorySecretStore;
   revoked: string[];
+  releaseRevoke(): void;
   script(step: (options: OpenGoogleDriveOptions) => Promise<Opened>): void;
   called(): Promise<void>;
 }
 
-async function harness(options: { revokeFails?: boolean; dirs?: DaemonDirs } = {}): Promise<Harness> {
+async function harness(
+  options: { revokeFails?: boolean; revokeHangs?: boolean; dirs?: DaemonDirs } = {},
+): Promise<Harness> {
   const dirs = options.dirs ?? (await makeDaemonDirs("you-brain-google-logout-"));
   if (!options.dirs) roots.push(dirs.root);
   const clock = testClock();
   const drive = new MemoryDrive({ now: () => clock.now() });
   const secrets = new MemorySecretStore(null);
   const revoked: string[] = [];
+  let releaseRevoke = (): void => undefined;
   let grants = 0;
   let step: ((options: OpenGoogleDriveOptions) => Promise<Opened>) | null = null;
   let firstCall = deferred<void>();
@@ -167,8 +195,27 @@ async function harness(options: { revokeFails?: boolean; dirs?: DaemonDirs } = {
     return result;
   };
   const revokeFetch = ((_url: unknown, init?: RequestInit) => {
+    const body = String(init?.body);
+    if (options.revokeHangs) {
+      return new Promise<Response>((resolve, reject) => {
+        let settled = false;
+        const finish = (error?: unknown) => {
+          if (settled) return;
+          settled = true;
+          if (error) reject(error instanceof Error ? error : new Error("revocation aborted"));
+          else {
+            revoked.push(body);
+            resolve(new Response("{}", { status: 200 }));
+          }
+        };
+        releaseRevoke = () => finish();
+        const signal = init?.signal;
+        if (signal?.aborted) finish(signal.reason);
+        else signal?.addEventListener("abort", () => finish(signal.reason), { once: true });
+      });
+    }
+    revoked.push(body);
     if (options.revokeFails) return Promise.reject(new Error("offline"));
-    revoked.push(String(init?.body));
     return Promise.resolve(new Response("{}", { status: 200 }));
   }) as unknown as typeof fetch;
   const daemon = await startDaemon({
@@ -195,6 +242,7 @@ async function harness(options: { revokeFails?: boolean; dirs?: DaemonDirs } = {
     drive,
     secrets,
     revoked,
+    releaseRevoke: () => releaseRevoke(),
     script: (next) => {
       step = next;
       firstCall = deferred<void>();

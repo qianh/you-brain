@@ -87,6 +87,18 @@ function clip(text: string): string {
   return trimmed === "" ? "同步失败" : trimmed;
 }
 
+/**
+ * True when this failure means Google Drive itself cannot be reached: the
+ * connection failed, the call timed out, or the grant was rejected. A conflict,
+ * a bad cursor, or any other sync problem is not one of these.
+ */
+export function isDriveUnreachable(error: unknown): boolean {
+  const message = errorText(error);
+  const status = httpStatus(error);
+  const codes = errorCodes(error);
+  return isAuth(error, message, status) || isTimeout(error, message, codes) || isNetwork(message, codes);
+}
+
 /** Short Chinese copy for a failed pull. At most 200 characters, with secrets removed. */
 export function describeSyncFailure(error: unknown): string {
   const message = errorText(error);

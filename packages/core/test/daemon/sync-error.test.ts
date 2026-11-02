@@ -6,7 +6,7 @@ import { YouBrainError } from "../../src/domain/errors.js";
 import type { DrivePort } from "../../src/drive/drive-port.js";
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
 import { startDaemon, type YouBrainDaemon } from "../../src/daemon/daemon.js";
-import { describeSyncFailure } from "../../src/daemon/sync-error.js";
+import { describeSyncFailure, isDriveUnreachable } from "../../src/daemon/sync-error.js";
 import { makeDaemonDirs, readStatus, testClock, throwingEmbedder, type DaemonDirs } from "./helpers.js";
 
 const SECRET = "ya29.SUPERSECRET";
@@ -54,6 +54,14 @@ describe("describeSyncFailure", () => {
     expect(describeSyncFailure(new Error("drive down"))).toBe("同步失败");
     expect(describeSyncFailure("nope")).toBe("同步失败");
   });
+
+  it("treats only connection, timeout, and auth failures as Drive being unreachable", () => {
+    expect(isDriveUnreachable(Object.assign(new Error("hang"), { code: "ETIMEDOUT" }))).toBe(true);
+    expect(isDriveUnreachable(Object.assign(new Error("no route"), { code: "ENOTFOUND" }))).toBe(true);
+    expect(isDriveUnreachable(Object.assign(new Error("denied"), { response: { status: 401 } }))).toBe(true);
+    expect(isDriveUnreachable(new Error("Invalid pageToken"))).toBe(false);
+    expect(isDriveUnreachable(new Error("drive down"))).toBe(false);
+  });
 });
 
 describe("daemon sync error", () => {
@@ -81,7 +89,7 @@ describe("daemon sync error", () => {
     expect(failed.sync.lastError).not.toContain(SECRET);
     expect(failed.sync.lastError).not.toContain("?");
     expect(failed.sync.lastErrorAt).toBe(clock.now().toISOString());
-    expect(failed.drive.reachable).toBe(false);
+    expect(failed.drive.reachable).toBe(true);
 
     failPull = false;
     const restored = await fetch(`${daemon.baseUrl}/api/actions/sync`, {
@@ -101,7 +109,7 @@ describe("daemon sync error", () => {
     const polled = await readStatus(daemon);
     expect(polled.sync.lastError?.startsWith("同步失败：拉取没有完成")).toBe(true);
     expect(polled.sync.lastError).not.toContain(SECRET);
-    expect(polled.drive.reachable).toBe(false);
+    expect(polled.drive.reachable).toBe(true);
 
     failPull = false;
     await clock.advance(30_000);
@@ -118,16 +126,36 @@ describe("daemon sync error", () => {
     expect(pulled.sync.lastErrorAt).toBeNull();
     expect(pulled.drive.reachable).toBe(true);
   }, 20_000);
+
+  it("marks Drive unreachable when a sync failure is a connection failure and Drive does not answer", async () => {
+    const dirs = await trackDirs("you-brain-sync-offline-");
+    const clock = testClock();
+    let offline = false;
+    const drive = flakyDrive(new MemoryDrive({ now: () => clock.now() }), () => offline, true);
+    const daemon = await startTracked(dirs, drive, clock);
+    await daemon.settled();
+    expect((await readStatus(daemon)).drive.reachable).toBe(true);
+
+    offline = true;
+    const denied = await fetch(`${daemon.baseUrl}/api/actions/sync`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    expect(denied.ok).toBe(false);
+    expect((await readStatus(daemon)).drive.reachable).toBe(false);
+  });
 });
 
-function flakyDrive(inner: MemoryDrive, fail: () => boolean): DrivePort {
+function flakyDrive(inner: MemoryDrive, fail: () => boolean, disconnect = false): DrivePort {
   return new Proxy(inner, {
     get(target, property, receiver) {
       const value = Reflect.get(target, property, receiver);
       if (typeof value !== "function") return value;
       return (...args: unknown[]) => {
-        if (fail() && (property === "list" || property === "changes")) {
-          return Promise.reject(new Error(SENSITIVE));
+        if (fail() && (property === "list" || property === "changes" || (disconnect && property === "startPageToken"))) {
+          const error = new Error(SENSITIVE);
+          if (disconnect) Object.assign(error, { code: "ENOTFOUND" });
+          return Promise.reject(error);
         }
         return (value as (...input: unknown[]) => unknown).apply(target, args);
       };

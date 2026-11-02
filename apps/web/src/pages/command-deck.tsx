@@ -40,6 +40,7 @@ export function CommandDeckPage() {
   const [masterModelDraft, setMasterModelDraft] = useState("");
   const [error, setError] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const activeIdRef = useRef<string | null>(null);
   const revisionRef = useRef(0);
 
@@ -149,6 +150,25 @@ export function CommandDeckPage() {
     }
   }, [client, describeError, draft, loadAll, sending, toast]);
 
+  const saveMaster = useCallback(
+    async (patch: { masterProvider?: string; masterModel?: string }) => {
+      try {
+        const response = await client.writeDeckConfig(patch);
+        setMasterConfig(response.config);
+        setMasterModelDraft(response.config.masterModel ?? "");
+      } catch (caught) {
+        toast.push({ message: describeError(caught), tone: "danger" });
+      }
+    },
+    [client, describeError, toast],
+  );
+
+  const startNew = useCallback(() => {
+    setActiveId(null);
+    setDraft("");
+    inputRef.current?.focus();
+  }, []);
+
   const executorSummary = useMemo(() => {
     if (state.executors.length === 0) return "";
     const available = state.executors.filter((executor) => executor.available).length;
@@ -178,62 +198,10 @@ export function CommandDeckPage() {
       <div className="deck">
         <aside className="deck-side">
           <div className="deck-side-head">
-            <button
-              type="button"
-              className={`btn${activeId === null ? " primary" : ""}`}
-              onClick={() => setActiveId(null)}
-            >
+            <button type="button" className="btn" onClick={startNew}>
               <Icon name="plus" /> {t("commandDeckNew")}
             </button>
           </div>
-          <DeckSection title={t("commandDeckMaster")}>
-            <Select
-              label={t("commandDeckMaster")}
-              value={masterConfig.masterProvider ?? ""}
-              onChange={(value) => {
-                void (async () => {
-                  try {
-                    const response = await client.writeDeckConfig({ masterProvider: value });
-                    setMasterConfig(response.config);
-                    toast.push({ message: t("commandDeckMasterSaved"), tone: "success" });
-                  } catch (caught) {
-                    toast.push({ message: describeError(caught), tone: "danger" });
-                  }
-                })();
-              }}
-              options={[
-                { value: "", label: t("commandDeckMasterAuto") },
-                ...state.executors
-                  .filter((executor) => executor.kind === "cli-agent")
-                  .map((executor) => ({
-                    value: executor.id,
-                    label: `${executor.id}${executor.available ? "" : "（未就绪）"}`,
-                  })),
-              ]}
-            />
-            <input
-              className="deck-master-model"
-              value={masterModelDraft}
-              placeholder={t("commandDeckMasterModel")}
-              onChange={(event) => setMasterModelDraft(event.target.value)}
-              onBlur={() => {
-                void (async () => {
-                  if (masterModelDraft.trim() === (masterConfig.masterModel ?? "")) return;
-                  try {
-                    const response = await client.writeDeckConfig({ masterModel: masterModelDraft });
-                    setMasterConfig(response.config);
-                    setMasterModelDraft(response.config.masterModel ?? "");
-                    toast.push({ message: t("commandDeckMasterSaved"), tone: "success" });
-                  } catch (caught) {
-                    toast.push({ message: describeError(caught), tone: "danger" });
-                  }
-                })();
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") event.currentTarget.blur();
-              }}
-            />
-          </DeckSection>
           <DeckSection title={t("commandDeckThreads")}>
             {state.conversations.length === 0 ? (
               <p className="deck-side-empty">{t("commandDeckThreadsEmpty")}</p>
@@ -348,19 +316,55 @@ export function CommandDeckPage() {
                   </div>
                 ) : null}
               </div>
-              <footer className="deck-composer">
-                <textarea
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      void send();
-                    }
+            </>
+          )}
+          <footer className="deck-composer">
+            <div className="deck-composer-box">
+              <textarea
+                ref={inputRef}
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    void send();
+                  }
+                }}
+                placeholder={t("commandDeckInputPlaceholder")}
+                rows={2}
+                disabled={sending}
+              />
+              <div className="deck-composer-bar">
+                <input
+                  className="deck-master-model"
+                  value={masterModelDraft}
+                  placeholder={t("commandDeckMasterModel")}
+                  title={t("commandDeckMasterModel")}
+                  aria-label={t("commandDeckMasterModel")}
+                  onChange={(event) => setMasterModelDraft(event.target.value)}
+                  onBlur={() => {
+                    if (masterModelDraft.trim() === (masterConfig.masterModel ?? "")) return;
+                    void saveMaster({ masterModel: masterModelDraft });
                   }}
-                  placeholder={t("commandDeckInputPlaceholder")}
-                  rows={2}
-                  disabled={sending}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                  }}
+                />
+                <Select
+                  label={t("commandDeckMaster")}
+                  value={masterConfig.masterProvider ?? ""}
+                  onChange={(value) => {
+                    void saveMaster({ masterProvider: value });
+                  }}
+                  options={[
+                    { value: "", label: t("commandDeckMasterAuto") },
+                    ...state.executors
+                      .filter((executor) => executor.kind === "cli-agent")
+                      .map((executor) => ({
+                        value: executor.id,
+                        label: `${executor.id}${executor.available ? "" : "（未就绪）"}`,
+                      })),
+                  ]}
                 />
                 <button
                   type="button"
@@ -370,9 +374,9 @@ export function CommandDeckPage() {
                 >
                   {t("commandDeckSend")}
                 </button>
-              </footer>
-            </>
-          )}
+              </div>
+            </div>
+          </footer>
         </section>
       </div>
       <ConfirmDialog
