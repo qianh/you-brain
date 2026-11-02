@@ -10,6 +10,7 @@ import { parseCursorSession } from "./cursor.js";
 import { parseGeminiSession } from "./gemini.js";
 import { globFiles } from "./glob.js";
 import { parseGrokSession } from "./grok.js";
+import { parseGrokBotBlob, grokBotAdapter } from "./grok-bot.js";
 import { parsePiSession } from "./pi.js";
 import { getAdapter } from "./registry.js";
 import { parseT3Session } from "./t3.js";
@@ -27,6 +28,14 @@ export { parseCodexSession, codexAdapter } from "./codex.js";
 export { parseCursorSession, cursorAdapter } from "./cursor.js";
 export { parseGeminiSession, geminiAdapter } from "./gemini.js";
 export { parseGrokSession, grokAdapter } from "./grok.js";
+export {
+  parseGrokBotBlob,
+  grokBotAdapter,
+  grokBotPersistenceRoot,
+  grokBotTurns,
+  readGrokBotTranscripts,
+  type GrokBotTurn,
+} from "./grok-bot.js";
 export { parsePiSession, piAdapter } from "./pi.js";
 export { parseT3Session, t3Adapter, isImportedThread, parseT3Path } from "./t3.js";
 export { parseZcodeSession, zcodeAdapter, parseZcodePath } from "./zcode.js";
@@ -128,6 +137,8 @@ export async function discoverSessions(
     pi: emptyStatus(),
     t3: emptyStatus(),
     zcode: emptyStatus(),
+    grokBot: emptyStatus(),
+    deck: emptyStatus(),
   };
   const output: DiscoveryResult = {
     sessions: [],
@@ -332,6 +343,26 @@ export async function discoverSessions(
     );
   }
 
+  if (!stopped() && options.sources.includes("grok-bot")) {
+    // Grok Bot 的转录是每个 blob 一份线程：适配器自己列文件，不走 glob。
+    const paths = visible(
+      "grok-bot",
+      await incrementalFiles(
+        await rowPaths("grok-bot", options.paths.grokBot ?? []),
+        options.modifiedAfter?.["grok-bot"],
+        includePaths,
+      ),
+    );
+    status.grokBot.discovered = paths.length;
+    work.push(
+      ...paths.map((path) => ({
+        name: "grokBot" as const,
+        path,
+        parse: () => parseGrokBotBlob(path, parserOptions),
+      })),
+    );
+  }
+
   const retainSessions = options.retainSessions !== false;
   for (const item of work) {
     if (stopped()) break;
@@ -395,5 +426,10 @@ export async function parseSourceFile(
       return parseT3Session(path, options);
     case "zcode":
       return parseZcodeSession(path, options);
+    case "grok-bot":
+      return parseGrokBotBlob(path, options);
+    case "deck":
+      // 指挥台会话是程序内直产的，没有可扫描的文件。
+      return { session: null, skippedSubagent: false, malformedLines: 0 };
   }
 }

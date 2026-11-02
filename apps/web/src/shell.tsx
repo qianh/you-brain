@@ -21,6 +21,7 @@ import { useRoute } from "./router.js";
 import type { MessageKey } from "./i18n/messages.js";
 
 const TABS: ReadonlyArray<{ key: MessageKey; href: string; icon: IconName }> = [
+  { key: "navDeck", href: "/deck", icon: "command" },
   { key: "navToday", href: "/today", icon: "calendar" },
   { key: "topicsBook", href: "/topics", icon: "book" },
   { key: "navKnowledge", href: "/knowledge", icon: "book-open" },
@@ -72,6 +73,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const preset = requested === "palette" ? (readQuery(href, "pq") ?? "") : "";
   const settings = location.pathname === "/settings";
   const knowledge = location.pathname === "/knowledge";
+  const deck = location.pathname === "/deck";
   const overlayTitlebar = typeof window !== "undefined" && window.__TAURI__ !== undefined && /Mac/.test(navigator.platform);
   const mod = shortcutMod(typeof navigator === "undefined" ? "" : navigator.platform);
   const chord = (key: string): string => `${modLabel(mod)}${mod === "meta" ? "" : "+"}${key}`;
@@ -133,7 +135,7 @@ export function Shell({ children }: { children: ReactNode }) {
   const kind = shellCapsuleKind({ loading, status });
 
   return (
-    <div className="app">
+    <div className={deck ? "app app-deck" : "app"}>
       <a className="skip" href="#content">
         {t("skip")}
       </a>
@@ -205,7 +207,7 @@ export function Shell({ children }: { children: ReactNode }) {
           </Tooltip>
         </div>
       </header>
-      <main id="content" className={settings || knowledge ? "main main-wide" : "main"}>
+      <main id="content" className={deck ? "main main-wide main-deck" : settings || knowledge ? "main main-wide" : "main"}>
         {error && !offlineHome ? (
           <Banner tone="danger" action={<Button size="sm" onClick={() => void refresh()}>{t("retry")}</Button>}>
             {error}

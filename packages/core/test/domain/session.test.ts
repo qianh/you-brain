@@ -20,11 +20,15 @@ describe("session domain", () => {
       "pi",
       "t3-code",
       "zcode",
+      "grok-bot",
+      "deck",
     ]);
     expect(SessionSourceSchema.parse("gemini-cli")).toBe("gemini-cli");
     expect(SessionSourceSchema.parse("pi")).toBe("pi");
     expect(SessionSourceSchema.parse("t3-code")).toBe("t3-code");
     expect(SessionSourceSchema.parse("zcode")).toBe("zcode");
+    expect(SessionSourceSchema.parse("grok-bot")).toBe("grok-bot");
+    expect(SessionSourceSchema.parse("deck")).toBe("deck");
     expect(() => SessionSourceSchema.parse("gemini")).toThrow();
     expect(LEGACY_BACKFILL_SOURCES).toEqual([
       "claude-code",

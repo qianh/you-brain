@@ -223,6 +223,11 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
             if (event.kind === "ready" || event.kind === "portrait") return;
             // 知识库页自己管理刷新;这里只处理会话域的变更。
             if (event.kind === "notion") return;
+            // 指挥台的私有数据（会话/任务）由页面自己按 revision 拉。
+            if (event.kind === "deck") {
+              setDetailRevision((value) => value + 1);
+              return;
+            }
             void reload(event.kind);
           }, { signal: controller.signal });
           setStreamError(null);

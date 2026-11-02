@@ -49,6 +49,18 @@ import type {
   NotionUpdateBlockBody,
   OAuthClientPublic,
   OAuthClientPutBody,
+  DeckConversationResponse,
+  DeckConversationsResponse,
+  DeckConversationSendResponse,
+  DeckDeletedResponse,
+  DeckExecutorsResponse,
+  DeckSendBody,
+  DeckTaskBody,
+  DeckTaskDeleteBody,
+  DeckTaskResponse,
+  DeckTasksResponse,
+  DeckConfigPutBody,
+  DeckConfigResponse,
 } from "./types.js";
 
 /** Read and write ports for the local API. The daemon supplies the implementations. */
@@ -113,5 +125,22 @@ export interface HttpDeps {
   notionPatchTitle?(body: NotionPatchTitleBody): Promise<NotionPageMutationResult>;
   notionCreatePage?(body: NotionCreatePageBody): Promise<NotionCreatePageResult>;
   notionArchivePage?(body: NotionArchivePageBody): Promise<NotionArchivePageResult>;
+  /** 指挥台（deck）。The daemon always supplies it. */
+  deck?: DeckHttpPort;
   events: EventSink;
+}
+
+/** 指挥台的 HTTP 端口。实现是 daemon 里的 DeckService。 */
+export interface DeckHttpPort {
+  listConversations(): Promise<DeckConversationsResponse>;
+  getConversation(id: string): Promise<DeckConversationResponse>;
+  send(body: DeckSendBody): Promise<DeckConversationSendResponse>;
+  executors(): Promise<DeckExecutorsResponse>;
+  listTasks(): Promise<DeckTasksResponse>;
+  saveTask(body: DeckTaskBody): Promise<DeckTaskResponse>;
+  deleteTask(id: string): Promise<DeckDeletedResponse>;
+  /** 后台启动一次执行，立即返回任务现状。 */
+  runTask(id: string): Promise<DeckTaskResponse>;
+  config(): Promise<DeckConfigResponse>;
+  writeConfig(body: DeckConfigPutBody): Promise<DeckConfigResponse>;
 }

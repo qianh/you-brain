@@ -273,6 +273,9 @@ export async function locateRunnableCli(options: LocateCliOptions): Promise<Loca
   for (const path of paths) {
     const probe = await probeCliVersion(path, options.env);
     if (probe.ok) return { bin: path, unusable };
+    // 超时 ≠ 坏：冷启动首启可能超过 5 秒。跳到下一个候选会选中同名旧版
+    // （比如 ~/.bun/bin 里的老 claude），宁可把慢的当成可用。
+    if (probe.detail === "超时") return { bin: path, unusable };
     unusable.push({ path, detail: probe.detail });
     const pinned =
       (options.bin !== undefined && options.bin.trim() !== "") ||

@@ -125,7 +125,79 @@
               ],
               "type": "object"
             },
+            "deck": {
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "exclude": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "include": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "paths": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "enabled",
+                "paths",
+                "include",
+                "exclude"
+              ],
+              "type": "object"
+            },
             "gemini-cli": {
+              "additionalProperties": false,
+              "properties": {
+                "enabled": {
+                  "type": "boolean"
+                },
+                "exclude": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "include": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "paths": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "enabled",
+                "paths",
+                "include",
+                "exclude"
+              ],
+              "type": "object"
+            },
+            "grok-bot": {
               "additionalProperties": false,
               "properties": {
                 "enabled": {
@@ -314,7 +386,9 @@
             "gemini-cli",
             "pi",
             "t3-code",
-            "zcode"
+            "zcode",
+            "grok-bot",
+            "deck"
           ],
           "type": "object"
         }

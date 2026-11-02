@@ -10,7 +10,7 @@ import {
 } from "@you-brain/protocol";
 import { z } from "zod";
 
-import type { HttpDeps } from "./deps.js";
+import type { DeckHttpPort, HttpDeps } from "./deps.js";
 import {
   ConsolidationRejected,
   consolidationRejectMessage,
@@ -45,6 +45,10 @@ import {
   WebhookPublicSchema,
   WebhookPutSchema,
   WebhookTestResultSchema,
+  DeckSendBodySchema,
+  DeckTaskBodySchema,
+  DeckTaskDeleteBodySchema,
+  DeckConfigPutBodySchema,
   type ActionResponse,
   type ApiErrorBody,
   type DaemonChangeKind,
@@ -247,6 +251,35 @@ export async function handleApi(
   }
   if (path === "/api/actions/notion-archive-page") {
     return method(request, "POST", () => notionMutation(request, context, "notionArchivePage", NotionArchivePageSchema));
+  }
+  if (path === "/api/deck/conversations") {
+    return method(request, "GET", () => deckConversations(context));
+  }
+  if (path === "/api/deck/conversation") {
+    return method(request, "GET", () => deckConversation(url, context));
+  }
+  if (path === "/api/deck/send") {
+    return method(request, "POST", () => deckSend(request, context));
+  }
+  if (path === "/api/deck/executors") {
+    return method(request, "GET", () => deckExecutors(context));
+  }
+  if (path === "/api/deck/tasks") {
+    return method(request, "GET", () => deckTasks(context));
+  }
+  if (path === "/api/deck/task") {
+    return method(request, "POST", () => deckSaveTask(request, context));
+  }
+  if (path === "/api/deck/task-delete") {
+    return method(request, "POST", () => deckDeleteTask(request, context));
+  }
+  if (path === "/api/deck/task-run") {
+    return method(request, "POST", () => deckRunTask(request, context));
+  }
+  if (path === "/api/deck/config") {
+    if (request.method === "GET") return deckConfig(context);
+    if (request.method === "PUT") return deckWriteConfig(request, context);
+    return methodNotAllowed("GET, PUT");
   }
   if (path === "/api/status") return method(request, "GET", () => status(context));
   if (path === "/api/reminders") return method(request, "GET", () => reminders(url, context));
@@ -592,6 +625,60 @@ async function sendWebhookTest(context: ApiContext): Promise<Response> {
 
 function notSupported(): never {
   throw new HttpError(503, "NOT_SUPPORTED", "当前 daemon 不支持这个接口");
+}
+
+// ---- 指挥台（deck）----
+
+function deck(context: ApiContext): DeckHttpPort {
+  if (!context.deps.deck) notSupported();
+  return context.deps.deck;
+}
+
+async function deckConversations(context: ApiContext): Promise<Response> {
+  return json(await deck(context).listConversations());
+}
+
+async function deckConversation(url: URL, context: ApiContext): Promise<Response> {
+  const id = url.searchParams.get("id") ?? "";
+  if (id === "") throw new HttpError(400, "INVALID_INPUT", "缺少会话 id");
+  return json(await deck(context).getConversation(id));
+}
+
+async function deckSend(request: Request, context: ApiContext): Promise<Response> {
+  const body = DeckSendBodySchema.parse(await readJson(request));
+  return json(await deck(context).send(body));
+}
+
+async function deckExecutors(context: ApiContext): Promise<Response> {
+  return json(await deck(context).executors());
+}
+
+async function deckTasks(context: ApiContext): Promise<Response> {
+  return json(await deck(context).listTasks());
+}
+
+async function deckSaveTask(request: Request, context: ApiContext): Promise<Response> {
+  const body = DeckTaskBodySchema.parse(await readJson(request));
+  return json(await deck(context).saveTask(body));
+}
+
+async function deckDeleteTask(request: Request, context: ApiContext): Promise<Response> {
+  const body = DeckTaskDeleteBodySchema.parse(await readJson(request));
+  return json(await deck(context).deleteTask(body.id));
+}
+
+async function deckRunTask(request: Request, context: ApiContext): Promise<Response> {
+  const body = DeckTaskDeleteBodySchema.parse(await readJson(request));
+  return json(await deck(context).runTask(body.id));
+}
+
+async function deckConfig(context: ApiContext): Promise<Response> {
+  return json(await deck(context).config());
+}
+
+async function deckWriteConfig(request: Request, context: ApiContext): Promise<Response> {
+  const body = DeckConfigPutBodySchema.parse(await readJson(request));
+  return json(await deck(context).writeConfig(body));
 }
 
 async function writeLlmSecret(request: Request, context: ApiContext): Promise<Response> {

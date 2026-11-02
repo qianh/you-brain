@@ -769,7 +769,7 @@ export type { WebhookEventKind };
 
 export const DaemonEventSchema = z.object({
   id: z.number().int().nonnegative(),
-  kind: z.enum(["ready", "topics", "today", "status", "portrait", "devices", "notion"]),
+  kind: z.enum(["ready", "topics", "today", "status", "portrait", "devices", "notion", "deck"]),
   at: z.string().min(1),
 });
 
@@ -797,4 +797,75 @@ export interface EventSink {
     type: T,
     data: EventOf<T>["data"],
   ): void | Promise<void>;
+}
+
+// ---- 指挥台（deck）----
+
+export const DeckSendBodySchema = z.object({
+  text: z.string().min(1, "消息不能为空").max(20_000),
+  conversationId: z.string().min(1).optional(),
+});
+
+export type DeckSendBody = z.infer<typeof DeckSendBodySchema>;
+
+export const DeckTaskBodySchema = z.object({
+  id: z.string().min(1).optional(),
+  title: z.string().min(1, "标题不能为空").max(120),
+  prompt: z.string().min(1, "指令不能为空").max(20_000),
+  executor: z.object({
+    kind: z.enum(["cli-agent", "model", "capability", "gui-app"]),
+    id: z.string().min(1),
+  }),
+  schedule: z.union([
+    z.object({ kind: z.literal("daily"), time: z.string().regex(/^\d{2}:\d{2}$/u) }),
+    z.object({ kind: z.literal("interval"), minutes: z.number().int().min(5).max(60 * 24 * 30) }),
+  ]),
+  enabled: z.boolean().optional(),
+});
+
+export type DeckTaskBody = z.infer<typeof DeckTaskBodySchema>;
+
+export const DeckTaskDeleteBodySchema = z.object({ id: z.string().min(1) });
+
+export type DeckTaskDeleteBody = z.infer<typeof DeckTaskDeleteBodySchema>;
+
+export interface DeckConversationsResponse {
+  conversations: import("../deck/types.js").DeckConversation[];
+}
+
+export interface DeckConversationResponse {
+  conversation: import("../deck/types.js").DeckConversation | null;
+}
+
+export interface DeckConversationSendResponse {
+  conversation: import("../deck/types.js").DeckConversation;
+}
+
+export interface DeckExecutorsResponse {
+  executors: import("../deck/service.js").DeckExecutorView[];
+}
+
+export interface DeckTasksResponse {
+  tasks: import("../deck/types.js").DeckTask[];
+}
+
+export interface DeckTaskResponse {
+  task: import("../deck/types.js").DeckTask | null;
+}
+
+export interface DeckDeletedResponse {
+  deleted: boolean;
+}
+
+export const DeckConfigPutBodySchema = z.object({
+  /** 主控 CLI 覆盖；空串 = 自动（跟随可用 CLI）。 */
+  masterProvider: z.string().max(60).optional(),
+  /** 主控补全的模型覆盖；空串 = CLI 默认。 */
+  masterModel: z.string().max(120).optional(),
+});
+
+export type DeckConfigPutBody = z.infer<typeof DeckConfigPutBodySchema>;
+
+export interface DeckConfigResponse {
+  config: import("../deck/types.js").DeckConfig;
 }

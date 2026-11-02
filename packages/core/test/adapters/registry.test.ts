@@ -19,7 +19,8 @@ const fixture = (...parts: string[]) =>
   resolve(import.meta.dirname, "..", "fixtures", ...parts);
 
 describe("adapter registry", () => {
-  it("registers the eight built-in sources and their default roots", () => {
+  it("registers the built-in sources and their default roots", () => {
+    // deck 没有适配器：指挥台会话是程序内直产的，不走扫描。
     expect(listAdapters().map((adapter) => adapter.id)).toEqual([
       "claude-code",
       "codex",
@@ -29,6 +30,7 @@ describe("adapter registry", () => {
       "pi",
       "t3-code",
       "zcode",
+      "grok-bot",
     ]);
     expect(claudeAdapter.defaultRoots("/Users/me")).toEqual([
       "/Users/me/.claude/projects",
@@ -53,6 +55,11 @@ describe("adapter registry", () => {
     ]);
     expect(getAdapter("zcode")?.defaultRoots("/Users/me")).toEqual([
       "/Users/me/.zcode/cli/db",
+    ]);
+    expect(
+      getAdapter("grok-bot")?.defaultRoots("/Users/me"),
+    ).toEqual([
+      "/Users/me/Library/Application Support/Grok Bot/sand-client-persistence",
     ]);
   });
 

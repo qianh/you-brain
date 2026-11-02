@@ -11,6 +11,8 @@ export const CAPTURE_SOURCE_IDS = [
   "pi",
   "t3-code",
   "zcode",
+  "grok-bot",
+  "deck",
 ] as const;
 
 export const CaptureSourceIdSchema = z.enum(CAPTURE_SOURCE_IDS);

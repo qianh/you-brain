@@ -109,10 +109,12 @@ async function execute(
       throw cliFailure("auth", driver.loginMessage, result.stderr, secrets);
     }
     if (result.exitCode !== 0) {
+      // claude 等会把错误写进 stdout 的 is_error JSON，stderr 反而为空；两处都带出来。
+      const detail = [result.stderr, result.stdout].filter((v) => v.trim() !== "").join("\n");
       throw cliFailure(
         "server",
-        `命令执行失败（退出码 ${result.exitCode}）`,
-        result.stderr,
+        `命令执行失败（退出码 ${result.exitCode}，${bin}）`,
+        detail,
         secrets,
       );
     }

@@ -66,6 +66,7 @@ import { portraitCorrectionViews } from "../portrait/corrections.js";
 import { startDaemonHttp, type DaemonHttpServer } from "../http/server.js";
 import type {
   HttpDeps,
+  DeckHttpPort,
 } from "../http/deps.js";
 import type {
   LlmKeyPutBody,
@@ -170,6 +171,8 @@ import {
 import { UploadService } from "../upload/upload-service.js";
 import type { UploadIndex } from "../upload/types.js";
 import { NotionService } from "../notion/service.js";
+import { DeckService, type DeckServiceOptions } from "../deck/index.js";
+import { buildDeckCapabilityPort } from "./deck-ports.js";
 import {
   captureGeneration,
   captureWorkerBinary,
@@ -633,6 +636,8 @@ export class YouBrainDaemon {
   #searchSemantic: boolean | null = null;
   #embedderClose: (() => Promise<void>) | null = null;
   #notion: NotionService | null = null;
+  #deck: DeckService | null = null;
+  #lastDeck: number | null = null;
   #uploader: UploadService | null = null;
   #portrait: PortraitService | null = null;
   #coding: CodingInjection | null = null;
@@ -1078,6 +1083,7 @@ export class YouBrainDaemon {
   async #stopBody(): Promise<void> {
     this.#stopped = true;
     this.#abort.abort();
+    this.#deck?.stop();
     this.#webhookTimer?.cancel();
     this.#webhookTimer = null;
     await this.#webhookChain.catch(() => undefined);
@@ -1374,6 +1380,14 @@ export class YouBrainDaemon {
         // One bad delivery must not stop the loop.
       }
       this.#lastWebhook = this.#clock.nowMs();
+    }
+    if (!this.#stopped && intervalDue(this.#lastDeck, now, INTERVALS.deckMs)) {
+      this.#lastDeck = this.#clock.nowMs();
+      try {
+        await this.#deck?.tick(now);
+      } catch {
+        // 周期任务读取失败不能停 tick；执行本身在后台。
+      }
     }
   }
 
@@ -1785,9 +1799,11 @@ export class YouBrainDaemon {
         cursor: roots.cursor,
         gemini: roots["gemini-cli"],
         pi: roots.pi,
-        t3: roots["t3-code"],
-        zcode: roots.zcode,
-      },
+      t3: roots["t3-code"],
+      zcode: roots.zcode,
+      grokBot: roots["grok-bot"],
+      deck: roots.deck,
+    },
       cursors: this.#captureCursors(),
     };
     let hits: CaptureHit[];
@@ -2964,6 +2980,9 @@ export class YouBrainDaemon {
       });
     }
     const readers = createStoreReaders(store, this.#zone);
+    if (this.#paths) {
+      this.#deck ??= new DeckService(this.#deckOptions(readers));
+    }
     return {
       today: () => readers.today(),
       topics: async (query) => {
@@ -3072,6 +3091,7 @@ export class YouBrainDaemon {
         this.changes.publish("notion", this.#clock.now().toISOString());
         return { roots: result.roots };
       },
+      ...(this.#deck === null ? {} : { deck: this.#deckPort() as DeckHttpPort }),
       status: () => {
         // 聚合一次要跑全量会话/采集/Drive 检查(秒级);短缓存让启动和
         // SSE 风暴里的并发调用共享同一份结果,而不是各自重算。
@@ -3115,6 +3135,80 @@ export class YouBrainDaemon {
       events: {
         emit: (type, data) => this.#emitUser(type, data),
       },
+    };
+  }
+
+  #deckOptions(readers: ReturnType<typeof createStoreReaders>): DeckServiceOptions {
+    const paths = this.#paths;
+    if (!paths) throw new YouBrainError("INVALID_INPUT", "paths is not open");
+    return {
+      dataDir: paths.dataDir,
+      displayName: this.#local.displayName,
+      homeDir: this.#homeDir,
+      timeZone: this.#roles.timezone,
+      capabilities: buildDeckCapabilityPort({
+        today: () => readers.today(),
+        topics: (query) => readers.topics(query),
+        topic: (id) => readers.topic(id),
+        search: (query) => this.#searchLocal(query),
+        portrait: (variant) => readPortraitFile(paths.portraitDir, variant),
+        knowledgeSearch: (query, limit) => {
+          const hits = this.#requireNotion().search(query, limit ?? 8);
+          return Promise.resolve({ query, hits });
+        },
+      }),
+      upload: (session) => {
+        const uploader = this.#uploader;
+        if (!uploader) throw new YouBrainError("SOURCE_UNAVAILABLE", "Drive 未就绪");
+        return uploader.upload(session);
+      },
+      driveAvailable: () => this.#driveReachable && this.#uploader !== null,
+      llmSelection: () => ({
+        provider: this.#shared.llm.provider,
+        model: this.#shared.llm.model,
+        baseUrl: this.#shared.llm.baseUrl,
+      }),
+      env: this.#env,
+      getApiKey: (provider) =>
+        getLlmApiKey(provider, { platform: this.#platform, backend: this.#secretBackend }),
+      emitChange: () => this.changes.publish("deck", this.#clock.now().toISOString()),
+      clock: { now: () => this.#clock.now(), nowMs: () => this.#clock.nowMs() },
+    };
+  }
+
+  #deckPort(): DeckHttpPort | undefined {
+    const deck = this.#deck;
+    if (!deck) return undefined;
+    return {
+      listConversations: async () => ({ conversations: await deck.listConversations() }),
+      getConversation: async (id) => ({ conversation: await deck.getConversation(id) }),
+      send: async (body) => ({ conversation: await deck.send(body.text, body.conversationId ?? null) }),
+      executors: async () => ({ executors: await deck.executors() }),
+      listTasks: async () => ({ tasks: await deck.listTasks() }),
+      saveTask: async (body) => {
+        if (body.id !== undefined) {
+          const patch = {
+            title: body.title,
+            prompt: body.prompt,
+            executor: body.executor,
+            schedule: body.schedule,
+            ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
+          };
+          return { task: await deck.updateTask(body.id, patch) };
+        }
+        const created = await deck.createTask({
+          title: body.title,
+          prompt: body.prompt,
+          executor: body.executor,
+          schedule: body.schedule,
+          ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
+        });
+        return { task: created };
+      },
+      deleteTask: async (id) => ({ deleted: await deck.deleteTask(id) }),
+      runTask: async (id) => ({ task: await deck.startTask(id) }),
+      config: async () => ({ config: await deck.getConfig() }),
+      writeConfig: async (body) => ({ config: await deck.writeConfig(body) }),
     };
   }
 
@@ -3689,6 +3783,8 @@ export class YouBrainDaemon {
       pi: [] as string[],
       "t3-code": [] as string[],
       zcode: [] as string[],
+      "grok-bot": [] as string[],
+      deck: [] as string[],
     };
     // 服务器上不存在这些 CLI 的会话目录。采集空转，只做提炼与沉淀。
     if (this.#local.role === "server") return roots;

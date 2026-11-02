@@ -97,6 +97,9 @@ export interface DiscoveryOptions {
     pi?: string[];
     t3?: string[];
     zcode?: string[];
+    grokBot?: string[];
+    /** 指挥台会话是程序内直产的，不走扫描；键存在只为类型对齐。 */
+    deck?: string[];
   };
   modifiedAfter?: Partial<Record<SessionSource, string>>;
   includePaths?: string[];
@@ -141,7 +144,16 @@ export interface DiscoveryResult {
   malformed: number;
   warnings: Array<{ code: string; message: string }>;
   status: Record<
-    "claude" | "codex" | "grok" | "cursor" | "gemini" | "pi" | "t3" | "zcode",
+    | "claude"
+    | "codex"
+    | "grok"
+    | "cursor"
+    | "gemini"
+    | "pi"
+    | "t3"
+    | "zcode"
+    | "grokBot"
+    | "deck",
     DiscoveryStatus
   >;
 }

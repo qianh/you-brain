@@ -3,6 +3,7 @@ import { useEffect } from "react";
 import { BrandMark } from "./components/icons.js";
 import { ToastProvider } from "./components/toast.js";
 import { DaemonProvider, useDaemon } from "./daemon-context.js";
+import { CommandDeckPage } from "./pages/command-deck.js";
 import { DesignPage } from "./pages/design.js";
 import { PanelPage } from "./pages/panel.js";
 import { TodayPage } from "./pages/today.js";
@@ -34,7 +35,7 @@ function Frame() {
   const { loading, today, t } = useDaemon();
   const panel = location.pathname === "/panel";
   useEffect(() => {
-    if (location.pathname === "/") navigate("/today", "replace");
+    if (location.pathname === "/") navigate("/deck", "replace");
   }, [location.pathname, navigate]);
   // 顶部导航收敛后,旧入口指到设置里的对应分区。
   useEffect(() => {
@@ -50,15 +51,17 @@ function Frame() {
     const page =
       location.pathname === "/panel"
         ? t("brand")
-        : location.pathname === "/topics" || location.pathname === "/topics/history"
-          ? t("topicsBook")
-            : location.pathname === "/knowledge"
-              ? t("navKnowledge")
-              : location.pathname === "/search"
-                ? t("navSearch")
-                : location.pathname === "/settings"
-                  ? t("navSettings")
-                  : t("navToday");
+        : location.pathname === "/deck"
+          ? t("navDeck")
+          : location.pathname === "/topics" || location.pathname === "/topics/history"
+            ? t("topicsBook")
+              : location.pathname === "/knowledge"
+                ? t("navKnowledge")
+                : location.pathname === "/search"
+                  ? t("navSearch")
+                  : location.pathname === "/settings"
+                    ? t("navSettings")
+                    : t("navToday");
     document.title = `${page} · U-Brain`;
   }, [location.pathname, t]);
 
@@ -73,7 +76,8 @@ function Frame() {
   if (panel) return <PanelPage />;
 
   let page = <Missing />;
-  if (location.pathname === "/" || location.pathname === "/today") page = <TodayPage />;
+  if (location.pathname === "/" || location.pathname === "/deck") page = <CommandDeckPage />;
+  else if (location.pathname === "/today") page = <TodayPage />;
   else if (location.pathname === "/topics") page = <TopicsPage zone="active" />;
   else if (location.pathname === "/topics/history") page = <TopicsPage zone="history" />;
   else if (location.pathname === "/knowledge") page = <KnowledgePage />;

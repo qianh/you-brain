@@ -49,6 +49,17 @@ import type {
   WebhookTestResult,
   OAuthClientPublic,
   OAuthClientPutBody,
+  DeckConversationsResponse,
+  DeckConversationResponse,
+  DeckConversationSendResponse,
+  DeckDeletedResponse,
+  DeckExecutorsResponse,
+  DeckSendBody,
+  DeckTaskBody,
+  DeckTaskResponse,
+  DeckTasksResponse,
+  DeckConfigPutBody,
+  DeckConfigResponse,
 } from "@you-brain/core/http/types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 
@@ -114,6 +125,17 @@ export interface BrowserDaemon extends Omit<DaemonClient, "reminderAction" | "co
   notionArchivePage(body: NotionArchivePageBody): Promise<NotionArchivePageResult>;
   /** 同源相对路径,直接放进 <img src> / <a href>。 */
   notionAssetUrl(blockId: string): string;
+  /** 指挥台。 */
+  deckConversations(): Promise<DeckConversationsResponse>;
+  deckConversation(id: string): Promise<DeckConversationResponse>;
+  deckSend(body: DeckSendBody): Promise<DeckConversationSendResponse>;
+  deckExecutors(): Promise<DeckExecutorsResponse>;
+  deckTasks(): Promise<DeckTasksResponse>;
+  deckSaveTask(body: DeckTaskBody): Promise<DeckTaskResponse>;
+  deckDeleteTask(id: string): Promise<DeckDeletedResponse>;
+  deckRunTask(id: string): Promise<DeckTaskResponse>;
+  deckConfig(): Promise<DeckConfigResponse>;
+  writeDeckConfig(body: DeckConfigPutBody): Promise<DeckConfigResponse>;
 }
 
 export function readDaemonToken(): string {
@@ -234,6 +256,20 @@ export function createBrowserDaemon(options?: {
       request<NotionDatabaseView>("GET", `/api/notion/database?id=${encodeURIComponent(databaseId)}`),
     notionSync: () => request<NotionSyncResult>("POST", "/api/actions/notion-sync"),
     notionTest: () => request<NotionTestResult>("POST", "/api/actions/notion-test"),
+    deckConversations: () => request<DeckConversationsResponse>("GET", "/api/deck/conversations"),
+    deckConversation: (id: string) =>
+      request<DeckConversationResponse>("GET", `/api/deck/conversation?id=${encodeURIComponent(id)}`),
+    deckSend: (body: DeckSendBody) =>
+      request<DeckConversationSendResponse>("POST", "/api/deck/send", body),
+    deckExecutors: () => request<DeckExecutorsResponse>("GET", "/api/deck/executors"),
+    deckTasks: () => request<DeckTasksResponse>("GET", "/api/deck/tasks"),
+    deckSaveTask: (body: DeckTaskBody) => request<DeckTaskResponse>("POST", "/api/deck/task", body),
+    deckDeleteTask: (id: string) =>
+      request<DeckDeletedResponse>("POST", "/api/deck/task-delete", { id }),
+    deckRunTask: (id: string) => request<DeckTaskResponse>("POST", "/api/deck/task-run", { id }),
+    deckConfig: () => request<DeckConfigResponse>("GET", "/api/deck/config"),
+    writeDeckConfig: (body: DeckConfigPutBody) =>
+      request<DeckConfigResponse>("PUT", "/api/deck/config", body),
     putNotionKey: async (body: NotionKeyPutBody) => {
       await request("PUT", "/api/secrets/notion", body);
     },

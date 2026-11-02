@@ -49,7 +49,6 @@
 - [ ] **D4 服务器端真机验收**：在真实 Linux 服务器上跑通 `install.sh` → `setup --server --oauth custom`（SSH 隧道完成一次真实 Google 授权）→ `service install` + `loginctl enable-linger` → 设为主设备 → 完成一次每日沉淀。同时在 GitHub Actions 手动触发 `server-linux.yml` 确认 tar.gz 可用
 
 ## F. 真实数据下暴露的问题（2026-10-25 ~ 26）
-
 - [x] **F1 Codex 启动噪音**：Codex 每次启动写一份只含 `AGENTS.md` 注入的 JSONL，6735 个文件里只有 189 个真对话。统一 `isConversation` 判定并接入全部适配器；`scripts/cleanup-noise-sessions.ts` 清理历史（本机删 158 会话 / 34 空话题 / 327 事件）
 - [x] **F2 话题活跃时间被提醒污染**：`reminder.action` 的 `touchUser` 让「忽略提醒」算成话题活跃，一次批量清理把 40 个话题刷成今天。拆出 `lastContentAt`（迁移 3），`countReminderActions` 显式选择口径
 - [x] **F3 重启全量重扫**：采集指纹只在内存，重启重解析 9,596 个文件（7 分钟）。`capture.files` 持久化指纹 + 会话元数据，启动恢复；未变化的扫描结果要保留旧元数据否则下次恢复不出来
@@ -92,6 +91,18 @@
   - 已定（不变）：只读，编辑回 Notion；可搜索、可供 MCP 查询，后续接数字分身蒸馏（纳入范围按页面圈定，蒸馏管线接入时实现）；手机暂不接入
   - 未定/后续：①蒸馏输入的纳入范围（哪些页面喂分身）②对外部图片的直连加载（现在 Notion 域名走代理、外域直接由浏览器加载）③database 视图的筛选/排序 ④wiki 数据库（data source 新版 API）兼容
   - 遗留自 Obsidian 方案的 Drive 复制讨论（If-Match 并发、三方合并等）随方案废弃，不再相关
+
+## H. 指挥台（2026-10-31 拷问会定案并实现 v1，见 `CONTEXT.md`「指挥台」与 `docs/adr/0001、0002`）
+
+- [x] **H1 主控与决策**：`packages/core/src/deck/`；主控用本机 CLI 的受限补全出决策 JSON（answer / dispatch / schedule），调度 skill 是系统提示词（`deck/skill-text.ts`）；上下文包注入今日/活跃话题/已登记任务；决策解析失败整段按回答兜底
+- [x] **H2 执行者四类**：capability（搜索/话题/分身/知识库，daemon 内直调）、model（共享 llm 配置）、cli-agent（grok/claude/codex/gemini/opencode 的 agent 模式，`deck/cli-agent.ts`，专属 workdir、grok 隔离、禁私设调度）、gui-app（通用桥，见 H3）
+- [x] **H3 GUI App 通用桥**（ADR-0002）：辅助功能权限探测（带超时）、剪贴板投递 + 激活 + 粘贴 + 回车；grok-bot 经本地转录回收（20s/60s/180s 三次轮询）；Muse 只投递不回收（落盘格式未逆）
+- [x] **H4 周期任务**：注册表 `<dataDir>/deck/tasks.json`（0600）；daily（本地时区，错过补最近一次）/ interval（分钟）；daemon 每分钟 tick，执行后台化、单任务在跑守卫；任务结果写进 `task-<id>` 会话
+- [x] **H5 会话入管线**：指挥台对话直接落会话原文（来源 `deck`），一个对话一个 Drive 文件原地更新，15 秒提炼回填自动处理；HTTP `/api/deck/*` 八个端点 + SSE `deck` 变更；web 主窗口新增「指挥台」页（首 Tab，`/deck` 为默认落地页）
+- [x] **H6 Grok Bot 采集适配器**：来源 `grok-bot`（协议枚举 + 配置键 + 扫描分支），解析 `sand-client-persistence/*.blob` 转录（UI 状态 blob 自动跳过）；真实数据验证 17 条转录
+- [~] **H7 主控可配置 UI**：已完成主控选择——指挥台侧栏「主控」区块（CLI 下拉 + 模型覆盖，`GET/PUT /api/deck/config`）；剩余：执行者开关
+- [ ] **H8 GUI 桥健壮性**：Grok Bot 改版后的选择器兜底；输入框定位不止「激活即焦点」；投递失败的用户引导（辅助功能授权流程图）
+- [ ] **H9 能力侧 remote MCP（独立立项）**：daemon MCP 从 stdio 升级为远程端点 + OAuth，让 Muse / Grok Bot 的 Connectors 连上 you-brain；承载点用服务器模式（D4）
 
 ## 需要你决定或配合（不进自动队列）
 
