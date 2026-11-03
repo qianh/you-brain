@@ -4,7 +4,9 @@
   display: grid;
   grid-template-columns: var(--knowledge-sidebar-w, 264px) minmax(0, 1fr);
   gap: 0;
-  min-height: calc(100vh - 56px);
+  /* main-bleed 退掉了 main 的垂直 padding:页面自己负责窗口边缘 12
+     (侧栏/正文首尾 padding 各 12),高度只扣顶栏。 */
+  min-height: calc(100vh - var(--h-topbar));
   background: var(--surface);
   border-top: 1px solid var(--border);
 }
@@ -18,8 +20,8 @@
   background: var(--bg);
   min-height: 0;
   position: sticky;
-  top: 56px;
-  height: calc(100vh - 56px);
+  top: var(--h-topbar);
+  height: calc(100vh - var(--h-topbar));
   overflow: hidden;
 }
 
@@ -171,8 +173,8 @@
 .knowledge-main {
   min-width: 0;
   overflow-y: auto;
-  height: calc(100vh - 56px);
-  padding: 40px 48px 96px;
+  height: calc(100vh - var(--h-topbar));
+  padding: 12px 48px 12px;
 }
 
 .knowledge-save-state {

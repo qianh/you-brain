@@ -3,7 +3,7 @@
   flex-direction: column;
   gap: var(--sp-5);
   min-width: 0;
-  min-height: calc(100dvh - var(--h-topbar) - var(--sp-4) - var(--sp-10));
+  min-height: calc(100dvh - var(--h-topbar) - var(--sp-3) - var(--sp-3));
 }
 
 .portrait-layout {
@@ -25,7 +25,8 @@
 
 .card.portrait-doc {
   width: 100%;
-  padding: var(--sp-8);
+  /* 卡片边缘→内容与其他页一致:12(sp-3),不用 40 的旧排版留白。 */
+  padding: var(--sp-3);
 }
 
 .portrait-hold { min-height: calc(var(--sp-10) * 6); }
@@ -40,7 +41,7 @@
 
 .portrait-side {
   position: sticky;
-  top: calc(var(--h-topbar) + var(--sp-4));
+  top: calc(var(--h-topbar) + var(--sp-3));
   align-self: start;
   min-width: 0;
 }

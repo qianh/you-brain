@@ -125,4 +125,7 @@
 
 /* macOS shell: the native title bar is overlaid, so the top bar shares the
    row with the traffic lights and doubles as the drag handle. */
-.shell-overlay .topbar { padding-left: 84px; }
+/* Overlay 模式顶栏加高:上下各留 12px(胶囊 32px),与全窗口 12px 外间距节奏一致。 */
+html.shell-overlay { --h-topbar: 56px; }
+/* 红绿灯组(x=16 起,宽 ~52)与品牌行之间留足间距,不再贴着灯。 */
+.shell-overlay .topbar { padding-left: 100px; }

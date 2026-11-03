@@ -12,7 +12,7 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  padding-bottom: var(--sp-4);
+  padding-bottom: var(--sp-3);
 }
 
 .main-deck .route-fade,
