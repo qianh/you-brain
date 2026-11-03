@@ -36,7 +36,7 @@ import {
 const REMINDERS_PREVIEW = 2;
 
 export function TodayPage() {
-  const { t, language, today, devices, timeZone, topics, status, reminders, error, loading, reload, reminderAction } = useDaemon();
+  const { t, language, today, devices, timeZone, topics, status, reminders, error, loading, reload, reminderAction, client } = useDaemon();
   const { navigate } = useRoute();
   // The session blocks point at the list further down this page.
   const sessionsRef = useRef<HTMLDivElement | null>(null);
@@ -204,6 +204,7 @@ export function TodayPage() {
                     t={t}
                     onAction={reminderAction}
                     onOpenTopic={(topicId) => navigate(topicHref(topicZone(topics, topicId), topicId))}
+                    loadDetail={(reminderId) => client.reminderDetail(reminderId).then((result) => result.detail)}
                   />
                 </div>
               </div>

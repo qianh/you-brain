@@ -26,6 +26,7 @@ import type {
   VirtualDeviceResponse,
   RemoveDeviceResponse,
   NotionArchivePageBody,
+  NotionMovePageBody,
   NotionArchivePageResult,
   NotionCreatePageBody,
   NotionCreatePageResult,
@@ -105,6 +106,8 @@ export interface BrowserDaemon extends Omit<DaemonClient, "reminderAction" | "co
   updateWebhook(body: WebhookPutBody): Promise<WebhookPublic>;
   testWebhook(): Promise<WebhookTestResult>;
   reminderAction(reminderId: string, action: ReminderActionName, until?: string): Promise<ReminderView>;
+  /** 提醒被截短的原文;没有更多内容为 null。 */
+  reminderDetail(reminderId: string): Promise<{ detail: string | null }>;
   consolidate(body?: { force?: boolean }): Promise<ConsolidateActionResult>;
   /** 知识库(Notion,只读)。 */
   notionStatus(): Promise<NotionStatusView>;
@@ -124,6 +127,7 @@ export interface BrowserDaemon extends Omit<DaemonClient, "reminderAction" | "co
   notionPatchTitle(body: NotionPatchTitleBody): Promise<NotionPageMutationResult>;
   notionCreatePage(body: NotionCreatePageBody): Promise<NotionCreatePageResult>;
   notionArchivePage(body: NotionArchivePageBody): Promise<NotionArchivePageResult>;
+  notionMovePage(body: NotionMovePageBody): Promise<NotionArchivePageResult>;
   /** 同源相对路径,直接放进 <img src> / <a href>。 */
   notionAssetUrl(blockId: string): string;
   /** 指挥台。 */
@@ -221,6 +225,8 @@ export function createBrowserDaemon(options?: {
     updateConfig: (patch) => request<SharedConfig>("PUT", "/api/config", patch),
     status: () => request<StatusResponse>("GET", "/api/status"),
     reminders: () => request<RemindersResponse>("GET", "/api/reminders"),
+    reminderDetail: (reminderId) =>
+      request<{ detail: string | null }>("GET", `/api/reminder-detail?id=${encodeURIComponent(reminderId)}`),
     reminderAction: (reminderId, action, until) =>
       request<ReminderView>("POST", "/api/actions/reminder", {
         reminderId,
@@ -293,6 +299,8 @@ export function createBrowserDaemon(options?: {
       request<NotionPageMutationResult>("POST", "/api/actions/notion-patch-title", body),
     notionCreatePage: (body: NotionCreatePageBody) =>
       request<NotionCreatePageResult>("POST", "/api/actions/notion-create-page", body),
+    notionMovePage: (body: NotionMovePageBody) =>
+      request<NotionArchivePageResult>("POST", "/api/actions/notion-move-page", body),
     notionArchivePage: (body: NotionArchivePageBody) =>
       request<NotionArchivePageResult>("POST", "/api/actions/notion-archive-page", body),
     notionAssetUrl: (blockId: string) => `/api/notion/asset?block=${encodeURIComponent(blockId)}`,

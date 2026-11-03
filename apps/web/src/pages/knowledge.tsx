@@ -6,13 +6,13 @@ import {
   useState,
   type CSSProperties,
   type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 
 import type {
   NotionBlockModel,
   NotionDatabaseView,
-  NotionPageMutationResult,
   NotionPageView,
   NotionSegment,
   NotionStatusView,
@@ -25,18 +25,44 @@ import { Icon } from "../components/icons.js";
 import { Input } from "../components/input.js";
 import { useToast } from "../components/toast.js";
 import { useDaemon } from "../daemon-context.js";
+import { useImeGuard } from "../lib/ime-guard.js";
 import { settingsHref } from "../lib/route.js";
 import { useRoute } from "../router.js";
 import { BlockList } from "./knowledge/blocks-view.js";
 import { type BlockEditorCallbacks, type FocusRequest, type Translate } from "./knowledge/block-editor.js";
 import {
-  firstNewBlockId,
+  LOCAL_ID_PREFIX,
   blockMarkdown,
+  convertBlock,
   defaultPageId,
-  fuzzyFilter,
+  findBlockIn,
   flattenTree,
+  fuzzyFilter,
+  hasSegments,
+  insertAfterIn,
+  indentIn,
+  isLocalId,
+  lastChildOf,
+  locateNewBlockId,
+  locateNewBlocks,
+  outdentIn,
+  pairBlockIds,
+  pastedToAppend,
+  pastedToLocal,
+  plainSegments,
+  blockToAppend,
+  canDropPage,
+  moveNodeIn,
+  type AppendChild,
+  makeLocalBlock,
   relativeTime,
+  remapBlockIds,
+  removeBlockIn,
+  segmentsText,
+  updateBlockIn,
+  withSegments,
   type FlatPage,
+  type TurnIntoKind,
 } from "./knowledge/logic.js";
 
 interface KnowledgeCache {
@@ -73,25 +99,54 @@ function writeKnowledgeCache(patch: Partial<KnowledgeCache>): void {
   }
 }
 
+const COLLAPSED_KEY = "you-brain:knowledge:collapsed:v1";
+
+function readCollapsed(): ReadonlySet<string> {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "[]");
+    return new Set(Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeCollapsed(ids: ReadonlySet<string>): void {
+  try {
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...ids]));
+  } catch {
+    // 写不进就只在本次会话内有效。
+  }
+}
+
 export function KnowledgePage() {
   const { client, t, language } = useDaemon();
   const { push } = useToast();
   const { location, navigate } = useRoute();
+  const titleIme = useImeGuard();
   const cached = useRef(readKnowledgeCache());
 
   const [status, setStatus] = useState<NotionStatusView | null>(cached.current.status);
   const [roots, setRoots] = useState<NotionTreeNodeView[] | null>(cached.current.roots);
   const [page, setPage] = useState<NotionPageView | null>(null);
+  // 页面的同步镜像:编辑回调在同一事件里连续读写,不能等 React 渲染。
+  const pageRef = useRef<NotionPageView | null>(null);
+  const selectedRef = useRef<string | null>(null);
+  const commitPage = useCallback((next: NotionPageView | null): void => {
+    pageRef.current = next;
+    setPage(next);
+  }, []);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "error">("idle");
+  // 移动/复制要等 Notion 重排后才能显示,期间禁用这类菜单项。
+  const [structBusy, setStructBusy] = useState(false);
   const [database, setDatabase] = useState<NotionDatabaseView | null>(null);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [query, setQuery] = useState("");
   const [hits, setHits] = useState<Array<{ pageId: string; title: string; excerpt: string }> | null>(null);
   const [switcherOpen, setSwitcherOpen] = useState(false);
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
+  // 侧栏折叠状态要记住:重新进入知识库时保持上次收起/展开的样子。
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(readCollapsed);
   const [titleEditing, setTitleEditing] = useState(false);
-  // 文末空段落创建中:幽灵行先藏,防止两行同屏。
-  const [tailPending, setTailPending] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [focus, setFocus] = useState<FocusRequest | null>(null);
@@ -120,7 +175,6 @@ export function KnowledgePage() {
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   };
-  const [focusNonce, setFocusNonce] = useState(0);
 
   const selectedId = location.id;
 
@@ -165,7 +219,7 @@ export function KnowledgePage() {
   useEffect(() => {
     let alive = true;
     if (!selectedId) {
-      setPage(null);
+      commitPage(null);
       setDatabase(null);
       return;
     }
@@ -176,7 +230,7 @@ export function KnowledgePage() {
       page === null &&
       !loading
     ) {
-      setPage(cached.current.page);
+      commitPage(cached.current.page);
     }
     setLoading(true);
     void (async () => {
@@ -186,17 +240,22 @@ export function KnowledgePage() {
           const db = await client.notionDatabase(selectedId);
           if (!alive) return;
           setDatabase(db);
-          setPage(null);
+          commitPage(null);
         } else {
+          // 先等在途的保存落地,再拉取,否则会读到还没写入的旧内容。
+          await queue.current;
           const detail = await client.notionPage(selectedId);
           if (!alive) return;
-          setPage(detail);
           setDatabase(null);
           writeKnowledgeCache({ pageId: selectedId, page: detail });
+          // 正在这一页里打字时不整页替换(目录刷新也会触发这里),否则光标会被打断。
+          if (pageRef.current?.id === selectedId && (pendingJobs.current > 0 || isEditingBlocks())) return;
+          sentText.current.clear();
+          commitPage(detail);
         }
       } catch {
         if (alive) {
-          setPage(null);
+          commitPage(null);
           setDatabase(null);
         }
       } finally {
@@ -275,178 +334,473 @@ export function KnowledgePage() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  // —— 编辑回调:每次写操作都返回刷新后的页面,直接替换本地视图 ——
-  const run = useCallback(
-    async (action: () => Promise<unknown>): Promise<unknown> => {
-      setBusy(true);
-      try {
-        const result = await action();
-        await refreshMeta();
-        if (selectedId) {
-          const detail = await client.notionPage(selectedId);
-          setPage(detail);
-          writeKnowledgeCache({ pageId: selectedId, page: detail });
-          return result;
-        }
-        return result;
-      } catch (error) {
-        push({
-          message: error instanceof Error ? error.message : String(error),
-          tone: "danger",
-        });
-        return null;
-      } finally {
-        setBusy(false);
+  // —— 编辑:乐观更新 + 串行后台保存 ——
+  // Notion 式手感:先改本地块树(立刻可见、光标不动),再由一条串行队列写回 Notion。
+  // 队列里新建的块先用本地 id;Notion 返回后登记真实 id,后续操作按本地 id 解析。
+  selectedRef.current = selectedId;
+  const localSeq = useRef(0);
+  const localToReal = useRef(new Map<string, string>());
+  const realToLocal = useRef(new Map<string, string>());
+  const sentText = useRef(new Map<string, string>());
+  const queue = useRef<Promise<void>>(Promise.resolve());
+  const pendingJobs = useRef(0);
+  const pendingStructural = useRef(0);
+  const needAdopt = useRef(false);
+  const failedJob = useRef(false);
+  const lastServer = useRef<NotionPageView | null>(null);
+
+  const newLocalId = useCallback((): string => {
+    localSeq.current += 1;
+    return `${LOCAL_ID_PREFIX}${localSeq.current}`;
+  }, []);
+  const realId = useCallback(
+    (id: string): string | null =>
+      localToReal.current.get(id) ?? (isLocalId(id) ? null : id),
+    [],
+  );
+  const learnId = useCallback((localId: string, serverId: string): void => {
+    localToReal.current.set(localId, serverId);
+    realToLocal.current.set(serverId, localId);
+  }, []);
+  /** 本地块树里的最新状态(任务真正执行时再读,保证写的是最新文本)。 */
+  const liveBlock = useCallback(
+    (id: string, fallback: NotionBlockModel): NotionBlockModel =>
+      findBlockIn(pageRef.current?.blocks ?? [], id) ?? fallback,
+    [],
+  );
+  const requestFocus = useCallback((blockId: string, at: FocusRequest["at"]): void => {
+    setFocus({ blockId, at });
+  }, []);
+  // 请求的块若始终没出现(例如已被删除),别让它在以后意外抢走光标。
+  useEffect(() => {
+    if (focus === null) return;
+    const timer = setTimeout(() => setFocus(null), 1500);
+    return () => clearTimeout(timer);
+  }, [focus]);
+
+  const enqueue = useCallback(
+    (
+      pageId: string,
+      job: () => Promise<NotionPageView | null>,
+      options?: { structural?: boolean },
+    ): void => {
+      pendingJobs.current += 1;
+      if (options?.structural) {
+        pendingStructural.current += 1;
+        setStructBusy(true);
       }
+      setSaveState("saving");
+      queue.current = queue.current
+        .then(async () => {
+          const view = await job();
+          if (view) lastServer.current = view;
+          if (options?.structural) needAdopt.current = true;
+        })
+        .catch((error: unknown) => {
+          failedJob.current = true;
+          needAdopt.current = true;
+          push({
+            message: error instanceof Error ? error.message : String(error),
+            tone: "danger",
+          });
+        })
+        .then(async () => {
+          pendingJobs.current -= 1;
+          if (options?.structural) {
+            pendingStructural.current -= 1;
+            if (pendingStructural.current === 0) setStructBusy(false);
+          }
+          if (pendingJobs.current > 0) return;
+          const failed = failedJob.current;
+          const adopt = needAdopt.current;
+          failedJob.current = false;
+          needAdopt.current = false;
+          setSaveState(failed ? "error" : "idle");
+          const known = lastServer.current?.id === pageId ? lastServer.current : null;
+          if (!failed && known) writeKnowledgeCache({ pageId, page: known });
+          if (!adopt) return;
+          // 失败或移动/复制:以 Notion 为准重建本地视图(沿用本地 id,行不重挂载)。
+          try {
+            const view = failed || !known ? await client.notionPage(pageId) : known;
+            if (view && selectedRef.current === pageId) {
+              sentText.current.clear();
+              commitPage({ ...view, blocks: remapBlockIds(view.blocks, realToLocal.current) });
+              writeKnowledgeCache({ pageId, page: view });
+            }
+          } catch {
+            // 下次打开页面会重新拉取。
+          }
+        });
     },
-    [client, push, refreshMeta, selectedId],
+    [client, commitPage, push],
   );
 
-  const textLength = useCallback((blocks: readonly NotionBlockModel[], id: string): number => {
-    const visit = (list: readonly NotionBlockModel[]): number => {
-      for (const model of list) {
-        if (model.id === id) return blockTextLength(model);
-        const nested = visit(model.children);
-        if (nested >= 0) return nested;
-      }
-      return -1;
-    };
-    return visit(blocks);
-  }, []);
+  /** 改本地块树并同步到 pageRef;返回改之前的页面(没有页面则 null)。 */
+  const editLocal = useCallback(
+    (change: (blocks: NotionBlockModel[]) => NotionBlockModel[]): NotionPageView | null => {
+      const current = pageRef.current;
+      if (!current) return null;
+      commitPage({ ...current, blocks: change(current.blocks) });
+      return current;
+    },
+    [commitPage],
+  );
 
   const editor: BlockEditorCallbacks = useMemo(() => {
-    void run;
+    const syncText = (pageId: string, blockId: string): void => {
+      enqueue(pageId, async () => {
+        const real = realId(blockId);
+        const live = pageRef.current ? findBlockIn(pageRef.current.blocks, blockId) : null;
+        if (!real || !live || !hasSegments(live)) return null;
+        const json = JSON.stringify(live.segments);
+        if (sentText.current.get(blockId) === json) return null;
+        sentText.current.set(blockId, json);
+        const result = await client.notionUpdateBlock({ blockId: real, markdown: "", rich: live.segments });
+        return result.page;
+      });
+    };
+    const removeBlock = (blockId: string, focusId?: string | null): void => {
+      const before = editLocal((blocks) => removeBlockIn(blocks, blockId));
+      if (!before) return;
+      if (focusId) requestFocus(focusId, "end");
+      enqueue(before.id, async () => {
+        const real = realId(blockId);
+        if (!real) return null;
+        return (await client.notionDeleteBlock({ blockId: real })).page;
+      });
+    };
+    /**
+     * 在 anchor 处重建一份块(带整棵子树)再删掉原块,并把副本的真实 id 登记给原本地 id。
+     * Notion 没有「移动」也不允许改块类型(PATCH 换类型会报 Block type mismatch),
+     * 转类型、缩进、反缩进都只能这样:新建 + 删除。
+     */
+    const recreate = (
+      pageId: string,
+      blockId: string,
+      anchor: { parentId: string } | { afterId: string },
+    ): void => {
+      enqueue(pageId, async () => {
+        const oldReal = realId(blockId);
+        const anchorId = "parentId" in anchor ? anchor.parentId : anchor.afterId;
+        const anchorReal = realId(anchorId);
+        const live = findBlockIn(pageRef.current?.blocks ?? [], blockId);
+        if (!oldReal || !anchorReal || !live) return null;
+        const payload = blockToAppend(live);
+        // 子树里有图片/表格等没法重建的块:宁可报错并回到 Notion 的版本,也不能静默丢内容。
+        if (!payload) throw new Error("这个块带有无法重建的子块(图片、表格等),暂不支持转类型或缩进");
+        const result = await client.notionAppendBlock({
+          ...("parentId" in anchor ? { parentBlockId: anchorReal } : { afterBlockId: anchorReal }),
+          markdown: "",
+          children: [payload],
+        });
+        const copy =
+          "parentId" in anchor
+            ? lastChildOf(result.page.blocks, anchorReal)
+            : locateNewBlocks(result.page.blocks, anchorReal, 1)[0];
+        if (copy) for (const [localId, serverId] of pairBlockIds([live], [copy])) learnId(localId, serverId);
+        sentText.current.delete(blockId);
+        return (await client.notionDeleteBlock({ blockId: oldReal })).page;
+      });
+    };
+    const convert = (block: NotionBlockModel, kind: TurnIntoKind): void => {
+      const live = liveBlock(block.id, block);
+      const before = editLocal((blocks) => updateBlockIn(blocks, live.id, (entry) => convertBlock(entry, kind)));
+      if (!before) return;
+      // 转成代码块后直接进入编辑(代码块没有行内光标,空的更点不到)。
+      if (kind === "code") requestFocus(block.id, "start");
+      recreate(before.id, block.id, { afterId: block.id });
+    };
+    /**
+     * 缩进/反缩进:本地立刻换位置;Notion 没有移动接口,所以在新位置建一份副本(带整棵子树)
+     * 再删掉原块,并把副本的真实 id 登记给原来的本地 id,后续操作不受影响。
+     */
+    const relocate = (
+      current: NotionPageView,
+      nextBlocks: NotionBlockModel[],
+      blockId: string,
+      caret: number | undefined,
+      target: { parentId: string } | { afterId: string },
+    ): Promise<void> => {
+      if (!findBlockIn(nextBlocks, blockId)) return Promise.resolve();
+      commitPage({ ...current, blocks: nextBlocks });
+      requestFocus(blockId, caret ?? "end");
+      recreate(current.id, blockId, target);
+      return Promise.resolve();
+    };
     return {
-      busy,
+      busy: structBusy,
       focus,
       onFocusHandled: () => setFocus(null),
       saveSegments: (block, segments) => {
-        // Notion 语义:空块失焦保留(等 Backspace/合并去删),否则文末空行
-        // 一失焦就被删,幽灵行跟着闪现,来回跳。
-        if (segments.length === 0 || segments.every((segment) => segment.text === "")) {
-          return Promise.resolve();
-        }
-        void run(() =>
-          client.notionUpdateBlock({
-            blockId: block.id,
-            markdown: "",
-            rich: segments,
-          }),
+        const live = liveBlock(block.id, block);
+        if (!hasSegments(live)) return Promise.resolve();
+        if (JSON.stringify(live.segments) === JSON.stringify(segments)) return Promise.resolve();
+        const before = editLocal((blocks) =>
+          updateBlockIn(blocks, block.id, (entry) => withSegments(entry, segments)),
         );
+        if (before) syncText(before.id, block.id);
         return Promise.resolve();
       },
       saveCode: (blockId, text, language) => {
-        void run(() =>
-          client.notionUpdateBlock({
-            blockId,
+        const before = editLocal((blocks) =>
+          updateBlockIn(blocks, blockId, (entry) =>
+            entry.kind === "code" ? { ...entry, text, ...(language ? { language } : {}) } : entry,
+          ),
+        );
+        if (!before) return Promise.resolve();
+        enqueue(before.id, async () => {
+          const real = realId(blockId);
+          if (!real) return null;
+          const result = await client.notionUpdateBlock({
+            blockId: real,
             markdown: text,
             ...(language ? { language } : {}),
-          }),
-        );
+          });
+          return result.page;
+        });
         return Promise.resolve();
       },
-      remove: (blockId) => {
-        void run(() => client.notionDeleteBlock({ blockId }));
+      remove: (blockId, focusId) => {
+        removeBlock(blockId, focusId);
         return Promise.resolve();
       },
       move: (blockId, direction) => {
-        void run(() => client.notionMoveBlock({ blockId, direction }));
-        return Promise.resolve();
-      },
-      duplicate: (blockId) => {
-        void run(() => client.notionDuplicateBlock({ blockId }));
-        return Promise.resolve();
-      },
-      toggleTodo: (block) => {
-        if (block.kind !== "todo") return Promise.resolve();
-        void run(() =>
-          client.notionUpdateBlock({
-            blockId: block.id,
-            markdown: blockMarkdown(block),
-            checked: !block.checked,
-          }),
+        const current = pageRef.current;
+        if (!current) return Promise.resolve();
+        enqueue(
+          current.id,
+          async () => {
+            const real = realId(blockId);
+            if (!real) return null;
+            return (await client.notionMoveBlock({ blockId: real, direction })).page;
+          },
+          { structural: true },
         );
         return Promise.resolve();
       },
+      duplicate: (blockId) => {
+        const current = pageRef.current;
+        if (!current) return Promise.resolve();
+        enqueue(
+          current.id,
+          async () => {
+            const real = realId(blockId);
+            if (!real) return null;
+            return (await client.notionDuplicateBlock({ blockId: real })).page;
+          },
+          { structural: true },
+        );
+        return Promise.resolve();
+      },
+      toggleTodo: (block) => {
+        const live = liveBlock(block.id, block);
+        if (live.kind !== "todo") return Promise.resolve();
+        const checked = !live.checked;
+        const before = editLocal((blocks) =>
+          updateBlockIn(blocks, block.id, (entry) => (entry.kind === "todo" ? { ...entry, checked } : entry)),
+        );
+        if (!before) return Promise.resolve();
+        enqueue(before.id, async () => {
+          const real = realId(block.id);
+          if (!real) return null;
+          const now = liveBlock(block.id, live);
+          const rich = hasSegments(now) ? now.segments : [];
+          sentText.current.set(block.id, JSON.stringify(rich));
+          const result = await client.notionUpdateBlock({ blockId: real, markdown: "", rich, checked });
+          return result.page;
+        });
+        return Promise.resolve();
+      },
       addBelow: (afterBlockId, kind) => {
-        const before = page;
-        return run(() =>
-          client.notionAppendBlock({
-            ...(afterBlockId ? { afterBlockId } : { pageId: page?.id ?? "" }),
+        const id = newLocalId();
+        const trailingId = kind === "divider" ? newLocalId() : null;
+        const before = editLocal((blocks) => {
+          const next = insertAfterIn(blocks, afterBlockId, makeLocalBlock(id, kind));
+          return trailingId ? insertAfterIn(next, id, makeLocalBlock(trailingId, "paragraph")) : next;
+        });
+        if (!before) return Promise.resolve();
+        // 分隔线没有文本:光标落到它下面新补的空段落。
+        requestFocus(trailingId ?? id, "start");
+        enqueue(before.id, async () => {
+          const after = afterBlockId === null ? null : realId(afterBlockId);
+          if (afterBlockId !== null && !after) return null;
+          const first = await client.notionAppendBlock({
+            ...(after ? { afterBlockId: after } : { pageId: before.id }),
             markdown: "",
             kind,
-          }),
-        ).then((raw) => {
-          const result = raw as NotionPageMutationResult | null;
-          if (before && result) {
-            const created = firstNewBlockId(before.blocks, result.page.blocks);
-            if (created) {
-              setFocus({ blockId: created, at: "start" });
-              setFocusNonce((value) => value + 1);
-            }
-          }
+          });
+          const created = locateNewBlockId(first.page.blocks, after);
+          if (created) learnId(id, created);
+          if (!trailingId || !created) return first.page;
+          const second = await client.notionAppendBlock({
+            afterBlockId: created,
+            markdown: "",
+            kind: "paragraph",
+          });
+          const trailing = locateNewBlockId(second.page.blocks, created);
+          if (trailing) learnId(trailingId, trailing);
+          return second.page;
         });
+        return Promise.resolve();
       },
       split: (block, head, tail) => {
-        const before = page;
+        const live = liveBlock(block.id, block);
+        const bare = (segments: NotionSegment[]): boolean => segments.every((segment) => segment.text === "");
+        // Notion:空的列表项/待办上回车 = 退出列表,变回普通段落。
+        if (
+          bare(head) &&
+          bare(tail) &&
+          (live.kind === "bulleted" || live.kind === "numbered" || live.kind === "todo")
+        ) {
+          convert(live, "paragraph");
+          requestFocus(block.id, "start");
+          return Promise.resolve();
+        }
         const kind =
-          block.kind === "heading"
+          live.kind === "heading"
             ? ("paragraph" as const)
-            : block.kind === "todo"
-              ? ("todo" as const)
-              : (block.kind as "paragraph" | "bulleted" | "numbered" | "todo" | "quote" | "callout" | "toggle");
-        return run(async () => {
-          await client.notionUpdateBlock({
-            blockId: block.id,
-            markdown: "",
-            rich: head,
-          });
-          await client.notionAppendBlock({
-            afterBlockId: block.id,
+            : (live.kind as "paragraph" | "bulleted" | "numbered" | "todo" | "quote" | "callout" | "toggle");
+        const id = newLocalId();
+        const before = editLocal((blocks) =>
+          insertAfterIn(
+            updateBlockIn(blocks, block.id, (entry) => withSegments(entry, head)),
+            block.id,
+            makeLocalBlock(id, kind, tail),
+          ),
+        );
+        if (!before) return Promise.resolve();
+        requestFocus(id, "start");
+        enqueue(before.id, async () => {
+          const real = realId(block.id);
+          if (!real) return null;
+          sentText.current.set(block.id, JSON.stringify(head));
+          await client.notionUpdateBlock({ blockId: real, markdown: "", rich: head });
+          const result = await client.notionAppendBlock({
+            afterBlockId: real,
             markdown: "",
             kind,
             rich: tail,
           });
-        }).then((raw) => {
-          const result = raw as NotionPageMutationResult | null;
-          if (before && result) {
-            const created = firstNewBlockId(before.blocks, result.page.blocks);
-            if (created) {
-              setFocus({ blockId: created, at: "start" });
-              setFocusNonce((value) => value + 1);
-            }
-          }
+          const created = locateNewBlockId(result.page.blocks, real);
+          if (created) learnId(id, created);
+          return result.page;
         });
-      },
-      merge: (block, prevId) => {
-        const prevLen = page ? Math.max(0, textLength(page.blocks, prevId)) : 0;
-        return run(async () => {
-          const prevSegments = segmentsOfBlock(page?.blocks ?? [], prevId);
-          const curSegments = segmentsOfBlock(page?.blocks ?? [], block.id);
-          const merged = [...prevSegments, ...curSegments.filter((segment) => segment.text !== "")];
-          await client.notionUpdateBlock({
-            blockId: prevId,
-            markdown: "",
-            rich: merged,
-          });
-          await client.notionDeleteBlock({ blockId: block.id });
-        }).then(() => {
-          setFocus({ blockId: prevId, at: prevLen });
-          setFocusNonce((value) => value + 1);
-        });
-      },
-      turnInto: (block, kind) => {
-        void run(() =>
-          client.notionUpdateBlock({
-            blockId: block.id,
-            markdown: blockMarkdown(block),
-            kind,
-          }),
-        );
         return Promise.resolve();
       },
+      merge: (block, prevId) => {
+        const current = pageRef.current;
+        if (!current) return Promise.resolve();
+        const prev = findBlockIn(current.blocks, prevId);
+        const live = liveBlock(block.id, block);
+        if (!prev || !hasSegments(prev) || !hasSegments(live) || live.children.length > 0) {
+          // 前一块不是文本块(或本块带子块):空块直接删,有字的不动,避免误伤。
+          if (hasSegments(live) && segmentsText(live.segments) === "") removeBlock(block.id, prevId);
+          else if (prev) requestFocus(prevId, "end");
+          return Promise.resolve();
+        }
+        const prevLength = segmentsText(prev.segments).length;
+        const merged = [...prev.segments, ...live.segments.filter((segment) => segment.text !== "")];
+        const before = editLocal((blocks) =>
+          removeBlockIn(
+            updateBlockIn(blocks, prevId, (entry) => withSegments(entry, merged)),
+            block.id,
+          ),
+        );
+        if (!before) return Promise.resolve();
+        requestFocus(prevId, prevLength);
+        enqueue(before.id, async () => {
+          const realPrev = realId(prevId);
+          const real = realId(block.id);
+          if (!realPrev || !real) return null;
+          sentText.current.set(prevId, JSON.stringify(merged));
+          await client.notionUpdateBlock({ blockId: realPrev, markdown: "", rich: merged });
+          return (await client.notionDeleteBlock({ blockId: real })).page;
+        });
+        return Promise.resolve();
+      },
+      turnInto: (block, kind) => {
+        convert(block, kind);
+        return Promise.resolve();
+      },
+      paste: (block, head, items, tail) => {
+        const live = liveBlock(block.id, block);
+        const tailKind =
+          live.kind === "heading"
+            ? ("paragraph" as const)
+            : (live.kind as "paragraph" | "bulleted" | "numbered" | "todo" | "quote" | "callout" | "toggle");
+        const hasTail = tail.some((segment) => segment.text !== "");
+        const added = pastedToLocal(items, newLocalId);
+        if (hasTail) added.push(makeLocalBlock(newLocalId(), tailKind, tail));
+        const before = editLocal((blocks) => {
+          let next = head ? updateBlockIn(blocks, block.id, (entry) => withSegments(entry, head)) : blocks;
+          let after = block.id;
+          for (const entry of added) {
+            next = insertAfterIn(next, after, entry);
+            after = entry.id;
+          }
+          return head === null ? removeBlockIn(next, block.id) : next;
+        });
+        if (!before) return Promise.resolve();
+        // 光标落在粘贴内容的最后一个文本块末尾(嵌套的取最深的最后一个)。
+        const lastLeaf = (list: readonly NotionBlockModel[]): NotionBlockModel | null => {
+          for (let i = list.length - 1; i >= 0; i -= 1) {
+            const entry = list[i];
+            if (!entry) continue;
+            const nested = lastLeaf(entry.children);
+            if (nested) return nested;
+            if (hasSegments(entry)) return entry;
+          }
+          return null;
+        };
+        const focusTarget = lastLeaf(hasTail ? added.slice(0, -1) : added);
+        if (focusTarget) requestFocus(focusTarget.id, "end");
+        const children: AppendChild[] = [
+          ...pastedToAppend(items),
+          ...(hasTail ? [{ kind: tailKind, markdown: "", rich: tail }] : []),
+        ];
+        enqueue(before.id, async () => {
+          let afterReal = realId(block.id);
+          if (!afterReal) return null;
+          const firstReal = afterReal;
+          if (head) {
+            sentText.current.set(block.id, JSON.stringify(head));
+            await client.notionUpdateBlock({ blockId: afterReal, markdown: "", rich: head });
+          }
+          let view: NotionPageView | null = null;
+          // Notion 单次最多追加 100 个块;每批接在上一批最后一个块之后。
+          for (let start = 0; start < children.length; start += 100) {
+            const batch = children.slice(start, start + 100);
+            const result = await client.notionAppendBlock({ afterBlockId: afterReal, markdown: "", children: batch });
+            view = result.page;
+            const created = locateNewBlocks(result.page.blocks, afterReal, batch.length);
+            for (const [localId, serverId] of pairBlockIds(added.slice(start, start + batch.length), created)) {
+              learnId(localId, serverId);
+            }
+            const last = created[created.length - 1];
+            if (!last) break;
+            afterReal = last.id;
+          }
+          if (head === null) view = (await client.notionDeleteBlock({ blockId: firstReal })).page;
+          return view;
+        });
+        return Promise.resolve();
+      },
+      indent: (block, caret) => {
+        const current = pageRef.current;
+        if (!current) return Promise.resolve();
+        const moved = indentIn(current.blocks, block.id);
+        if (!moved) return Promise.resolve();
+        return relocate(current, moved.blocks, block.id, caret, { parentId: moved.parentId });
+      },
+      outdent: (block, caret) => {
+        const current = pageRef.current;
+        if (!current) return Promise.resolve();
+        const moved = outdentIn(current.blocks, block.id);
+        if (!moved) return Promise.resolve();
+        return relocate(current, moved.blocks, block.id, caret, { afterId: moved.afterId });
+      },
     };
-  }, [busy, client, focus, page, push, run, textLength]);
+  }, [client, editLocal, enqueue, focus, learnId, liveBlock, newLocalId, realId, requestFocus, structBusy]);
 
   // Notion 式文末行:最后一行是空段落就聚焦它,否则追加一个新空段落。
   const blocks = page?.blocks ?? [];
@@ -458,22 +812,16 @@ export function KnowledgePage() {
     lastBlock.children.length === 0 &&
     lastBlock.segments.every((segment) => segment.text.trim() === "");
   const tailLine = useCallback((): void => {
-    const blocks = page?.blocks ?? [];
+    const blocks = pageRef.current?.blocks ?? [];
     const last = blocks[blocks.length - 1];
     const emptyTail =
       last !== undefined &&
       last.kind === "paragraph" &&
       last.children.length === 0 &&
       last.segments.every((segment) => segment.text.trim() === "");
-    if (last && emptyTail) {
-      setFocus({ blockId: last.id, at: "end" });
-      setFocusNonce((value) => value + 1);
-    } else {
-      // 立刻藏掉幽灵行:数据重拉回来之前,它和新空段落会短暂同屏成两行。
-      setTailPending(true);
-      void editor.addBelow(null, "paragraph").finally(() => setTailPending(false));
-    }
-  }, [editor, page]);
+    if (last && emptyTail) requestFocus(last.id, "end");
+    else void editor.addBelow(null, "paragraph");
+  }, [editor, requestFocus]);
 
   const flat = useMemo(() => flattenTree(roots ?? []), [roots]);
 
@@ -482,9 +830,103 @@ export function KnowledgePage() {
       const next = new Set(current);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      writeCollapsed(next);
       return next;
     });
   }, []);
+
+  // —— 侧栏拖拽:把页面拖到另一个页面上 = 移到它下面(Notion 同款) ——
+  // 用指针事件而不是 HTML5 拖放:桌面壳的 WebView 对后者支持不一致。
+  const rootsRef = useRef<NotionTreeNodeView[] | null>(roots);
+  rootsRef.current = roots;
+  const [dragUi, setDragUi] = useState<{ id: string; title: string; x: number; y: number; overId: string | null } | null>(null);
+  const justDragged = useRef(false);
+
+  const movePageTo = useCallback(
+    (id: string, parentId: string): void => {
+      const before = rootsRef.current;
+      if (!before) return;
+      // 先改本地树,松手立刻见效;请求失败再还原。
+      const optimistic = moveNodeIn(before, id, parentId);
+      rootsRef.current = optimistic;
+      setRoots(optimistic);
+      setCollapsed((current) => {
+        if (!current.has(parentId)) return current;
+        const next = new Set(current);
+        next.delete(parentId);
+        writeCollapsed(next);
+        return next;
+      });
+      void client
+        .notionMovePage({ pageId: id, parentId })
+        .then((result) => {
+          rootsRef.current = result.roots;
+          setRoots(result.roots);
+          writeKnowledgeCache({ roots: result.roots });
+        })
+        .catch((error) => {
+          rootsRef.current = before;
+          setRoots(before);
+          push({ message: error instanceof Error ? error.message : String(error), tone: "danger" });
+        });
+    },
+    [client, push],
+  );
+
+  const beginTreeDrag = useCallback(
+    (event: ReactPointerEvent, node: { id: string; title: string; object: string }): void => {
+      if (event.button !== 0 || node.object !== "page") return;
+      const startX = event.clientX;
+      const startY = event.clientY;
+      let active = false;
+      const overOf = (x: number, y: number): string | null => {
+        const row = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-tree-id]");
+        const id = row?.dataset.treeId ?? null;
+        return id && canDropPage(rootsRef.current ?? [], node.id, id) ? id : null;
+      };
+      const stop = (): void => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onCancel);
+        window.removeEventListener("keydown", onKey);
+        document.body.style.userSelect = "";
+        document.body.style.cursor = "";
+      };
+      const onMove = (move: PointerEvent): void => {
+        if (!active) {
+          if (Math.hypot(move.clientX - startX, move.clientY - startY) < 6) return;
+          active = true;
+          document.body.style.userSelect = "none";
+          document.body.style.cursor = "grabbing";
+        }
+        setDragUi({ id: node.id, title: node.title, x: move.clientX, y: move.clientY, overId: overOf(move.clientX, move.clientY) });
+      };
+      const onUp = (up: PointerEvent): void => {
+        stop();
+        if (!active) return;
+        // 松手后浏览器还会补一个 click,别让它把页面打开了。
+        justDragged.current = true;
+        setTimeout(() => {
+          justDragged.current = false;
+        }, 50);
+        const target = overOf(up.clientX, up.clientY);
+        setDragUi(null);
+        if (target) movePageTo(node.id, target);
+      };
+      const onCancel = (): void => {
+        stop();
+        setDragUi(null);
+      };
+      const onKey = (key: KeyboardEvent): void => {
+        if (key.key === "Escape") onCancel();
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onCancel);
+      window.addEventListener("keydown", onKey);
+    },
+    [movePageTo],
+  );
 
   if (status !== null && !status.hasToken) {
     return (
@@ -575,7 +1017,12 @@ export function KnowledgePage() {
               selectedId={selectedId ?? null}
               collapsed={collapsed}
               onToggle={toggleCollapse}
-              onOpen={open}
+              onOpen={(id) => {
+                if (!justDragged.current) open(id);
+              }}
+              dragId={dragUi?.id ?? null}
+              dropTargetId={dragUi?.overId ?? null}
+              onDragStart={beginTreeDrag}
               untitled={t("knowledgeUntitled")}
               onCreateChild={(parentId) => {
                 setBusy(true);
@@ -668,7 +1115,7 @@ export function KnowledgePage() {
                       await refreshMeta();
                       if (selectedId === target.id && page) {
                         const detail = await client.notionPage(target.id);
-                        setPage(detail);
+                        commitPage(detail);
                         writeKnowledgeCache({ pageId: target.id, page: detail });
                       }
                     })
@@ -720,6 +1167,11 @@ export function KnowledgePage() {
           <DatabaseView database={database} onOpen={open} untitled={t("knowledgeUntitled")} />
         ) : page ? (
           <article className="knowledge-page">
+            {saveState !== "idle" ? (
+              <div className="knowledge-save-state" data-state={saveState} role="status">
+                {saveState === "saving" ? t("knowledgeSaving") : t("knowledgeSaveFailed")}
+              </div>
+            ) : null}
             {page.coverUrl ? <div className="knowledge-cover" /> : null}
             <header className="knowledge-page-head">
               {page.icon ? <span className="knowledge-page-icon">{page.icon}</span> : null}
@@ -733,7 +1185,7 @@ export function KnowledgePage() {
                     void client
                       .notionPatchTitle({ pageId: page.id, title: titleDraft.trim() })
                       .then((result) => {
-                        setPage(result.page);
+                        commitPage({ ...result.page, blocks: pageRef.current?.blocks ?? result.page.blocks });
                         setTitleEditing(false);
                       })
                       .catch((error) =>
@@ -750,7 +1202,11 @@ export function KnowledgePage() {
                     value={titleDraft}
                     autoFocus
                     onChange={(event) => setTitleDraft(event.target.value)}
+                    onCompositionStart={titleIme.onCompositionStart}
+                    onCompositionEnd={titleIme.onCompositionEnd}
                     onKeyDown={(event) => {
+                      // 输入法选词的回车不是提交。
+                      if (event.key === "Enter" && titleIme.isComposing(event)) event.preventDefault();
                       if (event.key === "Escape") setTitleEditing(false);
                     }}
                   />
@@ -785,6 +1241,10 @@ export function KnowledgePage() {
                 const target = event.target as HTMLElement;
                 if (target.closest("a, button, [contenteditable], .nb-menu, .nb-code, .knowledge-properties, .knowledge-title-form")) return;
                 if (target !== event.currentTarget) return;
+                // 只有点在最后一行下方的空白才落到文末;行与行之间的缝隙别把光标拽走。
+                const rows = event.currentTarget.querySelectorAll(".nb-row");
+                const lastRow = rows[rows.length - 1];
+                if (lastRow && event.clientY < lastRow.getBoundingClientRect().bottom) return;
                 tailLine();
               }}
             >
@@ -797,7 +1257,7 @@ export function KnowledgePage() {
                 onFocusHandled={() => setFocus(null)}
               />
               {/* Notion 式末尾幽灵行:仅当文末不是空段落且无创建中的空段时显示,保证永远只有一行。 */}
-              {!tailIsEmptyParagraph && !tailPending ? (
+              {!tailIsEmptyParagraph ? (
                 <div
                   className="knowledge-new-line"
                   onMouseDown={(event) => {
@@ -821,6 +1281,11 @@ export function KnowledgePage() {
           </div>
         ) : null}
       </section>
+      {dragUi !== null ? (
+        <div className="knowledge-drag-ghost" style={{ left: dragUi.x + 12, top: dragUi.y + 10 }}>
+          {dragUi.title || t("knowledgeUntitled")}
+        </div>
+      ) : null}
       {switcherOpen ? (
         <Switcher
           pages={flat}
@@ -843,6 +1308,9 @@ function TreeNodes({
   collapsed,
   onToggle,
   onOpen,
+  dragId,
+  dropTargetId,
+  onDragStart,
   depth = 0,
   untitled,
   onCreateChild,
@@ -856,6 +1324,10 @@ function TreeNodes({
   collapsed: ReadonlySet<string>;
   onToggle: (id: string) => void;
   onOpen: (id: string) => void;
+  /** 正在被拖的页面、当前悬停的可放置目标;松手即移动。 */
+  dragId: string | null;
+  dropTargetId: string | null;
+  onDragStart: (event: ReactPointerEvent, node: { id: string; title: string; object: string }) => void;
   depth?: number;
   untitled: string;
   onCreateChild: (parentId: string) => void;
@@ -873,7 +1345,12 @@ function TreeNodes({
         return (
           <div key={node.id}>
             <div
-              className="knowledge-tree-row"
+              className={
+                "knowledge-tree-row" +
+                (dropTargetId === node.id ? " is-drop-target" : "") +
+                (dragId === node.id ? " is-dragging" : "")
+              }
+              data-tree-id={node.id}
               style={{ paddingLeft: `${8 + depth * 14}px` }}
               onMouseLeave={() => setMenuFor((value) => (value === node.id ? null : value))}
             >
@@ -893,6 +1370,7 @@ function TreeNodes({
                 type="button"
                 className={"knowledge-tree-item" + (node.id === selectedId ? " is-active" : "")}
                 onClick={() => onOpen(node.id)}
+                onPointerDown={(event) => onDragStart(event, node)}
               >
                 <span className="knowledge-tree-title">
                   {node.icon ?? (node.object === "database" ? "🗂" : "📄")} {node.title || untitled}
@@ -952,6 +1430,9 @@ function TreeNodes({
                 collapsed={collapsed}
                 onToggle={onToggle}
                 onOpen={onOpen}
+                dragId={dragId}
+                dropTargetId={dropTargetId}
+                onDragStart={onDragStart}
                 depth={depth + 1}
                 untitled={untitled}
                 onCreateChild={onCreateChild}
@@ -1092,35 +1573,10 @@ function DatabaseView({
   );
 }
 
-function segmentsOfBlock(blocks: readonly NotionBlockModel[], id: string): NotionSegment[] {
-  for (const model of blocks) {
-    if (model.id === id) {
-      if (
-        model.kind === "paragraph" ||
-        model.kind === "quote" ||
-        model.kind === "callout" ||
-        model.kind === "toggle" ||
-        model.kind === "bulleted" ||
-        model.kind === "numbered" ||
-        model.kind === "todo" ||
-        model.kind === "heading"
-      ) {
-        return model.segments;
-      }
-      return [];
-    }
-    const nested = segmentsOfBlock(model.children, id);
-    if (nested.length > 0) return nested;
-  }
-  return [];
-}
-
-function blockTextLength(model: NotionBlockModel): number {
-  const segments = segmentsOfBlock([model], model.id);
-  if (segments.length > 0) {
-    return segments.reduce((sum, segment) => sum + segment.text.length, 0);
-  }
-  return model.kind === "code" ? model.text.length : 0;
+/** 焦点是否正在知识库正文的可编辑行里。 */
+function isEditingBlocks(): boolean {
+  const active = document.activeElement;
+  return active instanceof HTMLElement && active.isContentEditable && active.closest(".knowledge-blocks") !== null;
 }
 
 function findNode(nodes: readonly NotionTreeNodeView[], id: string): NotionTreeNodeView | null {

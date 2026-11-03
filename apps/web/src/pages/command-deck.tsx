@@ -20,6 +20,7 @@ import { Select } from "../components/select.js";
 import { MarkdownView } from "../components/ui.js";
 import { useDaemon } from "../daemon-context.js";
 import { subscribeDeckDelta } from "../lib/deck-stream.js";
+import { useImeGuard } from "../lib/ime-guard.js";
 
 type Phase = "loading" | "ready" | "error";
 
@@ -84,20 +85,24 @@ export function CommandDeckPage() {
   );
 
   const loadAll = useCallback(async () => {
+    // 执行者目录要探测本机 CLI/应用,最慢;不挡首屏,到了再补进执行面板。
+    void client
+      .deckExecutors()
+      .then((executors) => setState((current) => ({ ...current, executors: executors.executors })))
+      .catch(() => undefined);
     try {
-      const [conversations, tasks, executors, jobs, config] = await Promise.all([
+      const [conversations, tasks, jobs, config] = await Promise.all([
         client.deckConversations(),
         client.deckTasks(),
-        client.deckExecutors(),
         client.deckJobs(),
         client.deckConfig(),
       ]);
-      setState({
+      setState((current) => ({
         conversations: conversations.conversations,
         tasks: tasks.tasks,
-        executors: executors.executors,
+        executors: current.executors,
         jobs: jobs.jobs,
-      });
+      }));
       setMasterConfig(config.config);
       setMasterModelDraft(config.config.masterModel ?? "");
       setPhase("ready");
@@ -561,10 +566,12 @@ export function CommandDeckPage() {
                 <li
                   key={`${executor.kind}:${executor.id}`}
                   className={executor.available ? "" : "is-off"}
+                  // 说明文字(路径、input 约定等)不占版面,悬停才看。
+                  title={executor.detail}
                 >
                   <span className="deck-executor-kind">{executor.kind}</span>
                   <span className="deck-executor-id">{executor.id}</span>
-                  <span className="deck-executor-detail">{executor.detail}</span>
+                  {executor.available ? null : <span className="deck-executor-detail">未就绪</span>}
                 </li>
               ))}
             </ul>
@@ -640,30 +647,6 @@ function DeckSection({ title, children }: { title: string; children: ReactNode }
       {children}
     </section>
   );
-}
-
-/**
- * CJK 输入法安全：组词期间的 Enter 是确认候选词，不是发送。
- * WKWebView(Safari) 还会在 compositionend 之后才补发那条确认用的
- * Enter keydown（isComposing 已变 false），所以再认 50ms 内的「刚结束」。
- */
-function useImeGuard() {
-  const state = useRef({ active: false, endedAt: -Infinity });
-  const onCompositionStart = useCallback(() => {
-    state.current.active = true;
-  }, []);
-  const onCompositionEnd = useCallback((event: CompositionEvent) => {
-    state.current.active = false;
-    state.current.endedAt = event.timeStamp;
-  }, []);
-  const isComposing = useCallback((event: ReactKeyboardEvent): boolean => {
-    return (
-      event.nativeEvent.isComposing ||
-      state.current.active ||
-      event.timeStamp - state.current.endedAt < 50
-    );
-  }, []);
-  return { onCompositionStart, onCompositionEnd, isComposing };
 }
 
 function DeckTurnView({ turn }: { turn: DeckTurn }) {

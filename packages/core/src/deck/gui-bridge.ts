@@ -66,7 +66,8 @@ function isMac(): boolean {
   return platform() === "darwin";
 }
 
-async function appRunning(app: GuiAppDef): Promise<boolean> {
+/** 进程是否在跑(一次 pgrep,毫秒级)。 */
+export async function appRunning(app: GuiAppDef): Promise<boolean> {
   try {
     await probe("pgrep", ["-x", app.processName]);
     return true;
@@ -96,14 +97,18 @@ export interface GuiAppStatus {
   detail: string;
 }
 
-export async function guiAppStatus(app: GuiAppDef): Promise<GuiAppStatus> {
+export async function guiAppStatus(
+  app: GuiAppDef,
+  /** 多个 App 一起探测时共用同一次辅助功能权限检测(osascript 要几百毫秒)。 */
+  accessibility: () => Promise<boolean> = accessibilityGranted,
+): Promise<GuiAppStatus> {
   if (!isMac()) {
     return { id: app.id, displayName: app.displayName, available: false, detail: "仅支持 macOS" };
   }
   if (!(await appRunning(app))) {
     return { id: app.id, displayName: app.displayName, available: false, detail: "App 未运行" };
   }
-  if (!(await accessibilityGranted())) {
+  if (!(await accessibility())) {
     return {
       id: app.id,
       displayName: app.displayName,

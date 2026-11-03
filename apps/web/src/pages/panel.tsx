@@ -257,6 +257,7 @@ export function PanelPage() {
                   t={t}
                   onAction={reminderAction}
                   onOpenTopic={(topicId) => openMain(topicHref(topicZone(topics, topicId), topicId))}
+                  loadDetail={(reminderId) => client.reminderDetail(reminderId).then((result) => result.detail)}
                 />
               </div>
             ) : null}

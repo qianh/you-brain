@@ -525,26 +525,64 @@ export class NotionService {
       markdown: string;
       kind?: string | undefined;
       rich?: NotionSegment[] | undefined;
+      /** 追加为这个块的子块(缩进)。 */
+      parentBlockId?: string | undefined;
+      children?: NewChildInput[] | undefined;
     },
   ): Promise<NotionPageView> {
     const client = await this.#openClient();
     if (!client) throw new YouBrainError("INVALID_INPUT", "还没有保存 Notion 集成令牌");
-    const pageId = input.pageId ?? (input.afterBlockId ? this.#pageOfBlock(input.afterBlockId) : null);
-    if (!pageId) throw new YouBrainError("INVALID_INPUT", "缺少 pageId 或 afterBlockId");
-    const child = this.#newBlockChild(input.kind ?? "paragraph", input.markdown, input.rich);
+    const pageId =
+      input.pageId ??
+      (input.parentBlockId
+        ? this.#pageOfBlock(input.parentBlockId)
+        : input.afterBlockId
+          ? this.#pageOfBlock(input.afterBlockId)
+          : null);
+    if (!pageId) throw new YouBrainError("INVALID_INPUT", "缺少 pageId、afterBlockId 或 parentBlockId");
+    const children = input.children
+      ? input.children.map((entry) => this.#newBlockTree(entry))
+      : [this.#newBlockChild(input.kind ?? "paragraph", input.markdown, input.rich)];
     // afterBlockId 是兄弟:父级取它的父级,靠 `after` 参数定位插入点。
-    const parentId = input.afterBlockId
-      ? (this.#locate(pageId, input.afterBlockId)?.parentId ?? pageId)
-      : pageId;
-    await client.appendBlocks(parentId, [child], input.afterBlockId);
+    const parentId = input.parentBlockId
+      ? input.parentBlockId
+      : input.afterBlockId
+        ? (this.#locate(pageId, input.afterBlockId)?.parentId ?? pageId)
+        : pageId;
+    await client.appendBlocks(parentId, children, input.afterBlockId);
     await this.#syncEngine().resyncPage(pageId);
     const view = await this.page(pageId);
     if (!view) throw new YouBrainError("INVALID_INPUT", "页面刷新失败");
     return view;
   }
 
+  /** 带嵌套子块的新块 payload(Notion 单次请求最多嵌两层)。 */
+  #newBlockTree(input: NewChildInput): Record<string, unknown> {
+    const child = this.#newBlockChild(
+      input.kind,
+      input.markdown,
+      input.rich,
+      input.language,
+      input.checked,
+      input.emoji,
+    );
+    if (input.children && input.children.length > 0) {
+      const type = String(child.type);
+      const payload = child[type] as Record<string, unknown> | undefined;
+      if (payload) payload.children = input.children.map((entry) => this.#newBlockTree(entry));
+    }
+    return child;
+  }
+
   /** Fresh block payload for the "add block" menu kinds. */
-  #newBlockChild(kind: string, markdown: string, rich?: NotionSegment[]): Record<string, unknown> {
+  #newBlockChild(
+    kind: string,
+    markdown: string,
+    rich?: NotionSegment[],
+    language?: string,
+    checked?: boolean,
+    emoji?: string,
+  ): Record<string, unknown> {
     const richText = segmentsToRichText(
       rich && rich.length > 0 ? rich : markdownToSegments(markdown),
     );
@@ -554,7 +592,7 @@ export class NotionService {
       case "numbered":
         return { object: "block", type: "numbered_list_item", numbered_list_item: { rich_text: richText } };
       case "todo":
-        return { object: "block", type: "to_do", to_do: { rich_text: richText, checked: false } };
+        return { object: "block", type: "to_do", to_do: { rich_text: richText, checked: checked ?? false } };
       case "heading1":
         return { object: "block", type: "heading_1", heading_1: { rich_text: richText } };
       case "heading2":
@@ -567,7 +605,7 @@ export class NotionService {
         return {
           object: "block",
           type: "callout",
-          callout: { rich_text: richText, icon: { type: "emoji", emoji: "💡" }, color: "default" },
+          callout: { rich_text: richText, icon: { type: "emoji", emoji: emoji || "💡" }, color: "default" },
         };
       case "toggle":
         return { object: "block", type: "toggle", toggle: { rich_text: richText } };
@@ -575,7 +613,7 @@ export class NotionService {
         return {
           object: "block",
           type: "code",
-          code: { rich_text: [{ type: "text", text: { content: markdown } }], language: "plain text" },
+          code: { rich_text: chunkText(markdown).map((content) => ({ type: "text", text: { content } })), language: language || "plain text" },
         };
       case "divider":
         return { object: "block", type: "divider", divider: {} };
@@ -702,6 +740,36 @@ export class NotionService {
     return { pageId, view: await this.page(pageId) };
   }
 
+  /**
+   * 把页面移到另一个页面下(侧栏拖拽)。Notion 的限制:只能移普通页面,目标必须是普通页面
+   * (不能是数据库或数据库里的行),不能移到顶层。本地先校验,免得白发一次请求;
+   * 成功后立刻改本地索引,侧栏马上是新结构,下一轮同步再和 Notion 对齐。
+   */
+  async movePage(pageId: string, parentId: string): Promise<{ roots: NotionTreeNode[] }> {
+    const pages = this.#openIndex().listPages();
+    const byId = new Map(pages.map((page) => [page.pageId, page]));
+    const page = byId.get(pageId);
+    const parent = byId.get(parentId);
+    if (!page || !parent) throw new YouBrainError("INVALID_INPUT", "页面不存在或还没有同步");
+    if (page.object !== "page" || page.parentKind === "database") {
+      throw new YouBrainError("INVALID_INPUT", "只能移动普通页面(不能移动数据库或数据库里的行)");
+    }
+    if (parent.object !== "page" || parent.parentKind === "database") {
+      throw new YouBrainError("INVALID_INPUT", "只能移到普通页面下面(不能移到数据库里)");
+    }
+    if (pageId === parentId) throw new YouBrainError("INVALID_INPUT", "不能把页面移到它自己下面");
+    for (let cursor: string | null = parent.parentId, hops = 0; cursor !== null && hops < 200; hops += 1) {
+      if (cursor === pageId) throw new YouBrainError("INVALID_INPUT", "不能把页面移到它自己的子页面下面");
+      cursor = byId.get(cursor)?.parentId ?? null;
+    }
+    if (page.parentKind === "page" && page.parentId === parentId) return { roots: await this.tree() };
+    const client = await this.#openClient();
+    if (!client) throw new YouBrainError("INVALID_INPUT", "还没有保存 Notion 集成令牌");
+    await client.movePage(pageId, parentId);
+    this.#openIndex().upsertPage({ ...page, parentKind: "page", parentId });
+    return { roots: await this.tree() };
+  }
+
   /** Archive a page (soft-delete in Notion) and remove it from the index. */
   async archivePage(pageId: string): Promise<{ roots: NotionTreeNode[] }> {
     const client = await this.#openClient();
@@ -754,6 +822,26 @@ export class NotionService {
     if (!view) throw new YouBrainError("INVALID_INPUT", "页面刷新失败");
     return view;
   }
+}
+
+interface NewChildInput {
+  kind: string;
+  markdown: string;
+  rich?: NotionSegment[] | undefined;
+  language?: string | undefined;
+  checked?: boolean | undefined;
+  emoji?: string | undefined;
+  children?: NewChildInput[] | undefined;
+}
+
+/** Notion 单个 rich_text 的 content 上限 2000 字符,长代码要切段。 */
+function chunkText(text: string, size = 2000): string[] {
+  // 空代码块:rich_text 给空数组,而不是一个 content 为空串的文本(Notion 可能拒收)。
+  if (text === "") return [];
+  if (text.length <= size) return [text];
+  const out: string[] = [];
+  for (let at = 0; at < text.length; at += size) out.push(text.slice(at, at + size));
+  return out;
 }
 
 function flattenCells(cells: Record<string, unknown>): Record<string, string> {

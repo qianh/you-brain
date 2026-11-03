@@ -175,6 +175,8 @@ function fakeFetch() {
     inserted: new Map<string, Array<{ after: string | null; block: Record<string, unknown> }>>(),
     /** 模拟导入竞态:页面已建、内容还没推。 */
     emptyPages: new Set<string>(),
+    /** 「移动页面」请求记录(接口要求新版本头)。 */
+    moves: [] as Array<{ pageId: string; parentId: string; version: string | null }>,
   };
   const serveChildren = (base: Array<Record<string, unknown>>, parentId: string) => {
     let list = [...base];
@@ -272,6 +274,17 @@ function fakeFetch() {
       if (!def) return json({ code: "object_not_found", message: "not found" }, 404);
       return json(apiPage(def));
     }
+    const moveMatch = /^POST \/pages\/([^/]+)\/move$/u.exec(key);
+    if (moveMatch) {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { parent?: { page_id?: string } };
+      const headers = new Headers(init?.headers);
+      state.moves.push({
+        pageId: decodeURIComponent(moveMatch[1] ?? ""),
+        parentId: body.parent?.page_id ?? "",
+        version: headers.get("notion-version"),
+      });
+      return json({ object: "page", id: moveMatch[1] });
+    }
     if (key === "POST /pages") {
       const body = JSON.parse(String(init?.body ?? "{}")) as {
         parent: { page_id: string };
@@ -317,7 +330,9 @@ function fakeFetch() {
       body.children.forEach((child, index) => {
         // 真实 API 会分配块 id;fake 里补上,页面树才挂得起来。
         const withId = child.id ? child : { ...child, id: `new-${state.inserted.size}-${list.length + index}` };
-        list.push({ after, block: withId });
+        // 一次追加多个块时,真实 API 按顺序依次排在 after 之后:后一个接在前一个后面。
+        const previous = index > 0 ? list[list.length - 1]?.block.id : undefined;
+        list.push({ after: typeof previous === "string" ? previous : after, block: withId });
       });
       state.inserted.set(id, list);
       return json({ results: body.children });
@@ -632,6 +647,27 @@ describe("notion write path", () => {
     }
   });
 
+  test("批量追加(粘贴 Markdown):多个块一次落在 after 之后且保持顺序", async () => {
+    const service = await prepare();
+    const before = ["p1", "h1", "todo1", "tbl"];
+    const appended = await service.appendBlock({
+      afterBlockId: "p1",
+      markdown: "",
+      children: [
+        { kind: "paragraph", markdown: "", rich: [{ text: "甲", href: null, bold: true, italic: false, strikethrough: false, underline: false, code: false, color: "default" }] },
+        { kind: "numbered", markdown: "乙" },
+        { kind: "todo", markdown: "丙", checked: true },
+      ],
+    });
+    const ids = appended.blocks.map((block) => block.id);
+    const fresh = ids.filter((id) => !before.includes(id));
+    expect(fresh).toHaveLength(3);
+    expect(ids.slice(ids.indexOf("p1") + 1, ids.indexOf("p1") + 4)).toEqual(fresh);
+    expect(fresh.map((id) => findModel(appended.blocks, id)?.kind)).toEqual(["paragraph", "numbered", "todo"]);
+    const todo = findModel(appended.blocks, fresh[2] ?? "");
+    expect(todo && todo.kind === "todo" ? todo.checked : false).toBe(true);
+  });
+
   test("移动:上移后顺序交换;带子块的块拒绝移动", async () => {
     const service = await prepare();
     const moved = await service.moveBlock("h1", "up");
@@ -651,6 +687,38 @@ describe("notion write path", () => {
 
     const renamed = await service.patchTitle(ROW_PAGE_A, "改过的标题");
     expect(renamed.title).toBe("改过的标题");
+  });
+
+  test("移动页面:调用新版接口、侧栏结构立刻变化,非法目标被拒", async () => {
+    const service = await prepare();
+    const a = await service.createPage({ title: "甲" });
+    const b = await service.createPage({ title: "乙" });
+    const inner = await service.createPage({ parentId: a.pageId, title: "甲的子页" });
+
+    const moved = await service.movePage(b.pageId, a.pageId);
+    const find = (nodes: NotionTreeNode[], id: string): NotionTreeNode | null => {
+      for (const node of nodes) {
+        if (node.id === id) return node;
+        const nested = find(node.children, id);
+        if (nested) return nested;
+      }
+      return null;
+    };
+    expect(find(moved.roots, a.pageId)?.children.map((node) => node.id)).toContain(b.pageId);
+    expect(fake.state.moves).toEqual([{ pageId: b.pageId, parentId: a.pageId, version: "2026-03-11" }]);
+    // 其余请求仍用原来的版本
+    expect(fake.calls.some((call) => call === "POST /pages")).toBe(true);
+
+    // 移到原本就在的父页面下:不再发请求
+    await service.movePage(b.pageId, a.pageId);
+    expect(fake.state.moves).toHaveLength(1);
+
+    // 不能移到自己、自己的子孙下面,也不能移数据库
+    await expect(service.movePage(a.pageId, a.pageId)).rejects.toThrow("自己下面");
+    await expect(service.movePage(a.pageId, b.pageId)).rejects.toThrow("子页面");
+    await expect(service.movePage(a.pageId, inner.pageId)).rejects.toThrow("子页面");
+    await expect(service.movePage(ROW_PAGE_A, a.pageId)).rejects.toThrow();
+    expect(fake.state.moves).toHaveLength(1);
   });
 
   test("新建页面与删除页面", async () => {

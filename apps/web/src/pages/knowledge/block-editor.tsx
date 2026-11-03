@@ -4,11 +4,14 @@ import type { NotionBlockModel, NotionSegment } from "@you-brain/core/http/types
 
 import type { MessageKey } from "../../i18n/messages.js";
 import { highlightCode } from "../../lib/highlight.js";
+import { useImeGuard } from "../../lib/ime-guard.js";
 import { ConfirmDialog } from "../../components/dialog.js";
 import {
   caretOffsetIn,
+  caretOnEdgeLine,
   domToSegments,
   extractTailFromCaret,
+  moveCaretToNeighbor,
   segmentsToHtml,
   selectionInside,
   setCaretAtOffset,
@@ -18,7 +21,10 @@ import {
   blockMarkdown,
   canMoveBlock,
   isEditableBlock,
+  markdownShortcutKind,
+  parseMarkdownBlocks,
   segmentsOf as safeSegmentsOf,
+  type PastedBlock,
   type TurnIntoKind,
 } from "./logic.js";
 
@@ -103,7 +109,8 @@ export interface BlockEditorCallbacks {
   /** 保存块文本(segments 为空 = 清空并删块)。 */
   saveSegments(block: NotionBlockModel, segments: NotionSegment[]): Promise<void>;
   saveCode(blockId: string, text: string, language?: string): Promise<void>;
-  remove(blockId: string): Promise<void>;
+  /** focusId:删完后光标去哪(Backspace 删空块时落到上一块末尾)。 */
+  remove(blockId: string, focusId?: string | null): Promise<void>;
   move(blockId: string, direction: "up" | "down"): Promise<void>;
   duplicate(blockId: string): Promise<void>;
   toggleTodo(block: NotionBlockModel): Promise<void>;
@@ -111,6 +118,14 @@ export interface BlockEditorCallbacks {
   /** 回车分块:当前块保留 head,新块带 tail。 */
   split(block: NotionBlockModel, head: NotionSegment[], tail: NotionSegment[]): Promise<void>;
   merge(block: NotionBlockModel, prevId: string): Promise<void>;
+  /**
+   * 粘贴多块 Markdown:head 非空表示当前块保留 head、items 插在它后面、tail 另起一段;
+   * head 为 null 表示当前块是空的,直接被 items 替换。
+   */
+  /** Tab:缩进成上一个兄弟的子块;Shift+Tab:退回父块的下一个兄弟。caret 是光标偏移,换位后恢复。 */
+  indent(block: NotionBlockModel, caret?: number): Promise<void>;
+  outdent(block: NotionBlockModel, caret?: number): Promise<void>;
+  paste(block: NotionBlockModel, head: NotionSegment[] | null, items: PastedBlock[], tail: NotionSegment[]): Promise<void>;
   turnInto(block: NotionBlockModel, kind: TurnIntoKind): Promise<void>;
   busy: boolean;
   focus: FocusRequest | null;
@@ -148,6 +163,7 @@ export function EditableRow({
   const ref = useRef<HTMLDivElement>(null);
   const dirty = useRef(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ime = useImeGuard();
   const editable = isEditableBlock(block);
   const isCode = block.kind === "code";
 
@@ -167,8 +183,15 @@ export function EditableRow({
   }, [block, isCode]);
 
   useEffect(() => {
+    if (editor.focus?.blockId !== block.id) return;
+    // 代码块没有行内编辑区:被要求聚焦(刚插入/刚转成代码块)就直接打开代码编辑面板。
+    if (isCode) {
+      setCodeEditing(true);
+      editor.onFocusHandled();
+      return;
+    }
     const el = ref.current;
-    if (!el || editor.focus?.blockId !== block.id) return;
+    if (!el) return;
     el.focus();
     const at = editor.focus.at;
     setCaretAtOffset(el, at === "start" ? 0 : at === "end" ? el.textContent?.length ?? 0 : at);
@@ -186,19 +209,35 @@ export function EditableRow({
 
   const scheduleSave = useCallback(() => {
     if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => flushSave(), 900);
+    const tick = (): void => {
+      // 组词中的拼音还不是内容,等输入法落字再存。
+      if (ime.isComposingNow()) saveTimer.current = setTimeout(tick, 400);
+      else flushSave();
+    };
+    saveTimer.current = setTimeout(tick, 900);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flushSave]);
 
-  useEffect(
-    () => () => {
+  // 卸载(切页、块被替换)时,没落盘的输入补发一次,不丢字。
+  const latest = useRef({ block, editor });
+  latest.current = { block, editor };
+  useEffect(() => {
+    const el = ref.current;
+    return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
-    },
-    [],
-  );
+      if (el && dirty.current && !isCode) {
+        dirty.current = false;
+        void latest.current.editor.saveSegments(latest.current.block, domToSegments(el)).catch(() => undefined);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
     const el = ref.current;
     if (!el) return;
+    // 输入法组词期间的 Enter/方向键是在选词,不是分块/移动光标。
+    if (ime.isComposing(event)) return;
     if (slashOpen) {
       const count = slashItems.length;
       if (event.key === "Escape") {
@@ -233,38 +272,94 @@ export function EditableRow({
       scheduleSave();
       return;
     }
-    if (event.key === "Enter" && !event.shiftKey) {
+    if (event.key === "Tab" && !mod && !event.altKey) {
+      // 缩进/反缩进(Notion 同款);没法缩进时也要吞掉 Tab,别让焦点跳出编辑区。
       event.preventDefault();
+      const caret = caretOffsetIn(el) ?? undefined;
+      if (saveTimer.current) clearTimeout(saveTimer.current);
       flushSave();
-      const head = domToSegments(el);
+      void (event.shiftKey ? editor.outdent(block, caret) : editor.indent(block, caret));
+      return;
+    }
+    if (event.key === "Enter" && (event.shiftKey || mod)) {
+      // Shift+Enter = 块内软换行(Notion 同款);带 ⌘/Ctrl 的 Enter 不做任何事,别让浏览器塞 div。
+      event.preventDefault();
+      if (event.shiftKey && !mod) {
+        document.execCommand("insertLineBreak");
+        dirty.current = true;
+        scheduleSave();
+      }
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+      // 有选中文字时,回车先替换掉选区(与 Notion 一致),再从光标处分块。
+      if (window.getSelection()?.isCollapsed === false) document.execCommand("delete");
+      // 先把光标之后的内容切走,剩下的才是 head(顺序反了会把尾巴复制一份)。
       const tail = extractTailFromCaret(el);
+      const head = domToSegments(el);
       el.innerHTML = segmentsToHtml(head);
       dirty.current = false;
       void editor.split(block, head, tail);
       return;
     }
-    if (event.key === "Backspace") {
+    if (event.key === "Backspace" && !event.metaKey && !event.altKey) {
       if (caretOffsetIn(el) === 0) {
         event.preventDefault();
-        flushSave();
-        if ((el.textContent ?? "") === "") {
-          void editor.remove(block.id);
+        if (saveTimer.current) clearTimeout(saveTimer.current);
+        if (block.kind !== "paragraph") {
+          // Notion:块首退格先退回普通段落,再按一次才并入上一块。
+          flushSave();
+          void editor.turnInto(block, "paragraph");
+        } else if ((el.textContent ?? "") === "") {
+          dirty.current = false;
+          void editor.remove(block.id, prevEditableId);
         } else if (prevEditableId) {
+          flushSave();
           void editor.merge(block, prevEditableId);
         }
       }
       return;
     }
+    // 方向键在块首/块尾继续走进相邻块(各块是独立的编辑区,浏览器不会自动跨过去)。
+    if (!event.shiftKey && !mod && !event.altKey) {
+      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+        const dir = event.key === "ArrowUp" ? -1 : 1;
+        if (caretOnEdgeLine(el, dir) && moveCaretToNeighbor(el, dir, { keepX: true })) event.preventDefault();
+        return;
+      }
+      if (event.key === "ArrowLeft" && caretOffsetIn(el) === 0) {
+        if (moveCaretToNeighbor(el, -1, { keepX: false })) event.preventDefault();
+        return;
+      }
+      if (event.key === "ArrowRight" && caretOffsetIn(el) === (el.textContent?.length ?? 0)) {
+        if (moveCaretToNeighbor(el, 1, { keepX: false })) event.preventDefault();
+        return;
+      }
+    }
     if (event.key === "Escape") el.blur();
   };
 
   const onInput = (): void => {
-    dirty.current = true;
-    scheduleSave();
     const el = ref.current;
     if (!el) return;
-    // Notion 规则:正文中出现「/」即弹菜单,其后文本作为过滤词(空格结束)。
     const text = el.textContent ?? "";
+    // Notion 的 Markdown 快捷输入:空段落里输入「# 」「- 」「1. 」「[] 」「> 」「" 」「```」直接转块。
+    if (block.kind === "paragraph" && !ime.isComposingNow()) {
+      const shortcut = text === "```" ? "code" : markdownShortcutKind(text);
+      if (shortcut) {
+        if (saveTimer.current) clearTimeout(saveTimer.current);
+        el.innerHTML = "";
+        dirty.current = false;
+        setSlashOpen(false);
+        void editor.turnInto(block, shortcut);
+        return;
+      }
+    }
+    dirty.current = true;
+    scheduleSave();
+    // Notion 规则:正文中出现「/」即弹菜单,其后文本作为过滤词(空格结束)。
     const at = text.lastIndexOf("/");
     if (at >= 0 && !text.slice(at + 1).includes(" ")) {
       setSlashOpen(true);
@@ -315,13 +410,15 @@ export function EditableRow({
         prefix = at >= 0 ? text.slice(0, at) : text;
         if (prefix === "") el.innerHTML = "";
         else el.textContent = prefix;
-        dirty.current = prefix !== "";
+        dirty.current = true;
       }
       setSlashOpen(false);
       setSlashQuery("");
-      if (prefix !== "") flushSave();
+      flushSave();
       if (kind === "divider") {
         void editor.addBelow(block.id, "divider");
+        // 空段落里选分隔线 = 用分隔线替掉这一行(Notion 同款),不留空行。
+        if (prefix === "" && block.kind === "paragraph") void editor.remove(block.id);
         return;
       }
       if (kind === "paragraph") return;
@@ -422,7 +519,17 @@ export function EditableRow({
 
   const kindClass = block.kind === "heading" ? `heading-${block.level}` : block.kind;
   return (
-    <div className={`nb-row nb-row-${kindClass}`}>
+    <div
+      className={`nb-row nb-row-${kindClass}`}
+      onMouseDown={(event) => {
+        // 点在行本身的空白处(复选框与正文之间的缝、行尾右侧等):光标落到这一行末尾。
+        const el = ref.current;
+        if (event.target !== event.currentTarget || !el) return;
+        event.preventDefault();
+        el.focus();
+        setCaretAtOffset(el, el.textContent?.length ?? 0);
+      }}
+    >
       {chrome}
       <div className="nb-row-main">
         <div
@@ -433,6 +540,12 @@ export function EditableRow({
           spellCheck={false}
           data-placeholder={t("knowledgeEditablePlaceholder")}
           onKeyDown={onKeyDown}
+          onCompositionStart={ime.onCompositionStart}
+          onCompositionEnd={(event) => {
+            ime.onCompositionEnd(event);
+            // 组词结束后补一次输入处理:组词期间跳过的快捷输入/「/」菜单在这里生效。
+            onInput();
+          }}
           onInput={onInput}
           onBlur={() => {
             setFloatBar(null);
@@ -440,9 +553,34 @@ export function EditableRow({
           }}
           onPaste={(event) => {
             event.preventDefault();
+            const el = ref.current;
+            if (!el) return;
             const text = event.clipboardData.getData("text/plain");
-            document.execCommand("insertText", false, text);
-            dirty.current = true;
+            const items = parseMarkdownBlocks(text);
+            if (items.length <= 1 && (items[0]?.kind ?? "paragraph") === "paragraph") {
+              // 单行:行内 Markdown(**粗体** 等)直接转成格式粘到光标处。
+              const segments = items[0]?.segments ?? [];
+              const formatted = segments.some(
+                (segment) => segment.bold || segment.italic || segment.code || segment.strikethrough || segment.href,
+              );
+              if (formatted) document.execCommand("insertHTML", false, segmentsToHtml(segments));
+              else document.execCommand("insertText", false, segments.map((segment) => segment.text).join("") || text);
+              dirty.current = true;
+              scheduleSave();
+              return;
+            }
+            // 多行 Markdown:拆成多个块(标题/列表/待办/引用/代码/分隔线),不再挤成一行。
+            if (window.getSelection()?.isCollapsed === false) document.execCommand("delete");
+            if (saveTimer.current) clearTimeout(saveTimer.current);
+            let head: NotionSegment[] | null = null;
+            let tail: NotionSegment[] = [];
+            if ((el.textContent ?? "") !== "") {
+              tail = extractTailFromCaret(el);
+              head = domToSegments(el);
+              el.innerHTML = segmentsToHtml(head);
+            }
+            dirty.current = false;
+            void editor.paste(block, head, items, tail);
           }}
         />
         {children ? <div className="nb-row-children">{children}</div> : null}

@@ -682,21 +682,58 @@ export const NotionUpdateBlockSchema = z
 
 export type NotionUpdateBlockBody = z.infer<typeof NotionUpdateBlockSchema>;
 
+const NotionNewBlockKindSchema = z.enum([
+  "paragraph",
+  "heading1",
+  "heading2",
+  "heading3",
+  "bulleted",
+  "numbered",
+  "todo",
+  "quote",
+  "callout",
+  "toggle",
+  "code",
+  "divider",
+]);
+
+/** 追加时一个新块的描述;children 是嵌套子块(Notion 单次请求最多嵌两层)。 */
+export const NotionNewChildSchema = z
+  .object({
+    kind: NotionNewBlockKindSchema,
+    markdown: z.string().max(20_000),
+    rich: z.array(NotionSegmentSchema).max(200).optional(),
+    language: z.string().max(40).optional(),
+    checked: z.boolean().optional(),
+    /** callout 的图标。 */
+    emoji: z.string().max(16).optional(),
+    get children() {
+      return z.array(NotionNewChildSchema).max(100).optional();
+    },
+  })
+  .strict();
+
+export type NotionNewChildBody = z.infer<typeof NotionNewChildSchema>;
+
 /** POST /api/actions/notion-append-block。 */
 export const NotionAppendBlockSchema = z
   .object({
     pageId: z.string().min(1).optional(),
     afterBlockId: z.string().min(1).optional(),
+    /** 追加为这个块的子块(缩进);不带 afterBlockId 时放在它的子块末尾。 */
+    parentBlockId: z.string().min(1).optional(),
     markdown: z.string().max(20_000),
-    kind: z
-      .enum(["paragraph", "heading1", "heading2", "heading3", "bulleted", "numbered", "todo", "quote", "callout", "toggle", "code", "divider"])
-      .optional(),
+    kind: NotionNewBlockKindSchema.optional(),
     rich: z.array(NotionSegmentSchema).max(200).optional(),
+    /** 一次追加多个块(粘贴 Markdown、缩进):给了它就忽略上面的 kind/markdown/rich。Notion 单次最多 100 个。 */
+    children: z.array(NotionNewChildSchema).min(1).max(100).optional(),
   })
   .strict()
-  .refine((value) => value.pageId !== undefined || value.afterBlockId !== undefined, {
-    message: "缺少 pageId 或 afterBlockId",
-  });
+  .refine(
+    (value) =>
+      value.pageId !== undefined || value.afterBlockId !== undefined || value.parentBlockId !== undefined,
+    { message: "缺少 pageId、afterBlockId 或 parentBlockId" },
+  );
 
 export type NotionAppendBlockBody = z.infer<typeof NotionAppendBlockSchema>;
 
@@ -738,6 +775,13 @@ export const NotionArchivePageSchema = z
   .strict();
 
 export type NotionArchivePageBody = z.infer<typeof NotionArchivePageSchema>;
+
+/** POST /api/actions/notion-move-page:把页面移到另一个页面下。 */
+export const NotionMovePageSchema = z
+  .object({ pageId: z.string().min(1), parentId: z.string().min(1) })
+  .strict();
+
+export type NotionMovePageBody = z.infer<typeof NotionMovePageSchema>;
 
 export interface NotionPageMutationResult {
   page: NotionPageView;

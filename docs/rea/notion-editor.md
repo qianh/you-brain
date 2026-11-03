@@ -16,7 +16,7 @@
 1. **编辑器不在本地**——对本地 Notion.app 做 REA 拿不到编辑器功能面(与 Obsidian 不同,那是完整本地渲染)。
 2. you-brain 的写入走 **Notion 公开 REST API**(与官方集成同一通道),因此可复刻的编辑能力 = API 写入能力:
    - ✅ 块内容更新(PATCH /blocks/{id}):paragraph、heading 1–3、bulleted/numbered list、to_do(含勾选)、quote、callout(emoji+颜色)、toggle、code(语言+文本)
-   - ✅ 块类型转换(turn into):PATCH 换 type
+   - ⚠️ 块类型转换(turn into):**PATCH 换 type 会被拒绝**(`Block type mismatch … Changing a block's type is not supported`)。只能「在原位置新建目标类型的块(带子树)+ 删除原块」,前端的 `recreate` 就是这么做的;缩进/反缩进同理
    - ✅ 插入:PATCH /blocks/{parent}/children 支持 `after` 参数(可插到任意块之后)
    - ✅ 删除:DELETE /blocks/{id}(归档)
    - ✅ 页面标题:PATCH /pages/{id}(title property)

@@ -53,6 +53,8 @@ struct ShellState {
 }
 
 static BLUR_GUARD_UNTIL: AtomicU64 = AtomicU64::new(0);
+/// Bumped each time the panel opens so an older focus watcher stops itself.
+static PANEL_WATCH_GEN: AtomicU64 = AtomicU64::new(0);
 
 pub fn run() {
     tauri::Builder::default()
@@ -575,6 +577,44 @@ fn toggle_panel(app: &tauri::AppHandle, anchor: Option<tauri::Rect>, toggle: boo
     position_panel(app, &window, anchor.as_ref());
     let _ = window.show();
     let _ = window.set_focus();
+    watch_panel_focus(window);
+}
+
+/// Clicking outside must close the panel. `Focused(false)` alone is not enough: the
+/// tray click itself can resign the panel's key status inside the blur guard, and the
+/// event is swallowed. With no key status left there is no later event, so the panel
+/// stayed until the tray icon was clicked again. This watcher closes that gap: once the
+/// panel has been key and no longer is (guard expired), hide it.
+fn watch_panel_focus(panel: WebviewWindow) {
+    const POLL: Duration = Duration::from_millis(150);
+    const ACTIVATION_RETRY_AFTER: Duration = Duration::from_millis(500);
+    let generation = PANEL_WATCH_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let mut seen_focus = false;
+        let mut retried = false;
+        loop {
+            thread::sleep(POLL);
+            if PANEL_WATCH_GEN.load(Ordering::SeqCst) != generation
+                || !panel.is_visible().unwrap_or(false)
+            {
+                return;
+            }
+            if panel.is_focused().unwrap_or(false) {
+                seen_focus = true;
+            } else if seen_focus {
+                if !blur_guard_active() {
+                    let _ = panel.hide();
+                    return;
+                }
+            } else if !retried && started.elapsed() >= ACTIVATION_RETRY_AFTER {
+                // Never became key (activation lost the race with the tray click): ask again
+                // once so later blur events are delivered normally.
+                retried = true;
+                let _ = panel.set_focus();
+            }
+        }
+    });
 }
 
 const MAX_APP_PATH: usize = 512;

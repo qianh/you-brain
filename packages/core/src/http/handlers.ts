@@ -28,6 +28,7 @@ import {
   LlmTestBodySchema,
   NotionAppendBlockSchema,
   NotionArchivePageSchema,
+  NotionMovePageSchema,
   NotionCreatePageSchema,
   NotionDeleteBlockSchema,
   NotionDuplicateBlockSchema,
@@ -249,6 +250,9 @@ export async function handleApi(
   if (path === "/api/actions/notion-create-page") {
     return method(request, "POST", () => notionMutation(request, context, "notionCreatePage", NotionCreatePageSchema));
   }
+  if (path === "/api/actions/notion-move-page") {
+    return method(request, "POST", () => notionMutation(request, context, "notionMovePage", NotionMovePageSchema));
+  }
   if (path === "/api/actions/notion-archive-page") {
     return method(request, "POST", () => notionMutation(request, context, "notionArchivePage", NotionArchivePageSchema));
   }
@@ -291,6 +295,7 @@ export async function handleApi(
   }
   if (path === "/api/status") return method(request, "GET", () => status(context));
   if (path === "/api/reminders") return method(request, "GET", () => reminders(url, context));
+  if (path === "/api/reminder-detail") return method(request, "GET", () => reminderDetail(url, context));
   if (path === "/api/activity") return method(request, "POST", () => activity(request, context));
   if (path === "/api/actions/reminder") {
     return method(request, "POST", () => reminderAction(request, context));
@@ -827,7 +832,8 @@ async function notionMutation<
     | "notionDuplicateBlock"
     | "notionPatchTitle"
     | "notionCreatePage"
-    | "notionArchivePage",
+    | "notionArchivePage"
+    | "notionMovePage",
   S extends z.ZodType,
 >(
   request: Request,
@@ -892,6 +898,12 @@ async function writeConfig(request: Request, context: ApiContext): Promise<Respo
 
 async function status(context: ApiContext): Promise<Response> {
   return json(await context.deps.status());
+}
+
+async function reminderDetail(url: URL, context: ApiContext): Promise<Response> {
+  const id = url.searchParams.get("id");
+  if (!id) throw new HttpError(400, "INVALID_INPUT", "缺少 id");
+  return json((await context.deps.reminderDetail?.(id)) ?? { detail: null });
 }
 
 async function reminders(url: URL, context: ApiContext): Promise<Response> {

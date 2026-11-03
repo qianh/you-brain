@@ -113,6 +113,7 @@ import {
   MERGE_SUGGESTIONS_CURSOR,
   type ConsolidationState,
 } from "../consolidate/index.js";
+import { reminderDetail } from "../reminders/detail.js";
 import { dueRemindersForDevice } from "../reminders/run.js";
 import { timeZoneOffsetMinutes } from "../reminders/time.js";
 import {
@@ -3018,8 +3019,10 @@ export class YouBrainDaemon {
       });
     }
     const readers = createStoreReaders(store, this.#zone);
-    if (this.#paths) {
-      this.#deck ??= new DeckService(this.#deckOptions(readers));
+    if (this.#paths && this.#deck === null) {
+      this.#deck = new DeckService(this.#deckOptions(readers));
+      // 本机 CLI/应用的探测在后台预热,指挥台与其他功能打开时直接读缓存。
+      this.#deck.warmExecutors();
     }
     return {
       today: () => readers.today(),
@@ -3124,6 +3127,11 @@ export class YouBrainDaemon {
         this.changes.publish("notion", this.#clock.now().toISOString());
         return created;
       },
+      notionMovePage: async (body) => {
+        const result = await this.#requireNotion().movePage(body.pageId, body.parentId);
+        this.changes.publish("notion", this.#clock.now().toISOString());
+        return { roots: result.roots };
+      },
       notionArchivePage: async (body) => {
         const result = await this.#requireNotion().archivePage(body.pageId);
         this.changes.publish("notion", this.#clock.now().toISOString());
@@ -3172,6 +3180,19 @@ export class YouBrainDaemon {
         };
       },
       reminder: (id) => readers.reminder(id),
+      reminderDetail: async (id) => {
+        const reminder = await readers.reminder(id);
+        if (!reminder) return { detail: null };
+        const book = foldEvents(store.listEvents());
+        const issuedAt = new Date(reminder.issuedAt);
+        return {
+          detail: reminderDetail({
+            reminder,
+            book,
+            timeZoneOffsetMinutes: timeZoneOffsetMinutes(this.#roles.timezone, issuedAt),
+          }),
+        };
+      },
       reportActivity: async (at) => {
         this.#noteActivity(at);
         return { at: this.#lastActivityAt ?? this.#activityForDevice() };

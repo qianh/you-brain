@@ -8,6 +8,8 @@
 
 export const NOTION_API_BASE = "https://api.notion.com/v1";
 export const NOTION_VERSION = "2022-06-28";
+/** 「移动页面」接口只在这个版本及以后提供;只有这一个请求用它,其余仍走 NOTION_VERSION。 */
+export const MOVE_PAGE_NOTION_VERSION = "2026-03-11";
 
 export interface NotionRichText {
   plainText: string;
@@ -98,6 +100,7 @@ export class NotionApiClient {
     method: "GET" | "POST" | "PATCH" | "DELETE",
     path: string,
     body?: unknown,
+    version: string = NOTION_VERSION,
   ): Promise<T> {
     let attempt = 0;
     // Notion's published average rate limit is about three requests per second;
@@ -106,7 +109,7 @@ export class NotionApiClient {
       attempt += 1;
       const headers: Record<string, string> = {
         authorization: `Bearer ${this.#token}`,
-        "notion-version": NOTION_VERSION,
+        "notion-version": version,
       };
       if (body !== undefined) headers["content-type"] = "application/json";
       let response: Response;
@@ -226,6 +229,16 @@ export class NotionApiClient {
       parent: { type: "page_id", page_id: parentPageId },
       properties: { title: { title: [{ type: "text", text: { content: title } }] } },
     });
+  }
+
+  /** 把页面移到另一个页面下(Notion 不允许移到工作区顶层、也不能移数据库)。 */
+  async movePage(pageId: string, parentPageId: string): Promise<void> {
+    await this.#request(
+      "POST",
+      `/pages/${pageId}/move`,
+      { parent: { type: "page_id", page_id: parentPageId } },
+      MOVE_PAGE_NOTION_VERSION,
+    );
   }
 
   /** Archive (soft-delete) a page or a database. */

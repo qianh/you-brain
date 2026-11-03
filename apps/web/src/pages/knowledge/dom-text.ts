@@ -16,6 +16,12 @@ function escapeHtml(text: string): string {
 }
 
 export function segmentsToHtml(segments: readonly NotionSegment[]): string {
+  const html = segmentsToHtmlRaw(segments);
+  // 文本以软换行结尾时,末尾的 <br> 会被浏览器折叠,补一个占位 br 才能看见新行。
+  return segments[segments.length - 1]?.text.endsWith("\n") ? `${html}<br>` : html;
+}
+
+function segmentsToHtmlRaw(segments: readonly NotionSegment[]): string {
   return segments
     .map((segment) => {
       let html = escapeHtml(segment.text).replaceAll("\n", "<br>");
@@ -75,7 +81,11 @@ function domToSegmentsImpl(
   if (node.nodeType !== Node.ELEMENT_NODE) return;
   const element = node as Element;
   const tag = element.tagName.toLowerCase();
-  if (tag === "br") return;
+  if (tag === "br") {
+    // Shift+Enter 的软换行;末尾那个占位 br 在 domToSegments 里统一扣掉。
+    domToSegmentsImpl(document.createTextNode("\n"), state, out);
+    return;
+  }
   const next: FormatState = { ...state };
   if (tag === "b" || tag === "strong") next.bold = true;
   else if (tag === "i" || tag === "em") next.italic = true;
@@ -86,6 +96,12 @@ function domToSegmentsImpl(
   for (const child of Array.from(element.childNodes)) {
     domToSegmentsImpl(child, next, out);
   }
+}
+
+function lastLeaf(node: Node): Node {
+  let current = node;
+  while (current.lastChild) current = current.lastChild;
+  return current;
 }
 
 export function domToSegments(element: readonly Node[] | Node): NotionSegment[] {
@@ -101,6 +117,13 @@ export function domToSegments(element: readonly Node[] | Node): NotionSegment[] 
   };
   for (const child of Array.from(root.childNodes)) {
     domToSegmentsImpl(child, initial, out);
+  }
+  // 以 <br> 收尾时,最后那个是浏览器给"看得见的最后一行"放的占位,不算内容。
+  const tail = out[out.length - 1];
+  const leaf = root.lastChild ? lastLeaf(root) : null;
+  if (tail && leaf instanceof HTMLBRElement && tail.text.endsWith("\n")) {
+    tail.text = tail.text.slice(0, -1);
+    if (tail.text === "") out.pop();
   }
   return out;
 }
@@ -203,4 +226,59 @@ export function selectionInside(element: HTMLElement): Selection | null {
   const range = selection.getRangeAt(0);
   if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) return null;
   return selection;
+}
+
+
+// —— 跨块光标移动(方向键走到块首/块尾时进入相邻块) ——
+
+function caretRect(element: HTMLElement): DOMRect | null {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) return null;
+  const range = selection.getRangeAt(0);
+  if (!element.contains(range.startContainer)) return null;
+  const rects = range.getClientRects();
+  const rect = rects.length > 0 ? rects[0] : range.getBoundingClientRect();
+  return rect && (rect.height > 0 || rect.width > 0) ? rect : null;
+}
+
+/** 光标是否在第一行(dir=-1)/最后一行(dir=1);空块或量不出来时按"在边缘"处理。 */
+export function caretOnEdgeLine(element: HTMLElement, dir: -1 | 1): boolean {
+  const rect = caretRect(element);
+  if (!rect) return true;
+  const box = element.getBoundingClientRect();
+  const style = getComputedStyle(element);
+  const line = Number.parseFloat(style.lineHeight) || rect.height || 16;
+  if (dir < 0) return rect.top - (box.top + (Number.parseFloat(style.paddingTop) || 0)) < line * 0.8;
+  return box.bottom - (Number.parseFloat(style.paddingBottom) || 0) - rect.bottom < line * 0.8;
+}
+
+/**
+ * 把光标移到文档顺序里相邻的可编辑块;保持水平位置(x),没有相邻块返回 false。
+ * x 为 null 时落在块首(向下/向右)或块尾(向上/向左)。
+ */
+export function moveCaretToNeighbor(
+  element: HTMLElement,
+  dir: -1 | 1,
+  options: { keepX: boolean },
+): boolean {
+  const scope = element.closest(".knowledge-blocks");
+  if (!scope) return false;
+  const all = Array.from(scope.querySelectorAll<HTMLElement>("[contenteditable='true'], [contenteditable='']"));
+  const next = all[all.indexOf(element) + dir];
+  if (!next) return false;
+  const x = options.keepX ? caretRect(element)?.left ?? null : null;
+  next.focus();
+  if (x !== null && typeof document.caretRangeFromPoint === "function") {
+    const box = next.getBoundingClientRect();
+    const y = dir < 0 ? box.bottom - 4 : box.top + 4;
+    const range = document.caretRangeFromPoint(x, y);
+    if (range && next.contains(range.startContainer)) {
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      return true;
+    }
+  }
+  setCaretAtOffset(next, dir < 0 ? (next.textContent?.length ?? 0) : 0);
+  return true;
 }

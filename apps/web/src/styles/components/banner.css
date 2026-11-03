@@ -54,6 +54,19 @@
   cursor: pointer;
 }
 .reminder-expand:hover { text-decoration: underline; }
+.reminder-detail-toggle { display: block; margin-top: 4px; }
+.reminder-detail {
+  margin-top: 6px;
+  padding: 8px 10px;
+  max-height: 360px;
+  overflow-y: auto;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+  font-size: var(--fs-sm);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 
 .banner.info, .banner-info { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 20%, transparent); }
 .banner.info .banner-icon { color: var(--accent); }

@@ -43,6 +43,7 @@ import {
   type NotionPageView,
   type NotionAppendBlockBody,
   type NotionArchivePageBody,
+  type NotionMovePageBody,
   type NotionArchivePageResult,
   type NotionCreatePageBody,
   type NotionCreatePageResult,
@@ -116,6 +117,7 @@ export interface DaemonClient {
   notionPatchTitle(body: NotionPatchTitleBody): Promise<NotionPageMutationResult>;
   notionCreatePage(body: NotionCreatePageBody): Promise<NotionCreatePageResult>;
   notionArchivePage(body: NotionArchivePageBody): Promise<NotionArchivePageResult>;
+  notionMovePage(body: NotionMovePageBody): Promise<NotionArchivePageResult>;
   /** 只拼 URL;二进制由调用方自行 fetch(浏览器同源 / CLI 拿绝对地址)。 */
   notionAssetUrl(blockId: string): string;
   events(
@@ -231,6 +233,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     notionPatchTitle: (body) => request("POST", "/api/actions/notion-patch-title", body),
     notionCreatePage: (body) => request("POST", "/api/actions/notion-create-page", body),
     notionArchivePage: (body) => request("POST", "/api/actions/notion-archive-page", body),
+    notionMovePage: (body) => request("POST", "/api/actions/notion-move-page", body),
     notionAssetUrl: (blockId) =>
       `${baseUrl}/api/notion/asset?block=${encodeURIComponent(blockId)}`,
     events: (listener, eventOptions) =>

@@ -32,6 +32,7 @@ export function ReminderList({
   t,
   onAction,
   onOpenTopic,
+  loadDetail,
 }: {
   reminders: readonly ReminderView[];
   layout: "today" | "panel";
@@ -39,6 +40,8 @@ export function ReminderList({
   t: Translate;
   onAction: (reminderId: string, action: ReminderActionName, until?: string) => Promise<void>;
   onOpenTopic: (topicId: string) => void;
+  /** 取提醒被截短的原文;不传就不显示「查看详情」。 */
+  loadDetail?: ((reminderId: string) => Promise<string | null>) | undefined;
 }) {
   const { push } = useToast();
   const [pending, setPending] = useState<{ id: string; action: ReminderActionName } | null>(null);
@@ -68,6 +71,7 @@ export function ReminderList({
           t={t}
           onAction={(action, until) => void run(reminder.reminderId, action, until)}
           onOpenTopic={onOpenTopic}
+          loadDetail={loadDetail}
         />
       ))}
     </>
@@ -83,6 +87,7 @@ export function ReminderCard({
   t,
   onAction,
   onOpenTopic,
+  loadDetail,
 }: {
   reminder: ReminderView;
   layout: "today" | "panel";
@@ -92,8 +97,32 @@ export function ReminderCard({
   t: Translate;
   onAction: (action: ReminderActionName, until?: string) => void;
   onOpenTopic: (topicId: string) => void;
+  loadDetail?: ((reminderId: string) => Promise<string | null>) | undefined;
 }) {
   const [open, setOpen] = useState(false);
+  // 正文为通知被截短了(「…」结尾)时,点「查看详情」现取原文。undefined = 还没取过。
+  const [detail, setDetail] = useState<string | null | undefined>(undefined);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const canDetail = loadDetail !== undefined && reminder.kind === "morning_digest" && detail !== null;
+  const toggleDetail = (): void => {
+    if (detailOpen) {
+      setDetailOpen(false);
+      return;
+    }
+    if (detail !== undefined || loadDetail === undefined) {
+      setDetailOpen(true);
+      return;
+    }
+    setDetailLoading(true);
+    void loadDetail(reminder.reminderId)
+      .then((text) => {
+        setDetail(text);
+        setDetailOpen(text !== null);
+      })
+      .catch(() => setDetail(null))
+      .finally(() => setDetailLoading(false));
+  };
   const digest = isDigestReminder(reminder);
   const preview = reminderFirstLine(reminder.text);
   const panelClamp = layout === "panel" && !open;
@@ -115,6 +144,18 @@ export function ReminderCard({
           {open ? t("reminderCollapse") : t("reminderExpand")}
         </button>
       ) : null}
+      {canDetail ? (
+        <button
+          type="button"
+          className="reminder-expand reminder-detail-toggle"
+          aria-expanded={detailOpen}
+          disabled={detailLoading}
+          onClick={toggleDetail}
+        >
+          {detailOpen ? t("reminderDetailHide") : detailLoading ? `${t("reminderDetail")}…` : t("reminderDetail")}
+        </button>
+      ) : null}
+      {detailOpen && detail ? <div className="reminder-detail">{detail}</div> : null}
     </>
   );
 

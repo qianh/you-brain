@@ -1,9 +1,10 @@
+import { platform } from "node:os";
 import { join } from "node:path";
 
 import { ulid, type LlmProvider } from "@you-brain/protocol";
 
 import { createLlmBackend } from "../llm/factory.js";
-import { CLI_PROVIDERS, isCliProvider, locateRunnableCli, type CliProvider } from "../llm/cli/locate.js";
+import { CLI_PROVIDERS, isCliProvider, locateCliBinary, locateRunnableCli, type CliProvider } from "../llm/cli/locate.js";
 import { LLM_PRESETS } from "../llm/presets.js";
 import type { LlmBackend } from "../llm/types.js";
 import type { UploadableSession } from "../upload/types.js";
@@ -18,6 +19,8 @@ import {
   GUI_APPS,
   dispatchToGuiApp,
   guiAppById,
+  accessibilityGranted,
+  appRunning,
   guiAppStatus,
   recoverGuiAppReplies,
 } from "./gui-bridge.js";
@@ -73,6 +76,10 @@ export interface DeckExecutorView {
 }
 
 const RESULT_TEXT_CAP = 20_000;
+/** 执行者目录缓存多久算旧:旧了仍立即返回,同时后台刷新(装/卸 CLI 后最多这么久才反映)。 */
+const EXECUTORS_TTL_MS = 300_000;
+/** 启动后等这么久再预热探测,避开启动高峰。 */
+const EXECUTORS_WARM_DELAY_MS = 1_500;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -95,6 +102,8 @@ export class DeckService {
   readonly #uploads = new Map<string, Promise<void>>();
   readonly #locks = new Map<string, Promise<void>>();
   readonly #cliEnv: NodeJS.ProcessEnv | undefined;
+  #executorsCache: { at: number; views: DeckExecutorView[] } | null = null;
+  #executorsInFlight: Promise<void> | null = null;
   #backendCache: { key: string; backend: LlmBackend } | null = null;
   #defaultProvider: CliProvider | null = null;
 
@@ -584,57 +593,105 @@ export class DeckService {
   // 执行者目录与主控
   // ------------------------------------------------------------------
 
+  /**
+   * 执行者目录(本机 CLI agent / GUI App)。做法对齐主流 AI 应用:
+   * 1. 守护进程启动后在后台预热(warmExecutors),不等用户打开页面;
+   * 2. 读取永远走缓存,过期了先返回旧值、后台刷新(stale-while-revalidate);
+   * 3. 冷启动时先给毫秒级的快速结果(CLI 只看文件在不在、App 只看进程在不在),
+   *    要起进程的完整验证(`--version`、辅助功能权限)放后台,结果变了再通知界面。
+   */
   async executors(): Promise<DeckExecutorView[]> {
-    const views: DeckExecutorView[] = [];
-    for (const capability of this.#capabilities) {
-      views.push({
-        kind: "capability",
-        id: capability.id,
-        title: capability.title,
-        available: true,
-        detail: capability.hint,
+    if (this.#options.probeExecutors === false) return this.#probeExecutors("none");
+    const cache = this.#executorsCache;
+    if (cache) {
+      if (Date.now() - cache.at >= EXECUTORS_TTL_MS) void this.#refreshExecutors();
+      return cache.views;
+    }
+    const quick = await this.#probeExecutors("quick");
+    this.#executorsCache = { at: 0, views: quick };
+    void this.#refreshExecutors();
+    return quick;
+  }
+
+  /** 守护进程启动后调用:稍等一下避开启动高峰,再在后台完成完整探测。 */
+  warmExecutors(): void {
+    if (this.#options.probeExecutors === false) return;
+    const timer = setTimeout(() => void this.#refreshExecutors(), EXECUTORS_WARM_DELAY_MS);
+    timer.unref?.();
+  }
+
+  #refreshExecutors(): Promise<void> {
+    if (this.#executorsInFlight) return this.#executorsInFlight;
+    this.#executorsInFlight = this.#probeExecutors("full")
+      .then((views) => {
+        const changed = JSON.stringify(views) !== JSON.stringify(this.#executorsCache?.views);
+        this.#executorsCache = { at: Date.now(), views };
+        if (changed) this.#options.emitChange();
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        this.#executorsInFlight = null;
       });
-    }
-    for (const provider of CLI_PROVIDERS) {
-      if (this.#options.probeExecutors === false) {
-        views.push({
-          kind: "cli-agent",
-          id: provider,
-          title: `本机 agent ${provider}`,
-          available: false,
-          detail: "未探测",
-        });
-        continue;
-      }
-      let available = false;
-      let detail = "未安装";
-      try {
-        const located = await locateRunnableCli({
-          provider,
-          ...(this.#options.homeDir !== undefined ? { homeDir: this.#options.homeDir } : {}),
-          ...(this.#cliEnv !== undefined ? { env: this.#cliEnv } : {}),
-        });
-        available = located.bin !== null;
-        const skipped = located.unusable
-          .map((failure) => `${failure.path}: ${failure.detail}`)
-          .join("; ");
-        const pathHead = (this.#options.env?.PATH ?? "")
-          .split(":")
-          .slice(0, 5)
-          .join(" | ");
-        if (located.bin !== null) {
-          detail = `就绪（${located.bin}；PATH=${pathHead}${skipped === "" ? "" : `；跳过 ${skipped}`}）`;
-        } else {
-          detail = skipped === "" ? "未安装或未登录" : `未就绪（${skipped}；PATH=${pathHead}）`;
+    return this.#executorsInFlight;
+  }
+
+  /** none: 不探测;quick: 只看文件/进程在不在(毫秒);full: 真正运行 --version、检查权限(秒级)。 */
+  async #probeExecutors(mode: "none" | "quick" | "full"): Promise<DeckExecutorView[]> {
+    const capabilities: DeckExecutorView[] = this.#capabilities.map((capability) => ({
+      kind: "capability",
+      id: capability.id,
+      title: capability.title,
+      available: true,
+      detail: capability.hint,
+    }));
+    const clis = await Promise.all(
+      CLI_PROVIDERS.map(async (provider): Promise<DeckExecutorView> => {
+        const title = `本机 agent ${provider}`;
+        if (mode === "none") return { kind: "cli-agent", id: provider, title, available: false, detail: "未探测" };
+        if (mode === "quick") {
+          const bin = locateCliBinary({
+            provider,
+            ...(this.#options.homeDir !== undefined ? { homeDir: this.#options.homeDir } : {}),
+            ...(this.#cliEnv !== undefined ? { env: this.#cliEnv } : {}),
+          });
+          return {
+            kind: "cli-agent",
+            id: provider,
+            title,
+            available: bin !== null,
+            detail: bin !== null ? `已找到（${bin}；后台验证中）` : "未安装",
+          };
         }
-      } catch {
-        available = false;
-      }
-      views.push({ kind: "cli-agent", id: provider, title: `本机 agent ${provider}`, available, detail });
-    }
+        let available = false;
+        let detail = "未安装";
+        try {
+          const located = await locateRunnableCli({
+            provider,
+            ...(this.#options.homeDir !== undefined ? { homeDir: this.#options.homeDir } : {}),
+            ...(this.#cliEnv !== undefined ? { env: this.#cliEnv } : {}),
+          });
+          available = located.bin !== null;
+          const skipped = located.unusable
+            .map((failure) => `${failure.path}: ${failure.detail}`)
+            .join("; ");
+          const pathHead = (this.#options.env?.PATH ?? "")
+            .split(":")
+            .slice(0, 5)
+            .join(" | ");
+          if (located.bin !== null) {
+            detail = `就绪（${located.bin}；PATH=${pathHead}${skipped === "" ? "" : `；跳过 ${skipped}`}）`;
+          } else {
+            detail = skipped === "" ? "未安装或未登录" : `未就绪（${skipped}；PATH=${pathHead}）`;
+          }
+        } catch {
+          available = false;
+        }
+        return { kind: "cli-agent", id: provider, title, available, detail };
+      }),
+    );
     const selection = this.#options.llmSelection();
     const preset = LLM_PRESETS[selection.provider];
-    views.push({
+    const model: DeckExecutorView = {
       kind: "model",
       id: selection.provider,
       title: `模型 ${selection.provider}`,
@@ -643,28 +700,35 @@ export class DeckService {
         preset.kind === "cli"
           ? "当前模型配置是订阅 CLI（补全模式）"
           : `当前配置的模型后端（${selection.model || "默认模型"}）`,
-    });
-    for (const app of GUI_APPS) {
-      if (this.#options.probeExecutors === false) {
-        views.push({
+    };
+    let accessibility: Promise<boolean> | undefined;
+    const sharedAccessibility = (): Promise<boolean> => (accessibility ??= accessibilityGranted());
+    const apps = await Promise.all(
+      GUI_APPS.map(async (app): Promise<DeckExecutorView> => {
+        if (mode === "none") {
+          return { kind: "gui-app", id: app.id, title: app.displayName, available: false, detail: "未探测" };
+        }
+        if (mode === "quick") {
+          const running = platform() === "darwin" && (await appRunning(app));
+          return {
+            kind: "gui-app",
+            id: app.id,
+            title: app.displayName,
+            available: running,
+            detail: running ? "App 运行中（后台确认权限）" : "App 未运行",
+          };
+        }
+        const status = await guiAppStatus(app, sharedAccessibility);
+        return {
           kind: "gui-app",
           id: app.id,
           title: app.displayName,
-          available: false,
-          detail: "未探测",
-        });
-        continue;
-      }
-      const status = await guiAppStatus(app);
-      views.push({
-        kind: "gui-app",
-        id: app.id,
-        title: app.displayName,
-        available: status.available,
-        detail: status.detail,
-      });
-    }
-    return views;
+          available: status.available,
+          detail: status.detail,
+        };
+      }),
+    );
+    return [...capabilities, ...clis, model, ...apps];
   }
 
   async #catalogRows(): Promise<string[]> {

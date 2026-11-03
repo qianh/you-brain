@@ -175,6 +175,22 @@
   padding: 40px 48px 96px;
 }
 
+.knowledge-save-state {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  float: right;
+  margin: 0 0 -20px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface, transparent);
+  color: var(--text-3);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.knowledge-save-state[data-state="error"] { color: var(--danger, #d44c47); }
+
 .knowledge-page {
   max-width: none;
 }
@@ -925,6 +941,8 @@
 
 .nb-row-main {
   min-width: 0;
+  /* 列表/待办行是 flex:正文要撑满整行,点行尾右侧的空白才落在编辑区里、光标自动到行末。 */
+  flex: 1;
 }
 
 .nb-row-bulleted,
@@ -982,14 +1000,16 @@
   padding: 1px 2px;
 }
 
+/* Notion:空块平时什么都不显示,只有光标在这个空块里时才出提示。 */
 .nb-editable:empty::before {
   content: attr(data-placeholder);
   color: var(--text-3);
   pointer-events: none;
+  opacity: 0;
 }
 
-.nb-editable:not(:focus):empty::before {
-  opacity: 0.6;
+.nb-editable:focus:empty::before {
+  opacity: 1;
 }
 
 .nb-editable-heading-1 {
@@ -1192,6 +1212,9 @@
 }
 
 .knowledge-new-line:hover .knowledge-new-line-body { color: var(--text-2); }
+/* 文末可点区域平时不显示提示,悬停才出现(Notion 同款)。 */
+.knowledge-new-line .knowledge-new-line-body { opacity: 0; transition: opacity 0.12s; }
+.knowledge-new-line:hover .knowledge-new-line-body { opacity: 1; }
 
 /* —— Notion 式「/」斜杠菜单 —— */
 
@@ -1296,4 +1319,29 @@
   padding: 14px 10px;
   color: var(--text-3);
   font-size: var(--fs-sm);
+}
+
+/* 侧栏拖拽移动页面:悬停的可放置目标高亮,被拖的行变淡,光标旁跟一个标题浮标。 */
+.knowledge-tree-row.is-drop-target {
+  background: var(--accent-soft);
+  outline: 1.5px solid var(--accent);
+  outline-offset: -1.5px;
+  border-radius: 6px;
+}
+.knowledge-tree-row.is-dragging { opacity: 0.45; }
+.knowledge-tree-item { touch-action: none; }
+.knowledge-drag-ghost {
+  position: fixed;
+  z-index: 1000;
+  max-width: 240px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
 }

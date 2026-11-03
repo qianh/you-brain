@@ -28,6 +28,7 @@ import type {
   GoogleLoginResult,
   GoogleLogoutResult,
   NotionArchivePageBody,
+  NotionMovePageBody,
   NotionArchivePageResult,
   NotionAsset,
   NotionCreatePageBody,
@@ -85,6 +86,8 @@ export interface HttpDeps {
   status(): Promise<StatusResponse>;
   reminders(all: boolean): Promise<RemindersResponse>;
   reminder(id: string): Promise<ReminderView | null>;
+  /** 提醒被截短的原文(目前只有晨间摘要);没有更多内容为 null。 */
+  reminderDetail?(id: string): Promise<{ detail: string | null }>;
   /** Record keyboard, pointer, or other local activity. `at` is already bounded. */
   reportActivity(at: string): Promise<{ at: string }>;
   now(): Date;
@@ -126,6 +129,7 @@ export interface HttpDeps {
   notionPatchTitle?(body: NotionPatchTitleBody): Promise<NotionPageMutationResult>;
   notionCreatePage?(body: NotionCreatePageBody): Promise<NotionCreatePageResult>;
   notionArchivePage?(body: NotionArchivePageBody): Promise<NotionArchivePageResult>;
+  notionMovePage?(body: NotionMovePageBody): Promise<NotionArchivePageResult>;
   /** 指挥台（deck）。The daemon always supplies it. */
   deck?: DeckHttpPort;
   events: EventSink;

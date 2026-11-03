@@ -1,15 +1,12 @@
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
 import { afterEach, describe, expect, it } from "bun:test";
 
-import { MISSING_OFFICIAL_OAUTH_MESSAGE } from "../../src/auth/official-oauth-client.js";
-import { MemorySecretStore } from "../../src/auth/secret-store.js";
-import { createDefaultLocalConfig } from "../../src/domain/config.js";
+import {
+  isUsableOfficialOAuthClient,
+  MISSING_OFFICIAL_OAUTH_MESSAGE,
+  resolveOfficialOAuthClient,
+} from "../../src/auth/official-oauth-client.js";
 import { YouBrainError } from "../../src/domain/errors.js";
-import { writeLocalConfig } from "../../src/domain/config-io.js";
-import { describeGoogleDriveOpenError, openGoogleDrive } from "../../src/daemon/google.js";
+import { describeGoogleDriveOpenError } from "../../src/daemon/google.js";
 
 const ENV_KEYS = [
   "YOU_BRAIN_BUNDLED_OAUTH_CLIENT_ID",
@@ -74,25 +71,10 @@ describe("describeGoogleDriveOpenError", () => {
 });
 
 describe("openGoogleDrive official credentials", () => {
-  it("throws the missing-credential message interactively and returns null otherwise", async () => {
+  it("uses the client shipped in source when the build did not inject another one", () => {
     isolateBundledEnv();
-    const root = await mkdtemp(join(tmpdir(), "you-brain-google-open-"));
-    const configFile = join(root, "config.toml");
-    const local = createDefaultLocalConfig({ hostname: "device", dataDir: root });
-    await writeLocalConfig(configFile, local);
-    const options = {
-      local,
-      configFile,
-      platform: "darwin" as const,
-      env: {},
-      secrets: new MemorySecretStore(null),
-    };
-    await expect(openGoogleDrive({ ...options, interactive: true })).rejects.toEqual(
-      expect.objectContaining({
-        code: "AUTH_REQUIRED",
-        message: MISSING_OFFICIAL_OAUTH_MESSAGE,
-      }),
-    );
-    await expect(openGoogleDrive({ ...options, interactive: false })).resolves.toBeNull();
+    const client = resolveOfficialOAuthClient({});
+    expect(isUsableOfficialOAuthClient(client)).toBe(true);
+    expect(client.clientId.endsWith(".apps.googleusercontent.com")).toBe(true);
   });
 });

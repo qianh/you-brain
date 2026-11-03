@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -56,13 +56,13 @@ interface Harness {
   dir: string;
   uploads: UploadableSession[];
   agents: Array<{ provider: string; prompt: string }>;
-  changes: number;
+  readonly changes: number;
   deltas: Array<{ conversationId: string; text: string }>;
 }
 
 async function harness(
   masterReply: (system: string, user: string) => string,
-  options?: { stream?: boolean },
+  options?: { stream?: boolean; probeEnv?: NodeJS.ProcessEnv },
 ): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "deck-"));
   const uploads: UploadableSession[] = [];
@@ -96,9 +96,10 @@ async function harness(
     createMasterBackend: async () =>
       options?.stream === true ? fakeStreamBackend(masterReply) : fakeBackend(masterReply),
     createModelBackend: async () => fakeBackend(() => "模型输出"),
-    probeExecutors: false,
+    probeExecutors: options?.probeEnv !== undefined,
+    ...(options?.probeEnv !== undefined ? { env: options.probeEnv } : {}),
   });
-  return { service, dir, uploads, agents, changes, deltas };
+  return { service, dir, uploads, agents, get changes() { return changes; }, deltas };
 }
 
 async function cleanup(dir: string): Promise<void> {
@@ -261,6 +262,45 @@ describe("deck service", () => {
       expect(((await h.service.listTasks())[0])?.lastRunAt).toBe(before);
     } finally {
       await cleanup(h.dir);
+    }
+  });
+
+  it("executors: first read is instant from a quick probe, full verification lands in the background", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "deck-bin-"));
+    const bin = join(dir, "bin");
+    await mkdir(bin);
+    // 启动要 400ms 的假 claude:完整验证(--version)会慢,快速探测只看文件在不在。
+    await writeFile(join(bin, "claude"), "#!/bin/sh\nsleep 0.4\necho 1.0.0\n");
+    await chmod(join(bin, "claude"), 0o755);
+    const h = await harness(() => '{"kind":"answer","text":"x"}', {
+      probeEnv: { PATH: `${bin}:/usr/bin:/bin` },
+    });
+    try {
+      const startedAt = Date.now();
+      const first = await h.service.executors();
+      expect(Date.now() - startedAt).toBeLessThan(350);
+      const claude = first.find((view) => view.id === "claude-cli");
+      expect(claude?.available).toBe(true);
+      expect(claude?.detail).toContain("后台验证中");
+
+      // 后台验证完成后:缓存变成完整结果,并通知界面刷新。
+      const deadline = Date.now() + 8_000;
+      let verified = first;
+      while (Date.now() < deadline) {
+        verified = await h.service.executors();
+        if (verified.find((view) => view.id === "claude-cli")?.detail.startsWith("就绪")) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      expect(verified.find((view) => view.id === "claude-cli")?.detail.startsWith("就绪")).toBe(true);
+      expect(h.changes).toBeGreaterThan(0);
+
+      // 之后读取走缓存,不再起进程。
+      const again = Date.now();
+      await h.service.executors();
+      expect(Date.now() - again).toBeLessThan(50);
+    } finally {
+      await cleanup(h.dir);
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });
