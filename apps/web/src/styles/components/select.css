@@ -50,6 +50,13 @@
   font-size: var(--fs-base);
   text-align: left;
   cursor: pointer;
+  white-space: nowrap;
+}
+/* 标签列：面板宽度封顶时单行省略，不逐字换行。 */
+.select-option > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .select-option:hover, .select-option.is-hover, .select-option.is-active { background: var(--hover); }
 .select-option[aria-selected="true"] { background: var(--accent-soft); }

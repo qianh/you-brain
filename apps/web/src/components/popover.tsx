@@ -37,7 +37,17 @@ export function Popover({
       if (!root || !pop) return;
       const rect = root.getBoundingClientRect();
       const margin = 8;
-      const width = matchWidth ? rect.width : Math.min(440, Math.max(220, pop.offsetWidth));
+      let width: number;
+      if (matchWidth) {
+        // 面板至少和触发器一样宽，但不窄于内容的单行宽度——否则选项逐字换行。
+        const previous = pop.style.width;
+        pop.style.width = "max-content";
+        const natural = pop.offsetWidth;
+        pop.style.width = previous;
+        width = Math.max(rect.width, Math.min(natural, 440));
+      } else {
+        width = Math.min(440, Math.max(220, pop.offsetWidth));
+      }
       const left = Math.min(Math.max(margin, rect.left), window.innerWidth - margin - width);
       const height = pop.offsetHeight;
       const spaceBelow = window.innerHeight - rect.bottom;
