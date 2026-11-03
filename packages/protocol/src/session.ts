@@ -12,6 +12,7 @@ export const CAPTURE_SOURCE_IDS = [
   "t3-code",
   "zcode",
   "grok-bot",
+  "dsh",
   "deck",
 ] as const;
 

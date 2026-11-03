@@ -67,6 +67,7 @@ function captureSources(): Record<CaptureSourceId, CaptureSourceConfig> {
     "t3-code": captureSource(),
     zcode: captureSource(),
     "grok-bot": captureSource(),
+    dsh: captureSource(),
     deck: captureSource(),
   };
 }
@@ -101,6 +102,7 @@ const SharedConfigObjectSchema = z.object({
       "t3-code": CaptureSourceConfigSchema,
       zcode: CaptureSourceConfigSchema,
       "grok-bot": CaptureSourceConfigSchema,
+      dsh: CaptureSourceConfigSchema,
       deck: CaptureSourceConfigSchema,
     }),
     keepToolCalls: z.boolean(),

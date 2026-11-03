@@ -22,6 +22,7 @@ import {
 
 import {
   captureSourceFilters,
+  dshSessionsRoot,
   getAdapter,
   parseSourceFile,
 } from "../adapters/index.js";
@@ -173,7 +174,6 @@ import { UploadService } from "../upload/upload-service.js";
 import type { UploadIndex } from "../upload/types.js";
 import { NotionService } from "../notion/service.js";
 import { DeckService, type DeckServiceOptions } from "../deck/index.js";
-import { buildDeckCapabilityPort } from "./deck-ports.js";
 import {
   captureGeneration,
   captureWorkerBinary,
@@ -644,7 +644,6 @@ export class YouBrainDaemon {
   #embedderClose: (() => Promise<void>) | null = null;
   #notion: NotionService | null = null;
   #deck: DeckService | null = null;
-  #lastDeck: number | null = null;
   #uploader: UploadService | null = null;
   #portrait: PortraitService | null = null;
   #coding: CodingInjection | null = null;
@@ -1399,14 +1398,6 @@ export class YouBrainDaemon {
       }
       this.#lastWebhook = this.#clock.nowMs();
     }
-    if (!this.#stopped && intervalDue(this.#lastDeck, now, INTERVALS.deckMs)) {
-      this.#lastDeck = this.#clock.nowMs();
-      try {
-        await this.#deck?.tick(now);
-      } catch {
-        // 周期任务读取失败不能停 tick；执行本身在后台。
-      }
-    }
   }
 
   /** Starts the upload loop when anything is queued and it is not already running. */
@@ -1820,6 +1811,7 @@ export class YouBrainDaemon {
       t3: roots["t3-code"],
       zcode: roots.zcode,
       grokBot: roots["grok-bot"],
+      dsh: roots.dsh,
       deck: roots.deck,
     },
       cursors: this.#captureCursors(),
@@ -3020,9 +3012,9 @@ export class YouBrainDaemon {
     }
     const readers = createStoreReaders(store, this.#zone);
     if (this.#paths && this.#deck === null) {
-      this.#deck = new DeckService(this.#deckOptions(readers));
+      this.#deck = new DeckService(this.#deckOptions());
       // 本机 CLI/应用的探测在后台预热,指挥台与其他功能打开时直接读缓存。
-      this.#deck.warmExecutors();
+      this.#deck.warmDsh();
     }
     return {
       today: () => readers.today(),
@@ -3204,45 +3196,15 @@ export class YouBrainDaemon {
     };
   }
 
-  #deckOptions(readers: ReturnType<typeof createStoreReaders>): DeckServiceOptions {
+  #deckOptions(): DeckServiceOptions {
     const paths = this.#paths;
     if (!paths) throw new YouBrainError("INVALID_INPUT", "paths is not open");
     return {
       dataDir: paths.dataDir,
-      displayName: this.#local.displayName,
       homeDir: this.#homeDir,
-      timeZone: this.#roles.timezone,
-      capabilities: buildDeckCapabilityPort({
-        today: () => readers.today(),
-        topics: (query) => readers.topics(query),
-        topic: (id) => readers.topic(id),
-        search: (query) => this.#searchLocal(query),
-        portrait: (variant) => readPortraitFile(paths.portraitDir, variant),
-        knowledgeSearch: (query, limit) => {
-          const hits = this.#requireNotion().search(query, limit ?? 8);
-          return Promise.resolve({ query, hits });
-        },
-      }),
-      upload: (session) => {
-        const uploader = this.#uploader;
-        if (!uploader) throw new YouBrainError("SOURCE_UNAVAILABLE", "Drive 未就绪");
-        return uploader.upload(session);
-      },
-      driveAvailable: () => this.#driveReachable && this.#uploader !== null,
-      llmSelection: () => ({
-        provider: this.#shared.llm.provider,
-        model: this.#shared.llm.model,
-        baseUrl: this.#shared.llm.baseUrl,
-      }),
       env: this.#env,
       getApiKey: (provider) =>
         getLlmApiKey(provider, { platform: this.#platform, backend: this.#secretBackend }),
-      emitChange: () => this.changes.publish("deck", this.#clock.now().toISOString()),
-      emitDeckDelta: (conversationId, text) =>
-        this.changes.publish("deck", this.#clock.now().toISOString(), {
-          deckDelta: { conversationId, text },
-        }),
-      clock: { now: () => this.#clock.now(), nowMs: () => this.#clock.nowMs() },
     };
   }
 
@@ -3250,37 +3212,12 @@ export class YouBrainDaemon {
     const deck = this.#deck;
     if (!deck) return undefined;
     return {
-      listConversations: async () => ({ conversations: await deck.listConversations() }),
-      getConversation: async (id) => ({ conversation: await deck.getConversation(id) }),
-      deleteConversation: async (id) => ({ deleted: await deck.deleteConversation(id) }),
-      send: async (body) => ({ conversation: await deck.beginSend(body.text, body.conversationId ?? null) }),
-      executors: async () => ({ executors: await deck.executors() }),
-      listJobs: async () => ({ jobs: await deck.listJobs() }),
-      listTasks: async () => ({ tasks: await deck.listTasks() }),
-      saveTask: async (body) => {
-        if (body.id !== undefined) {
-          const patch = {
-            title: body.title,
-            prompt: body.prompt,
-            executor: body.executor,
-            schedule: body.schedule,
-            ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
-          };
-          return { task: await deck.updateTask(body.id, patch) };
-        }
-        const created = await deck.createTask({
-          title: body.title,
-          prompt: body.prompt,
-          executor: body.executor,
-          schedule: body.schedule,
-          ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
-        });
-        return { task: created };
-      },
-      deleteTask: async (id) => ({ deleted: await deck.deleteTask(id) }),
-      runTask: async (id) => ({ task: await deck.startTask(id) }),
-      config: async () => ({ config: await deck.getConfig() }),
-      writeConfig: async (body) => ({ config: await deck.writeConfig(body) }),
+      dshWeb: (retry) => deck.dshWeb(retry === true),
+      dshLogin: async () => ({ providers: await deck.dshLogin() }),
+      dshLoginAction: async (body) => ({ providers: await deck.dshLoginAction(body.action, body.provider) }),
+      bridgeApps: async () => ({ apps: await deck.bridgeApps() }),
+      bridgeSend: (body) => deck.bridgeSend(body.app, body.prompt),
+      bridgeReplies: async (body) => ({ replies: await deck.bridgeReplies(body.app, body.sinceMs) }),
     };
   }
 
@@ -3899,6 +3836,7 @@ export class YouBrainDaemon {
       "t3-code": [] as string[],
       zcode: [] as string[],
       "grok-bot": [] as string[],
+      dsh: [] as string[],
       deck: [] as string[],
     };
     // 服务器上不存在这些 CLI 的会话目录。采集空转，只做提炼与沉淀。
@@ -3913,7 +3851,10 @@ export class YouBrainDaemon {
       roots[id] =
         configured.paths.length > 0
           ? [...configured.paths]
-          : [...(getAdapter(id)?.defaultRoots(this.#homeDir) ?? [])];
+          : id === "dsh"
+            ? // DSH 的 home 在数据目录里（指挥台运行时托管），不在用户 home 下。
+              [dshSessionsRoot(this.#paths.dataDir)]
+            : [...(getAdapter(id)?.defaultRoots(this.#homeDir) ?? [])];
     }
     return roots;
   }

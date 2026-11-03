@@ -40,8 +40,6 @@ export const INTERVALS = {
   webhookDebounceMs: 2_000,
   /** Retry sweep. Backoff is enforced by the delivery state, not by this interval. */
   webhookMs: 60_000,
-  /** 指挥台周期任务：每分钟看一次到期；执行在后台，不占 tick。 */
-  deckMs: 60_000,
 } as const;
 
 /** `last === null` means the job has never run and is due immediately. */

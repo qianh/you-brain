@@ -98,6 +98,7 @@ export interface DiscoveryOptions {
     t3?: string[];
     zcode?: string[];
     grokBot?: string[];
+    dsh?: string[];
     /** 指挥台会话是程序内直产的，不走扫描；键存在只为类型对齐。 */
     deck?: string[];
   };
@@ -153,6 +154,7 @@ export interface DiscoveryResult {
     | "t3"
     | "zcode"
     | "grokBot"
+  | "dsh"
     | "deck",
     DiscoveryStatus
   >;

@@ -11,6 +11,7 @@ const SOURCE_LABELS: Record<string, string> = {
   pi: "Pi",
   "t3-code": "T3 Code",
   zcode: "ZCode",
+  dsh: "DeepSeek Harness",
 };
 
 export function sourceLabel(source: string): string {

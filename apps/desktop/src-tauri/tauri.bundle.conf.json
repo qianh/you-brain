@@ -6,7 +6,8 @@
     },
     "resources": {
       "../../../dist/daemon/aarch64-apple-darwin/vendor": "vendor",
-      "../../../dist/daemon/aarch64-apple-darwin/web": "web"
+      "../../../dist/daemon/aarch64-apple-darwin/web": "web",
+      "../../../dist/daemon/aarch64-apple-darwin/dsh": "dsh"
     }
   }
 }

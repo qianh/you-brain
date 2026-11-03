@@ -1,3 +1,4 @@
+import { DSH_LOGIN_PROVIDER_IDS } from "../deck/dsh/login.js";
 import {
   DeviceCapabilitySchema,
   IsoTimestampSchema,
@@ -813,15 +814,8 @@ export type { WebhookEventKind };
 
 export const DaemonEventSchema = z.object({
   id: z.number().int().nonnegative(),
-  kind: z.enum(["ready", "topics", "today", "status", "portrait", "devices", "notion", "deck"]),
+  kind: z.enum(["ready", "topics", "today", "status", "portrait", "devices", "notion"]),
   at: z.string().min(1),
-  /** 指挥台主控回答的流式增量。只随 deck 事件出现；界面据此逐字上屏。 */
-  deckDelta: z
-    .object({
-      conversationId: z.string().min(1),
-      text: z.string(),
-    })
-    .optional(),
 });
 
 export type DaemonEvent = z.infer<typeof DaemonEventSchema>;
@@ -850,77 +844,46 @@ export interface EventSink {
   ): void | Promise<void>;
 }
 
-// ---- 指挥台（deck）----
+// ---- 指挥台（deck）：界面、主控、任务都由 DSH 承担，daemon 只提供下面这些 ----
 
-export const DeckSendBodySchema = z.object({
-  text: z.string().min(1, "消息不能为空").max(20_000),
-  conversationId: z.string().min(1).optional(),
+/** 指挥台标签页嵌入的 DSH Web 界面的状态；ready 时 url 带一次性访问令牌，仅限本机。 */
+export type DeckDshWebResponse = import("../deck/dsh/web.js").DshWebState;
+
+export const DeckBridgeSendBodySchema = z.object({
+  app: z.string().min(1).max(60),
+  prompt: z.string().min(1).max(20_000),
 });
 
-export type DeckSendBody = z.infer<typeof DeckSendBodySchema>;
-
-export const DeckTaskBodySchema = z.object({
-  id: z.string().min(1).optional(),
-  title: z.string().min(1, "标题不能为空").max(120),
-  prompt: z.string().min(1, "指令不能为空").max(20_000),
-  executor: z.object({
-    kind: z.enum(["cli-agent", "model", "capability", "gui-app"]),
-    id: z.string().min(1),
-  }),
-  schedule: z.union([
-    z.object({ kind: z.literal("daily"), time: z.string().regex(/^\d{2}:\d{2}$/u) }),
-    z.object({ kind: z.literal("interval"), minutes: z.number().int().min(5).max(60 * 24 * 30) }),
-  ]),
-  enabled: z.boolean().optional(),
+export const DeckBridgeRepliesBodySchema = z.object({
+  app: z.string().min(1).max(60),
+  sinceMs: z.number().int().nonnegative(),
 });
 
-export type DeckTaskBody = z.infer<typeof DeckTaskBodySchema>;
+export type DeckBridgeSendBody = z.infer<typeof DeckBridgeSendBodySchema>;
+export type DeckBridgeRepliesBody = z.infer<typeof DeckBridgeRepliesBodySchema>;
 
-export const DeckTaskDeleteBodySchema = z.object({ id: z.string().min(1) });
-
-export type DeckTaskDeleteBody = z.infer<typeof DeckTaskDeleteBodySchema>;
-
-export interface DeckConversationsResponse {
-  conversations: import("../deck/types.js").DeckConversation[];
+export interface DeckBridgeAppsResponse {
+  apps: Array<{ id: string; displayName: string; available: boolean; detail: string; recoverable: boolean }>;
 }
 
-export interface DeckConversationResponse {
-  conversation: import("../deck/types.js").DeckConversation | null;
+export interface DeckBridgeSendResponse {
+  sentAtMs: number;
+  recoverable: boolean;
 }
 
-export interface DeckConversationSendResponse {
-  conversation: import("../deck/types.js").DeckConversation;
+export interface DeckBridgeRepliesResponse {
+  replies: string[];
 }
 
-export interface DeckExecutorsResponse {
-  executors: import("../deck/service.js").DeckExecutorView[];
-}
-
-export interface DeckJobsResponse {
-  jobs: import("../deck/types.js").DeckJobView[];
-}
-
-export interface DeckTasksResponse {
-  tasks: import("../deck/types.js").DeckTask[];
-}
-
-export interface DeckTaskResponse {
-  task: import("../deck/types.js").DeckTask | null;
-}
-
-export interface DeckDeletedResponse {
-  deleted: boolean;
-}
-
-export const DeckConfigPutBodySchema = z.object({
-  /** 主控 CLI 覆盖；空串 = 自动（跟随可用 CLI）。 */
-  masterProvider: z.string().max(60).optional(),
-  /** 主控补全的模型覆盖；空串 = CLI 默认。 */
-  masterModel: z.string().max(120).optional(),
+export const DeckDshLoginBodySchema = z.object({
+  action: z.enum(["start", "cancel", "logout"]),
+  provider: z.enum(DSH_LOGIN_PROVIDER_IDS),
 });
 
-export type DeckConfigPutBody = z.infer<typeof DeckConfigPutBodySchema>;
+export type DeckDshLoginBody = z.infer<typeof DeckDshLoginBodySchema>;
 
-export interface DeckConfigResponse {
-  config: import("../deck/types.js").DeckConfig;
+/** 订阅登录状态：各供应商是否已登录、是否在等浏览器授权。 */
+export interface DeckDshLoginResponse {
+  providers: import("../deck/dsh/login.js").DshLoginView[];
 }
+

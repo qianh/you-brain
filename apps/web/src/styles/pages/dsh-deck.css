@@ -1,0 +1,53 @@
+/* 指挥台 = 嵌入的 DeepSeek Harness 界面：整页一个 iframe。 */
+
+/* main-deck / app-deck 由 shell 在 /deck 路由挂上：
+   高度链 .app(100dvh) → .main(overflow hidden) → .page-frame → .deck
+   全部确定，消息区内滚、输入框钉底，页面本身不滚。 */
+.app-deck {
+  height: 100dvh;
+}
+
+.main-deck {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding-bottom: var(--sp-4);
+}
+
+.main-deck .route-fade,
+.main-deck .page-frame {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dsh-deck {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.dsh-frame {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 0;
+  border-radius: var(--radius-md, 10px);
+  background: var(--surface-1);
+}
+
+.dsh-deck-state {
+  flex: 1;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: var(--sp-3, 12px);
+  color: var(--text-2);
+  text-align: center;
+}
+
+.dsh-deck-state .dsh-deck-hint { font-size: 12px; color: var(--text-3); }
+.dsh-deck-state .dsh-deck-error { max-width: 640px; color: var(--danger, #c33); word-break: break-word; }

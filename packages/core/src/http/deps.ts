@@ -50,19 +50,14 @@ import type {
   NotionUpdateBlockBody,
   OAuthClientPublic,
   OAuthClientPutBody,
-  DeckConversationResponse,
-  DeckConversationsResponse,
-  DeckConversationSendResponse,
-  DeckDeletedResponse,
-  DeckExecutorsResponse,
-  DeckJobsResponse,
-  DeckSendBody,
-  DeckTaskBody,
-  DeckTaskDeleteBody,
-  DeckTaskResponse,
-  DeckTasksResponse,
-  DeckConfigPutBody,
-  DeckConfigResponse,
+  DeckBridgeAppsResponse,
+  DeckBridgeRepliesBody,
+  DeckBridgeRepliesResponse,
+  DeckBridgeSendBody,
+  DeckBridgeSendResponse,
+  DeckDshLoginBody,
+  DeckDshLoginResponse,
+  DeckDshWebResponse,
 } from "./types.js";
 
 /** Read and write ports for the local API. The daemon supplies the implementations. */
@@ -137,17 +132,12 @@ export interface HttpDeps {
 
 /** 指挥台的 HTTP 端口。实现是 daemon 里的 DeckService。 */
 export interface DeckHttpPort {
-  listConversations(): Promise<DeckConversationsResponse>;
-  getConversation(id: string): Promise<DeckConversationResponse>;
-  deleteConversation(id: string): Promise<DeckDeletedResponse>;
-  send(body: DeckSendBody): Promise<DeckConversationSendResponse>;
-  executors(): Promise<DeckExecutorsResponse>;
-  listJobs(): Promise<DeckJobsResponse>;
-  listTasks(): Promise<DeckTasksResponse>;
-  saveTask(body: DeckTaskBody): Promise<DeckTaskResponse>;
-  deleteTask(id: string): Promise<DeckDeletedResponse>;
-  /** 后台启动一次执行，立即返回任务现状。 */
-  runTask(id: string): Promise<DeckTaskResponse>;
-  config(): Promise<DeckConfigResponse>;
-  writeConfig(body: DeckConfigPutBody): Promise<DeckConfigResponse>;
+  /** 启动（若未运行）并返回嵌入页面用的 DSH Web 状态。 */
+  dshWeb(retry?: boolean): Promise<DeckDshWebResponse>;
+  dshLogin(): Promise<DeckDshLoginResponse>;
+  dshLoginAction(body: DeckDshLoginBody): Promise<DeckDshLoginResponse>;
+  /** GUI App 桥：给 DSH 的 u-brain-bridge 插件用。 */
+  bridgeApps(): Promise<DeckBridgeAppsResponse>;
+  bridgeSend(body: DeckBridgeSendBody): Promise<DeckBridgeSendResponse>;
+  bridgeReplies(body: DeckBridgeRepliesBody): Promise<DeckBridgeRepliesResponse>;
 }

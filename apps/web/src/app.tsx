@@ -3,7 +3,7 @@ import { useEffect } from "react";
 import { BrandMark } from "./components/icons.js";
 import { ToastProvider } from "./components/toast.js";
 import { DaemonProvider, useDaemon } from "./daemon-context.js";
-import { CommandDeckPage } from "./pages/command-deck.js";
+import { DshDeckPage } from "./pages/dsh-deck.js";
 import { DesignPage } from "./pages/design.js";
 import { PanelPage } from "./pages/panel.js";
 import { TodayPage } from "./pages/today.js";
@@ -76,7 +76,7 @@ function Frame() {
   if (panel) return <PanelPage />;
 
   let page = <Missing />;
-  if (location.pathname === "/" || location.pathname === "/deck") page = <CommandDeckPage />;
+  if (location.pathname === "/" || location.pathname === "/deck") page = <DshDeckPage />;
   else if (location.pathname === "/today") page = <TodayPage />;
   else if (location.pathname === "/topics") page = <TopicsPage zone="active" />;
   else if (location.pathname === "/topics/history") page = <TopicsPage zone="history" />;

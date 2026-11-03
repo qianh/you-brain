@@ -1,0 +1,18 @@
+{
+  "name": "you-brain-dsh-host",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "指挥台的 DeepSeek Harness 运行时宿主：独立 Node 24 进程，不进 bun workspace。",
+  "engines": {
+    "node": ">=24.9"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-subagent-acp": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-subagent-claude-code": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-subagent-codex": "0.2.1-rc.5",
+    "u-brain-brand": "file:plugins/u-brain-brand",
+    "u-brain-login": "file:plugins/u-brain-login"
+  }
+}

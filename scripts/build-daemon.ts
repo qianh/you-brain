@@ -129,6 +129,9 @@ if (await isDir(webDist)) {
   console.log("apps/web/dist 不存在，跳过 web/");
 }
 
+// DSH 运行时（Node 24 + 裁剪后的 sidecar）：指挥台的界面和订阅登录都靠它，随 App 交付。
+await run([bun, join(root, "scripts", "build-dsh.ts")], root);
+
 const binaries = join(root, "apps/desktop/src-tauri/binaries");
 await mkdir(binaries, { recursive: true });
 const sidecar = join(binaries, `you-brain-${triple}`);

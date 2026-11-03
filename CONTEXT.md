@@ -8,7 +8,7 @@
 
 | 类别 | 含义 | 来源 |
 |---|---|---|
-| **会话原文** | 一次 AI 对话的完整内容（只保留可见文本和图片，已脱敏） | 本地 CLI 采集、浏览器插件上报、指挥台直落（主控对话）、GUI App 桥回收（Grok Bot 等） |
+| **会话原文** | 一次 AI 对话的完整内容（只保留可见文本和图片，已脱敏） | 本地 CLI 采集、浏览器插件上报、指挥台（dsh 会话文件）、GUI App 桥回收（Grok Bot 等） |
 | **知识库** | 用户主动写下的笔记集合，当前指 Notion workspace | 用户授权的 Notion 集成 |
 
 - 两类都是**数字分身的输入来源**。
@@ -42,14 +42,25 @@
 
 ## 指挥台
 
-> 状态：已实现 v1（2026-10-31）。产品文档旧称「调度功能」——**调度一词已被每日沉淀的定时执行占用**，本功能正式定名「指挥台」（代码模块 `deck`）。
+> 状态：2026-11-03 起整页改用 **DeepSeek Harness（dsh）**，旧的自研指挥台（主控、对话页、周期任务、执行者目录）已删除。决定见 ADR-0003。
 
-对话式命令入口：用户在 Chat 式界面（主窗口首页）下命令、问问题；**主控**（本机一个 AI CLI，复用 llm/cli 基座做决策补全，系统提示词即调度 skill）判断每条消息是当场回答、**派活**还是**登记成周期任务**，并输出结构化决策 JSON，由 daemon 执行。
+指挥台标签页里就是 dsh 自己的 Web 界面（嵌入 U-Brain 窗口）。dsh 是“一切皆插件”的 agent 运行时，对话、模型选择、子代理、自动化任务（定时/周期）都由它承担；U-Brain 的 daemon 只做三件 dsh 做不了的事：
 
-- **执行者**：主控可以派活的对象，收有可编程接口的四类——本机 CLI agent（grok / claude / codex / gemini / opencode 的 agent 模式，专属 workdir）、本机模型（BYOK / Ollama，单次补全）、daemon 能力（搜索、话题、分身、知识库）、**本机 GUI App（通用桥**：辅助功能 API 投递 + 采集适配器回收，见 ADR-0002；Grok Bot、Muse 走此类）。
-- **周期任务**：注册表在本机 `<dataDir>/deck/tasks.json`；daily（本地时区 HH:MM，错过补最近一次）与 interval（分钟）；执行后台化，不阻塞 daemon tick。
-- 指挥台里的主控对话**直接落成会话原文**（来源 `deck`，无需采集），与所有会话一样进提炼管线；决定见 ADR-0001。
-- 外部 AI App 的能力通过 GUI App 桥派活获得，见下节。
+- **托管 dsh 进程**：随 U-Brain 启动、崩溃自动拉起（dsh 的定时任务只在它运行时才触发）。运行时（Node 24 + 裁剪后的依赖）随 App 打包，用户机器上不需要 Node。
+- **订阅登录**：dsh 后端支持订阅（OAuth）登录但界面没有入口，由 daemon 驱动登录引擎，完成后重启 dsh 让它挂上新的模型路由。
+- **GUI App 桥**：daemon 持有 macOS 辅助功能权限，经本机接口给 dsh 的 `u-brain-bridge` 插件用；见 ADR-0002。
+
+接入面：
+
+| 能力 | 做法 |
+|---|---|
+| 其他 CLI | dsh 子代理提供者：claude-code / codex 用官方原生包（打包版为控制体积不带原生载荷，不挂载），gemini（`--acp`）/ opencode（`acp`）走 ACP |
+| GUI App（Grok Bot、Muse） | dsh 插件 `u-brain-bridge`（工具 `gui_app_list` / `gui_app_ask` / `gui_app_replies`），回调 daemon 的 `/api/deck/bridge/*` |
+| U-Brain 自己的能力（搜索、话题、今日、分身、知识库） | `you-brain mcp`，打包版自动挂给 dsh |
+| 更多插件 | 用户把 cordis 补丁放进 `<dataDir>/deck/dsh/user.patch.yml`，原样加载 |
+| 会话进数字资产 | `dsh` 采集来源读 dsh 的会话文件（`<dsh home>/sessions/**/session.v4.jsonl.zstd`），与其他来源同一管线 |
+
+- 历史上的 `deck` 来源（旧指挥台直落的会话）保留在数字资产里，不再产生新的。
 
 ## 接入 AI App 的方向
 

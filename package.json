@@ -12,6 +12,7 @@
     "typecheck": "bunx tsc --noEmit -p packages/protocol && bunx tsc --noEmit -p packages/core && bunx tsc --noEmit -p packages/cli && bunx tsc --noEmit -p apps/web",
     "check:desktop": "bun run --cwd apps/desktop check && bun run --cwd apps/desktop test && bun run --cwd apps/desktop test:bundle:linux",
     "build:daemon": "bun scripts/build-daemon.ts",
+    "build:dsh": "bun scripts/build-dsh.ts",
     "protocol:schemas": "bun scripts/gen-protocol-schemas.ts",
     "install:app": "bun scripts/install-app.ts",
     "build:server": "bun scripts/build-server.ts"

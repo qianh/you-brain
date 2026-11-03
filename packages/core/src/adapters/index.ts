@@ -10,6 +10,7 @@ import { parseCursorSession } from "./cursor.js";
 import { parseGeminiSession } from "./gemini.js";
 import { globFiles } from "./glob.js";
 import { parseGrokSession } from "./grok.js";
+import { dshAdapter, dshSessionsRoot, parseDshSession } from "./dsh.js";
 import { parseGrokBotBlob, grokBotAdapter } from "./grok-bot.js";
 import { parsePiSession } from "./pi.js";
 import { getAdapter } from "./registry.js";
@@ -39,6 +40,7 @@ export {
 export { parsePiSession, piAdapter } from "./pi.js";
 export { parseT3Session, t3Adapter, isImportedThread, parseT3Path } from "./t3.js";
 export { parseZcodeSession, zcodeAdapter, parseZcodePath } from "./zcode.js";
+export { dshAdapter, dshSessionsRoot, parseDshSession };
 export {
   clearContinuationIndex,
   continuationByPrefix,
@@ -138,6 +140,7 @@ export async function discoverSessions(
     t3: emptyStatus(),
     zcode: emptyStatus(),
     grokBot: emptyStatus(),
+    dsh: emptyStatus(),
     deck: emptyStatus(),
   };
   const output: DiscoveryResult = {
@@ -363,6 +366,26 @@ export async function discoverSessions(
     );
   }
 
+  if (!stopped() && options.sources.includes("dsh")) {
+    // DSH 的会话是 <home>/sessions/<工作区>/session-<id>/ 下的 zstd JSONL：适配器自己列文件。
+    const paths = visible(
+      "dsh",
+      await incrementalFiles(
+        await rowPaths("dsh", options.paths.dsh ?? []),
+        options.modifiedAfter?.dsh,
+        includePaths,
+      ),
+    );
+    status.dsh.discovered = paths.length;
+    work.push(
+      ...paths.map((path) => ({
+        name: "dsh" as const,
+        path,
+        parse: () => parseDshSession(path, parserOptions),
+      })),
+    );
+  }
+
   const retainSessions = options.retainSessions !== false;
   for (const item of work) {
     if (stopped()) break;
@@ -428,6 +451,8 @@ export async function parseSourceFile(
       return parseZcodeSession(path, options);
     case "grok-bot":
       return parseGrokBotBlob(path, options);
+    case "dsh":
+      return parseDshSession(path, options);
     case "deck":
       // 指挥台会话是程序内直产的，没有可扫描的文件。
       return { session: null, skippedSubagent: false, malformedLines: 0 };

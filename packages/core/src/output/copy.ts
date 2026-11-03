@@ -47,6 +47,7 @@ const SOURCES: Record<string, string> = {
   pi: "Pi",
   "t3-code": "T3 Code",
   zcode: "ZCode",
+  dsh: "DeepSeek Harness",
 };
 
 const EN_STATUS: Record<TopicStatus, string> = {

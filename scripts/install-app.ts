@@ -41,7 +41,7 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-for (const name of ["you-brain", "web", "vendor"]) {
+for (const name of ["you-brain", "web", "vendor", "dsh"]) {
   if (!(await exists(join(built, name)))) {
     console.error(`缺少 ${join(built, name)}，先运行 bun run build:daemon`);
     process.exit(2);
@@ -63,10 +63,13 @@ const binaries = join(app, "Contents", "MacOS");
 // Replace, never merge: a leftover `web/web` would keep serving stale assets.
 await rm(join(resources, "web"), { recursive: true, force: true });
 await rm(join(resources, "vendor"), { recursive: true, force: true });
+await rm(join(resources, "dsh"), { recursive: true, force: true });
 await cp(join(built, "web"), join(staging, "web"), { recursive: true, dereference: true });
 await cp(join(built, "vendor"), join(staging, "vendor"), { recursive: true, dereference: true });
 await cp(join(staging, "web"), join(resources, "web"), { recursive: true, dereference: true });
 await cp(join(staging, "vendor"), join(resources, "vendor"), { recursive: true, dereference: true });
+// dsh 不经 staging：体积大，且 node_modules/.bin 里的链接要原样保留。
+await cp(join(built, "dsh"), join(resources, "dsh"), { recursive: true, verbatimSymlinks: true });
 await rm(staging, { recursive: true, force: true });
 
 await cp(join(built, "you-brain"), join(binaries, "you-brain"));

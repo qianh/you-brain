@@ -31,6 +31,7 @@ describe("adapter registry", () => {
       "t3-code",
       "zcode",
       "grok-bot",
+      "dsh",
     ]);
     expect(claudeAdapter.defaultRoots("/Users/me")).toEqual([
       "/Users/me/.claude/projects",

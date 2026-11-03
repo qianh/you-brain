@@ -39,6 +39,7 @@ export ROOT REPO
 
 VENDOR="$REPO/dist/daemon/aarch64-apple-darwin/vendor"
 WEB="$REPO/dist/daemon/aarch64-apple-darwin/web"
+DSH="$REPO/dist/daemon/aarch64-apple-darwin/dsh"
 TARGET_TRIPLE=aarch64-apple-darwin
 APP_NAME=U-Brain.app
 DEST_DIR="$REPO/dist/app.noindex"
@@ -227,10 +228,10 @@ fi
 remove_stale_apps
 
 build_status=0
-if [ -d "$VENDOR" ] && [ -d "$WEB" ]; then
+if [ -d "$VENDOR" ] && [ -d "$WEB" ] && [ -d "$DSH" ]; then
   bunx tauri build --config src-tauri/tauri.bundle.conf.json "$@" || build_status=$?
 else
-  echo "you-brain: $VENDOR or $WEB is missing; bundling without those resources" >&2
+  echo "you-brain: $VENDOR, $WEB or $DSH is missing; bundling without those resources" >&2
   bunx tauri build "$@" || build_status=$?
 fi
 

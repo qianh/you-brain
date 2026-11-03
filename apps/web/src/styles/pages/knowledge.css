@@ -295,7 +295,8 @@
 }
 
 .nb-checkbox {
-  margin-top: 5px;
+  /* 15px/1.7 的首行中心在 12.75px;13px 的勾选框要 margin-top 6px 才对齐。 */
+  margin-top: 6px;
   accent-color: var(--accent);
 }
 
@@ -964,7 +965,8 @@
 
 .nb-row-todo .nb-checkbox {
   flex: none;
-  margin-top: 5px;
+  /* 编辑行正文有 1px 上内边距,首行中心在 13.75px,比只读视图再低 1px。 */
+  margin-top: 7px;
 }
 
 .nb-row-callout {

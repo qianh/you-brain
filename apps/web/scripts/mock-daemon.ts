@@ -675,179 +675,11 @@ function applyReminderAction(body: unknown): Response {
   return json(item);
 }
 
-function publish(kind: "topics" | "today" | "status" | "portrait" | "deck"): void {
+function publish(kind: "topics" | "today" | "status" | "portrait"): void {
   seq += 1;
   const event = { id: seq, kind, at: new Date().toISOString() };
   const frame = `id: ${event.id}\nevent: ${event.kind}\ndata: ${JSON.stringify(event)}\n\n`;
   for (const send of subscribers) send(frame);
-}
-
-// ---- 指挥台（deck）----
-
-interface MockDeckTurn {
-  id: string;
-  role: "user" | "assistant" | "event";
-  text: string;
-  at: string;
-}
-
-interface MockDeckConversation {
-  id: string;
-  title: string;
-  createdAt: string;
-  updatedAt: string;
-  taskId?: string;
-  turns: MockDeckTurn[];
-}
-
-interface MockDeckTask {
-  id: string;
-  title: string;
-  prompt: string;
-  executor: { kind: "cli-agent" | "model" | "capability" | "gui-app"; id: string };
-  schedule: { kind: "daily"; time: string } | { kind: "interval"; minutes: number };
-  enabled: boolean;
-  createdAt: string;
-  lastRunAt: string | null;
-  lastStatus: "ok" | "error" | null;
-  lastError: string | null;
-}
-
-let deckSeq = 0;
-let deckTurnSeq = 0;
-
-function mockDeckTurn(role: MockDeckTurn["role"], text: string): MockDeckTurn {
-  deckTurnSeq += 1;
-  return { id: `dt${deckTurnSeq}`, role, text, at: new Date().toISOString() };
-}
-
-const mockDeckConfig: { masterProvider?: string; masterModel?: string } = {};
-const deckConversations: MockDeckConversation[] = [];
-const deckTasks: MockDeckTask[] = [];
-
-function mockDeckConversation(id: string | null): MockDeckConversation {
-  const existing = id === null ? undefined : deckConversations.find((item) => item.id === id);
-  if (existing) return existing;
-  deckSeq += 1;
-  const conversation: MockDeckConversation = {
-    id: `deck${String(deckSeq).padStart(3, "0")}`,
-    title: "新的对话",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    turns: [],
-  };
-  deckConversations.unshift(conversation);
-  return conversation;
-}
-
-const deckExecutors = [
-  { kind: "capability", id: "search", title: "会话搜索", available: true, detail: "input 是搜索词（语义+关键词）" },
-  { kind: "capability", id: "today", title: "今日视图", available: true, detail: "忽略 input" },
-  { kind: "capability", id: "topics", title: "话题册", available: true, detail: "忽略 input" },
-  { kind: "capability", id: "topic", title: "话题详情", available: true, detail: "input 是话题 ID" },
-  { kind: "capability", id: "portrait", title: "数字分身", available: true, detail: "input 是变体" },
-  { kind: "capability", id: "knowledge", title: "知识库搜索", available: true, detail: "input 是搜索词" },
-  { kind: "cli-agent", id: "claude-cli", title: "本机 agent claude-cli", available: true, detail: "就绪" },
-  { kind: "cli-agent", id: "codex-cli", title: "本机 agent codex-cli", available: true, detail: "就绪" },
-  { kind: "gui-app", id: "grok-bot", title: "Grok Bot", available: true, detail: "就绪" },
-];
-
-async function handleDeckApi(request: Request, url: URL): Promise<Response> {
-  const path = url.pathname;
-  if (path === "/api/deck/conversations" && request.method === "GET") {
-    return json({ conversations: deckConversations });
-  }
-  if (path === "/api/deck/conversation" && request.method === "GET") {
-    const id = url.searchParams.get("id") ?? "";
-    return json({ conversation: deckConversations.find((item) => item.id === id) ?? null });
-  }
-  if (path === "/api/deck/send" && request.method === "POST") {
-    const body = (await request.json()) as { text: string; conversationId?: string };
-    const conversation = mockDeckConversation(body.conversationId ?? null);
-    conversation.turns.push(mockDeckTurn("user", body.text));
-    if (conversation.turns.length === 1) conversation.title = body.text.slice(0, 24);
-    conversation.turns.push(mockDeckTurn("assistant", "（mock）这是一条演示回复：主控判断为直接回答。"));
-    conversation.updatedAt = new Date().toISOString();
-    publish("deck");
-    return json({ conversation });
-  }
-  if (path === "/api/deck/executors" && request.method === "GET") {
-    return json({ executors: deckExecutors });
-  }
-  if (path === "/api/deck/tasks" && request.method === "GET") {
-    return json({ tasks: deckTasks });
-  }
-  if (path === "/api/deck/task" && request.method === "POST") {
-    const input = (await request.json()) as MockDeckTask & { id?: string };
-    if (input.id !== undefined) {
-      const task = deckTasks.find((item) => item.id === input.id);
-      if (task) {
-        task.title = input.title;
-        task.prompt = input.prompt;
-        task.executor = input.executor;
-        task.schedule = input.schedule;
-        task.enabled = input.enabled ?? task.enabled;
-      }
-      publish("deck");
-      return json({ task: task ?? null });
-    }
-    const created: MockDeckTask = {
-      id: `task${deckTasks.length + 1}`,
-      title: input.title,
-      prompt: input.prompt,
-      executor: input.executor,
-      schedule: input.schedule,
-      enabled: input.enabled ?? true,
-      createdAt: new Date().toISOString(),
-      lastRunAt: null,
-      lastStatus: null,
-      lastError: null,
-    };
-    deckTasks.push(created);
-    publish("deck");
-    return json({ task: created });
-  }
-  if (path === "/api/deck/task-delete" && request.method === "POST") {
-    const { id } = (await request.json()) as { id: string };
-    const index = deckTasks.findIndex((item) => item.id === id);
-    if (index >= 0) deckTasks.splice(index, 1);
-    publish("deck");
-    return json({ deleted: index >= 0 });
-  }
-  if (path === "/api/deck/config" && request.method === "GET") {
-    return json({ config: mockDeckConfig });
-  }
-  if (path === "/api/deck/config" && request.method === "PUT") {
-    const body = (await request.json()) as { masterProvider?: string; masterModel?: string };
-    if (body.masterProvider !== undefined) {
-      const provider = body.masterProvider.trim();
-      if (provider === "") delete mockDeckConfig.masterProvider;
-      else mockDeckConfig.masterProvider = provider;
-    }
-    if (body.masterModel !== undefined) {
-      const model = body.masterModel.trim();
-      if (model === "") delete mockDeckConfig.masterModel;
-      else mockDeckConfig.masterModel = model;
-    }
-    publish("deck");
-    return json({ config: mockDeckConfig });
-  }
-  if (path === "/api/deck/task-run" && request.method === "POST") {
-    const { id } = (await request.json()) as { id: string };
-    const task = deckTasks.find((item) => item.id === id);
-    if (task === undefined) return json({ task: null });
-    task.lastRunAt = new Date().toISOString();
-    task.lastStatus = "ok";
-    const conversation = mockDeckConversation(`task-${task.id}`);
-    conversation.title = `任务：${task.title}`;
-    conversation.taskId = task.id;
-    conversation.turns.push(mockDeckTurn("user", `【周期任务】\n\n${task.prompt}`));
-    conversation.turns.push(mockDeckTurn("assistant", `【${task.title} · 结果】\n\n（mock）任务已完成。`));
-    conversation.updatedAt = new Date().toISOString();
-    publish("deck");
-    return json({ task });
-  }
-  return fail(404, "NOT_FOUND", "找不到接口");
 }
 
 function topicName(topicId: string | null): string | null {
@@ -1555,7 +1387,6 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
     if (request.method === "POST") return mutateTopic(id, request);
     return fail(405, "METHOD_NOT_ALLOWED", "方法不被允许");
   }
-  if (path.startsWith(`/api/deck/`)) return handleDeckApi(request, url);
   return fail(404, "NOT_FOUND", "找不到接口");
 }
 

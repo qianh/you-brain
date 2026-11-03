@@ -1,0 +1,23 @@
+{
+  "name": "u-brain-brand",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH 插件：把指挥台里的 DeepSeek 品牌（侧栏 logo/名称、首屏标题与“预览版”角标）换成 U-Brain 的。替代 @deepseek-ai/dsh-client-ui-brand-official。",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": ["@deepseek-ai/dsh-client-ui-renderer", "@deepseek-ai/dsh-client-ui-sidebar", "@deepseek-ai/dsh-client-ui-conversation"],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5"
+  },
+  "files": ["lib/index.js", "lib/client.js"]
+}

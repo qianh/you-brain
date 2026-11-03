@@ -1,0 +1,23 @@
+{
+  "name": "u-brain-login",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH 插件：在「设置 → 模型」页底部加一个“订阅登录”区块（Claude / ChatGPT / Grok / GitHub Copilot / Kimi Code）。DSH 后端支持订阅登录，但它的界面没有入口。",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": ["@deepseek-ai/dsh-client-ui-settings-models"],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5"
+  },
+  "files": ["lib/index.js", "lib/client.js"]
+}
