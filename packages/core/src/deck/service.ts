@@ -51,6 +51,8 @@ export interface DeckServiceOptions {
   getApiKey?: (provider: LlmProvider) => string | null | undefined | Promise<string | null | undefined>;
   /** 变更通知（SSE），web 端据此刷新指挥台。 */
   emitChange(): void;
+  /** 主控回答的流式增量（SSE delta），界面逐字上屏。缺省 = 不流式。 */
+  emitDeckDelta?: (conversationId: string, text: string) => void;
   clock?: { now(): Date; nowMs(): number };
   /** 测试注入 CLI agent 执行。 */
   runAgent?: (options: RunCliAgentOptions) => Promise<string>;
@@ -87,6 +89,10 @@ export class DeckService {
   readonly #runningTasks = new Set<string>();
   readonly #jobs = new Map<string, { view: DeckJobView; promise: Promise<void> }>();
   readonly #taskRuns = new Set<Promise<void>>();
+  readonly #processRuns = new Set<Promise<void>>();
+  readonly #deltaEmitAt = new Map<string, number>();
+  /** 每个会话一条上传链：落盘不等待 Drive，但同一会话的上传顺序不乱。 */
+  readonly #uploads = new Map<string, Promise<void>>();
   readonly #locks = new Map<string, Promise<void>>();
   readonly #cliEnv: NodeJS.ProcessEnv | undefined;
   #backendCache: { key: string; backend: LlmBackend } | null = null;
@@ -120,6 +126,8 @@ export class DeckService {
     await Promise.all([
       ...[...this.#jobs.values()].map((job) => job.promise),
       ...this.#taskRuns,
+      ...this.#processRuns,
+      ...[...this.#uploads.values()],
     ]);
   }
 
@@ -135,12 +143,36 @@ export class DeckService {
     return this.store.getConversation(id);
   }
 
+  /** 删除一条会话。运行中的主控/派活产出会因重读不到会话而丢弃。 */
+  async deleteConversation(id: string): Promise<boolean> {
+    return this.#withConv(id, () => this.store.deleteConversation(id));
+  }
+
   async listJobs(): Promise<DeckJobView[]> {
     return [...this.#jobs.values()].map((job) => ({ ...job.view }));
   }
 
-  /** 发送一条消息：先落用户轮，再跑主控决策并执行。 */
+  /**
+   * 发送一条消息：用户轮落盘并广播后就返回，主控决策与执行转后台
+   * （界面立刻显示这条消息，主控产出经 SSE 推送）。done 等整轮结束。
+   */
+  async beginSend(text: string, conversationId: string | null): Promise<DeckConversation> {
+    const conversation = await this.#appendUserTurn(text, conversationId);
+    const run = this.#process(conversation).catch(() => undefined);
+    this.#processRuns.add(run);
+    void run.finally(() => this.#processRuns.delete(run));
+    return conversation;
+  }
+
+  /** beginSend 的阻塞版：等主控决策与执行全部落地（服务层测试用）。 */
   async send(text: string, conversationId: string | null): Promise<DeckConversation> {
+    const conversation = await this.#appendUserTurn(text, conversationId);
+    await this.#process(conversation);
+    return (await this.store.getConversation(conversation.id)) ?? conversation;
+  }
+
+  /** 落用户轮（含落盘与变更通知），返回会话。 */
+  async #appendUserTurn(text: string, conversationId: string | null): Promise<DeckConversation> {
     const trimmed = text.trim();
     if (trimmed === "") throw new Error("消息不能为空");
     if (this.#stopped) throw new Error("指挥台已停止");
@@ -152,11 +184,36 @@ export class DeckService {
       if (conversation.taskId === undefined && existing === null) {
         conversation.title = deriveTitle(trimmed);
       }
-      return Promise.resolve();
+      return this.#persist(conversation);
     });
-    const decision = await this.#decide(conversation);
-    await this.#applyDecision(conversation, decision);
     return conversation;
+  }
+
+  /** 跑主控决策并执行；失败写进会话（event 轮），不静默吞掉。 */
+  async #process(conversation: DeckConversation): Promise<void> {
+    const id = conversation.id;
+    try {
+      const decision = await this.#decide(conversation);
+      await this.#applyDecision(id, decision);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.#withConv(id, async () => {
+        const fresh = await this.store.getConversation(id);
+        if (fresh === null) return;
+        this.#appendTurn(fresh, "event", `【主控 · 失败】${message}`);
+        await this.#persist(fresh);
+      });
+    }
+  }
+
+  /** 250ms 节流的回答增量（SSE）。最终轮落盘时整段刷新会覆盖它。 */
+  #emitDelta(conversationId: string, text: string): void {
+    const emit = this.#options.emitDeckDelta;
+    if (!emit) return;
+    const now = this.#options.clock?.nowMs() ?? Date.now();
+    if (now - (this.#deltaEmitAt.get(conversationId) ?? 0) < 250) return;
+    this.#deltaEmitAt.set(conversationId, now);
+    emit(conversationId, text);
   }
 
   #newConversation(): DeckConversation {
@@ -186,17 +243,27 @@ export class DeckService {
       history: conversation.turns,
       message: conversation.turns[conversation.turns.length - 1]?.text ?? "",
     });
-    return runMasterDecision({ backend, system, user });
+    return runMasterDecision({
+      backend,
+      system,
+      user,
+      ...(this.#options.emitDeckDelta === undefined
+        ? {}
+        : { onDisplay: (text: string) => this.#emitDelta(conversation.id, text) }),
+    });
   }
 
-  async #applyDecision(
-    conversation: DeckConversation,
-    decision: DeckDecision,
-  ): Promise<void> {
+  /**
+   * 执行决策。每条分支都在会话锁内重读 store 再追加——决策期间用户可能
+   * 又发了消息，直接用旧对象落盘会把那些轮次覆盖掉。
+   */
+  async #applyDecision(conversationId: string, decision: DeckDecision): Promise<void> {
     if (decision.kind === "answer") {
-      await this.#withConv(conversation.id, () => {
+      await this.#withConv(conversationId, async () => {
+        const conversation = await this.store.getConversation(conversationId);
+        if (conversation === null) return;
         this.#appendTurn(conversation, "assistant", decision.text);
-        return this.#persist(conversation);
+        await this.#persist(conversation);
       });
       return;
     }
@@ -207,13 +274,15 @@ export class DeckService {
         executor: decision.executor,
         schedule: decision.schedule,
       });
-      await this.#withConv(conversation.id, () => {
+      await this.#withConv(conversationId, async () => {
+        const conversation = await this.store.getConversation(conversationId);
+        if (conversation === null) return;
         this.#appendTurn(
           conversation,
           "event",
           `已登记周期任务「${task.title}」（${describeSchedule(task.schedule)}，执行者 ${describeExecutor(task.executor)}）`,
         );
-        return this.#persist(conversation);
+        await this.#persist(conversation);
       });
       return;
     }
@@ -221,21 +290,23 @@ export class DeckService {
     const jobId = ulid();
     const view: DeckJobView = {
       id: jobId,
-      conversationId: conversation.id,
+      conversationId,
       title: decision.title,
       executor: decision.executor,
       status: "running",
       startedAt: this.#iso(),
     };
-    await this.#withConv(conversation.id, () => {
+    await this.#withConv(conversationId, async () => {
+      const conversation = await this.store.getConversation(conversationId);
+      if (conversation === null) return;
       this.#appendTurn(
         conversation,
         "event",
         `已派活「${decision.title}」→ ${describeExecutor(decision.executor)}（运行中）`,
       );
-      return this.#persist(conversation);
+      await this.#persist(conversation);
     });
-    const promise = this.#executeJob(conversation.id, jobId, decision.title, decision.executor, decision.prompt);
+    const promise = this.#executeJob(conversationId, jobId, decision.title, decision.executor, decision.prompt);
     this.#jobs.set(jobId, { view, promise: promise.catch(() => undefined) });
   }
 
@@ -716,17 +787,31 @@ export class DeckService {
     conversation.updatedAt = now;
   }
 
-  /** 保存会话 + 上传会话原文 + 发变更通知。上传失败不阻塞本地保存。 */
+  /**
+   * 保存会话 + 发变更通知（立刻，界面马上刷新），会话原文上传排进该会话的
+   * 后台链：Drive 慢不拖住发送，同一会话的上传顺序仍有保证。
+   */
   async #persist(conversation: DeckConversation): Promise<void> {
     await this.store.saveConversation(conversation);
-    if (this.#options.driveAvailable()) {
-      try {
-        await uploadDeckSession(this.#options.upload, conversation, this.#options.displayName);
-      } catch {
-        // Drive 不在或上传失败：本地照常，稍后的对话更新会再试。
-      }
-    }
     this.#options.emitChange();
+    const id = conversation.id;
+    const previous = this.#uploads.get(id) ?? Promise.resolve();
+    const run = previous
+      .then(() =>
+        this.#options.driveAvailable()
+          ? uploadDeckSession(this.#options.upload, conversation, this.#options.displayName)
+          : undefined,
+      )
+      .catch(() => {
+        // Drive 不在或上传失败：本地照常，稍后的对话更新会再试。
+      });
+    this.#uploads.set(
+      id,
+      run.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
   }
 
   async #withConv<T>(id: string, fn: () => Promise<T>): Promise<T> {

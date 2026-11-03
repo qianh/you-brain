@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import { parseDecision } from "../../src/deck/decision.js";
+import { createDecisionDisplay } from "../../src/deck/master.js";
 
 describe("deck decision", () => {
   it("parses an answer decision", () => {
@@ -31,5 +32,49 @@ describe("deck decision", () => {
     expect(parseDecision("这不是 JSON")).toBeNull();
     expect(parseDecision("")).toBeNull();
     expect(parseDecision('{"kind":"nonsense"}')).toBeNull();
+  });
+});
+
+describe("decision display stream", () => {
+  function feed(chunks: string[]): { shown: string[]; final: string } {
+    const display = createDecisionDisplay();
+    const shown: string[] = [];
+    let text = "";
+    for (const chunk of chunks) {
+      text += chunk;
+      const delta = display.push(text);
+      if (delta !== "") {
+        shown.push(delta);
+      }
+    }
+    return { shown, final: display.text() };
+  }
+
+  it("extracts the answer text incrementally across arbitrary chunk boundaries", () => {
+    const full = '{"kind":"answer","text":"费曼学习法是用「讲给别人听」来检验理解。"}';
+    // 按 3 字符一块喂入，模拟逐字流。
+    const chunks: string[] = [];
+    for (let i = 0; i < full.length; i += 3) chunks.push(full.slice(i, i + 3));
+    const { shown, final } = feed(chunks);
+    expect(shown.join("")).toBe("费曼学习法是用「讲给别人听」来检验理解。");
+    expect(final).toBe("费曼学习法是用「讲给别人听」来检验理解。");
+  });
+
+  it("decodes escapes inside the text field", () => {
+    const { final } = feed(['{"kind":"answer","text":"第一行\\n第二行 \\"引话\\""}']);
+    expect(final).toBe('第一行\n第二行 "引话"');
+  });
+
+  it("shows nothing for decisions without a text field", () => {
+    const { final } = feed([
+      '{"kind":"dispatch","title":"写诗","executor":{"kind":"cli-agent","id":"grok-cli"},"prompt":"写一首诗"}',
+    ]);
+    expect(final).toBe("");
+  });
+
+  it("passes prose through as-is (parseDecision fallback case)", () => {
+    const { shown, final } = feed(["这是", "一个直接", "回答。"]);
+    expect(shown.join("")).toBe("这是一个直接回答。");
+    expect(final).toBe("这是一个直接回答。");
   });
 });

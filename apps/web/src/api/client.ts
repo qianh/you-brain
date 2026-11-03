@@ -54,6 +54,7 @@ import type {
   DeckConversationSendResponse,
   DeckDeletedResponse,
   DeckExecutorsResponse,
+  DeckJobsResponse,
   DeckSendBody,
   DeckTaskBody,
   DeckTaskResponse,
@@ -128,8 +129,10 @@ export interface BrowserDaemon extends Omit<DaemonClient, "reminderAction" | "co
   /** 指挥台。 */
   deckConversations(): Promise<DeckConversationsResponse>;
   deckConversation(id: string): Promise<DeckConversationResponse>;
+  deckDeleteConversation(id: string): Promise<DeckDeletedResponse>;
   deckSend(body: DeckSendBody): Promise<DeckConversationSendResponse>;
   deckExecutors(): Promise<DeckExecutorsResponse>;
+  deckJobs(): Promise<DeckJobsResponse>;
   deckTasks(): Promise<DeckTasksResponse>;
   deckSaveTask(body: DeckTaskBody): Promise<DeckTaskResponse>;
   deckDeleteTask(id: string): Promise<DeckDeletedResponse>;
@@ -259,9 +262,12 @@ export function createBrowserDaemon(options?: {
     deckConversations: () => request<DeckConversationsResponse>("GET", "/api/deck/conversations"),
     deckConversation: (id: string) =>
       request<DeckConversationResponse>("GET", `/api/deck/conversation?id=${encodeURIComponent(id)}`),
+    deckDeleteConversation: (id: string) =>
+      request<DeckDeletedResponse>("POST", "/api/deck/conversation-delete", { id }),
     deckSend: (body: DeckSendBody) =>
       request<DeckConversationSendResponse>("POST", "/api/deck/send", body),
     deckExecutors: () => request<DeckExecutorsResponse>("GET", "/api/deck/executors"),
+    deckJobs: () => request<DeckJobsResponse>("GET", "/api/deck/jobs"),
     deckTasks: () => request<DeckTasksResponse>("GET", "/api/deck/tasks"),
     deckSaveTask: (body: DeckTaskBody) => request<DeckTaskResponse>("POST", "/api/deck/task", body),
     deckDeleteTask: (id: string) =>

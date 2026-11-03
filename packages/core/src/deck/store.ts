@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import { writeFileAtomic } from "../domain/atomic.js";
@@ -57,6 +57,15 @@ export class DeckStore {
     await writeFileAtomic(this.#conversationPath(conversation.id), JSON.stringify(conversation, null, 2), {
       mode: 0o600,
     });
+  }
+
+  async deleteConversation(id: string): Promise<boolean> {
+    try {
+      await rm(this.#conversationPath(id), { force: false });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   #conversationPath(id: string): string {

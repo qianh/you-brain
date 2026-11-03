@@ -258,11 +258,19 @@ export async function handleApi(
   if (path === "/api/deck/conversation") {
     return method(request, "GET", () => deckConversation(url, context));
   }
+
+  if (path === "/api/deck/conversation-delete") {
+    return method(request, "POST", () => deckDeleteConversation(request, context));
+  }
   if (path === "/api/deck/send") {
     return method(request, "POST", () => deckSend(request, context));
   }
   if (path === "/api/deck/executors") {
     return method(request, "GET", () => deckExecutors(context));
+  }
+
+  if (path === "/api/deck/jobs") {
+    return method(request, "GET", () => deckJobs(context));
   }
   if (path === "/api/deck/tasks") {
     return method(request, "GET", () => deckTasks(context));
@@ -644,6 +652,11 @@ async function deckConversation(url: URL, context: ApiContext): Promise<Response
   return json(await deck(context).getConversation(id));
 }
 
+async function deckDeleteConversation(request: Request, context: ApiContext): Promise<Response> {
+  const body = DeckTaskDeleteBodySchema.parse(await readJson(request));
+  return json(await deck(context).deleteConversation(body.id));
+}
+
 async function deckSend(request: Request, context: ApiContext): Promise<Response> {
   const body = DeckSendBodySchema.parse(await readJson(request));
   return json(await deck(context).send(body));
@@ -651,6 +664,10 @@ async function deckSend(request: Request, context: ApiContext): Promise<Response
 
 async function deckExecutors(context: ApiContext): Promise<Response> {
   return json(await deck(context).executors());
+}
+
+async function deckJobs(context: ApiContext): Promise<Response> {
+  return json(await deck(context).listJobs());
 }
 
 async function deckTasks(context: ApiContext): Promise<Response> {

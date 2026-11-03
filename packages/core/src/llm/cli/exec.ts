@@ -27,6 +27,8 @@ export interface CliRunOptions {
   noOutputTimeoutMessage?: string;
   /** Removed from the child environment after `env` is applied. */
   unset?: readonly string[];
+  /** 流式运行：每段 stdout 原样回调（缓冲上限照常生效）。 */
+  onStdout?: (chunk: string) => void;
 }
 
 let tail: Promise<void> = Promise.resolve();
@@ -148,6 +150,7 @@ export function runCliProcess(options: CliRunOptions): Promise<CliRunResult> {
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       stdout = appendCapped(stdout, chunk, STDOUT_CAP);
+      options.onStdout?.(chunk);
     });
     child.stderr?.on("data", (chunk: string) => {
       stderr = appendCapped(stderr, chunk, STDERR_CAP);

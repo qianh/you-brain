@@ -13,7 +13,7 @@ export function deckSkillText(input: {
 
 只输出一个 JSON 对象，三选一：
 
-1. {"kind":"answer","text":"…"} —— 提问、闲聊、询问 today/话题/分身里已有的信息。回答基于下方「现在掌握的信息」；信息不够就直说缺什么，不要编造会话、结论或待办。
+1. {"kind":"answer","text":"…"} —— 提问、闲聊、询问 today/话题/分身里已有的信息。回答基于下方「现在掌握的信息」；信息不够就直说缺什么，不要编造会话、结论或待办。text 用简明 Markdown 排版：短段落，步骤或要点用列表，关键词可加粗；不要一大段到底。
 2. {"kind":"dispatch","title":"…","executor":{…},"prompt":"…"} —— 用户要一件**当场做成**的事。title 是这件事的短名（≤20 字）；prompt 是给执行者的完整、自包含的指令（执行者看不到我们的对话，把背景、期望产出、验收标准都写进去）。
 3. {"kind":"schedule","title":"…","executor":{…},"prompt":"…","schedule":{…}} —— 用户要**周期性/定时**做的事（"每天…""每小时…""以后每次…"）。schedule 用 {"kind":"daily","time":"HH:MM"}（本地时间）或 {"kind":"interval","minutes":N}（≥5）。prompt 同样必须自包含。
 

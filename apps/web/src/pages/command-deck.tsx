@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { CompositionEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import type {
   DeckConfig,
   DeckConversation,
   DeckExecutorView,
+  DeckJobView,
   DeckTask,
   DeckTurn,
 } from "@you-brain/core/deck/index.js";
@@ -17,32 +19,61 @@ import { useToast } from "../components/toast.js";
 import { Select } from "../components/select.js";
 import { MarkdownView } from "../components/ui.js";
 import { useDaemon } from "../daemon-context.js";
+import { subscribeDeckDelta } from "../lib/deck-stream.js";
 
 type Phase = "loading" | "ready" | "error";
 
 interface DeckState {
   conversations: DeckConversation[];
+  jobs: DeckJobView[];
   tasks: DeckTask[];
   executors: DeckExecutorView[];
+}
+
+/** 等主控产出的那条消息：只在它自己的会话里显示思考态。 */
+interface Awaiting {
+  conversationId: string;
+  since: number;
+  /** 发出时会话的轮数；服务端轮数超过它即说明主控产出已落地。 */
+  knownTurns: number;
+}
+
+/** 主控回答的流式增量（谁的就显示在谁的会话里）。 */
+interface StreamState {
+  conversationId: string;
+  text: string;
 }
 
 export function CommandDeckPage() {
   const { client, t, detailRevision } = useDaemon();
   const toast = useToast();
   const [phase, setPhase] = useState<Phase>("loading");
-  const [state, setState] = useState<DeckState>({ conversations: [], tasks: [], executors: [] });
+  const [state, setState] = useState<DeckState>({
+    conversations: [],
+    jobs: [],
+    tasks: [],
+    executors: [],
+  });
   const [activeId, setActiveId] = useState<string | null>(null);
   const [active, setActive] = useState<DeckConversation | null>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const [awaiting, setAwaiting] = useState<Awaiting | null>(null);
+  const [stream, setStream] = useState<StreamState | null>(null);
   const [deletingTask, setDeletingTask] = useState<DeckTask | null>(null);
+  const [deletingConversation, setDeletingConversation] = useState<DeckConversation | null>(null);
   const [masterConfig, setMasterConfig] = useState<DeckConfig>({});
   const [masterModelDraft, setMasterModelDraft] = useState("");
   const [error, setError] = useState("");
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const activeIdRef = useRef<string | null>(null);
   const revisionRef = useRef(0);
+  /** 只有用户本来就贴在底部时才自动跟随；往上翻了就不拽。 */
+  const stickToBottomRef = useRef(true);
+  const composerIme = useImeGuard();
+  const modelIme = useImeGuard();
 
   const describeError = useCallback(
     (caught: unknown): string => {
@@ -54,16 +85,18 @@ export function CommandDeckPage() {
 
   const loadAll = useCallback(async () => {
     try {
-      const [conversations, tasks, executors, config] = await Promise.all([
+      const [conversations, tasks, executors, jobs, config] = await Promise.all([
         client.deckConversations(),
         client.deckTasks(),
         client.deckExecutors(),
+        client.deckJobs(),
         client.deckConfig(),
       ]);
       setState({
         conversations: conversations.conversations,
         tasks: tasks.tasks,
         executors: executors.executors,
+        jobs: jobs.jobs,
       });
       setMasterConfig(config.config);
       setMasterModelDraft(config.config.masterModel ?? "");
@@ -80,6 +113,32 @@ export function CommandDeckPage() {
       try {
         const response = await client.deckConversation(id);
         setActive(response.conversation);
+        // 主控产出（assistant/event 轮）已落地 → 撤掉这会话的思考态与流式缓冲。
+        const conversation = response.conversation;
+        setAwaiting((current) => {
+          if (
+            current !== null &&
+            current.conversationId === id &&
+            conversation !== null &&
+            conversation.turns.length > current.knownTurns
+          ) {
+            return null;
+          }
+          return current;
+        });
+        setStream((current) => {
+          if (
+            current !== null &&
+            current.conversationId === id &&
+            conversation !== null &&
+            conversation.turns.length > 0
+          ) {
+            const roles = conversation.turns.map((turn) => turn.role);
+            const lastRole = roles[roles.length - 1];
+            if (lastRole === "assistant" || lastRole === "event") return null;
+          }
+          return current;
+        });
       } catch (caught) {
         setError(describeError(caught));
       }
@@ -105,7 +164,7 @@ export function CommandDeckPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // daemon 发 deck 变更（对话更新、任务跑完）→ 刷新列表与当前会话。
+  // daemon 发 deck 变更（用户轮落盘、主控产出、任务跑完）→ 刷新列表、执行面板与当前会话。
   useEffect(() => {
     if (detailRevision === revisionRef.current) return;
     revisionRef.current = detailRevision;
@@ -116,6 +175,7 @@ export function CommandDeckPage() {
   useEffect(() => {
     if (activeId !== null) {
       activeIdRef.current = activeId;
+      stickToBottomRef.current = true;
       void loadConversation(activeId);
     } else {
       activeIdRef.current = null;
@@ -123,11 +183,45 @@ export function CommandDeckPage() {
     }
   }, [activeId, loadConversation]);
 
+  const busy = awaiting !== null || state.jobs.some((job) => job.status === "running");
   useEffect(() => {
-    const node = scrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
-  }, [active?.turns.length, active?.updatedAt]);
+    if (!busy) return;
+    const timer = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [busy]);
 
+  // 主控回答逐字上屏（SSE delta）。250ms 一条，只有流式主控（grok/claude/opencode）会发。
+  useEffect(() => subscribeDeckDelta((conversationId, text) => setStream({ conversationId, text })), []);
+
+  const showThinking =
+    awaiting !== null && active !== null && active.id === awaiting.conversationId;
+  const streaming =
+    stream !== null &&
+    active !== null &&
+    stream.conversationId === active.id &&
+    stream.text.trim() !== "";
+
+  const resizeComposer = useCallback(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+  }, []);
+
+  useEffect(() => {
+    resizeComposer();
+  }, [draft, resizeComposer]);
+
+  const followScroll = useCallback(() => {
+    const node = scrollRef.current;
+    if (node && stickToBottomRef.current) node.scrollTop = node.scrollHeight;
+  }, []);
+
+  useEffect(() => {
+    followScroll();
+  }, [active?.turns.length, active?.updatedAt, showThinking, streaming, stream?.text, followScroll]);
+
+  // 发送即返回：用户轮已落盘并上屏，主控在后台跑，产出经 SSE 推送。
   const send = useCallback(async () => {
     const text = draft.trim();
     if (text === "" || sending) return;
@@ -141,8 +235,12 @@ export function CommandDeckPage() {
       setActive(conversation);
       setActiveId(conversation.id);
       activeIdRef.current = conversation.id;
+      setAwaiting({ conversationId: conversation.id, since: Date.now(), knownTurns: conversation.turns.length });
+      setStream(null);
       setDraft("");
+      stickToBottomRef.current = true;
       await loadAll();
+      inputRef.current?.focus();
     } catch (caught) {
       toast.push({ message: describeError(caught), tone: "danger" });
     } finally {
@@ -169,11 +267,31 @@ export function CommandDeckPage() {
     inputRef.current?.focus();
   }, []);
 
+  const runTask = useCallback(
+    (task: DeckTask) => {
+      void (async () => {
+        try {
+          await client.deckRunTask(task.id);
+          toast.push({ message: t("commandDeckRunning"), tone: "info" });
+          setActiveId(`task-${task.id}`);
+        } catch (caught) {
+          toast.push({ message: describeError(caught), tone: "danger" });
+        }
+      })();
+    },
+    [client, describeError, t, toast],
+  );
+
   const executorSummary = useMemo(() => {
     if (state.executors.length === 0) return "";
     const available = state.executors.filter((executor) => executor.available).length;
     return `${available}/${state.executors.length}`;
   }, [state.executors]);
+
+  const jobs = useMemo(() => {
+    const rank = (job: DeckJobView): number => (job.status === "running" ? 0 : job.status === "error" ? 1 : 2);
+    return [...state.jobs].sort((a, b) => rank(a) - rank(b) || Date.parse(b.startedAt) - Date.parse(a.startedAt));
+  }, [state.jobs]);
 
   if (phase === "loading") {
     return (
@@ -209,14 +327,183 @@ export function CommandDeckPage() {
               <ul className="deck-thread-list">
                 {state.conversations.map((conversation) => (
                   <li key={conversation.id}>
-                    <button
-                      type="button"
+                    <div
                       className={`deck-thread${conversation.id === activeId ? " is-active" : ""}`}
+                      role="button"
+                      tabIndex={0}
                       onClick={() => setActiveId(conversation.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          setActiveId(conversation.id);
+                        }
+                      }}
                     >
                       <span className="deck-thread-title">{conversation.title}</span>
                       <span className="deck-thread-time">
                         {new Date(conversation.updatedAt).toLocaleString()}
+                      </span>
+                      <button
+                        type="button"
+                        className="deck-thread-delete"
+                        title={t("commandDeckThreadDelete")}
+                        aria-label={t("commandDeckThreadDelete")}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setDeletingConversation(conversation);
+                        }}
+                      >
+                        <Icon name="trash" />
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </DeckSection>
+        </aside>
+        <section className="deck-main">
+          {active === null ? (
+            <div className="deck-intro">
+              <EmptyState icon="command" title={t("commandDeckTitle")} description={t("commandDeckSubtitle")} />
+            </div>
+          ) : (
+            <>
+              <header className="deck-main-head">
+                <h2>{active.title}</h2>
+                {active.taskId !== undefined ? <span className="pill">{t("commandDeckTasks")}</span> : null}
+              </header>
+              <div
+                className="deck-scroll"
+                ref={scrollRef}
+                onScroll={() => {
+                  const node = scrollRef.current;
+                  if (!node) return;
+                  stickToBottomRef.current =
+                    node.scrollHeight - node.scrollTop - node.clientHeight < 80;
+                }}
+              >
+                {active.turns.map((turn) => (
+                  <DeckTurnView key={turn.id} turn={turn} />
+                ))}
+                {streaming && stream !== null ? (
+                  <div className="deck-turn deck-turn-assistant deck-turn-streaming">
+                    <MarkdownView source={stream.text} />
+                  </div>
+                ) : null}
+                {showThinking && !streaming ? (
+                  <div className="deck-turn deck-turn-assistant">
+                    <span className="deck-thinking">
+                      <Spinner /> {t("commandDeckThinking")}
+                      <span className="deck-thinking-elapsed">
+                        {Math.max(0, Math.round((nowMs - awaiting.since) / 1000))}s
+                      </span>
+                    </span>
+                  </div>
+                ) : null}
+              </div>
+            </>
+          )}
+          <footer className="deck-composer">
+            <div className="deck-composer-box">
+              <textarea
+                ref={inputRef}
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onCompositionStart={composerIme.onCompositionStart}
+                onCompositionEnd={composerIme.onCompositionEnd}
+                onKeyDown={(event) => {
+                  if (composerIme.isComposing(event)) return;
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    void send();
+                  }
+                }}
+                placeholder={t("commandDeckInputPlaceholder")}
+                rows={2}
+              />
+              <div className="deck-composer-bar">
+                <input
+                  className="deck-master-model"
+                  value={masterModelDraft}
+                  placeholder={t("commandDeckMasterModel")}
+                  title={t("commandDeckMasterModel")}
+                  aria-label={t("commandDeckMasterModel")}
+                  onChange={(event) => setMasterModelDraft(event.target.value)}
+                  onBlur={() => {
+                    if (masterModelDraft.trim() === (masterConfig.masterModel ?? "")) return;
+                    void saveMaster({ masterModel: masterModelDraft });
+                  }}
+                  onCompositionStart={modelIme.onCompositionStart}
+                  onCompositionEnd={modelIme.onCompositionEnd}
+                  onKeyDown={(event) => {
+                    if (modelIme.isComposing(event)) return;
+                    if (event.key === "Enter") event.currentTarget.blur();
+                  }}
+                />
+                <Select
+                  label={t("commandDeckMaster")}
+                  value={masterConfig.masterProvider ?? ""}
+                  onChange={(value) => {
+                    void saveMaster({ masterProvider: value });
+                  }}
+                  options={[
+                    { value: "", label: t("commandDeckMasterAuto") },
+                    ...state.executors
+                      .filter((executor) => executor.kind === "cli-agent")
+                      .map((executor) => ({
+                        value: executor.id,
+                        label: `${executor.id}${executor.available ? "" : "（未就绪）"}`,
+                      })),
+                  ]}
+                />
+                <button
+                  type="button"
+                  className="btn primary"
+                  onClick={() => void send()}
+                  disabled={sending || draft.trim() === ""}
+                >
+                  {t("commandDeckSend")}
+                </button>
+              </div>
+            </div>
+          </footer>
+        </section>
+        <aside className="deck-rail">
+          <DeckSection title={`${t("commandDeckJobs")}（${jobs.filter((job) => job.status === "running").length}）`}>
+            {jobs.length === 0 ? (
+              <p className="deck-side-empty">{t("commandDeckJobsEmpty")}</p>
+            ) : (
+              <ul className="deck-job-list">
+                {jobs.slice(0, 10).map((job) => (
+                  <li key={job.id}>
+                    <button
+                      type="button"
+                      className={`deck-job deck-job-${job.status}`}
+                      onClick={() => setActiveId(job.conversationId)}
+                      title={
+                        job.status === "error" && job.error !== undefined
+                          ? `${job.title}：${job.error}`
+                          : `${job.title} · ${job.executor.kind}:${job.executor.id}`
+                      }
+                    >
+                      <span className="deck-job-icon">
+                        {job.status === "running" ? (
+                          <Spinner />
+                        ) : (
+                          <Icon name={job.status === "error" ? "alert" : "check"} />
+                        )}
+                      </span>
+                      <span className="deck-job-body">
+                        <span className="deck-job-title">{job.title}</span>
+                        <span className="deck-job-meta">
+                          {job.executor.id}
+                          {job.status === "running"
+                            ? ` · ${Math.max(0, Math.round((nowMs - Date.parse(job.startedAt)) / 1000))}s`
+                            : job.status === "error"
+                              ? ` · ${t("commandDeckFailed")}`
+                              : ""}
+                        </span>
                       </span>
                     </button>
                   </li>
@@ -248,17 +535,7 @@ export function CommandDeckPage() {
                         type="button"
                         className="btn small"
                         title={t("commandDeckTaskRun")}
-                        onClick={() => {
-                          void (async () => {
-                            try {
-                              await client.deckRunTask(task.id);
-                              toast.push({ message: t("commandDeckRunning"), tone: "info" });
-                              setActiveId(`task-${task.id}`);
-                            } catch (caught) {
-                              toast.push({ message: describeError(caught), tone: "danger" });
-                            }
-                          })();
-                        }}
+                        onClick={() => runTask(task)}
                       >
                         <Icon name="corner-down-left" />
                       </button>
@@ -293,92 +570,39 @@ export function CommandDeckPage() {
             </ul>
           </DeckSection>
         </aside>
-        <section className="deck-main">
-          {active === null ? (
-            <div className="deck-intro">
-              <EmptyState icon="command" title={t("commandDeckTitle")} description={t("commandDeckSubtitle")} />
-            </div>
-          ) : (
-            <>
-              <header className="deck-main-head">
-                <h2>{active.title}</h2>
-                {active.taskId !== undefined ? <span className="pill">{t("commandDeckTasks")}</span> : null}
-              </header>
-              <div className="deck-scroll" ref={scrollRef}>
-                {active.turns.map((turn) => (
-                  <DeckTurnView key={turn.id} turn={turn} />
-                ))}
-                {sending ? (
-                  <div className="deck-turn deck-turn-assistant">
-                    <span className="deck-thinking">
-                      <Spinner /> {t("commandDeckThinking")}
-                    </span>
-                  </div>
-                ) : null}
-              </div>
-            </>
-          )}
-          <footer className="deck-composer">
-            <div className="deck-composer-box">
-              <textarea
-                ref={inputRef}
-                value={draft}
-                onChange={(event) => setDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void send();
-                  }
-                }}
-                placeholder={t("commandDeckInputPlaceholder")}
-                rows={2}
-                disabled={sending}
-              />
-              <div className="deck-composer-bar">
-                <input
-                  className="deck-master-model"
-                  value={masterModelDraft}
-                  placeholder={t("commandDeckMasterModel")}
-                  title={t("commandDeckMasterModel")}
-                  aria-label={t("commandDeckMasterModel")}
-                  onChange={(event) => setMasterModelDraft(event.target.value)}
-                  onBlur={() => {
-                    if (masterModelDraft.trim() === (masterConfig.masterModel ?? "")) return;
-                    void saveMaster({ masterModel: masterModelDraft });
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") event.currentTarget.blur();
-                  }}
-                />
-                <Select
-                  label={t("commandDeckMaster")}
-                  value={masterConfig.masterProvider ?? ""}
-                  onChange={(value) => {
-                    void saveMaster({ masterProvider: value });
-                  }}
-                  options={[
-                    { value: "", label: t("commandDeckMasterAuto") },
-                    ...state.executors
-                      .filter((executor) => executor.kind === "cli-agent")
-                      .map((executor) => ({
-                        value: executor.id,
-                        label: `${executor.id}${executor.available ? "" : "（未就绪）"}`,
-                      })),
-                  ]}
-                />
-                <button
-                  type="button"
-                  className="btn primary"
-                  onClick={() => void send()}
-                  disabled={sending || draft.trim() === ""}
-                >
-                  {t("commandDeckSend")}
-                </button>
-              </div>
-            </div>
-          </footer>
-        </section>
       </div>
+      <ConfirmDialog
+        open={deletingConversation !== null}
+        title={t("commandDeckThreadDelete")}
+        description={
+          deletingConversation === null
+            ? ""
+            : t("commandDeckThreadDeleteConfirm").replace("{title}", deletingConversation.title)
+        }
+        tone="danger"
+        confirmLabel={t("commandDeckThreadDelete")}
+        cancelLabel={t("cancel")}
+        onConfirm={() => {
+          void (async () => {
+            const conversation = deletingConversation;
+            if (conversation === null) return;
+            try {
+              await client.deckDeleteConversation(conversation.id);
+              setDeletingConversation(null);
+              if (activeIdRef.current === conversation.id) {
+                setActiveId(null);
+                setActive(null);
+                setAwaiting(null);
+                setStream(null);
+              }
+              await loadAll();
+            } catch (caught) {
+              toast.push({ message: describeError(caught), tone: "danger" });
+            }
+          })();
+        }}
+        onClose={() => setDeletingConversation(null)}
+      />
       <ConfirmDialog
         open={deletingTask !== null}
         title={t("commandDeckTaskDelete")}
@@ -416,6 +640,30 @@ function DeckSection({ title, children }: { title: string; children: ReactNode }
       {children}
     </section>
   );
+}
+
+/**
+ * CJK 输入法安全：组词期间的 Enter 是确认候选词，不是发送。
+ * WKWebView(Safari) 还会在 compositionend 之后才补发那条确认用的
+ * Enter keydown（isComposing 已变 false），所以再认 50ms 内的「刚结束」。
+ */
+function useImeGuard() {
+  const state = useRef({ active: false, endedAt: -Infinity });
+  const onCompositionStart = useCallback(() => {
+    state.current.active = true;
+  }, []);
+  const onCompositionEnd = useCallback((event: CompositionEvent) => {
+    state.current.active = false;
+    state.current.endedAt = event.timeStamp;
+  }, []);
+  const isComposing = useCallback((event: ReactKeyboardEvent): boolean => {
+    return (
+      event.nativeEvent.isComposing ||
+      state.current.active ||
+      event.timeStamp - state.current.endedAt < 50
+    );
+  }, []);
+  return { onCompositionStart, onCompositionEnd, isComposing };
 }
 
 function DeckTurnView({ turn }: { turn: DeckTurn }) {

@@ -3217,6 +3217,10 @@ export class YouBrainDaemon {
       getApiKey: (provider) =>
         getLlmApiKey(provider, { platform: this.#platform, backend: this.#secretBackend }),
       emitChange: () => this.changes.publish("deck", this.#clock.now().toISOString()),
+      emitDeckDelta: (conversationId, text) =>
+        this.changes.publish("deck", this.#clock.now().toISOString(), {
+          deckDelta: { conversationId, text },
+        }),
       clock: { now: () => this.#clock.now(), nowMs: () => this.#clock.nowMs() },
     };
   }
@@ -3227,8 +3231,10 @@ export class YouBrainDaemon {
     return {
       listConversations: async () => ({ conversations: await deck.listConversations() }),
       getConversation: async (id) => ({ conversation: await deck.getConversation(id) }),
-      send: async (body) => ({ conversation: await deck.send(body.text, body.conversationId ?? null) }),
+      deleteConversation: async (id) => ({ deleted: await deck.deleteConversation(id) }),
+      send: async (body) => ({ conversation: await deck.beginSend(body.text, body.conversationId ?? null) }),
       executors: async () => ({ executors: await deck.executors() }),
+      listJobs: async () => ({ jobs: await deck.listJobs() }),
       listTasks: async () => ({ tasks: await deck.listTasks() }),
       saveTask: async (body) => {
         if (body.id !== undefined) {

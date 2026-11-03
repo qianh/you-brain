@@ -30,6 +30,13 @@ export interface CliBuilt {
   stdin?: string;
 }
 
+/** 流式运行支持：参数换成流式输出格式，并从 JSONL 事件里增量提取模型文本。 */
+export interface CliStreamSupport {
+  args(ctx: CliBuildContext): CliBuilt;
+  /** 返回一个有状态的提取器：每个 stdout chunk 进，模型文本增量出。 */
+  extractor(): (chunk: string) => string;
+}
+
 export interface CliDriver {
   provider: CliProvider;
   command: string;
@@ -41,6 +48,36 @@ export interface CliDriver {
   skillsDir: boolean;
   build(ctx: CliBuildContext): CliBuilt;
   parse(result: CliRunResult, ctx: CliBuildContext): Promise<string>;
+  stream?: CliStreamSupport;
+}
+
+/**
+ * JSONL 事件流提取器：按行缓冲（一行可能拆在多个 chunk 里），完整行交给
+ * pick 挑出模型文本。坏行（半行尾巴之外的垃圾）忽略。
+ */
+function jsonlExtractor(pick: (record: Record<string, unknown>) => string): (chunk: string) => string {
+  let buffer = "";
+  return (chunk) => {
+    buffer += chunk;
+    let out = "";
+    for (;;) {
+      const nl = buffer.indexOf("\n");
+      if (nl < 0) break;
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (line === "") continue;
+      let record: unknown;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (record && typeof record === "object" && !Array.isArray(record)) {
+        out += pick(record as Record<string, unknown>);
+      }
+    }
+    return out;
+  };
 }
 
 const AUTH_PATTERNS = [
@@ -159,6 +196,42 @@ function structuredOrText(
   return requireOutput(raw, ctx, stderr);
 }
 
+function grokArgs(ctx: CliBuildContext, outputFormat: "json" | "streaming-json"): CliBuilt {
+  return {
+    args: [
+      "--prompt-file",
+      ctx.promptFile ?? "",
+      "--system-prompt-override",
+      ctx.system,
+      "--output-format",
+      outputFormat,
+      "--permission-mode",
+      "dontAsk",
+      ...GROK_DENY_RULES.flatMap((rule) => ["--deny", rule]),
+      "--sandbox",
+      "read-only",
+      "--disallowed-tools",
+      GROK_DISALLOWED_TOOLS,
+      "--no-subagents",
+      "--disable-web-search",
+      // 1 会在写出结果前用完，grok 以 "max turns reached" 退出。
+      "--max-turns",
+      "4",
+      "--no-plan",
+      "--no-memory",
+      "--no-auto-update",
+      "--verbatim",
+      // Without this grok uses the user's global default, which can be xhigh and runs ~3x slower.
+      "--effort",
+      "low",
+      "--cwd",
+      ctx.cwd,
+      ...modelArgs(ctx.model, "-m"),
+      ...(ctx.jsonSchema ? ["--json-schema", JSON.stringify(ctx.jsonSchema)] : []),
+    ],
+  };
+}
+
 const grokDriver: CliDriver = {
   provider: "grok-cli",
   command: "grok",
@@ -169,39 +242,7 @@ const grokDriver: CliDriver = {
   lastMessageFile: false,
   skillsDir: false,
   build(ctx) {
-    return {
-      args: [
-        "--prompt-file",
-        ctx.promptFile ?? "",
-        "--system-prompt-override",
-        ctx.system,
-        "--output-format",
-        "json",
-        "--permission-mode",
-        "dontAsk",
-        ...GROK_DENY_RULES.flatMap((rule) => ["--deny", rule]),
-        "--sandbox",
-        "read-only",
-        "--disallowed-tools",
-        GROK_DISALLOWED_TOOLS,
-        "--no-subagents",
-        "--disable-web-search",
-        // 1 会在写出结果前用完，grok 以 "max turns reached" 退出。
-        "--max-turns",
-        "4",
-        "--no-plan",
-        "--no-memory",
-        "--no-auto-update",
-        "--verbatim",
-        // Without this grok uses the user's global default, which can be xhigh and runs ~3x slower.
-        "--effort",
-        "low",
-        "--cwd",
-        ctx.cwd,
-        ...modelArgs(ctx.model, "-m"),
-        ...(ctx.jsonSchema ? ["--json-schema", JSON.stringify(ctx.jsonSchema)] : []),
-      ],
-    };
+    return grokArgs(ctx, "json");
   },
   parse(result, ctx) {
     return Promise.resolve(
@@ -215,7 +256,45 @@ const grokDriver: CliDriver = {
       ),
     );
   },
+  stream: {
+    args(ctx) {
+      return grokArgs(ctx, "streaming-json");
+    },
+    extractor() {
+      // {"type":"text","data":"…"}：模型输出逐段进来（schema 模式下就是决策 JSON 本身）。
+      return jsonlExtractor((record) =>
+        record.type === "text" && typeof record.data === "string" ? record.data : "",
+      );
+    },
+  },
 };
+
+function claudeArgs(ctx: CliBuildContext, streaming: boolean): CliBuilt {
+  return {
+    args: [
+      "-p",
+      "--output-format",
+      streaming ? "stream-json" : "json",
+      ...(streaming ? ["--verbose", "--include-partial-messages"] : []),
+      "--tools",
+      "",
+      "--system-prompt",
+      ctx.system,
+      "--no-session-persistence",
+      "--setting-sources",
+      "",
+      "--permission-mode",
+      "dontAsk",
+      "--permission-prompts",
+      "none",
+      "--strict-mcp-config",
+      "--disable-slash-commands",
+      ...modelArgs(ctx.model, "--model"),
+      ...(ctx.jsonSchema ? ["--json-schema", JSON.stringify(ctx.jsonSchema)] : []),
+    ],
+    stdin: ctx.user,
+  };
+}
 
 const claudeDriver: CliDriver = {
   provider: "claude-cli",
@@ -227,29 +306,7 @@ const claudeDriver: CliDriver = {
   lastMessageFile: false,
   skillsDir: false,
   build(ctx) {
-    return {
-      args: [
-        "-p",
-        "--output-format",
-        "json",
-        "--tools",
-        "",
-        "--system-prompt",
-        ctx.system,
-        "--no-session-persistence",
-        "--setting-sources",
-        "",
-        "--permission-mode",
-        "dontAsk",
-        "--permission-prompts",
-        "none",
-        "--strict-mcp-config",
-        "--disable-slash-commands",
-        ...modelArgs(ctx.model, "--model"),
-        ...(ctx.jsonSchema ? ["--json-schema", JSON.stringify(ctx.jsonSchema)] : []),
-      ],
-      stdin: ctx.user,
-    };
+    return claudeArgs(ctx, false);
   },
   parse(result, ctx) {
     return Promise.resolve(
@@ -262,6 +319,30 @@ const claudeDriver: CliDriver = {
         ["result"],
       ),
     );
+  },
+  stream: {
+    args(ctx) {
+      return claudeArgs(ctx, true);
+    },
+    extractor() {
+      // schema 模式下回答走 StructuredOutput 工具调用的 input_json_delta；
+      // 纯文本回答走 content_block_delta 的 text_delta。一次响应只出现其一。
+      return jsonlExtractor((record) => {
+        if (record.type !== "stream_event") return "";
+        const event = record.event;
+        if (!event || typeof event !== "object" || Array.isArray(event)) return "";
+        const payload = event as { type?: unknown; delta?: unknown };
+        if (payload.type !== "content_block_delta") return "";
+        const delta = payload.delta;
+        if (!delta || typeof delta !== "object" || Array.isArray(delta)) return "";
+        const piece = delta as { type?: unknown; text?: unknown; partial_json?: unknown };
+        if (piece.type === "text_delta" && typeof piece.text === "string") return piece.text;
+        if (piece.type === "input_json_delta" && typeof piece.partial_json === "string") {
+          return piece.partial_json;
+        }
+        return "";
+      });
+    },
   },
 };
 
@@ -353,6 +434,23 @@ const geminiDriver: CliDriver = {
   },
 };
 
+function opencodeArgs(ctx: CliBuildContext): CliBuilt {
+  const message = ctx.system.trim() === "" ? ctx.user : `${ctx.system}\n\n${ctx.user}`;
+  return {
+    args: [
+      "run",
+      "--format",
+      "json",
+      "--agent",
+      "plan",
+      "--standalone",
+      ...modelArgs(ctx.model, "-m"),
+      "--",
+      message,
+    ],
+  };
+}
+
 const opencodeDriver: CliDriver = {
   provider: "opencode-cli",
   command: "opencode",
@@ -362,22 +460,7 @@ const opencodeDriver: CliDriver = {
   schemaFile: false,
   lastMessageFile: false,
   skillsDir: false,
-  build(ctx) {
-    const message = ctx.system.trim() === "" ? ctx.user : `${ctx.system}\n\n${ctx.user}`;
-    return {
-      args: [
-        "run",
-        "--format",
-        "json",
-        "--agent",
-        "plan",
-        "--standalone",
-        ...modelArgs(ctx.model, "-m"),
-        "--",
-        message,
-      ],
-    };
-  },
+  build: opencodeArgs,
   parse(result, ctx) {
     const texts: string[] = [];
     let failure = "";
@@ -418,6 +501,21 @@ const opencodeDriver: CliDriver = {
     }
     if (sawEvent) return Promise.resolve(requireOutput("", ctx, result.stderr));
     return Promise.resolve(requireOutput(result.stdout, ctx, result.stderr));
+  },
+  stream: {
+    args: opencodeArgs,
+    extractor() {
+      // 与 parse 同一事件格式：type:"text" 的 part/text 就是模型输出。
+      return jsonlExtractor((record) => {
+        if (record.type !== "text") return "";
+        const part = record.part;
+        if (typeof part === "string") return part;
+        if (part && typeof part === "object" && !Array.isArray(part)) {
+          return asText((part as Record<string, unknown>).text) ?? "";
+        }
+        return asText(record.text) ?? "";
+      });
+    },
   },
 };
 

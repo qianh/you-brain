@@ -22,6 +22,15 @@ export interface LlmBackend {
   readonly id: string;
   readonly descriptor: LlmBackendDescriptor;
   complete(request: LlmCompleteRequest): Promise<string>;
+  /**
+   * 流式补全：模型每产出一段就回调一次 `onDelta(到目前为止的原始输出)`，
+   * 最终 resolve 与 complete 等价的完整输出。缺省表示该后端不支持流式，
+   * 调用方退回 complete。
+   */
+  completeStream?(
+    request: LlmCompleteRequest,
+    onDelta: (cumulative: string) => void,
+  ): Promise<string>;
   test(): Promise<void>;
 }
 

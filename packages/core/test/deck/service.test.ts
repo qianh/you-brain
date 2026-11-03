@@ -24,6 +24,24 @@ function fakeBackend(reply: (system: string, user: string) => string): LlmBacken
   };
 }
 
+/** 流式版假后端：把回复拆成小块，经 completeStream 的累计回调吐出。 */
+function fakeStreamBackend(reply: (system: string, user: string) => string): LlmBackend {
+  const base = fakeBackend(reply);
+  return {
+    ...base,
+    completeStream: async (request, onDelta) => {
+      const text = reply(request.system, request.user);
+      let raw = "";
+      for (let i = 0; i < text.length; i += 4) {
+        raw = text.slice(0, i + 4);
+        onDelta(raw);
+      }
+      onDelta(text);
+      return text;
+    },
+  };
+}
+
 const capabilities: DeckCapabilityPort = {
   today: async () => "今天没有会话",
   activeTopics: async () => "- 测试话题（进行中）[topic-1]：概要",
@@ -39,13 +57,19 @@ interface Harness {
   uploads: UploadableSession[];
   agents: Array<{ provider: string; prompt: string }>;
   changes: number;
+  deltas: Array<{ conversationId: string; text: string }>;
 }
 
-async function harness(masterReply: (system: string, user: string) => string): Promise<Harness> {
+async function harness(
+  masterReply: (system: string, user: string) => string,
+  options?: { stream?: boolean },
+): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "deck-"));
   const uploads: UploadableSession[] = [];
   const agents: Array<{ provider: string; prompt: string }> = [];
+  const deltas: Array<{ conversationId: string; text: string }> = [];
   let changes = 0;
+  let tick = 0;
   const service = new DeckService({
     dataDir: dir,
     displayName: "测试机",
@@ -60,15 +84,21 @@ async function harness(masterReply: (system: string, user: string) => string): P
     emitChange: () => {
       changes += 1;
     },
+    // nowMs 每次调用前进 300ms，绕过 250ms 的增量节流，测试能收齐每条 delta。
+    clock: { now: () => new Date(), nowMs: () => (tick += 300) },
+    emitDeckDelta: (conversationId, text) => {
+      deltas.push({ conversationId, text });
+    },
     runAgent: async (options) => {
       agents.push({ provider: options.provider, prompt: options.prompt });
       return "agent 干完了";
     },
-    createMasterBackend: async () => fakeBackend(masterReply),
+    createMasterBackend: async () =>
+      options?.stream === true ? fakeStreamBackend(masterReply) : fakeBackend(masterReply),
     createModelBackend: async () => fakeBackend(() => "模型输出"),
     probeExecutors: false,
   });
-  return { service, dir, uploads, agents, changes };
+  return { service, dir, uploads, agents, changes, deltas };
 }
 
 async function cleanup(dir: string): Promise<void> {
@@ -82,10 +112,45 @@ describe("deck service", () => {
       const conversation = await h.service.send("今天做了什么", null);
       expect(conversation.turns).toHaveLength(2);
       expect(conversation.turns[1]?.text).toBe("今天没有会话");
-      expect(h.uploads).toHaveLength(1);
+      await h.service.settled();
+      // 用户轮、回答轮各上传一次（原地更新同一会话原文）。
+      expect(h.uploads.length).toBeGreaterThanOrEqual(2);
       expect(h.uploads[0]?.source).toBe("deck");
-      expect(h.uploads[0]?.markdown).toContain("## User");
-      expect(h.uploads[0]?.markdown).toContain("## Assistant");
+      const finalUpload = h.uploads[h.uploads.length - 1];
+      expect(finalUpload?.markdown).toContain("## User");
+      expect(finalUpload?.markdown).toContain("## Assistant");
+    } finally {
+      await cleanup(h.dir);
+    }
+  });
+
+  it("beginSend returns after the user turn; the answer lands in the background", async () => {
+    const h = await harness(() => '{"kind":"answer","text":"后台落地的回答"}');
+    try {
+      const conversation = await h.service.beginSend("问题", null);
+      expect(conversation.turns).toHaveLength(1);
+      expect(conversation.turns[0]?.role).toBe("user");
+      const listed = await h.service.listConversations();
+      expect(listed.some((item) => item.id === conversation.id)).toBe(true);
+      await h.service.settled();
+      const done = await h.service.getConversation(conversation.id);
+      expect(done?.turns).toHaveLength(2);
+      expect(done?.turns[1]?.role).toBe("assistant");
+      expect(done?.turns[1]?.text).toBe("后台落地的回答");
+    } finally {
+      await cleanup(h.dir);
+    }
+  });
+
+  it("records a master failure as an event turn instead of throwing", async () => {
+    const h = await harness(() => {
+      throw new Error("没有可用的本机 CLI 作为主控");
+    });
+    try {
+      const conversation = await h.service.send("你好", null);
+      expect(
+        conversation.turns.some((turn) => turn.role === "event" && turn.text.includes("【主控 · 失败】")),
+      ).toBe(true);
     } finally {
       await cleanup(h.dir);
     }
@@ -113,6 +178,34 @@ describe("deck service", () => {
       expect(persisted).toContain("agent 干完了");
       // 会话原文在结果落地后又上传了一次（原地更新）。
       expect(h.uploads.length).toBeGreaterThanOrEqual(2);
+    } finally {
+      await cleanup(h.dir);
+    }
+  });
+
+  it("streams answer deltas through emitDeckDelta while the master runs", async () => {
+    const h = await harness(() => '{"kind":"answer","text":"流式落地的回答"}', { stream: true });
+    try {
+      const conversation = await h.service.send("问题", null);
+      expect(conversation.turns).toHaveLength(2);
+      // 流式增量按累计文本到达，最后一条就是完整回答。
+      expect(h.deltas.length).toBeGreaterThanOrEqual(2);
+      expect(h.deltas[0]?.conversationId).toBe(conversation.id);
+      expect(h.deltas[h.deltas.length - 1]?.text).toBe("流式落地的回答");
+    } finally {
+      await cleanup(h.dir);
+    }
+  });
+
+  it("deletes a conversation", async () => {
+    const h = await harness(() => '{"kind":"answer","text":"好的"}');
+    try {
+      const conversation = await h.service.send("你好", null);
+      expect(await h.service.deleteConversation(conversation.id)).toBe(true);
+      expect(await h.service.getConversation(conversation.id)).toBeNull();
+      const listed = await h.service.listConversations();
+      expect(listed.some((item) => item.id === conversation.id)).toBe(false);
+      expect(await h.service.deleteConversation(conversation.id)).toBe(false);
     } finally {
       await cleanup(h.dir);
     }

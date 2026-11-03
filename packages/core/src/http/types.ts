@@ -771,6 +771,13 @@ export const DaemonEventSchema = z.object({
   id: z.number().int().nonnegative(),
   kind: z.enum(["ready", "topics", "today", "status", "portrait", "devices", "notion", "deck"]),
   at: z.string().min(1),
+  /** 指挥台主控回答的流式增量。只随 deck 事件出现；界面据此逐字上屏。 */
+  deckDelta: z
+    .object({
+      conversationId: z.string().min(1),
+      text: z.string(),
+    })
+    .optional(),
 });
 
 export type DaemonEvent = z.infer<typeof DaemonEventSchema>;
@@ -843,6 +850,10 @@ export interface DeckConversationSendResponse {
 
 export interface DeckExecutorsResponse {
   executors: import("../deck/service.js").DeckExecutorView[];
+}
+
+export interface DeckJobsResponse {
+  jobs: import("../deck/types.js").DeckJobView[];
 }
 
 export interface DeckTasksResponse {

@@ -6,8 +6,12 @@ export class ChangeHub {
   #shutdown = new Set<() => void>();
   #seq = 0;
 
-  publish(kind: DaemonChangeKind, at = new Date().toISOString()): DaemonEvent {
-    const event: DaemonEvent = { id: ++this.#seq, kind, at };
+  publish(
+    kind: DaemonChangeKind,
+    at = new Date().toISOString(),
+    data?: Partial<DaemonEvent>,
+  ): DaemonEvent {
+    const event: DaemonEvent = { id: ++this.#seq, kind, at, ...data };
     for (const listener of this.#listeners) {
       try {
         listener(event);

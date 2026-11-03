@@ -54,6 +54,7 @@ import type {
   DeckConversationSendResponse,
   DeckDeletedResponse,
   DeckExecutorsResponse,
+  DeckJobsResponse,
   DeckSendBody,
   DeckTaskBody,
   DeckTaskDeleteBody,
@@ -134,8 +135,10 @@ export interface HttpDeps {
 export interface DeckHttpPort {
   listConversations(): Promise<DeckConversationsResponse>;
   getConversation(id: string): Promise<DeckConversationResponse>;
+  deleteConversation(id: string): Promise<DeckDeletedResponse>;
   send(body: DeckSendBody): Promise<DeckConversationSendResponse>;
   executors(): Promise<DeckExecutorsResponse>;
+  listJobs(): Promise<DeckJobsResponse>;
   listTasks(): Promise<DeckTasksResponse>;
   saveTask(body: DeckTaskBody): Promise<DeckTaskResponse>;
   deleteTask(id: string): Promise<DeckDeletedResponse>;

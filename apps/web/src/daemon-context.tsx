@@ -18,6 +18,7 @@ import {
   type ReminderActionName,
 } from "./api/client.js";
 import { driveStillChecking } from "./lib/drive-state.js";
+import { emitDeckDelta } from "./lib/deck-stream.js";
 import type { Language } from "./lib/format.js";
 import { translate, type MessageKey } from "./i18n/messages.js";
 
@@ -225,7 +226,12 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
             if (event.kind === "notion") return;
             // 指挥台的私有数据（会话/任务）由页面自己按 revision 拉。
             if (event.kind === "deck") {
-              setDetailRevision((value) => value + 1);
+              // 流式增量走单例直达指挥台页；只有真正的会话变更才触发整页刷新。
+              if (event.deckDelta) {
+                emitDeckDelta(event.deckDelta.conversationId, event.deckDelta.text);
+              } else {
+                setDetailRevision((value) => value + 1);
+              }
               return;
             }
             void reload(event.kind);
