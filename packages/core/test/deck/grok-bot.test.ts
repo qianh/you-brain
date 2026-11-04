@@ -23,6 +23,23 @@ describe("grok bot blob parser", () => {
     expect(turns[1]).toMatchObject({ role: "assistant", text: "以下是三条新闻" });
   });
 
+  it("treats the bot's text send-message entries as assistant turns", () => {
+    const turns = grokBotTurns({
+      entries: [
+        { kind: "message", role: "user", content: "问题", timestampMs: 1000 },
+        { kind: "send-message", message: { type: "text", content: "回答" }, timestampMs: 2000 },
+        { kind: "send-message", message: { type: "text", content: "带引用", reply_to: "x" }, timestampMs: 3000 },
+        { kind: "send-message", message: { type: "image", url: "a.png" }, timestampMs: 4000 },
+        { kind: "send-message", message: "{'type':'text'}", timestampMs: 5000 },
+      ],
+    });
+    expect(turns).toEqual([
+      { role: "user", text: "问题", atMs: 1000 },
+      { role: "assistant", text: "回答", atMs: 2000 },
+      { role: "assistant", text: "带引用", atMs: 3000 },
+    ]);
+  });
+
   it("ignores UI-state blobs", () => {
     expect(
       grokBotTurns({ sidebar: { expandedWidth: 240 }, infoPane: { isOpen: false } }),

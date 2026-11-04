@@ -18,7 +18,7 @@ export const REFINE_OUTPUT_JSON_SCHEMA: Record<string, unknown> = {
       additionalProperties: false,
       required: ["action", "topicId", "name", "aliases"],
       properties: {
-        action: { type: "string", enum: ["assign", "create"] },
+        action: { type: "string", enum: ["assign", "create", "none"] },
         topicId: { type: "string" },
         name: { type: "string" },
         aliases: {

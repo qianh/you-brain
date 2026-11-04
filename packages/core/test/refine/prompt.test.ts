@@ -1,6 +1,11 @@
 import { describe, expect, it } from "bun:test";
 
-import { fitRefineMessages, selectCandidateTopics, selectOpenTodos } from "../../src/refine/messages.js";
+import {
+  candidateQuery,
+  fitRefineMessages,
+  selectCandidateTopics,
+  selectOpenTodos,
+} from "../../src/refine/messages.js";
 import { buildRefinePrompt } from "../../src/refine/prompt.js";
 import type { CandidateTopic } from "../../src/refine/types.js";
 
@@ -73,6 +78,49 @@ describe("refine prompt input", () => {
     expect(prompt.user).toContain("丙");
     expect(prompt.user).not.toContain("甲");
     expect(prompt.user).toContain("首次提炼");
+  });
+
+  it("offers matching history topics first, then recent ones, and the session's own topic", () => {
+    const history = Array.from({ length: 30 }, (_, index) => ({
+      ...topic(`h${index}`, "history", 1_000 + index),
+      name: `最近话题${index}`,
+    }));
+    const selected = selectCandidateTopics(
+      [
+        ...history,
+        { ...topic("port", "history", 1), name: "GM2港口目录接入" },
+        { ...topic("mine", "history", 2), name: "完全不相关的事" },
+      ],
+      10,
+      { query: "GM2港口目录还要再修", currentTopicId: "mine" },
+    );
+    const ids = selected.map((item) => item.topicId);
+    expect(ids[0]).toBe("mine");
+    expect(ids[1]).toBe("port");
+    expect(ids).toContain("h29");
+    expect(ids).not.toContain("h0");
+  });
+
+  it("builds the match text from the earlier refine and what the user wrote", () => {
+    const query = candidateQuery({ title: "旧标题", summary: "旧概要" }, [
+      { role: "user", text: "用户的话" },
+      { role: "assistant", text: "助手的长篇回答" },
+    ]);
+    expect(query).toContain("旧标题");
+    expect(query).toContain("用户的话");
+    expect(query).not.toContain("助手的长篇回答");
+  });
+
+  it("tells the model which topic the session is on and what a topic's sessions were", () => {
+    const prompt = buildRefinePrompt({
+      previous: { title: "旧", summary: "旧", conclusions: [], todos: [], topicId: "t1" },
+      topics: [{ ...topic("t1", "active"), name: "港口目录", recentTitles: ["修复复核", "接入评审"] }],
+      openTodos: [],
+      messages: [{ role: "user", text: "继续" }],
+      truncated: false,
+    });
+    expect(prompt.user).toContain("当前话题：港口目录（topicId: t1）");
+    expect(prompt.user).toContain("最近会话：修复复核、接入评审");
   });
 
   it("keeps every active topic and the 20 most recent history topics", () => {

@@ -24,6 +24,9 @@ import {
   type TopicDetail,
   type TopicMutationBody,
   type TopicMutationResponse,
+  type TopicReorganizeApplyBody,
+  type TopicReorganizePlan,
+  type TopicReorganizeResult,
   type TopicsQuery,
   type TopicsResponse,
   type UploadActionInput,
@@ -38,6 +41,9 @@ import {
   type NotionDeleteBlockBody,
   type NotionDuplicateBlockBody,
   type NotionKeyPutBody,
+  type SearchActivePutBody,
+  type SearchKeyPutBody,
+  type SearchSettings,
   type NotionMoveBlockBody,
   type NotionPageMutationResult,
   type NotionPageView,
@@ -95,6 +101,8 @@ export interface DaemonClient {
   reminderAction?(body: ReminderActionBody): Promise<ReminderView>;
   /** Optional so older clients can ignore the manual trigger. */
   consolidate?(body?: ConsolidateActionInput): Promise<ConsolidateActionResult>;
+  planTopicReorganization?(body?: { refresh?: boolean }): Promise<TopicReorganizePlan>;
+  applyTopicReorganization?(body: TopicReorganizeApplyBody): Promise<TopicReorganizeResult>;
   sync(): Promise<SyncActionResult>;
   upload(body?: UploadActionInput): Promise<UploadActionResult>;
   todo(body: TodoActionBody): Promise<ActionResponse>;
@@ -108,6 +116,9 @@ export interface DaemonClient {
   notionSync(): Promise<NotionSyncResult>;
   notionTest(): Promise<NotionTestResult>;
   putNotionKey(body: NotionKeyPutBody): Promise<void>;
+  searchSettings(): Promise<SearchSettings>;
+  putSearchKey(body: SearchKeyPutBody): Promise<void>;
+  putSearchActive(body: SearchActivePutBody): Promise<SearchSettings>;
   /** 编辑块内容,可选同时 turn-into。返回刷新后的页面。 */
   notionUpdateBlock(body: NotionUpdateBlockBody): Promise<NotionPageMutationResult>;
   notionAppendBlock(body: NotionAppendBlockBody): Promise<NotionPageMutationResult>;
@@ -207,6 +218,8 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     reminders: (all) => request("GET", all ? "/api/reminders?all=1" : "/api/reminders"),
     reminderAction: (body) => request("POST", "/api/actions/reminder", body),
     consolidate: (body) => request("POST", "/api/actions/consolidate", body ?? {}),
+    planTopicReorganization: (body) => request("POST", "/api/actions/topics-reorganize/plan", body ?? {}),
+    applyTopicReorganization: (body) => request("POST", "/api/actions/topics-reorganize/apply", body),
     sync: () => request("POST", "/api/actions/sync"),
     upload: (body) => request("POST", "/api/actions/upload", body ?? {}),
     todo: (body) => request("POST", "/api/actions/todo", body),
@@ -225,6 +238,9 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     notionSync: () => request("POST", "/api/actions/notion-sync"),
     notionTest: () => request("POST", "/api/actions/notion-test"),
     putNotionKey: (body) => request("PUT", "/api/secrets/notion", body),
+    searchSettings: () => request("GET", "/api/search-provider"),
+    putSearchActive: (body) => request("PUT", "/api/search-provider", body),
+    putSearchKey: (body) => request("PUT", "/api/secrets/search", body),
     notionUpdateBlock: (body) => request("POST", "/api/actions/notion-update-block", body),
     notionAppendBlock: (body) => request("POST", "/api/actions/notion-append-block", body),
     notionDeleteBlock: (body) => request("POST", "/api/actions/notion-delete-block", body),

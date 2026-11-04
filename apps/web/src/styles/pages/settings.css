@@ -44,11 +44,7 @@
   flex-direction: column;
   gap: var(--sp-4);
   min-width: 0;
-  max-width: 720px;
 }
-
-/* 数字分身等文档型区块不设上限,随窗口自适应。 */
-.settings-main.settings-main-wide { max-width: none; }
 
 .settings-main.has-dirty { padding-bottom: 84px; }
 
@@ -391,7 +387,6 @@
   .settings-nav-item[aria-selected="true"] {
     border-color: color-mix(in srgb, var(--accent) 35%, transparent);
   }
-  .settings-main { max-width: none; }
   .settings-page .row { grid-template-columns: auto minmax(0, 1fr); row-gap: var(--sp-2); }
   .settings-page .row-trail {
     grid-column: 1 / -1;

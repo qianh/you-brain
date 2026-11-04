@@ -201,6 +201,9 @@ function applyRenamed(memory: FoldMemory, event: EventOf<"topic.renamed">): void
   topic.name = event.data.name;
   topic.aliases = [...event.data.aliases];
   indexName(memory, topic);
+  // Tidying the book is not work on the topic: a batch of these must not make
+  // every touched topic look active today.
+  if (event.data.by === "auto") return;
   touchUser(topic, event.ts);
   touchContent(topic, event.ts);
 }
@@ -256,6 +259,7 @@ function applyMerged(memory: FoldMemory, event: EventOf<"topic.merged">): void {
   const into = resolveTopicId(memory, event.data.intoTopicId);
   if (from === into) return;
   link(memory, from, into);
+  if (event.data.by === "auto") return;
   const survivor = memory.topics.get(resolveTopicId(memory, into));
   if (survivor) {
     touchUser(survivor, event.ts);

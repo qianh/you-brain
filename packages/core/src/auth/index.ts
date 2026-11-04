@@ -92,6 +92,14 @@ export {
   type LlmSecretOptions,
 } from "./llm-secrets.js";
 export {
+  SEARCH_PROVIDERS,
+  getSearchKey,
+  searchKeychainService,
+  setSearchKey,
+  type SearchProvider,
+  type SearchSecretOptions,
+} from "./search-secrets.js";
+export {
   GOOGLE_CLIENT_ID_SUFFIX,
   clearUserOAuthCredentials,
   isGoogleClientId,

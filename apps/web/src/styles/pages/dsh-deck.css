@@ -12,6 +12,9 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  /* .main 的 12px 顶 padding 会叠在 topbar 自带的 12px 上，
+     白底 iframe 页上显成「tab 栏下方空一格」，这里抵消掉。 */
+  padding-top: 0;
   padding-bottom: var(--sp-3);
 }
 

@@ -818,7 +818,7 @@ function statusBody(): unknown {
     return {
       deviceId: MAC,
       drive: { reachable: null, accountEmail: null },
-      sync: { lastSyncAt: null, pendingOutbox: 0 },
+      sync: { lastSyncAt: null, pendingOutbox: 0, pendingOutboxSessions: 0 },
       search: { ready: false, documents: 0 },
       refine: { pending: 0, lastError: null },
       consolidation: consolidationStatus(),
@@ -835,6 +835,7 @@ function statusBody(): unknown {
       sync: {
         lastSyncAt: ago(12 * MINUTE),
         pendingOutbox: 0,
+        pendingOutboxSessions: 0,
         lastError: "同步失败：变更游标无效",
         lastErrorAt: ago(2 * MINUTE),
       },
@@ -857,7 +858,7 @@ function statusBody(): unknown {
     return {
       deviceId: MAC,
       drive: driveStatus(),
-      sync: { lastSyncAt: null, pendingOutbox: 0 },
+      sync: { lastSyncAt: null, pendingOutbox: 0, pendingOutboxSessions: 0 },
       search: { ready: false, documents: 0 },
       refine: { pending: 0, lastError: null },
       consolidation: consolidationStatus(),
@@ -871,7 +872,7 @@ function statusBody(): unknown {
   return {
     deviceId: MAC,
     drive: driveStatus(),
-    sync: { lastSyncAt: ago(4 * MINUTE), pendingOutbox: healthy ? 0 : 1 },
+    sync: { lastSyncAt: ago(4 * MINUTE), pendingOutbox: healthy ? 0 : 1, pendingOutboxSessions: healthy ? 0 : 1 },
     search: { ready: healthy, documents: 128 },
     refine: { pending: healthy ? 0 : 2, lastError: null },
     consolidation: consolidationStatus(),
@@ -1286,6 +1287,46 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
   }
   if (path === "/api/actions/reminder" && request.method === "POST") {
     return applyReminderAction(await request.json().catch(() => null));
+  }
+  if (path === "/api/actions/topics-reorganize/plan" && request.method === "POST") {
+    const live = topics.filter((topic) => topic.mergedInto === null && !topic.userLocked);
+    const [into, ...rest] = live;
+    return json({
+      topicCount: topics.length,
+      reviewedCount: topics.length,
+      topicCountAfter: topics.length - rest.length,
+      groups: into && rest.length > 0
+        ? [{
+            name: into.name,
+            reason: "都是同一件事的不同阶段",
+            intoTopicId: into.topicId,
+            members: [into, ...rest].map((topic) => ({
+              topicId: topic.topicId,
+              name: topic.name,
+              sessionCount: sessions.filter((session) => session.topicId === topic.topicId).length,
+            })),
+            archive: false,
+          }]
+        : [],
+    });
+  }
+  if (path === "/api/actions/topics-reorganize/apply" && request.method === "POST") {
+    const body: unknown = await request.json().catch(() => null);
+    const groups = isObject(body) && Array.isArray(body.groups) ? body.groups : [];
+    let merged = 0;
+    for (const group of groups) {
+      if (!isObject(group) || !Array.isArray(group.fromTopicIds)) continue;
+      for (const id of group.fromTopicIds) {
+        const from = topics.find((topic) => topic.topicId === id);
+        if (!from || typeof group.intoTopicId !== "string") continue;
+        from.mergedInto = group.intoTopicId;
+        for (const session of sessions) {
+          if (session.topicId === from.topicId) session.topicId = group.intoTopicId;
+        }
+        merged += 1;
+      }
+    }
+    return json({ merged });
   }
   if (path === "/api/actions/consolidate" && request.method === "POST") {
     return json({

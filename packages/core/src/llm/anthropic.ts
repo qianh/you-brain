@@ -45,6 +45,7 @@ export function createAnthropicBackend(options: AnthropicBackendOptions): LlmBac
       requiresApiKey: true,
     },
     async complete(request: LlmCompleteRequest): Promise<string> {
+      const timeoutMs = request.timeoutMs ?? options.timeoutMs;
       if (options.apiKey.trim() === "") {
         throw new LlmRequestError("auth", "缺少 API Key（you-brain/llm/claude）");
       }
@@ -75,7 +76,7 @@ export function createAnthropicBackend(options: AnthropicBackendOptions): LlmBac
           "anthropic-version": ANTHROPIC_VERSION,
         },
         body,
-        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
         ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
       });
       return readAnthropicContent(payload);

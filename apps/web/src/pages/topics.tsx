@@ -16,6 +16,7 @@ import { isTextEntry } from "../lib/shortcuts.js";
 import { useRoute } from "../router.js";
 import { highlightId, moveInList, showsNarrowDetail, statusCounts, visibleTopics, type StatusFilter } from "./topics/logic.js";
 import { TopicDetailPane } from "./topics/topic-detail.js";
+import { ReorganizeDialog } from "./topics/reorganize-dialog.js";
 import { TopicList } from "./topics/topic-list.js";
 import { useTopicActions } from "./topics/use-topic-actions.js";
 
@@ -54,6 +55,7 @@ export function TopicsPage({ zone }: { zone: "active" | "history" }) {
   const [detail, setDetail] = useState<TopicDetail | null>(null);
   const [phase, setPhase] = useState<"idle" | "loading" | "ready" | "missing" | "error">("idle");
   const [retryToken, setRetryToken] = useState(0);
+  const [reorganizing, setReorganizing] = useState(false);
   const epoch = useRef(0);
   const busyRef = useRef(false);
   const detailRef = useRef(detail);
@@ -205,15 +207,20 @@ export function TopicsPage({ zone }: { zone: "active" | "history" }) {
     <PageHeader
       title={t("topicsBook")}
       actions={
-        <Segmented
-          label={t("topicsBook")}
-          value={zone}
-          options={[
-            { value: "active", label: t("zoneActive") },
-            { value: "history", label: t("zoneHistory") },
-          ]}
-          onChange={(value) => navigate(value === "history" ? "/topics/history" : "/topics")}
-        />
+        <>
+          <Button size="sm" onClick={() => setReorganizing(true)}>
+            {t("reorganize")}
+          </Button>
+          <Segmented
+            label={t("topicsBook")}
+            value={zone}
+            options={[
+              { value: "active", label: t("zoneActive") },
+              { value: "history", label: t("zoneHistory") },
+            ]}
+            onChange={(value) => navigate(value === "history" ? "/topics/history" : "/topics")}
+          />
+        </>
       }
     />
   );
@@ -372,7 +379,13 @@ export function TopicsPage({ zone }: { zone: "active" | "history" }) {
     );
   }
 
-  return <div className={detailOpen ? "topics-page is-detail" : "topics-page is-list"}>{header}{body}</div>;
+  return (
+    <div className={detailOpen ? "topics-page is-detail" : "topics-page is-list"}>
+      {header}
+      {body}
+      <ReorganizeDialog open={reorganizing} onClose={() => setReorganizing(false)} />
+    </div>
+  );
 }
 
 function DetailSkeleton() {

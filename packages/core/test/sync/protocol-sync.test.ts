@@ -841,3 +841,38 @@ describe("protocol sync", () => {
     }
   });
 });
+
+describe("appendMany", () => {
+  it("writes a batch as one apply, queued for the next flush like single appends", async () => {
+    const drive = new MemoryDrive();
+    const local = openStore();
+    try {
+      let notified = 0;
+      const sync = new ProtocolSync({
+        drive,
+        store: local.store,
+        device: identity(DEVICE_A, "MacBook Air"),
+        listener: {
+          onTopicsChanged() {
+            notified += 1;
+          },
+        },
+      });
+      await sync.appendMany([
+        { type: "topic.created", data: { topicId: "a", name: "甲", aliases: [] } },
+        { type: "topic.created", data: { topicId: "b", name: "乙", aliases: [] } },
+        { type: "topic.merged", data: { fromTopicId: "b", intoTopicId: "a", by: "auto" } },
+      ]);
+      expect(notified).toBe(1);
+      expect(local.store.getTopic("b")?.mergedInto).toBe("a");
+      expect(sync.pendingEvents().map((event) => event.seq)).toEqual([1, 2, 3]);
+      await sync.flush();
+      expect(sync.pendingEvents()).toEqual([]);
+
+      await sync.appendMany([]);
+      expect(notified).toBe(1);
+    } finally {
+      local.close();
+    }
+  });
+});

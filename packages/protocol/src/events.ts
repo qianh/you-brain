@@ -39,6 +39,8 @@ export const TopicRenamedDataSchema = z.object({
   topicId: IdSchema,
   name: z.string().min(1),
   aliases: z.array(z.string().min(1)),
+  /** Absent means the user. `auto` is bookkeeping: it does not count as activity on the topic. */
+  by: EventActorSchema.optional(),
 });
 
 export const TopicStatusChangedDataSchema = z.object({
@@ -50,6 +52,8 @@ export const TopicStatusChangedDataSchema = z.object({
 export const TopicMergedDataSchema = z.object({
   fromTopicId: IdSchema,
   intoTopicId: IdSchema,
+  /** Absent means the user. `auto` is bookkeeping: it does not count as activity on the topic. */
+  by: EventActorSchema.optional(),
 });
 
 export const TopicSummaryRewrittenDataSchema = z.object({

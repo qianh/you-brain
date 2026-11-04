@@ -2,7 +2,12 @@ import { parseRefineOutput } from "@you-brain/protocol";
 
 import type { LlmBackend } from "../llm/types.js";
 import { defaultRefineIds, refineToEvents } from "./events.js";
-import { fitRefineMessages, selectCandidateTopics, selectOpenTodos } from "./messages.js";
+import {
+  candidateQuery,
+  fitRefineMessages,
+  selectCandidateTopics,
+  selectOpenTodos,
+} from "./messages.js";
 import { normalizeRefineOutput } from "./normalize.js";
 import { extractJson } from "./parse.js";
 import { buildRefinePrompt } from "./prompt.js";
@@ -35,7 +40,10 @@ export async function refineSession(
     };
   }
 
-  const topics = selectCandidateTopics(input.topics, options.historyLimit);
+  const topics = selectCandidateTopics(input.topics, options.historyLimit, {
+    query: candidateQuery(input.previous, input.messages),
+    currentTopicId: input.previous?.topicId ?? null,
+  });
   const openTodos = selectOpenTodos(input.openTodos, topics);
   const fitted = fitRefineMessages(
     input.messages,
@@ -64,12 +72,15 @@ export async function refineSession(
     try {
       const parsed = parseRefineOutput(extractJson(raw));
       const output = normalizeRefineOutput(parsed, {
-        topics,
+        topics: input.topics,
         openTodos,
         previous: input.previous,
         ids,
       });
-      const events = refineToEvents(input, output, options.eventFactory, ids);
+      const reactivate =
+        output.topic.action === "assign" &&
+        input.topics.some((topic) => topic.topicId === output.topic.topicId && topic.archived === true);
+      const events = refineToEvents(input, output, options.eventFactory, ids, { reactivate });
       return { status: "refined", output, events };
     } catch (error) {
       lastDetail = failureDetail(error, raw);

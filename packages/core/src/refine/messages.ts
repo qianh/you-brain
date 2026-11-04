@@ -1,5 +1,6 @@
 import { DEFAULT_HISTORY_TOPIC_CANDIDATES } from "@you-brain/protocol";
 
+import { rankTopicsByText } from "../topics/similarity.js";
 import type { CandidateTopic, OpenTodo, RefineMessage } from "./types.js";
 
 export const DEFAULT_REFINE_CHAR_BUDGET = 24_000;
@@ -68,24 +69,67 @@ function historyRank(topics: readonly CandidateTopic[]): CandidateTopic[] {
   );
 }
 
-/** Active topics, plus the most recent history topics (default 20). */
+/** Of the history slots, how many go to topics that match the text. The rest go by recency. */
+const RELEVANT_SHARE = 0.75;
+/** Below this the only thing shared is a stray pair of characters. */
+const MIN_RELEVANCE = 0.05;
+/** Enough to tell what a session is about. A long paste should not outweigh its opening. */
+const QUERY_CHARS = 6_000;
+
+export interface CandidateRelevance {
+  /** What the session is about. History topics matching it are offered first. */
+  query: string;
+  /** The topic the session already sits on. Always offered. */
+  currentTopicId?: string | null;
+}
+
+/** The text to match topics against: the earlier refine plus what the user wrote. */
+export function candidateQuery(
+  previous: { title: string; summary: string } | null,
+  messages: readonly RefineMessage[],
+): string {
+  const spoken = messages.filter((message) => message.role === "user");
+  const text = (spoken.length > 0 ? spoken : messages).map((message) => message.text).join("\n");
+  const head = previous ? `${previous.title}\n${previous.summary}\n` : "";
+  return `${head}${Array.from(text).slice(0, QUERY_CHARS).join("")}`;
+}
+
+/**
+ * Active topics, the topic the session is already on, and history topics (default 20):
+ * the ones matching the session first, then the most recent. Offering only recent ones
+ * hides the right topic as soon as the book outgrows the limit, and the model then has
+ * no choice but to open a duplicate.
+ */
 export function selectCandidateTopics(
   topics: readonly CandidateTopic[],
   historyLimit = DEFAULT_HISTORY_TOPIC_CANDIDATES,
+  relevance?: CandidateRelevance,
 ): CandidateTopic[] {
   const active = topics.filter((topic) => topic.zone === "active");
   const history = topics.filter((topic) => topic.zone === "history");
   const dated = history.some((topic) => topic.recency !== undefined);
   const limit = Math.max(0, historyLimit);
+  const relevant = relevance
+    ? rankTopicsByText(history, relevance.query)
+        .filter((item) => item.score >= MIN_RELEVANCE)
+        .slice(0, Math.ceil(limit * RELEVANT_SHARE))
+        .map((item) => item.topic)
+    : [];
+  const relevantIds = new Set(relevant.map((topic) => topic.topicId));
+  const rest = history.filter((topic) => !relevantIds.has(topic.topicId));
+  const room = limit - relevant.length;
   const recent =
-    limit === 0
+    room <= 0
       ? []
       : dated
-        ? historyRank(history).slice(0, limit)
-        : history.slice(-limit);
+        ? historyRank(rest).slice(0, room)
+        : rest.slice(-room);
+  const current = relevance?.currentTopicId
+    ? topics.filter((topic) => topic.topicId === relevance.currentTopicId)
+    : [];
   const seen = new Set<string>();
   const selected: CandidateTopic[] = [];
-  for (const topic of [...active, ...recent]) {
+  for (const topic of [...current, ...active, ...relevant, ...recent]) {
     if (seen.has(topic.topicId)) continue;
     seen.add(topic.topicId);
     selected.push(topic);

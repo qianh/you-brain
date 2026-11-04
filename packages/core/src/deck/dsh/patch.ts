@@ -106,6 +106,8 @@ export interface RenderDshPatchInput {
   plugins: readonly DshPluginStatus[];
   /** 把 you-brain 的 MCP（搜索、话题、分身…）挂给 dsh；缺省不挂。 */
   mcp?: { command: string; args: readonly string[]; env?: Record<string, string> } | undefined;
+  /** 搜索后端：给了就把 `web` 行的 `searchProvider` 指向它（如 exa、tavily）；缺省不动，仍走 DeepSeek 搜索。 */
+  webSearchProvider?: string | undefined;
   /** 随 App 带的本地 dsh 插件：`path` 是模块文件的绝对路径，或 sidecar 里的包名，按 `name: <值>` 加载。 */
   localPlugins?: ReadonlyArray<{ id: string; path: string }> | undefined;
   /** 自有品牌包的包名：给了就禁用官方品牌包（行 id `ui-brand-official`）并挂上它；缺省保留 DeepSeek 品牌。 */
@@ -167,6 +169,10 @@ export function renderDshPatch(input: RenderDshPatchInput): string {
     }
   }
   const parts: string[] = [];
+  // 补丁会整体替换该行的 config，所以把 fetchProvider 的出厂值一并写全。
+  if (input.webSearchProvider !== undefined) {
+    parts.push(`- id: web\n  config:\n    searchProvider: ${yaml(input.webSearchProvider)}\n    fetchProvider: http\n`);
+  }
   if (rows.length > 0) parts.push(`- insert:\n${rows.join("\n")}\n`);
   if (input.brandPlugin !== undefined) {
     // 补丁只能改行的字段、不能换包名，所以禁用官方行再插入自有行。

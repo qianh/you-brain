@@ -37,6 +37,9 @@ import type {
   NotionDeleteBlockBody,
   NotionDuplicateBlockBody,
   NotionKeyPutBody,
+  SearchActivePutBody,
+  SearchKeyPutBody,
+  SearchSettings,
   NotionMoveBlockBody,
   NotionPageMutationResult,
   NotionPageView,
@@ -58,6 +61,9 @@ import type {
   DeckDshLoginBody,
   DeckDshLoginResponse,
   DeckDshWebResponse,
+  TopicReorganizeApplyBody,
+  TopicReorganizePlan,
+  TopicReorganizeResult,
 } from "./types.js";
 
 /** Read and write ports for the local API. The daemon supplies the implementations. */
@@ -90,6 +96,9 @@ export interface HttpDeps {
   upload(input: UploadActionInput): Promise<UploadActionResult>;
   /** Optional so older test doubles keep compiling. The daemon always supplies it. */
   consolidate?(input: { force?: boolean }): Promise<ConsolidateActionResult>;
+  /** Optional so older test doubles keep compiling. The daemon always supplies both. */
+  planTopicReorganization?(input: { refresh?: boolean }): Promise<TopicReorganizePlan>;
+  applyTopicReorganization?(body: TopicReorganizeApplyBody): Promise<TopicReorganizeResult>;
   /** Optional so older test doubles keep compiling. The daemon always supplies it. */
   readWebhook?(): Promise<WebhookPublic>;
   writeWebhook?(body: WebhookPutBody): Promise<WebhookPublic>;
@@ -110,6 +119,9 @@ export interface HttpDeps {
   notionStatus?(): Promise<NotionStatusView>;
   notionTest?(): Promise<NotionTestResult>;
   writeNotionKey?(body: NotionKeyPutBody): Promise<void>;
+  searchSettings?(): Promise<SearchSettings>;
+  writeSearchKey?(body: SearchKeyPutBody): Promise<void>;
+  writeSearchActive?(body: SearchActivePutBody): Promise<void>;
   notionSync?(): Promise<NotionSyncResult>;
   notionTree?(): Promise<NotionTreeView>;
   notionPage?(pageId: string): Promise<NotionPageView | null>;

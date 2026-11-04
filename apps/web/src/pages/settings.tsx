@@ -80,11 +80,7 @@ export function SettingsPage() {
             id="settings-panel"
             role="tabpanel"
             ref={mainRef}
-            className={[
-              "settings-main",
-              section === "portrait" || section === "status" ? "settings-main-wide" : "",
-              dirty ? "has-dirty" : "",
-            ]
+            className={["settings-main", dirty ? "has-dirty" : ""]
               .filter(Boolean)
               .join(" ")}
           >

@@ -2,6 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "by": {
+      "enum": [
+        "auto",
+        "user"
+      ],
+      "type": "string"
+    },
     "fromTopicId": {
       "minLength": 1,
       "type": "string"

@@ -60,9 +60,9 @@ Schema：[`schemas/event.json`](schemas/event.json)，每种 `data` 在 `schemas
 | `topic.created` | `topicId`、`name`、`aliases` | 设置名称和别名。`createdTs` 只在为空时写成事件的 `ts`。同名（`canonicalTopicName`）的两条都还活着时，`createdTs` 更早的留下，平局则 `topicId` 字符串更小的留下，另一条链到留下的那条。 |
 | `topic.assigned` | `topicId`、`sessionKey` | 把会话指到这个话题（经合并链解析后的 id）。 |
 | `topic.unassigned` | 同上 | 仅当会话当前就在该话题上时清空。并 `touchUser`。 |
-| `topic.renamed` | `topicId`、`name`、`aliases` | 改名并 `touchUser`。不设置 `userLocked`，之后自动状态仍可改变它。 |
+| `topic.renamed` | `topicId`、`name`、`aliases`、可选 `by` | 改名并 `touchUser`。不设置 `userLocked`，之后自动状态仍可改变它。`by: "auto"`（批量整理）只改名，不算活跃，不 `touchUser`。 |
 | `topic.status_changed` | `topicId`、`status`（`active`、`follow_up`、`done`、`parked`）、`by`（`auto` 或 `user`） | `by: "auto"` 且 `userLocked` 时忽略。`by: "user"` 时锁定并 `touchUser`。 |
-| `topic.merged` | `fromTopicId`、`intoTopicId` | 把失败的一侧链到胜出的一侧，并 `touchUser` 胜出者。解析后两端相同则不动。 |
+| `topic.merged` | `fromTopicId`、`intoTopicId`、可选 `by` | 把失败的一侧链到胜出的一侧，并 `touchUser` 胜出者。解析后两端相同则不动。`by: "auto"`（批量整理）只合并，不算活跃，胜出者的时间只继承失败一侧已有的。 |
 | `topic.summary_rewritten` | `topicId`、`summary`、`nextStep` | 直接覆盖概要和下一步，不看 `userLocked`。桌面沉淀在发出这条事件之前会跳过已锁定或已合并的话题（`rewriteTopic`）。 |
 | `conclusion.added` | `conclusionId`、`topicId`、`text`、`sessionKey` | 按 `conclusionId` 覆盖结论，话题 id 走合并链，时间用事件 `ts`。 |
 | `todo.added` | `todoId`、`topicId`、`text`、`sessionKey`、`confidence`（0 到 1） | 新建时状态 `open`、`by: "auto"`、未锁定。已存在则更新文本和话题，保留锁定。 |
@@ -74,4 +74,4 @@ Schema：[`schemas/event.json`](schemas/event.json)，每种 `data` 在 `schemas
 
 `foldReminders` 和话题册都先按 `compareEvents` 排序，再按 id 去重。同一 id 只保留排序后的第一条。
 
-用户操作时间 `touchUser`：`topic.renamed`、用户发起的 `topic.status_changed`、`topic.unassigned`、`topic.merged` 的胜出者、用户发起的 `todo.status_changed`、以及带话题的 `reminder.action`。仅当新时间不早于已有 `lastUserOpAt` 时更新。
+用户操作时间 `touchUser`：不带 `by: "auto"` 的 `topic.renamed`、用户发起的 `topic.status_changed`、`topic.unassigned`、不带 `by: "auto"` 的 `topic.merged` 的胜出者、用户发起的 `todo.status_changed`、以及带话题的 `reminder.action`。仅当新时间不早于已有 `lastUserOpAt` 时更新。

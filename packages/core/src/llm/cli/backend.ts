@@ -100,14 +100,14 @@ async function execute(
       args: built.args,
       cwd,
       ...(built.stdin !== undefined ? { stdin: built.stdin } : {}),
-      timeoutMs: options.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS,
+      timeoutMs: request.timeoutMs ?? options.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS,
       ...(options.signal ? { signal: options.signal } : {}),
       env: childEnv,
       ...(unset.length > 0 ? { unset } : {}),
       secrets,
       noOutputTimeoutMessage: cliNoResponseMessage(
         driver.command,
-        options.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS,
+        request.timeoutMs ?? options.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS,
         cliLoginCommand(driver.provider),
       ),
     });

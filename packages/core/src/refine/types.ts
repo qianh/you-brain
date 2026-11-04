@@ -16,6 +16,8 @@ export interface PreviousRefine {
   summary: string;
   conclusions: readonly string[];
   todos: readonly PreviousRefineTodo[];
+  /** Where the session already sits. A session that has a topic keeps it. */
+  topicId?: string | null;
 }
 
 export type CandidateTopicZone = "active" | "history";
@@ -31,6 +33,10 @@ export interface CandidateTopic {
   summary: string;
   zone: CandidateTopicZone;
   recency?: number;
+  /** Latest session titles. Most topics have no summary, so these say what it is about. */
+  recentTitles?: readonly string[];
+  /** Marked done. New work landing here has to bring it back, or it would stay hidden. */
+  archived?: boolean;
 }
 
 export interface OpenTodo {

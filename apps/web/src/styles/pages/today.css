@@ -297,7 +297,8 @@
   flex-wrap: wrap;
   align-items: baseline;
   gap: var(--sp-2);
-  margin: var(--sp-3) 0 0;
+  /* 卡片本身无 padding，与上方 .stat 的 var(--sp-4) 对齐。 */
+  margin: var(--sp-3) var(--sp-4) var(--sp-4);
   color: var(--text-3);
   font-size: var(--fs-sm);
   font-variant-numeric: tabular-nums;

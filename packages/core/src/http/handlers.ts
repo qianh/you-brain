@@ -25,6 +25,8 @@ import {
   ConsolidateActionBodySchema,
   ConclusionActionBodySchema,
   LlmKeyPutSchema,
+  SearchActivePutSchema,
+  SearchKeyPutSchema,
   LlmTestBodySchema,
   NotionAppendBlockSchema,
   NotionArchivePageSchema,
@@ -41,6 +43,8 @@ import {
   ReminderActionBodySchema,
   TodoActionBodySchema,
   TopicMutationBodySchema,
+  TopicReorganizeApplyBodySchema,
+  TopicReorganizePlanBodySchema,
   UploadActionBodySchema,
   VirtualDeviceCreateBodySchema,
   WebhookPublicSchema,
@@ -215,6 +219,14 @@ export async function handleApi(
   if (path === "/api/secrets/notion") {
     return method(request, "PUT", () => writeNotionSecret(request, context));
   }
+  if (path === "/api/secrets/search") {
+    return method(request, "PUT", () => writeSearchSecret(request, context));
+  }
+  if (path === "/api/search-provider") {
+    if (request.method === "GET") return searchSettings(context);
+    if (request.method === "PUT") return writeSearchActive(request, context);
+    return methodNotAllowed("GET, PUT");
+  }
   if (path === "/api/actions/notion-test") {
     return method(request, "POST", () => notionTest(context));
   }
@@ -296,6 +308,12 @@ export async function handleApi(
   }
   if (path === "/api/actions/consolidate") {
     return method(request, "POST", () => consolidate(request, context));
+  }
+  if (path === "/api/actions/topics-reorganize/plan") {
+    return method(request, "POST", () => planReorganize(request, context));
+  }
+  if (path === "/api/actions/topics-reorganize/apply") {
+    return method(request, "POST", () => applyReorganize(request, context));
   }
   if (path === "/api/actions/upload") {
     return method(request, "POST", () => upload(request, context));
@@ -645,6 +663,26 @@ async function writeLlmSecret(request: Request, context: ApiContext): Promise<Re
   return json(response);
 }
 
+async function searchSettings(context: ApiContext): Promise<Response> {
+  if (!context.deps.searchSettings) notSupported();
+  return json(await context.deps.searchSettings());
+}
+
+async function writeSearchActive(request: Request, context: ApiContext): Promise<Response> {
+  if (!context.deps.writeSearchActive) notSupported();
+  const body = SearchActivePutSchema.parse(await readJson(request));
+  await context.deps.writeSearchActive(body);
+  return json(await (context.deps.searchSettings?.() ?? Promise.resolve({ active: body.active })));
+}
+
+async function writeSearchSecret(request: Request, context: ApiContext): Promise<Response> {
+  if (!context.deps.writeSearchKey) notSupported();
+  const body = SearchKeyPutSchema.parse(await readJson(request));
+  await context.deps.writeSearchKey(body);
+  const response: SecretStoredResponse = { stored: true, echoed: false, hasSecret: true };
+  return json(response);
+}
+
 async function testLlm(request: Request, context: ApiContext): Promise<Response> {
   if (!context.deps.testLlm) notSupported();
   const body = LlmTestBodySchema.parse(await readJson(request));
@@ -886,6 +924,22 @@ async function consolidate(request: Request, context: ApiContext): Promise<Respo
     }
     throw error;
   }
+}
+
+async function planReorganize(request: Request, context: ApiContext): Promise<Response> {
+  if (!context.deps.planTopicReorganization) return apiError(404, "NOT_FOUND", "找不到接口");
+  const body = TopicReorganizePlanBodySchema.parse(await readJson(request));
+  return json(
+    await context.deps.planTopicReorganization(body.refresh === true ? { refresh: true } : {}),
+  );
+}
+
+async function applyReorganize(request: Request, context: ApiContext): Promise<Response> {
+  if (!context.deps.applyTopicReorganization) return apiError(404, "NOT_FOUND", "找不到接口");
+  const body = TopicReorganizeApplyBodySchema.parse(await readJson(request));
+  const result = await context.deps.applyTopicReorganization(body);
+  publish(context.hub, ["topics", "today"]);
+  return json(result);
 }
 
 async function sync(context: ApiContext): Promise<Response> {

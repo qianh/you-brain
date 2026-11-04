@@ -38,6 +38,23 @@ export {
   TWIN_EVIDENCE_LIMIT,
   TWIN_MERGE_SYSTEM_PROMPT,
 } from "./prompt.js";
+export {
+  buildReorganizePrompt,
+  NOISE_GROUP_NAME,
+  parseReorganizePlan,
+  planTopicReorganization,
+  REORGANIZE_JSON_SCHEMA,
+  REORGANIZE_SYSTEM_PROMPT,
+  REORGANIZE_TOPIC_LIMIT,
+  reorganizeEvents,
+  reorganizeTopics,
+  type ReorganizeEvent,
+  type ReorganizeGroup,
+  type ReorganizeMember,
+  type ReorganizePlan,
+  type ReorganizeSelection,
+  type ReorganizeTopic,
+} from "./reorganize.js";
 export { runConsolidation, type ConsolidationRunResult, type ConsolidationStepResult } from "./run.js";
 export {
   BACKOFF_INITIAL_MS,

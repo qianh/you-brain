@@ -168,7 +168,13 @@ export async function openGoogleDrive(
       ...(options.signal ? { signal: options.signal } : {}),
     });
     // Without a timeout one stalled request holds the daemon's whole work queue.
-    const gdrive = google.drive({ version: "v3", auth: client, timeout: DRIVE_REQUEST_TIMEOUT_MS });
+    const gdrive = google.drive({
+      version: "v3",
+      auth: client,
+      timeout: DRIVE_REQUEST_TIMEOUT_MS,
+      // HTTP/2 uploads stall in this client until the deadline. Metadata calls are fine either way.
+      http2: false,
+    });
     let config = options.local;
     if (!config.driveRootId) {
       const connection = await connectGoogleAccount({

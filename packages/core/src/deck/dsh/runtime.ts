@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 
 import type { LlmProvider } from "@you-brain/protocol";
 
+import type { SearchProvider } from "../../auth/search-secrets.js";
+import { SEARCH_KEY_ENV, readSearchActive } from "./search-config.js";
 import { bundledDsh, type BundledDsh } from "./bundled.js";
 import { DSH_LOGIN_PROVIDERS, DshLogin, type DshLoginProviderId, type DshLoginView } from "./login.js";
 import { DshWeb, type DshWebState } from "./web.js";
@@ -21,6 +23,8 @@ export interface DshRuntimeOptions {
   homeDir: string;
   env?: NodeJS.ProcessEnv | undefined;
   getApiKey?: ((provider: LlmProvider) => string | null | undefined | Promise<string | null | undefined>) | undefined;
+  /** 第三方搜索服务（Exa）的 Key；有 Key 才给 dsh 挂对应的搜索 MCP。 */
+  getSearchKey?: ((provider: SearchProvider) => string | null | undefined | Promise<string | null | undefined>) | undefined;
   sidecarDir?: string | undefined;
   /** 守护进程可执行文件路径，用来找随 App 打包的 DSH 运行时（缺省 process.execPath）。 */
   execPath?: string | undefined;
@@ -50,8 +54,29 @@ const WEB_KEY_ENV: ReadonlyArray<readonly [LlmProvider, string]> = [
   ["openai", "OPENAI_API_KEY"],
 ];
 const STATUS_TTL_MS = 60_000;
+/** 启用的第三方搜索记在 `<数据目录>/deck/dsh/` 下这个文件里。 */
+export const SEARCH_CONFIG_FILE = "search.json";
 /** dsh 子进程只拿到这几个环境变量 + 密钥，不继承 daemon 的整个环境。 */
-const FORWARDED_ENV = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "SHELL"] as const;
+const FORWARDED_ENV = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "LANG",
+  "LC_ALL",
+  "TMPDIR",
+  "SHELL",
+  // 代理：fake-ip 模式下本机 DNS 解析到 198.18.x.x，dsh 的公网校验会拒绝；
+  // 拿到代理变量后 dsh 改由代理解析域名，web_fetch 才能出网。
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "no_proxy",
+] as const;
 
 export class DshRuntime {
   readonly #options: DshRuntimeOptions;
@@ -144,6 +169,9 @@ export class DshRuntime {
           }
           if (key !== "") env[name] = key;
         }
+        // 启用的第三方搜索的 Key 只走环境变量，不写进补丁文件。
+        const search = await this.#activeSearch();
+        if (search !== null) env[SEARCH_KEY_ENV[search.provider]] = search.key;
         return env;
       },
       patches: async () => {
@@ -152,12 +180,16 @@ export class DshRuntime {
         const signedIn = DSH_LOGIN_PROVIDERS.filter((provider) => credentials.includes(`llm-pi-ai/${provider.id}:`));
         // 随 App 带的本地插件（GUI App 桥）。文件不在就不挂（比如精简过的开发环境）。
         const bridge = join(this.sidecarDir, "plugins", "u-brain-bridge.mjs");
+        const searchPlugin = join(this.sidecarDir, "plugins", "u-brain-search.mjs");
         const text = renderDshPatch({
           plugins: base.plugins,
           mcp: this.#mcpLaunch(),
+          webSearchProvider: (await this.#activeSearch())?.provider,
           piAiProviders: signedIn.length > 0 ? Object.fromEntries(signedIn.map((provider) => [provider.id, {}])) : null,
           localPlugins: [
             ...(existsSync(bridge) ? [{ id: "u-brain-bridge", path: bridge }] : []),
+            // Exa / Tavily 搜索后端：只注册，选不选由上面的 webSearchProvider 决定。
+            ...(existsSync(searchPlugin) ? [{ id: "u-brain-search", path: searchPlugin }] : []),
             // 设置页里的“订阅登录”区块（前端 + 宿主路由，是个带 dsh.client 声明的包，按包名加载）。
             ...(existsSync(join(this.sidecarDir, "node_modules", "u-brain-login", "package.json"))
               ? [{ id: "u-brain-login", path: "u-brain-login" }]
@@ -178,6 +210,26 @@ export class DshRuntime {
       },
     });
     return this.#web.ensureStarted();
+  }
+
+  /**
+   * 当前生效的第三方搜索：设置里启用了某个后端、且它的 Key 还在，才算；否则返回 null，dsh 仍走自带的 DeepSeek 搜索。
+   * env 和补丁都从这里取，两边不会各说各话。
+   */
+  async #activeSearch(): Promise<{ provider: SearchProvider; key: string } | null> {
+    const provider = await readSearchActive(join(this.#root, SEARCH_CONFIG_FILE));
+    if (provider === null) return null;
+    try {
+      const key = (await this.#options.getSearchKey?.(provider))?.trim() ?? "";
+      return key === "" ? null : { provider, key };
+    } catch {
+      return null;
+    }
+  }
+
+  /** 搜索设置变了：重启 dsh，让它按新补丁和环境选搜索后端。dsh 没在运行就什么都不做。 */
+  refreshSearch(): void {
+    this.#web?.restart();
   }
 
   /** you-brain 自己的 MCP：显式配置优先；打包版用守护进程自身的 `mcp` 子命令。 */

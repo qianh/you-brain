@@ -95,6 +95,15 @@ describe("dsh patch", () => {
     expect(text).toContain("        env:\n          YOU_BRAIN_DATA_DIR: \"/data dir/you-brain\"");
   });
 
+  it("points the web row at the chosen search provider and keeps the stock fetch provider", () => {
+    const text = renderDshPatch({ plugins: [], webSearchProvider: "exa" });
+    expect(text).toBe('- id: web\n  config:\n    searchProvider: "exa"\n    fetchProvider: http\n');
+  });
+
+  it("leaves the web row alone when no search provider is chosen (DeepSeek default)", () => {
+    expect(renderDshPatch({ plugins: [] })).toBe("[]\n");
+  });
+
   it("quotes hostile paths as YAML scalars", () => {
     const text = renderDshPatch({
       plugins: [{ id: "gemini", title: "g", bin: '/x y/"z"\n- id: evil' }],

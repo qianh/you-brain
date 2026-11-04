@@ -230,9 +230,22 @@ export function StatusPage({ embedded = false }: { embedded?: boolean } = {}) {
           <Card>
             <StatGrid>
               <StatBlock
-                value={String(status.sync.pendingOutbox)}
+                value={String(
+                  status.sync.pendingOutboxSessions > 0
+                    ? status.sync.pendingOutboxSessions
+                    : status.sync.pendingOutbox,
+                )}
                 label={t("statPending")}
-                hint={status.sync.pendingOutbox === 0 ? t("statusAllSynced") : t("outboxLine", { count: status.sync.pendingOutbox })}
+                hint={
+                  status.sync.pendingOutbox === 0
+                    ? t("statusAllSynced")
+                    : status.sync.pendingOutboxSessions > 0
+                      ? t("outboxSessionLine", {
+                          sessions: status.sync.pendingOutboxSessions,
+                          count: status.sync.pendingOutbox,
+                        })
+                      : t("outboxLine", { count: status.sync.pendingOutbox })
+                }
                 english={language === "en"}
                 title={t("statPendingHint")}
               />

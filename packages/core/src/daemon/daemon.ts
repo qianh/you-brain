@@ -37,6 +37,9 @@ import {
   resolveSecretBackend,
   saveUserOAuthCredentials,
   setLlmApiKey,
+  getSearchKey,
+  setSearchKey,
+  type SearchProvider,
   updateUserOAuthClientId,
   type SecretBackend,
 } from "../auth/index.js";
@@ -71,6 +74,9 @@ import type {
 } from "../http/deps.js";
 import type {
   LlmKeyPutBody,
+  SearchActivePutBody,
+  SearchKeyPutBody,
+  SearchSettings,
   LlmTestBody,
   GoogleLoginResult,
   GoogleLogoutResult,
@@ -108,6 +114,11 @@ import {
   localDayKey,
   mergeSuggestionLines,
   parseMergeSuggestions,
+  planTopicReorganization,
+  reorganizeEvents,
+  reorganizeTopics,
+  type ReorganizeEvent,
+  type ReorganizePlan,
   readConsolidateLease,
   shiftDateKey,
   writeConsolidateLease,
@@ -162,7 +173,14 @@ import { EventLog } from "../sync/event-log.js";
 import { readOutboxQueue, writeOutboxQueue } from "../sync/queue.js";
 import { ProtocolSync } from "../sync/service.js";
 import type { DeviceIdentity } from "../sync/types.js";
-import { applyEvents, foldEvents, partitionTopics, persistTopicBook } from "../topics/index.js";
+import {
+  applyEvents,
+  foldEvents,
+  partitionTopics,
+  persistTopicBook,
+  recentSessionTitles,
+  type ZonedTopic,
+} from "../topics/index.js";
 import {
   decideUpload,
   emptySchedule,
@@ -174,6 +192,8 @@ import { UploadService } from "../upload/upload-service.js";
 import type { UploadIndex } from "../upload/types.js";
 import { NotionService } from "../notion/service.js";
 import { DeckService, type DeckServiceOptions } from "../deck/index.js";
+import { SEARCH_CONFIG_FILE } from "../deck/dsh/runtime.js";
+import { readSearchActive, writeSearchActive } from "../deck/dsh/search-config.js";
 import {
   captureGeneration,
   captureWorkerBinary,
@@ -649,6 +669,7 @@ export class YouBrainDaemon {
   #coding: CodingInjection | null = null;
   #output: OutputService | null = null;
   #llm: LlmBackend | null = null;
+  #reorganizePlan: Promise<ReorganizePlan> | null = null;
   #llmWarning: LlmSetupWarning | null = null;
   #llmOverride: LlmBackend | null | undefined;
   /** Consecutive timeouts that produced no stdout and no stderr. */
@@ -2196,6 +2217,23 @@ export class YouBrainDaemon {
     this.#scheduleWebhook();
   }
 
+  /** Same as `#emitUser` for many events, written and applied together. */
+  async #emitUserBatch(items: readonly ReorganizeEvent[]): Promise<void> {
+    if (items.length === 0) return;
+    if (this.#sync) {
+      await this.#sync.appendMany(items);
+      this.#scheduleWebhook();
+      return;
+    }
+    if (!this.#log || !this.#store) return;
+    const log = this.#log;
+    const events = items.map((item) => log.allocate(item.type, item.data));
+    for (const event of events) this.#enqueueLocal(event);
+    persistTopicBook(this.#store, applyEvents(foldEvents(this.#store.listEvents()), events));
+    this.#onTopicsChanged();
+    this.#scheduleWebhook();
+  }
+
   /** Drive may still be closed. Queue the event so the first flush replicates it. */
   #enqueueLocal(event: Event): void {
     const store = this.#store;
@@ -2677,6 +2715,33 @@ export class YouBrainDaemon {
     }
   }
 
+  #searchConfigPath(): string {
+    const paths = this.#paths;
+    if (!paths) throw new YouBrainError("INVALID_INPUT", "paths is not open");
+    return join(paths.dataDir, "deck", "dsh", SEARCH_CONFIG_FILE);
+  }
+
+  async #searchSettings(): Promise<SearchSettings> {
+    const options = { platform: this.#platform, backend: this.#secretBackend };
+    const hasKey = async (provider: SearchProvider): Promise<boolean> =>
+      (await getSearchKey(provider, options).catch(() => null)) !== null;
+    const active = await readSearchActive(this.#searchConfigPath());
+    return {
+      // Key 被清掉的后端不算启用：和 dsh 那边的判断一致。
+      active: active !== null && (await hasKey(active)) ? active : null,
+      providers: { exa: { hasKey: await hasKey("exa") }, tavily: { hasKey: await hasKey("tavily") } },
+    };
+  }
+
+  async #writeSearchActive(body: SearchActivePutBody): Promise<void> {
+    if (body.active !== null) {
+      const key = await getSearchKey(body.active, { platform: this.#platform, backend: this.#secretBackend });
+      if (key === null) throw new YouBrainError("INVALID_INPUT", `还没有 ${body.active} 的 API Key，先保存 Key 再启用。`);
+    }
+    await writeSearchActive(this.#searchConfigPath(), body.active);
+    this.#deck?.refreshSearch();
+  }
+
   async #writeLlmKey(body: LlmKeyPutBody): Promise<void> {
     await setLlmApiKey(body.provider, body.apiKey, {
       platform: this.#platform,
@@ -3063,6 +3128,16 @@ export class YouBrainDaemon {
       writeOAuthClient: (body) => this.#writeOAuthClient(body),
       notionStatus: () => this.#requireNotion().status(),
       notionTest: () => this.#requireNotion().testConnection(),
+      searchSettings: () => this.#searchSettings(),
+      writeSearchKey: async (body: SearchKeyPutBody) => {
+        await setSearchKey(body.provider, body.apiKey, {
+          platform: this.#platform,
+          backend: this.#secretBackend,
+        });
+        // Key 换了：如果它正是启用中的那个，指挥台要按新 Key 重启。
+        this.#deck?.refreshSearch();
+      },
+      writeSearchActive: (body: SearchActivePutBody) => this.#writeSearchActive(body),
       writeNotionKey: async (body) => {
         const notion = this.#requireNotion();
         await notion.setToken(body.token);
@@ -3158,6 +3233,28 @@ export class YouBrainDaemon {
       sync: () => this.#syncNow(),
       upload: (input) => this.#uploadNow(input),
       consolidate: (input) => this.#run(() => this.#consolidate({ manual: true, force: input.force === true })),
+      // Stays out of `#run`: a model call this long must not hold up capture and sync.
+      planTopicReorganization: (input) => {
+        if (!this.#llm) throw new HttpError(409, "NO_LLM", "还没有配置模型，没法整理话题");
+        if (input.refresh !== true && this.#reorganizePlan) return this.#reorganizePlan;
+        const run = planTopicReorganization(
+          this.#llm,
+          reorganizeTopics(foldEvents(store.listEvents())),
+        );
+        // Held here so leaving the page does not throw away minutes of model time.
+        this.#reorganizePlan = run;
+        run.catch(() => {
+          if (this.#reorganizePlan === run) this.#reorganizePlan = null;
+        });
+        return run;
+      },
+      applyTopicReorganization: (body) =>
+        this.#run(async () => {
+          const { events, merged } = reorganizeEvents(foldEvents(store.listEvents()), body.groups);
+          await this.#emitUserBatch(events);
+          this.#reorganizePlan = null;
+          return { merged };
+        }),
       reminders: async (all) => {
         const body = await readers.reminders(all);
         return {
@@ -3205,6 +3302,8 @@ export class YouBrainDaemon {
       env: this.#env,
       getApiKey: (provider) =>
         getLlmApiKey(provider, { platform: this.#platform, backend: this.#secretBackend }),
+      getSearchKey: (provider) =>
+        getSearchKey(provider, { platform: this.#platform, backend: this.#secretBackend }),
     };
   }
 
@@ -3489,6 +3588,7 @@ export class YouBrainDaemon {
       sync: {
         lastSyncAt: this.#lastSyncAt,
         pendingOutbox: this.#store?.countOutbox() ?? 0,
+        pendingOutboxSessions: this.#store?.countOutboxSessions() ?? 0,
         lastError: this.#lastSyncError?.message ?? null,
         lastErrorAt: this.#lastSyncError?.at ?? null,
       },
@@ -3764,12 +3864,13 @@ export class YouBrainDaemon {
 
   #previous(
     key: string,
-    stored: { title: string; summary: string; refinedUpTo: number } | null,
+    stored: { title: string; summary: string; refinedUpTo: number; topicId: string | null } | null,
   ): PreviousRefine | null {
     if (!stored || stored.refinedUpTo <= 0 || !this.#store) return null;
     return {
       title: stored.title,
       summary: stored.summary,
+      topicId: stored.topicId,
       conclusions: this.#store
         .listConclusions()
         .filter((item) => item.sessionKey === key)
@@ -3794,19 +3895,19 @@ export class YouBrainDaemon {
       historyDays: this.#shared.topics.historyDays,
       sessionUpdatedAt: activity,
     });
+    const titles = recentSessionTitles(book.sessions);
+    const shared = (topic: ZonedTopic) => ({
+      topicId: topic.topicId,
+      name: topic.name,
+      aliases: topic.aliases,
+      summary: topic.summary,
+      recentTitles: titles.get(topic.topicId) ?? [],
+      archived: topic.status === "done" && !topic.userLocked,
+    });
     return [
-      ...zones.active.map((topic) => ({
-        topicId: topic.topicId,
-        name: topic.name,
-        aliases: topic.aliases,
-        summary: topic.summary,
-        zone: "active" as const,
-      })),
+      ...zones.active.map((topic) => ({ ...shared(topic), zone: "active" as const })),
       ...zones.history.map((topic) => ({
-        topicId: topic.topicId,
-        name: topic.name,
-        aliases: topic.aliases,
-        summary: topic.summary,
+        ...shared(topic),
         zone: "history" as const,
         recency: Date.parse(topic.lastActive ?? "") || 0,
       })),

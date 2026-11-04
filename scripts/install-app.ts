@@ -1,5 +1,5 @@
 /**
- * Installs the built daemon into a local `you-brain.app` for ad-hoc testing.
+ * Installs the built daemon into the local `U-Brain.app` for ad-hoc testing.
  *
  * Replaces the three paths wholesale instead of copying over them: `cp -R src dest`
  * puts `src` *inside* an existing `dest`, which silently produced
@@ -9,7 +9,7 @@
  * refuses the existing keychain item, so a Google account signed in before the install
  * has to sign in once more.
  *
- * Usage: bun scripts/install-app.ts [path/to/you-brain.app]
+ * Usage: bun scripts/install-app.ts [path/to/U-Brain.app]
  */
 import { cp, rm, mkdtemp, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -18,7 +18,7 @@ import { join, resolve } from "node:path";
 const root = resolve(import.meta.dirname, "..");
 const triple = process.arch === "arm64" ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
 const built = join(root, "dist", "daemon", triple);
-const app = resolve(process.argv[2] ?? "/Applications/you-brain.app");
+const app = resolve(process.argv[2] ?? "/Applications/U-Brain.app");
 
 if (process.platform !== "darwin") {
   console.error("这个脚本只处理 macOS 的 .app；Linux 用 apps/desktop/scripts/bundle-linux.sh");

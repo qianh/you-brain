@@ -227,6 +227,30 @@ export class ProtocolSync {
   }
 
   /**
+   * Many events as one write. Applying each on its own rewrites the derived tables every
+   * time, which turns a batch of hundreds into minutes.
+   */
+  async appendMany(
+    items: readonly { [T in EventType]: { type: T; data: EventOf<T>["data"] } }[EventType][],
+  ): Promise<void> {
+    if (items.length === 0) return;
+    const events = items.map((item) => this.#log.allocate(item.type, item.data));
+    const queue = readOutboxQueue(this.#store, this.#device.deviceId);
+    queue.push(...events);
+    writeOutboxQueue(this.#store, this.#device.deviceId, queue);
+    for (const event of events) {
+      this.#store.enqueueOutbox({
+        id: event.id,
+        kind: "event",
+        payload: event,
+        createdAt: event.ts,
+      });
+    }
+    const applied = this.#apply(events);
+    if (applied.applied > 0) await this.#emitTopics(applied.book);
+  }
+
+  /**
    * Serialize this device's pending events into per-day jsonl files.
    * Callers schedule this every {@link EVENT_FLUSH_INTERVAL_MS}.
    * A failed day leaves that day's outbox intact for the next call.

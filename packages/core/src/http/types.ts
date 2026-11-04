@@ -1,3 +1,4 @@
+import { SEARCH_PROVIDERS } from "../auth/search-secrets.js";
 import { DSH_LOGIN_PROVIDER_IDS } from "../deck/dsh/login.js";
 import {
   DeviceCapabilitySchema,
@@ -202,6 +203,50 @@ export const TopicMutationBodySchema = z.discriminatedUnion("op", [
 
 export type TopicMutationBody = z.infer<typeof TopicMutationBodySchema>;
 
+export const TopicReorganizePlanBodySchema = z.object({
+  /** Discard the plan the daemon is holding and make a new one. */
+  refresh: z.boolean().optional(),
+});
+
+export const TopicReorganizeApplyBodySchema = z.object({
+  groups: z.array(
+    z.object({
+      intoTopicId: z.string().min(1),
+      fromTopicIds: z.array(z.string().min(1)).min(1),
+      name: z.string(),
+      archive: z.boolean(),
+    }),
+  ),
+});
+
+export type TopicReorganizeApplyBody = z.infer<typeof TopicReorganizeApplyBodySchema>;
+
+export interface TopicReorganizeMember {
+  topicId: string;
+  name: string;
+  sessionCount: number;
+}
+
+export interface TopicReorganizeGroup {
+  name: string;
+  reason: string;
+  intoTopicId: string;
+  /** The survivor comes first. */
+  members: TopicReorganizeMember[];
+  archive: boolean;
+}
+
+export interface TopicReorganizePlan {
+  topicCount: number;
+  reviewedCount: number;
+  topicCountAfter: number;
+  groups: TopicReorganizeGroup[];
+}
+
+export interface TopicReorganizeResult {
+  merged: number;
+}
+
 export const TodoActionBodySchema = z.object({
   todoId: z.string().min(1),
   status: TodoStatusSchema,
@@ -331,6 +376,8 @@ export interface StatusResponse {
   sync: {
     lastSyncAt: string | null;
     pendingOutbox: number;
+    /** 会话维度积压：未同步事件涉及的不同会话数。可能与 pendingOutbox 差几十倍。 */
+    pendingOutboxSessions: number;
     /** Set after a failed pull. Cleared by the next successful pull. Absent on older daemons. */
     lastError?: string | null;
     lastErrorAt?: string | null;
@@ -605,6 +652,29 @@ export const NotionKeyPutSchema = z
   .strict();
 
 export type NotionKeyPutBody = z.infer<typeof NotionKeyPutSchema>;
+
+/** PUT /api/secrets/search。第三方搜索服务（给指挥台挂搜索 MCP）的 Key 进系统钥匙串,永远不回显。 */
+export const SearchKeyPutSchema = z
+  .object({
+    provider: z.enum(SEARCH_PROVIDERS),
+    apiKey: z.string().trim().min(1),
+  })
+  .strict();
+
+export type SearchKeyPutBody = z.infer<typeof SearchKeyPutSchema>;
+
+/** PUT /api/search-provider。启用哪个第三方搜索；null = 都不启用，走 DeepSeek 默认。 */
+export const SearchActivePutSchema = z
+  .object({ active: z.enum(SEARCH_PROVIDERS).nullable() })
+  .strict();
+
+export type SearchActivePutBody = z.infer<typeof SearchActivePutSchema>;
+
+/** GET /api/search-provider。只说启用了谁、各家有没有 Key，不含 Key。 */
+export interface SearchSettings {
+  active: (typeof SEARCH_PROVIDERS)[number] | null;
+  providers: Record<(typeof SEARCH_PROVIDERS)[number], { hasKey: boolean }>;
+}
 
 export interface NotionTestResult {
   ok: boolean;

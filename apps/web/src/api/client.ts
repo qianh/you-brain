@@ -19,6 +19,9 @@ import type {
   TodayResponse,
   TopicDetail,
   TopicMutationResponse,
+  TopicReorganizeApplyBody,
+  TopicReorganizePlan,
+  TopicReorganizeResult,
   TopicsQuery,
   TopicsResponse,
   UploadActionResult,
@@ -34,6 +37,9 @@ import type {
   NotionDeleteBlockBody,
   NotionDuplicateBlockBody,
   NotionKeyPutBody,
+  SearchActivePutBody,
+  SearchKeyPutBody,
+  SearchSettings,
   NotionMoveBlockBody,
   NotionPageMutationResult,
   NotionPageView,
@@ -82,7 +88,13 @@ export interface ActionMessage {
 
 export type ReminderActionName = "reactivate" | "done" | "snooze" | "mute" | "ignore";
 
-export interface BrowserDaemon extends Omit<DaemonClient, "reminderAction" | "consolidate"> {
+export interface BrowserDaemon
+  extends Omit<
+    DaemonClient,
+    "reminderAction" | "consolidate" | "planTopicReorganization" | "applyTopicReorganization"
+  > {
+  planTopicReorganization(body?: { refresh?: boolean }): Promise<TopicReorganizePlan>;
+  applyTopicReorganization(body: TopicReorganizeApplyBody): Promise<TopicReorganizeResult>;
   putLlmKey(provider: string, apiKey: string): Promise<void>;
   testLlm(body: { provider: string; model: string; baseUrl: string }): Promise<ActionMessage>;
   googleLogin(): Promise<ActionMessage>;
@@ -107,6 +119,9 @@ export interface BrowserDaemon extends Omit<DaemonClient, "reminderAction" | "co
   notionSync(): Promise<NotionSyncResult>;
   notionTest(): Promise<NotionTestResult>;
   putNotionKey(body: NotionKeyPutBody): Promise<void>;
+  searchSettings(): Promise<SearchSettings>;
+  putSearchKey(body: SearchKeyPutBody): Promise<void>;
+  putSearchActive(body: SearchActivePutBody): Promise<SearchSettings>;
   /** 编辑块内容(可选 turn-into)/增删/移动/复制/改标题,均返回刷新后的页面。 */
   notionUpdateBlock(body: NotionUpdateBlockBody): Promise<NotionPageMutationResult>;
   notionAppendBlock(body: NotionAppendBlockBody): Promise<NotionPageMutationResult>;
@@ -212,6 +227,10 @@ export function createBrowserDaemon(options?: {
         ...(until === undefined ? {} : { until }),
       }),
     consolidate: (body) => request<ConsolidateActionResult>("POST", "/api/actions/consolidate", body ?? {}),
+    planTopicReorganization: (body) =>
+      request<TopicReorganizePlan>("POST", "/api/actions/topics-reorganize/plan", body ?? {}),
+    applyTopicReorganization: (body) =>
+      request<TopicReorganizeResult>("POST", "/api/actions/topics-reorganize/apply", body),
     sync: () => request<SyncActionResult>("POST", "/api/actions/sync"),
     upload: (body) => request<UploadActionResult>("POST", "/api/actions/upload", body ?? {}),
     todo: (body) => request<ActionResponse>("POST", "/api/actions/todo", body),
@@ -247,6 +266,12 @@ export function createBrowserDaemon(options?: {
       request<DeckDshWebResponse>("GET", retry === true ? "/api/deck/dsh?retry=1" : "/api/deck/dsh"),
     putNotionKey: async (body: NotionKeyPutBody) => {
       await request("PUT", "/api/secrets/notion", body);
+    },
+    searchSettings: () => request<SearchSettings>("GET", "/api/search-provider"),
+    putSearchActive: (body: SearchActivePutBody) =>
+      request<SearchSettings>("PUT", "/api/search-provider", body),
+    putSearchKey: async (body: SearchKeyPutBody) => {
+      await request("PUT", "/api/secrets/search", body);
     },
     notionUpdateBlock: (body: NotionUpdateBlockBody) =>
       request<NotionPageMutationResult>("POST", "/api/actions/notion-update-block", body),

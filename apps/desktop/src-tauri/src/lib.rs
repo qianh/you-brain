@@ -947,13 +947,13 @@ fn build_main(app: &tauri::AppHandle, url: WebviewUrl) -> tauri::Result<WebviewW
         .visible(false)
         .center();
     // The Web UI's top bar shares the row with the traffic lights; the bar is 56px in
-    // overlay mode (see shell.css `html.shell-overlay`), centre 28. Live-window crops
-    // show the lights' centre lands ≈ y − 3, so y = 31 puts it on the 28 centreline.
+    // overlay mode (see shell.css `html.shell-overlay`), centre 28. Measured on a live
+    // window: y = 31 puts the lights' centre at ≈ 32.75, so y ≈ 26 lands it on 28.
     #[cfg(target_os = "macos")]
     let builder = builder
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true)
-        .traffic_light_position(tauri::LogicalPosition::new(16.0, 31.0));
+        .traffic_light_position(tauri::LogicalPosition::new(16.0, 26.0));
     let window = builder.build()?;
     let main = window.clone();
     window.on_window_event(move |event| {

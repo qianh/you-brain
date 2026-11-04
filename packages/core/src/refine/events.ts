@@ -33,6 +33,7 @@ export function refineToEvents(
   output: RefineOutput,
   eventFactory: RefineEventFactory,
   ids: RefineIdSource,
+  options: { reactivate?: boolean } = {},
 ): Event[] {
   const events: Event[] = [];
   const stamp = () => {
@@ -69,13 +70,24 @@ export function refineToEvents(
       }),
     );
   }
-  events.push(
-    createEvent({
-      type: "topic.assigned",
-      ...stamp(),
-      data: { topicId, sessionKey: input.sessionKey },
-    }),
-  );
+  if (output.topic.action !== "none") {
+    events.push(
+      createEvent({
+        type: "topic.assigned",
+        ...stamp(),
+        data: { topicId, sessionKey: input.sessionKey },
+      }),
+    );
+  }
+  if (options.reactivate) {
+    events.push(
+      createEvent({
+        type: "topic.status_changed",
+        ...stamp(),
+        data: { topicId, status: "active", by: "auto" },
+      }),
+    );
+  }
   for (const text of output.conclusions_added) {
     events.push(
       createEvent({

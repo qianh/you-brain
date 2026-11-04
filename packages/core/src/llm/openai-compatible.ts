@@ -70,6 +70,7 @@ export function createOpenAiCompatibleBackend(
       requiresApiKey: options.preset.requiresApiKey,
     },
     async complete(request: LlmCompleteRequest): Promise<string> {
+      const timeoutMs = request.timeoutMs ?? options.timeoutMs;
       const format = responseFormat(request.jsonSchema, jsonMode);
       const system = request.jsonSchema
         ? `${request.system}${jsonInstruction(request.jsonSchema)}`
@@ -90,7 +91,7 @@ export function createOpenAiCompatibleBackend(
         url: joinUrl(options.baseUrl, "/chat/completions"),
         headers,
         body,
-        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
         ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
       });
       return readChatContent(payload);

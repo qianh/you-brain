@@ -1,10 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { DeckService } from "../../src/deck/service.js";
 import { renderDshPatch } from "../../src/deck/dsh/patch.js";
+import type { AxRequest, AxResult } from "../../src/deck/gui-ax.js";
+import { GUI_APPS, dispatchToGuiApp, guiAppStatus, recoverGuiAppReplies } from "../../src/deck/gui-bridge.js";
 // @ts-expect-error 插件是纯 JS 模块（随 App 打包），没有类型声明。
 import { createTools } from "../../../../sidecars/dsh-host/plugins/u-brain-bridge.mjs";
 
@@ -188,6 +190,78 @@ describe("deck service GUI bridge", () => {
     try {
       await expect(instance.bridgeSend("grok-bot", "x")).rejects.toThrow("辅助功能");
     } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe.skipIf(process.platform !== "darwin")("silent GUI dispatch", () => {
+  const grok = GUI_APPS.find((app) => app.id === "grok-bot");
+  if (!grok) throw new Error("missing grok-bot");
+  const delivered: AxResult = { ok: true, hasWindow: true, hasComposer: true, openedWindow: false, refocused: false };
+
+  it("sends the prompt to the target app and stamps the time before sending", async () => {
+    const requests: AxRequest[] = [];
+    const before = Date.now();
+    const result = await dispatchToGuiApp(grok, "任务", async (request) => {
+      requests.push(request);
+      return delivered;
+    });
+    expect(requests).toEqual([
+      expect.objectContaining({ action: "send", bundleId: "com.anysphere.sand", text: "任务" }),
+    ]);
+    expect(result.sentAtMs).toBeGreaterThanOrEqual(before);
+  });
+
+  it.each([
+    ["no_composer", "无法静默投递"],
+    ["draft", "未发送的内容"],
+    ["no_focus", "光标移到输入框"],
+    ["write_failed", "任务没有发出"],
+    ["not_cleared", "可能没有发出"],
+    ["no_permission", "辅助功能"],
+  ] as const)("reports %s instead of falling back to keystrokes", async (code, message) => {
+    let calls = 0;
+    const attempt = dispatchToGuiApp(grok, "任务", async () => {
+      calls += 1;
+      return { ok: false, code };
+    });
+    await expect(attempt).rejects.toThrow(message);
+    expect(calls).toBe(1);
+  });
+
+  it("recovers only replies that follow the task in its own conversation", async () => {
+    const home = await mkdtemp(join(tmpdir(), "grok-replies-"));
+    const root = join(home, "Library", "Application Support", "Grok Bot", "sand-client-persistence");
+    const blob = (entries: unknown[]) => JSON.stringify({ schemaVersion: 1, value: { entries } });
+    const say = (content: string, timestampMs: number) => ({ kind: "send-message", message: { type: "text", content }, timestampMs });
+    try {
+      await mkdir(root, { recursive: true });
+      await writeFile(join(root, "asked.blob"), blob([
+        say("任务之前的旧回复", 5_000),
+        { kind: "message", role: "user", content: "任务", timestampMs: 100_000 },
+        say("这次的回复", 101_000),
+      ]));
+      await writeFile(join(root, "other-bot.blob"), blob([
+        { kind: "message", role: "user", content: "很久以前的提问", timestampMs: 1_000 },
+        say("别的 Bot 自动发的消息", 102_000),
+      ]));
+      expect(await recoverGuiAppReplies(grok, 100_000, home)).toEqual(["这次的回复"]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("status reflects whether the composer can actually be reached", async () => {
+    const status = (result: AxResult) =>
+      guiAppStatus(grok, async () => true, { running: async () => true, ax: async () => result });
+    expect(await status(delivered)).toMatchObject({ available: true, detail: "就绪" });
+    expect(await status({ ...delivered, hasWindow: false, hasComposer: false })).toMatchObject({
+      available: true,
+      detail: expect.stringContaining("窗口未打开"),
+    });
+    expect(await status({ ...delivered, hasComposer: false })).toMatchObject({
+      available: false,
+      detail: expect.stringContaining("无法静默投递"),
+    });
   });
 });
 

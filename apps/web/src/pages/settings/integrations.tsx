@@ -9,6 +9,7 @@ import { useDaemon } from "../../daemon-context.js";
 import { sourceLabel } from "../../lib/format.js";
 import { toggleMember } from "./logic.js";
 import { NotionSection } from "./notion.js";
+import { SearchKeySection } from "./search-key.js";
 import { WebhookSection } from "./webhook.js";
 
 const GROUPS = [
@@ -66,6 +67,7 @@ export function IntegrationsSection({
       })}
       <WebhookSection />
       <NotionSection />
+      <SearchKeySection />
     </div>
   );
 }

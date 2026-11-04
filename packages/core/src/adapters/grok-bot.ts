@@ -9,8 +9,9 @@ import type { AdapterResult, CaptureOptions, SourceAdapter, SourceFile } from ".
  * Grok Bot（xAI 桌面应用）把线程数据落在 Electron 的 `sand-client-persistence`
  * 目录：每个 `*.blob` 是一份明文 JSON（`{"schemaVersion":n,"value":…}`）。
  * 线程转录的 `value.entries[]` 里，`kind:"message"` 的条目带 `role`、
- * `content` 和 `timestampMs`；UI 状态（侧栏、信息面板）也是 blob，但没有
- * `entries`。本适配器只认转录 blob。
+ * `content` 和 `timestampMs`；Bot 给用户的回复大多是 `kind:"send-message"`，
+ * 没有 `role`，正文在 `message:{type:"text",content}`。UI 状态（侧栏、信息面板）
+ * 也是 blob，但没有 `entries`。本适配器只认转录 blob。
  */
 
 export function grokBotPersistenceRoot(homeDir: string = osHomedir()): string | null {
@@ -58,6 +59,12 @@ function coerceRole(value: unknown): "user" | "assistant" | null {
   return value === "user" || value === "assistant" ? value : null;
 }
 
+/** Bot 发给用户的文字（`send-message`）；图片、卡片等其它类型返回 null。 */
+function sentMessageText(entry: BlobEntry): string | null {
+  if (entry.kind !== "send-message" || !isRecord(entry.message) || entry.message.type !== "text") return null;
+  return coerceEntryText(entry.message.content);
+}
+
 /** 从一份 blob JSON 里抽转录 turns；不是转录 blob 返回空数组。 */
 export function grokBotTurns(value: unknown): GrokBotTurn[] {
   if (!isRecord(value)) return [];
@@ -67,8 +74,9 @@ export function grokBotTurns(value: unknown): GrokBotTurn[] {
   for (const raw of entries) {
     if (!isRecord(raw)) continue;
     const entry = raw as BlobEntry;
-    const role = coerceRole(entry.role);
-    const text = coerceEntryText(entry.content) ?? coerceEntryText(entry.message);
+    const sent = sentMessageText(entry);
+    const role = sent === null ? coerceRole(entry.role) : "assistant";
+    const text = sent ?? coerceEntryText(entry.content) ?? coerceEntryText(entry.message);
     if (!role || text === null) continue;
     turns.push({ role, text, atMs: coerceTimestampMs(entry.timestampMs) });
   }

@@ -4,9 +4,16 @@ export {
   foldEvents,
   topicBookView,
 } from "./fold.js";
-export { canonicalTopicName } from "./normalize.js";
+export { canonicalTopicName, topicStem } from "./normalize.js";
 export { compareEvents, compareSortKeys, eventSortKey } from "./order.js";
 export { persistTopicBook } from "./persist.js";
+export {
+  rankTopicsByText,
+  recentSessionTitles,
+  topicTerms,
+  type RankedTopic,
+  type TopicText,
+} from "./similarity.js";
 export { deriveLastActive, partitionTopics, resolveMergedTopic } from "./zones.js";
 export type {
   ConclusionState,

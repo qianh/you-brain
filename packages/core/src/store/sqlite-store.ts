@@ -448,6 +448,18 @@ export class SqliteStore {
     return row?.count ?? 0;
   }
 
+  /** 会话维度的积压：未 ack 事件里出现过的不同 sessionKey。事件数可能是它的几十倍。 */
+  countOutboxSessions(): number {
+    const row = this.#db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(DISTINCT json_extract(payload, '$.data.sessionKey')) AS count " +
+          "FROM outbox WHERE status != 'acked' " +
+          "AND json_extract(payload, '$.data.sessionKey') IS NOT NULL",
+      )
+      .get();
+    return row?.count ?? 0;
+  }
+
   getTopic(topicId: string): TopicRecord | null {
     const row = this.#db
       .query<TopicRow, [string]>("SELECT * FROM topics WHERE topic_id = ?")

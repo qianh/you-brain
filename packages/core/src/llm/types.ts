@@ -7,6 +7,8 @@ export interface LlmCompleteRequest {
   system: string;
   user: string;
   jsonSchema?: object;
+  /** For one unusually long call. Everything else keeps the backend's default. */
+  timeoutMs?: number;
 }
 
 export interface LlmBackendDescriptor {

@@ -101,7 +101,7 @@ export function createTools(deps = {}) {
     {
       name: "gui_app_ask",
       description:
-        "把一个自包含的任务投递给本机桌面 AI App（先用 gui_app_list 确认 id 和是否就绪），并等待它的回复。会真的激活该 App 并往输入框粘贴内容，所以只在用户明确要求用那个 App 做事时使用。回复无法自动回收的 App（如 Muse）只会返回“已投递”。",
+        "把一个自包含的任务投递给本机桌面 AI App（先用 gui_app_list 确认 id 和是否就绪），并等待它的回复。投递是静默的：直接写入该 App 当前打开的对话并发送，不切换窗口、不动键盘和剪贴板。它会真的发出一条消息，所以只在用户明确要求用那个 App 做事时使用。回复无法自动回收的 App 只会返回“已投递”。\n规则：①投递报错时，把错误原文告诉用户并停止，不要重试；②等不到回复不代表失败，不要重发同一任务，用 gui_app_replies 稍后再查；③任何情况下都不要用 bash、osascript、python 等去操作 App 的界面，也不要读取 daemon.json 或直接调用 U-Brain 的接口——这些是越权，还可能把内容发到别的 App。",
       parameters: {
         app: { type: "string", required: true, description: "App id，如 grok-bot、muse" },
         prompt: { type: "string", required: true, description: "要它执行的任务，必须自包含（它看不到当前对话）" },

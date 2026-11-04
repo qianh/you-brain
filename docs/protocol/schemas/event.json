@@ -273,6 +273,13 @@
               },
               "type": "array"
             },
+            "by": {
+              "enum": [
+                "auto",
+                "user"
+              ],
+              "type": "string"
+            },
             "name": {
               "minLength": 1,
               "type": "string"
@@ -403,6 +410,13 @@
         "data": {
           "additionalProperties": false,
           "properties": {
+            "by": {
+              "enum": [
+                "auto",
+                "user"
+              ],
+              "type": "string"
+            },
             "fromTopicId": {
               "minLength": 1,
               "type": "string"

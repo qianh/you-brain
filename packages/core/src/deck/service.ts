@@ -1,5 +1,6 @@
 import type { LlmProvider } from "@you-brain/protocol";
 
+import type { SearchProvider } from "../auth/search-secrets.js";
 import type { DshLoginProviderId, DshLoginView } from "./dsh/login.js";
 import { DshRuntime, type DshRuntimeOptions } from "./dsh/runtime.js";
 import type { DshWebState } from "./dsh/web.js";
@@ -24,6 +25,8 @@ export interface DeckServiceOptions {
   env?: NodeJS.ProcessEnv;
   /** 设置里的各供应商 Key 经这里交给 dsh 做环境层凭据（daemon 传钥匙串读取）。 */
   getApiKey?: (provider: LlmProvider) => string | null | undefined | Promise<string | null | undefined>;
+  /** 第三方搜索服务（Exa）的 Key，有才给 dsh 挂搜索 MCP。 */
+  getSearchKey?: (provider: SearchProvider) => string | null | undefined | Promise<string | null | undefined>;
   /** false 时不在启动后预热 dsh（测试用）。 */
   warmDsh?: boolean;
   /** GUI App 桥的实现（缺省用 macOS 辅助功能 + 采集适配器）；测试注入。 */
@@ -33,7 +36,7 @@ export interface DeckServiceOptions {
     replies(appId: string, sinceMs: number): Promise<string[]>;
   };
   dsh?: {
-    runtime?: Pick<DshRuntime, "close" | "webState" | "loginView" | "loginAction">;
+    runtime?: Pick<DshRuntime, "close" | "webState" | "loginView" | "loginAction"> & Partial<Pick<DshRuntime, "refreshSearch">>;
     sidecarDir?: string;
     nodePath?: string;
     mcpLaunch?: DshRuntimeOptions["mcpLaunch"];
@@ -45,7 +48,8 @@ const DSH_WARM_DELAY_MS = 3_000;
 
 export class DeckService {
   readonly #options: DeckServiceOptions;
-  readonly #dsh: Pick<DshRuntime, "close" | "webState" | "loginView" | "loginAction">;
+  readonly #dsh: Pick<DshRuntime, "close" | "webState" | "loginView" | "loginAction"> &
+    Partial<Pick<DshRuntime, "refreshSearch">>;
   #stopped = false;
 
   constructor(options: DeckServiceOptions) {
@@ -57,6 +61,7 @@ export class DeckService {
         homeDir: options.homeDir,
         env: options.env,
         getApiKey: options.getApiKey,
+        getSearchKey: options.getSearchKey,
         sidecarDir: options.dsh?.sidecarDir,
         nodePath: options.dsh?.nodePath ?? options.env?.YOU_BRAIN_NODE24,
         mcpLaunch: options.dsh?.mcpLaunch,
@@ -84,6 +89,11 @@ export class DeckService {
   /** 嵌入指挥台页面的 dsh Web 界面：启动（若未运行）并返回状态；retry 才会重启出错的进程。 */
   async dshWeb(retry = false): Promise<DshWebState> {
     return this.#dsh.webState(retry);
+  }
+
+  /** 搜索 Key 变了：让 dsh 重载补丁。 */
+  refreshSearch(): void {
+    this.#dsh.refreshSearch?.();
   }
 
   async dshLogin(): Promise<DshLoginView[]> {

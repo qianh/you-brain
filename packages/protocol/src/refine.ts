@@ -1,6 +1,7 @@
 import { z } from "zod";
 
-export const REFINE_TOPIC_ACTIONS = ["assign", "create"] as const;
+/** `none`: the session has nothing worth keeping (a connectivity probe, an empty chat). */
+export const REFINE_TOPIC_ACTIONS = ["assign", "create", "none"] as const;
 
 export const RefineTopicSchema = z.object({
   action: z.enum(REFINE_TOPIC_ACTIONS),

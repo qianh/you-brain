@@ -3,6 +3,9 @@ pub struct StatusSnapshot {
     pub drive_reachable: Option<bool>,
     pub last_sync_at: Option<String>,
     pub pending_outbox: u64,
+    /// Session-dimension backlog: distinct sessions among unacked events.
+    /// Can be far smaller than `pending_outbox`; 0 on older daemons.
+    pub pending_sessions: u64,
     pub warnings: Vec<String>,
     pub refine_error: Option<String>,
     pub consolidation_stale: bool,
@@ -32,6 +35,10 @@ pub fn parse_status_value(value: &serde_json::Value) -> Result<StatusSnapshot, (
             .pointer("/sync/pendingOutbox")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
+        pending_sessions: value
+            .pointer("/sync/pendingOutboxSessions")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
         warnings: warning_messages(value.get("warnings")),
         refine_error: optional_string(value.pointer("/refine/lastError")),
         consolidation_stale: value
@@ -48,7 +55,11 @@ pub fn present(status: &StatusSnapshot, reminders: usize) -> TrayPresentation {
         format!("异常 {}", anomalies.len())
     } else if reminders > 0 {
         format!("提醒 {reminders}")
+    } else if status.pending_sessions > 0 {
+        // 主角是会话：1 个会话可能压着 40 条事件，按事件数展示会虚高。
+        format!("待同步 {} 个会话", status.pending_sessions)
     } else if status.pending_outbox > 0 {
+        // 只剩不挂在会话上的事件（网页端手动操作等）时按事件数展示。
         format!("待同步 {}", status.pending_outbox)
     } else if status.last_sync_at.is_some() {
         "已同步".to_string()
@@ -58,7 +69,7 @@ pub fn present(status: &StatusSnapshot, reminders: usize) -> TrayPresentation {
     let mut tooltip = format!(
         "you-brain\n同步：{}\n待上传：{}\n提醒：{reminders}",
         status.last_sync_at.as_deref().unwrap_or("从未"),
-        status.pending_outbox,
+        pending_upload_text(status),
     );
     if !anomalies.is_empty() {
         tooltip.push_str("\n异常：");
@@ -91,6 +102,17 @@ pub fn notification_body(status: &StatusSnapshot) -> String {
 
 pub fn should_notify(previous: Option<&str>, next: &str) -> bool {
     previous.is_some() && !next.is_empty() && previous != Some(next)
+}
+
+/// Tooltip 的待上传行：有会话维度数据时同时给出会话数和事件数。
+fn pending_upload_text(status: &StatusSnapshot) -> String {
+    if status.pending_outbox == 0 {
+        "0".to_string()
+    } else if status.pending_sessions > 0 {
+        format!("{} 个会话 · {} 条事件", status.pending_sessions, status.pending_outbox)
+    } else {
+        format!("{} 条事件", status.pending_outbox)
+    }
 }
 
 fn anomaly_lines(status: &StatusSnapshot) -> Vec<String> {
@@ -153,6 +175,7 @@ mod tests {
             drive_reachable: Some(true),
             last_sync_at: Some("2026-10-18T02:00:00Z".into()),
             pending_outbox: 0,
+            pending_sessions: 0,
             warnings: Vec::new(),
             refine_error: None,
             consolidation_stale: false,
@@ -209,6 +232,22 @@ mod tests {
     }
 
     #[test]
+    fn pending_badge_counts_sessions_not_events() {
+        let mut status = sample();
+        status.last_sync_at = None;
+        status.pending_outbox = 40;
+        status.pending_sessions = 1;
+        let view = present(&status, 0);
+        assert_eq!(view.title, "待同步 1 个会话");
+        assert!(view.tooltip.contains("1 个会话 · 40 条事件"));
+        // 没有会话维度数据（旧 daemon）时退回事件数。
+        status.pending_sessions = 0;
+        assert_eq!(present(&status, 0).title, "待同步 40");
+        // 剩下的都是不挂会话的事件时同样退回事件数。
+        assert!(present(&status, 0).tooltip.contains("40 条事件"));
+    }
+
+    #[test]
     fn notification_fires_only_when_attention_changes() {
         assert!(!should_notify(None, "r:1\n"));
         assert!(!should_notify(Some(""), ""));
@@ -220,11 +259,12 @@ mod tests {
     #[test]
     fn parses_the_daemon_status_shape() {
         let status = parse_status_json(
-            r#"{"deviceId":null,"drive":{"reachable":false,"accountEmail":null},"sync":{"lastSyncAt":null,"pendingOutbox":2},"search":{"ready":false,"documents":0},"refine":{"pending":0,"lastError":"timeout"},"consolidation":{"lastFinishedAt":null,"stale":true},"warnings":[{"code":"DRIVE","message":"offline"}]}"#,
+            r#"{"deviceId":null,"drive":{"reachable":false,"accountEmail":null},"sync":{"lastSyncAt":null,"pendingOutbox":2,"pendingOutboxSessions":1},"search":{"ready":false,"documents":0},"refine":{"pending":0,"lastError":"timeout"},"consolidation":{"lastFinishedAt":null,"stale":true},"warnings":[{"code":"DRIVE","message":"offline"}]}"#,
         )
         .unwrap();
         assert_eq!(status.drive_reachable, Some(false));
         assert_eq!(status.pending_outbox, 2);
+        assert_eq!(status.pending_sessions, 1);
         assert_eq!(status.warnings, vec!["offline".to_string()]);
         assert_eq!(status.refine_error.as_deref(), Some("timeout"));
         assert!(status.consolidation_stale);

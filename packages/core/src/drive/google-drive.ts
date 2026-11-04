@@ -71,6 +71,22 @@ function asBuffer(content: Buffer | string): Buffer {
   return typeof content === "string" ? Buffer.from(content, "utf8") : Buffer.from(content);
 }
 
+/**
+ * `Readable.from(buffer)` never ends under Bun, so gaxios waits until the request
+ * deadline. A one-shot readable pushes the bytes and then EOF.
+ */
+function mediaStream(bytes: Buffer): Readable {
+  let sent = false;
+  return new Readable({
+    read() {
+      if (sent) return;
+      sent = true;
+      this.push(bytes);
+      this.push(null);
+    },
+  });
+}
+
 export class DriveRequestTimeoutError extends Error {
   readonly code = "DRIVE_REQUEST_TIMEOUT" as const;
 
@@ -139,6 +155,7 @@ function withRequestDeadlines<T extends object>(client: T, deadlineMs: number): 
 export class GoogleDrive implements DrivePort {
   readonly #client: drive_v3.Drive;
   readonly #rootFolderId: string;
+  readonly #requestDeadlineMs: number;
   readonly #folderCreations = new Map<string, Promise<string>>();
   readonly #now: () => number;
   /** Folder ids per intermediate directory path. The last path segment is never cached. */
@@ -166,10 +183,8 @@ export class GoogleDrive implements DrivePort {
         "Drive root folder is not configured",
       );
     }
-    this.#client = withRequestDeadlines(
-      options.client,
-      options.requestDeadlineMs ?? DEFAULT_REQUEST_DEADLINE_MS,
-    );
+    this.#requestDeadlineMs = options.requestDeadlineMs ?? DEFAULT_REQUEST_DEADLINE_MS;
+    this.#client = withRequestDeadlines(options.client, this.#requestDeadlineMs);
     this.#rootFolderId = options.rootFolderId;
     this.#now = options.now ?? Date.now;
   }
@@ -692,6 +707,80 @@ export class GoogleDrive implements DrivePort {
     return segments.join("/");
   }
 
+  /**
+   * The googleapis media upload never finishes on Bun. A real client has an auth
+   * object, so those writes go out as one multipart request. Test doubles have no
+   * auth and keep using `files.create` / `files.update`.
+   */
+  async #accessToken(): Promise<string | null> {
+    const auth = (
+      this.#client as unknown as {
+        context?: {
+          _options?: {
+            auth?: { getAccessToken?: () => Promise<{ token?: string | null }> };
+          };
+        };
+      }
+    ).context?._options?.auth;
+    if (!auth?.getAccessToken) return null;
+    const token = await auth.getAccessToken();
+    return token.token ?? null;
+  }
+
+  async #uploadBytes(input: {
+    method: "POST" | "PATCH";
+    fileId?: string;
+    metadata: Record<string, unknown>;
+    bytes: Buffer;
+    mimeType: string;
+    ifMatch?: string;
+  }): Promise<{ file: drive_v3.Schema$File; etag: string } | null> {
+    const token = await this.#accessToken();
+    if (!token) return null;
+    const boundary = `you-brain-${crypto.randomUUID()}`;
+    const head = Buffer.from(
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(input.metadata)}\r\n--${boundary}\r\nContent-Type: ${input.mimeType}\r\n\r\n`,
+      "utf8",
+    );
+    const tail = Buffer.from(`\r\n--${boundary}--\r\n`, "utf8");
+    const query = new URLSearchParams({
+      uploadType: "multipart",
+      supportsAllDrives: "true",
+      fields: fileFields,
+    });
+    const path = input.fileId
+      ? `/upload/drive/v3/files/${encodeURIComponent(input.fileId)}`
+      : "/upload/drive/v3/files";
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": `multipart/related; boundary=${boundary}`,
+    };
+    if (input.ifMatch !== undefined) headers["If-Match"] = input.ifMatch;
+    let response: Response;
+    try {
+      response = await fetch(`https://www.googleapis.com${path}?${query}`, {
+        method: input.method,
+        headers,
+        body: Buffer.concat([head, input.bytes, tail]),
+        signal: AbortSignal.timeout(this.#requestDeadlineMs),
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "TimeoutError") {
+        throw new DriveRequestTimeoutError(input.fileId ? "files.update" : "files.create");
+      }
+      throw error;
+    }
+    if (response.status === 412) throw new ConflictError();
+    if (!response.ok) {
+      throw new YouBrainError(
+        "UPLOAD_FAILED",
+        `Google Drive upload failed: ${response.status}`,
+      );
+    }
+    const file = (await response.json()) as drive_v3.Schema$File;
+    return { file, etag: response.headers.get("etag") ?? String(file.version ?? "") };
+  }
+
   async create(input: DrivePutInput): Promise<DriveEntry> {
     return this.put(input);
   }
@@ -701,13 +790,24 @@ export class GoogleDrive implements DrivePort {
     const parent = await this.ensureFolder(
       posix.dirname(path) === "." ? "" : posix.dirname(path),
     );
+    const metadata = {
+      name: posix.basename(path),
+      parents: [parent],
+      ...(input.appProperties ? { appProperties: input.appProperties } : {}),
+    };
+    const bytes = asBuffer(input.bytes);
+    const uploaded = await this.#uploadBytes({
+      method: "POST",
+      metadata,
+      bytes,
+      mimeType: input.mimeType,
+    });
+    if (uploaded) {
+      return this.#entry(uploaded.file, path, uploaded.etag);
+    }
     const response = await this.#client.files.create({
-      requestBody: {
-        name: posix.basename(path),
-        parents: [parent],
-        ...(input.appProperties ? { appProperties: input.appProperties } : {}),
-      },
-      media: { mimeType: input.mimeType, body: Readable.from(input.bytes) },
+      requestBody: metadata,
+      media: { mimeType: input.mimeType, body: mediaStream(bytes) },
       fields: fileFields,
       supportsAllDrives: true,
     });
@@ -732,12 +832,23 @@ export class GoogleDrive implements DrivePort {
     }
     const mimeType =
       options?.mimeType ?? current.data.mimeType ?? "application/octet-stream";
+    const metadata = options?.appProperties ? { appProperties: options.appProperties } : {};
+    const uploaded = await this.#uploadBytes({
+      method: "PATCH",
+      fileId,
+      metadata,
+      bytes,
+      mimeType,
+      ...(options?.ifMatch !== undefined ? { ifMatch: options.ifMatch } : {}),
+    });
+    if (uploaded) {
+      const path = await this.#pathFor(fileId);
+      return this.#entry(uploaded.file, path, uploaded.etag);
+    }
     const request = {
       fileId,
-      requestBody: options?.appProperties
-        ? { appProperties: options.appProperties }
-        : {},
-      media: { mimeType, body: Readable.from(bytes) },
+      requestBody: metadata,
+      media: { mimeType, body: mediaStream(bytes) },
       fields: fileFields,
       supportsAllDrives: true,
     };

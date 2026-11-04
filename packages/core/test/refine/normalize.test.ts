@@ -126,4 +126,73 @@ describe("normalize refine output", () => {
       aliases: ["脚本"],
     });
   });
+
+  it("keeps a session on its topic whatever the model says", () => {
+    const previous = { title: "旧", summary: "旧", conclusions: [], todos: [], topicId: "topic-1" };
+    for (const topic of [
+      { action: "create" as const, topicId: "", name: "今日A股行情", aliases: [] },
+      { action: "assign" as const, topicId: "topic-2", name: "别的", aliases: [] },
+      { action: "none" as const, topicId: "", name: "", aliases: [] },
+    ]) {
+      const normalized = normalizeRefineOutput(output({ topic }), {
+        topics: [...topics, { topicId: "topic-2", name: "别的", aliases: [], summary: "", zone: "active" }],
+        openTodos: [],
+        previous,
+        ids: { topicId: () => "should-not-run" },
+      });
+      expect(normalized.topic.topicId).toBe("topic-1");
+      expect(normalized.topic.action).toBe("assign");
+    }
+  });
+
+  it("lets a session choose again when its topic no longer exists", () => {
+    const normalized = normalizeRefineOutput(
+      output({ topic: { action: "create", topicId: "", name: "全新事项", aliases: [] } }),
+      {
+        topics,
+        openTodos: [],
+        previous: { title: "旧", summary: "旧", conclusions: [], todos: [], topicId: "gone" },
+        ids: { topicId: () => "topic-new" },
+      },
+    );
+    expect(normalized.topic.topicId).toBe("topic-new");
+  });
+
+  it("drops conclusions and todos for a session with nothing worth keeping", () => {
+    const normalized = normalizeRefineOutput(
+      output({
+        topic: { action: "none", topicId: "", name: "", aliases: [] },
+        conclusions_added: ["回复了 ok"],
+        todos_added: [{ text: "再测一次", confidence: 0.9 }],
+      }),
+      { topics, openTodos: [], previous: null, ids: { topicId: () => "unused" } },
+    );
+    expect(normalized.topic.action).toBe("none");
+    expect(normalized.conclusions_added).toEqual([]);
+    expect(normalized.todos_added).toEqual([]);
+  });
+
+  it("does not open a duplicate that differs only by punctuation or a verb", () => {
+    const existing: CandidateTopic[] = [
+      { topicId: "port", name: "GM2 港口目录接入", aliases: [], summary: "", zone: "history" },
+    ];
+    for (const name of ["gm2-港口目录接入", "GM2港口目录接入评审", "GM2港口目录接入修复复核"]) {
+      const normalized = normalizeRefineOutput(
+        output({ topic: { action: "create", topicId: "", name, aliases: [] } }),
+        { topics: existing, openTodos: [], previous: null, ids: { topicId: () => "should-not-run" } },
+      );
+      expect(normalized.topic).toMatchObject({ action: "assign", topicId: "port" });
+    }
+  });
+
+  it("does not let two reviews of different things collapse into one", () => {
+    const existing: CandidateTopic[] = [
+      { topicId: "x", name: "代码审查", aliases: [], summary: "", zone: "history" },
+    ];
+    const normalized = normalizeRefineOutput(
+      output({ topic: { action: "create", topicId: "", name: "合同审查", aliases: [] } }),
+      { topics: existing, openTodos: [], previous: null, ids: { topicId: () => "topic-new" } },
+    );
+    expect(normalized.topic.action).toBe("create");
+  });
 });

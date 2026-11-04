@@ -299,4 +299,62 @@ describe("refine session", () => {
     ).rejects.toMatchObject({ kind: "rate_limit" });
     expect(failing.calls).toBe(1);
   });
+
+  it("records a session with nothing worth keeping without giving it a topic", async () => {
+    const model = backend([
+      JSON.stringify({
+        ...clean,
+        title: "回复 ok",
+        topic: { action: "none", topicId: "", name: "", aliases: [] },
+      }),
+    ]);
+    const result = await refineSession(model, input(), { eventFactory: factory(), ids: ids() });
+    if (result.status !== "refined") throw new Error("expected refined");
+    expect(result.events.map((event) => event.type)).toEqual(["session.refined"]);
+  });
+
+  it("brings an archived topic back when new work lands on it", async () => {
+    const base = input();
+    const archived = { ...base, topics: base.topics.map((topic) => ({ ...topic, archived: true })) };
+    const result = await refineSession(backend([JSON.stringify(clean)]), archived, {
+      eventFactory: factory(),
+      ids: ids(),
+    });
+    if (result.status !== "refined") throw new Error("expected refined");
+    expect(result.events.find((event) => event.type === "topic.status_changed")).toMatchObject({
+      data: { topicId: "topic-1", status: "active", by: "auto" },
+    });
+  });
+
+  it("shows the model the old topic that matches, past the recency window", async () => {
+    let user = "";
+    const model = backend([JSON.stringify(clean)]);
+    const complete = model.complete.bind(model);
+    model.complete = async (request) => {
+      user = request.user;
+      return complete(request);
+    };
+    const base = input(["GM2港口目录还要再修一下"]);
+    const history = Array.from({ length: 40 }, (_, index) => ({
+      topicId: `recent-${index}`,
+      name: `最近话题${index}`,
+      aliases: [],
+      summary: "",
+      zone: "history" as const,
+      recency: 1_000 + index,
+    }));
+    await refineSession(
+      model,
+      {
+        ...base,
+        topics: [
+          ...base.topics,
+          ...history,
+          { topicId: "port", name: "GM2港口目录接入", aliases: [], summary: "", zone: "history", recency: 1 },
+        ],
+      },
+      { eventFactory: factory(), ids: ids() },
+    );
+    expect(user).toContain("GM2港口目录接入");
+  });
 });

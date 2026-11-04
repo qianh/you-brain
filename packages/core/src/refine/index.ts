@@ -7,6 +7,7 @@ export {
   DEFAULT_REFINE_CHAR_BUDGET,
   fitRefineMessages,
   messageBlock,
+  candidateQuery,
   selectCandidateTopics,
   selectOpenTodos,
   type FittedMessages,
