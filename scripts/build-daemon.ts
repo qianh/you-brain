@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { cachedTree, hashInputs, runInstall } from "./build-cache.ts";
 import {
   officialOAuthDefine,
   parseReleaseEnv,
@@ -72,55 +73,64 @@ if (oauth.credentials) {
   console.log("已注入官方 OAuth 凭据");
 }
 
-const vendorRoot = await mkdtemp(join(tmpdir(), "you-brain-vendor-"));
-try {
-  await Bun.write(
-    join(vendorRoot, "package.json"),
-    `${JSON.stringify(
-      {
-        name: "you-brain-vendor",
-        private: true,
-        dependencies: {
-          "@huggingface/transformers": "4.3.1",
-          sharp: "0.34.5",
-          "onnxruntime-node": "1.30.0",
-        },
-        trustedDependencies: [
-          "sharp",
-          "onnxruntime-node",
-          "protobufjs",
-          "@huggingface/transformers",
-        ],
-      },
-      null,
-      2,
-    )}\n`,
-  );
-  await run([bun, "install"], vendorRoot);
-  const vendorModules = join(outDir, "vendor", "node_modules");
-  await mkdir(join(outDir, "vendor"), { recursive: true });
-  await cp(join(vendorRoot, "node_modules"), vendorModules, {
-    recursive: true,
-    dereference: true,
-  });
-  for (const name of ["sharp", "@huggingface/transformers", "onnxruntime-node"]) {
-    if (!(await isDir(join(vendorModules, name)))) {
-      throw new Error(`vendor 缺少 ${name}`);
+const vendorManifest = `${JSON.stringify(
+  {
+    name: "you-brain-vendor",
+    private: true,
+    dependencies: {
+      "@huggingface/transformers": "4.3.1",
+      sharp: "0.34.5",
+      "onnxruntime-node": "1.30.0",
+    },
+    trustedDependencies: [
+      "sharp",
+      "onnxruntime-node",
+      "protobufjs",
+      "@huggingface/transformers",
+    ],
+  },
+  null,
+  2,
+)}\n`;
+await cachedTree({
+  cacheRoot: join(root, "dist", ".build-cache"),
+  name: "vendor",
+  // 带上本脚本：裁剪规则变了也要重新生成。
+  key: hashInputs([triple, Bun.version, vendorManifest, await readFile(fileURLToPath(import.meta.url))]),
+  dest: join(outDir, "vendor"),
+  build: async (out) => {
+    const vendorRoot = await mkdtemp(join(tmpdir(), "you-brain-vendor-"));
+    try {
+      await Bun.write(join(vendorRoot, "package.json"), vendorManifest);
+      // 元数据缓存过期后，bun install 经本机代理会停在 Resolving dependencies；直连镜像没有这个问题。
+      await runInstall([bun, "install"], vendorRoot, { directFirst: true });
+      const vendorModules = join(out, "node_modules");
+      await mkdir(out, { recursive: true });
+      await cp(join(vendorRoot, "node_modules"), vendorModules, {
+        recursive: true,
+        dereference: true,
+      });
+      for (const name of ["sharp", "@huggingface/transformers", "onnxruntime-node"]) {
+        if (!(await isDir(join(vendorModules, name)))) {
+          throw new Error(`vendor 缺少 ${name}`);
+        }
+      }
+      const before = await dirBytes(out);
+      await pruneVendor(vendorModules, triple);
+      const after = await dirBytes(out);
+      console.log(
+        JSON.stringify({
+          vendorBefore: formatBytes(before),
+          vendorAfter: formatBytes(after),
+        }),
+      );
+    } finally {
+      await rm(vendorRoot, { recursive: true, force: true });
     }
-  }
-  const before = await dirBytes(join(outDir, "vendor"));
-  await pruneVendor(vendorModules, triple);
-  const after = await dirBytes(join(outDir, "vendor"));
-  console.log(
-    JSON.stringify({
-      vendorBefore: formatBytes(before),
-      vendorAfter: formatBytes(after),
-    }),
-  );
-} finally {
-  await rm(vendorRoot, { recursive: true, force: true });
-}
+  },
+});
 
+await run([bun, "run", "--cwd", join(root, "apps/web"), "build"], root);
 const webDist = join(root, "apps/web/dist");
 if (await isDir(webDist)) {
   await cp(webDist, join(outDir, "web"), { recursive: true, dereference: true });
