@@ -55,6 +55,7 @@ export {
   type ReorganizeSelection,
   type ReorganizeTopic,
 } from "./reorganize.js";
+export { REORGANIZE_DEADLINE_MS, ReorganizeJob, type ReorganizeJobStatus } from "./reorganize-job.js";
 export { runConsolidation, type ConsolidationRunResult, type ConsolidationStepResult } from "./run.js";
 export {
   BACKOFF_INITIAL_MS,

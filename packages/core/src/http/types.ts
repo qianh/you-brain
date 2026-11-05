@@ -243,6 +243,13 @@ export interface TopicReorganizePlan {
   groups: TopicReorganizeGroup[];
 }
 
+/** What the daemon knows about the plan. `queued` is waiting behind other model calls. */
+export type TopicReorganizeStatus =
+  | { state: "idle" }
+  | { state: "queued" | "running"; startedAt: string }
+  | { state: "ready"; plan: TopicReorganizePlan }
+  | { state: "failed"; message: string };
+
 export interface TopicReorganizeResult {
   merged: number;
 }

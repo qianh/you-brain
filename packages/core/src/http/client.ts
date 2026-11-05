@@ -25,8 +25,8 @@ import {
   type TopicMutationBody,
   type TopicMutationResponse,
   type TopicReorganizeApplyBody,
-  type TopicReorganizePlan,
   type TopicReorganizeResult,
+  type TopicReorganizeStatus,
   type TopicsQuery,
   type TopicsResponse,
   type UploadActionInput,
@@ -101,7 +101,8 @@ export interface DaemonClient {
   reminderAction?(body: ReminderActionBody): Promise<ReminderView>;
   /** Optional so older clients can ignore the manual trigger. */
   consolidate?(body?: ConsolidateActionInput): Promise<ConsolidateActionResult>;
-  planTopicReorganization?(body?: { refresh?: boolean }): Promise<TopicReorganizePlan>;
+  planTopicReorganization?(body?: { refresh?: boolean }): Promise<TopicReorganizeStatus>;
+  topicReorganizeStatus?(): Promise<TopicReorganizeStatus>;
   applyTopicReorganization?(body: TopicReorganizeApplyBody): Promise<TopicReorganizeResult>;
   sync(): Promise<SyncActionResult>;
   upload(body?: UploadActionInput): Promise<UploadActionResult>;
@@ -219,6 +220,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     reminderAction: (body) => request("POST", "/api/actions/reminder", body),
     consolidate: (body) => request("POST", "/api/actions/consolidate", body ?? {}),
     planTopicReorganization: (body) => request("POST", "/api/actions/topics-reorganize/plan", body ?? {}),
+    topicReorganizeStatus: () => request("GET", "/api/actions/topics-reorganize/status"),
     applyTopicReorganization: (body) => request("POST", "/api/actions/topics-reorganize/apply", body),
     sync: () => request("POST", "/api/actions/sync"),
     upload: (body) => request("POST", "/api/actions/upload", body ?? {}),

@@ -768,6 +768,41 @@ function today(): Response {
   });
 }
 
+/** Long enough to see the queued and running states in the dialog. */
+const REORGANIZE_MOCK_MS = 8_000;
+let reorganizeStartedAt: number | null = null;
+
+function reorganizeStatus(): unknown {
+  if (reorganizeStartedAt === null) return { state: "idle" };
+  const elapsed = Date.now() - reorganizeStartedAt;
+  const startedAt = new Date(reorganizeStartedAt).toISOString();
+  if (elapsed < REORGANIZE_MOCK_MS / 2) return { state: "queued", startedAt };
+  if (elapsed < REORGANIZE_MOCK_MS) return { state: "running", startedAt };
+  const live = topics.filter((topic) => topic.mergedInto === null && !topic.userLocked);
+  const [into, ...rest] = live;
+  return {
+    state: "ready",
+    plan: {
+      topicCount: topics.length,
+      reviewedCount: topics.length,
+      topicCountAfter: topics.length - rest.length,
+      groups: into && rest.length > 0
+        ? [{
+            name: into.name,
+            reason: "都是同一件事的不同阶段",
+            intoTopicId: into.topicId,
+            members: [into, ...rest].map((topic) => ({
+              topicId: topic.topicId,
+              name: topic.name,
+              sessionCount: sessions.filter((session) => session.topicId === topic.topicId).length,
+            })),
+            archive: false,
+          }]
+        : [],
+    },
+  };
+}
+
 function consolidationStatus(): {
   enabled: boolean;
   lastFinishedAt: string | null;
@@ -1289,28 +1324,16 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
     return applyReminderAction(await request.json().catch(() => null));
   }
   if (path === "/api/actions/topics-reorganize/plan" && request.method === "POST") {
-    const live = topics.filter((topic) => topic.mergedInto === null && !topic.userLocked);
-    const [into, ...rest] = live;
-    return json({
-      topicCount: topics.length,
-      reviewedCount: topics.length,
-      topicCountAfter: topics.length - rest.length,
-      groups: into && rest.length > 0
-        ? [{
-            name: into.name,
-            reason: "都是同一件事的不同阶段",
-            intoTopicId: into.topicId,
-            members: [into, ...rest].map((topic) => ({
-              topicId: topic.topicId,
-              name: topic.name,
-              sessionCount: sessions.filter((session) => session.topicId === topic.topicId).length,
-            })),
-            archive: false,
-          }]
-        : [],
-    });
+    const body = (await request.json().catch(() => null)) as { refresh?: boolean } | null;
+    const finished = reorganizeStartedAt !== null && Date.now() - reorganizeStartedAt >= REORGANIZE_MOCK_MS;
+    if (reorganizeStartedAt === null || (finished && body?.refresh === true)) reorganizeStartedAt = Date.now();
+    return json(reorganizeStatus());
+  }
+  if (path === "/api/actions/topics-reorganize/status" && request.method === "GET") {
+    return json(reorganizeStatus());
   }
   if (path === "/api/actions/topics-reorganize/apply" && request.method === "POST") {
+    reorganizeStartedAt = null;
     const body: unknown = await request.json().catch(() => null);
     const groups = isObject(body) && Array.isArray(body.groups) ? body.groups : [];
     let merged = 0;

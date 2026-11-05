@@ -9,6 +9,8 @@ export interface LlmCompleteRequest {
   jsonSchema?: object;
   /** For one unusually long call. Everything else keeps the backend's default. */
   timeoutMs?: number;
+  /** A CLI backend calls this when the request stops queueing for its slot and starts. */
+  onStart?: () => void;
 }
 
 export interface LlmBackendDescriptor {

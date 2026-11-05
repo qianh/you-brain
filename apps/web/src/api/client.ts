@@ -20,8 +20,8 @@ import type {
   TopicDetail,
   TopicMutationResponse,
   TopicReorganizeApplyBody,
-  TopicReorganizePlan,
   TopicReorganizeResult,
+  TopicReorganizeStatus,
   TopicsQuery,
   TopicsResponse,
   UploadActionResult,
@@ -91,9 +91,14 @@ export type ReminderActionName = "reactivate" | "done" | "snooze" | "mute" | "ig
 export interface BrowserDaemon
   extends Omit<
     DaemonClient,
-    "reminderAction" | "consolidate" | "planTopicReorganization" | "applyTopicReorganization"
+    | "reminderAction"
+    | "consolidate"
+    | "planTopicReorganization"
+    | "topicReorganizeStatus"
+    | "applyTopicReorganization"
   > {
-  planTopicReorganization(body?: { refresh?: boolean }): Promise<TopicReorganizePlan>;
+  planTopicReorganization(body?: { refresh?: boolean }): Promise<TopicReorganizeStatus>;
+  topicReorganizeStatus(): Promise<TopicReorganizeStatus>;
   applyTopicReorganization(body: TopicReorganizeApplyBody): Promise<TopicReorganizeResult>;
   putLlmKey(provider: string, apiKey: string): Promise<void>;
   testLlm(body: { provider: string; model: string; baseUrl: string }): Promise<ActionMessage>;
@@ -228,7 +233,9 @@ export function createBrowserDaemon(options?: {
       }),
     consolidate: (body) => request<ConsolidateActionResult>("POST", "/api/actions/consolidate", body ?? {}),
     planTopicReorganization: (body) =>
-      request<TopicReorganizePlan>("POST", "/api/actions/topics-reorganize/plan", body ?? {}),
+      request<TopicReorganizeStatus>("POST", "/api/actions/topics-reorganize/plan", body ?? {}),
+    topicReorganizeStatus: () =>
+      request<TopicReorganizeStatus>("GET", "/api/actions/topics-reorganize/status"),
     applyTopicReorganization: (body) =>
       request<TopicReorganizeResult>("POST", "/api/actions/topics-reorganize/apply", body),
     sync: () => request<SyncActionResult>("POST", "/api/actions/sync"),

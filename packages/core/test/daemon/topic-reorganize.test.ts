@@ -6,6 +6,7 @@ import { createEvent, ulid, type Event } from "@you-brain/protocol";
 
 import { startDaemon, type YouBrainDaemon } from "../../src/daemon/daemon.js";
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
+import type { TopicReorganizeStatus as ReorganizeStatus } from "../../src/http/types.js";
 import type { LlmBackend } from "../../src/llm/types.js";
 import { SqliteStore } from "../../src/store/sqlite-store.js";
 import { foldEvents } from "../../src/topics/fold.js";
@@ -74,6 +75,24 @@ async function post(daemon: YouBrainDaemon, path: string, body: unknown): Promis
   });
 }
 
+const PLAN_PATH = "/api/actions/topics-reorganize/plan";
+
+async function status(daemon: YouBrainDaemon): Promise<ReorganizeStatus> {
+  const response = await fetch(`${daemon.baseUrl}/api/actions/topics-reorganize/status`, {
+    headers: { authorization: `Bearer ${daemon.token}` },
+  });
+  return (await response.json()) as ReorganizeStatus;
+}
+
+async function settled(daemon: YouBrainDaemon): Promise<ReorganizeStatus> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const current = await status(daemon);
+    if (current.state !== "queued" && current.state !== "running") return current;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("the plan never settled");
+}
+
 async function topicNames(daemon: YouBrainDaemon): Promise<string[]> {
   const response = await fetch(`${daemon.baseUrl}/api/topics`, {
     headers: { authorization: `Bearer ${daemon.token}` },
@@ -105,18 +124,19 @@ describe.each([
     const llm = groupingBackend();
     const daemon = await boot(llm, extra());
 
-    const plan = (await (await post(daemon, "/api/actions/topics-reorganize/plan", {})).json()) as {
-      topicCount: number;
-      topicCountAfter: number;
-      groups: { name: string; intoTopicId: string; members: { topicId: string }[]; archive: boolean }[];
-    };
+    expect(await status(daemon)).toEqual({ state: "idle" });
+    await post(daemon, PLAN_PATH, {});
+    const finished = await settled(daemon);
+    if (finished.state !== "ready") throw new Error(`expected a plan, got ${finished.state}`);
+    const plan = finished.plan;
     expect(plan.topicCount).toBe(3);
     expect(plan.topicCountAfter).toBe(2);
     expect(plan.groups).toHaveLength(1);
 
-    await post(daemon, "/api/actions/topics-reorganize/plan", {});
+    await post(daemon, PLAN_PATH, {});
     expect(llm.calls()).toBe(1);
-    await post(daemon, "/api/actions/topics-reorganize/plan", { refresh: true });
+    await post(daemon, PLAN_PATH, { refresh: true });
+    await settled(daemon);
     expect(llm.calls()).toBe(2);
 
     const group = plan.groups[0];
@@ -138,11 +158,27 @@ describe.each([
     expect(names).toContain("无关话题:history");
     expect(names).toHaveLength(2);
 
-    await post(daemon, "/api/actions/topics-reorganize/plan", {});
+    expect(await status(daemon)).toEqual({ state: "idle" });
+    await post(daemon, PLAN_PATH, {});
+    await settled(daemon);
     expect(llm.calls()).toBe(3);
   }, 30_000);
 
-  it("forgets a failed plan so the next attempt starts over", async () => {
+  it("answers at once while the model is still working, so the page never waits on one request", async () => {
+    let finish: (raw: string) => void = () => undefined;
+    const daemon = await boot(
+      fakeBackend(() => new Promise<string>((resolve) => (finish = resolve))),
+      extra(),
+    );
+    const started = (await (await post(daemon, PLAN_PATH, {})).json()) as ReorganizeStatus;
+    expect(started.state).toBe("running");
+    expect((await status(daemon)).state).toBe("running");
+
+    finish(JSON.stringify({ groups: [], noise: [] }));
+    expect((await settled(daemon)).state).toBe("ready");
+  }, 30_000);
+
+  it("keeps why a plan failed, and the next attempt starts over", async () => {
     let calls = 0;
     const daemon = await boot(
       fakeBackend(async () => {
@@ -151,10 +187,14 @@ describe.each([
       }),
       extra(),
     );
-    const failed = await post(daemon, "/api/actions/topics-reorganize/plan", {});
-    expect(failed.ok).toBe(false);
+    await post(daemon, PLAN_PATH, {});
+    const failed = await settled(daemon);
+    if (failed.state !== "failed") throw new Error(`expected a failure, got ${failed.state}`);
+    expect(failed.message).toContain("话题整理方案生成失败");
     expect(calls).toBe(2);
-    await post(daemon, "/api/actions/topics-reorganize/plan", {});
+
+    await post(daemon, PLAN_PATH, {});
+    await settled(daemon);
     expect(calls).toBe(4);
   }, 30_000);
 });

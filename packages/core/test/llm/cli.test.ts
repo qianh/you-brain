@@ -434,6 +434,23 @@ describe("subscription cli backends", () => {
     expect(extractFirstJsonObject("no object here")).toBeNull();
   });
 
+  test("tells a caller when its turn comes, not when it joined the queue", async () => {
+    const item = DRIVERS[0];
+    if (!item) throw new Error("expected a driver");
+    const root = await tempDir();
+    const bin = await installFake(root);
+    const { backend } = await backendFor(root, bin, item, {});
+    const order: string[] = [];
+    const call = (name: string): Promise<void> =>
+      backend
+        .complete({ system: "Reply with one word.", user: "say ok", onStart: () => order.push(name) })
+        .then(() => {
+          order.push(`${name} done`);
+        });
+    await Promise.all([call("first"), call("second")]);
+    expect(order).toEqual(["first", "first done", "second", "second done"]);
+  });
+
   for (const item of DRIVERS) {
     test(`${item.provider} returns schema JSON and plain text`, async () => {
       const root = await tempDir();

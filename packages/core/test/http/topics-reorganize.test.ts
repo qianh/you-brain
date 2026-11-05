@@ -28,15 +28,16 @@ const PLAN: TopicReorganizePlan = {
 };
 
 describe("topic reorganize routes", () => {
-  it("passes plan and apply through, and rejects a malformed apply", async () => {
+  it("passes plan, status, and apply through, and rejects a malformed apply", async () => {
     const dataDir = mkdtempSync(join(tmpdir(), "ub-reorganize-http-"));
     const refreshes: Array<boolean | undefined> = [];
     const applied: TopicReorganizeApplyBody[] = [];
     const deps = {
-      planTopicReorganization: async (input: { refresh?: boolean }) => {
+      planTopicReorganization: (input: { refresh?: boolean }) => {
         refreshes.push(input.refresh);
-        return PLAN;
+        return { state: "ready", plan: PLAN };
       },
+      topicReorganizeStatus: () => ({ state: "running", startedAt: "2026-11-04T10:00:00.000Z" }),
       applyTopicReorganization: async (body: TopicReorganizeApplyBody) => {
         applied.push(body);
         return { merged: 1 };
@@ -46,9 +47,13 @@ describe("topic reorganize routes", () => {
     const server = await startDaemonHttp({ dataDir, deps });
     try {
       const client = createDaemonClient({ port: server.port, token: server.token });
-      expect(await client.planTopicReorganization?.()).toEqual(PLAN);
+      expect(await client.planTopicReorganization?.()).toEqual({ state: "ready", plan: PLAN });
       await client.planTopicReorganization?.({ refresh: true });
       expect(refreshes).toEqual([undefined, true]);
+      expect(await client.topicReorganizeStatus?.()).toEqual({
+        state: "running",
+        startedAt: "2026-11-04T10:00:00.000Z",
+      });
 
       const body = {
         groups: [{ intoTopicId: "a", fromTopicIds: ["b"], name: "港口目录", archive: false }],

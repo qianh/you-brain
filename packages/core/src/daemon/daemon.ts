@@ -117,8 +117,8 @@ import {
   planTopicReorganization,
   reorganizeEvents,
   reorganizeTopics,
+  ReorganizeJob,
   type ReorganizeEvent,
-  type ReorganizePlan,
   readConsolidateLease,
   shiftDateKey,
   writeConsolidateLease,
@@ -669,7 +669,7 @@ export class YouBrainDaemon {
   #coding: CodingInjection | null = null;
   #output: OutputService | null = null;
   #llm: LlmBackend | null = null;
-  #reorganizePlan: Promise<ReorganizePlan> | null = null;
+  readonly #reorganizeJob = new ReorganizeJob({ now: () => this.#clock.now().toISOString() });
   #llmWarning: LlmSetupWarning | null = null;
   #llmOverride: LlmBackend | null | undefined;
   /** Consecutive timeouts that produced no stdout and no stderr. */
@@ -3235,24 +3235,20 @@ export class YouBrainDaemon {
       consolidate: (input) => this.#run(() => this.#consolidate({ manual: true, force: input.force === true })),
       // Stays out of `#run`: a model call this long must not hold up capture and sync.
       planTopicReorganization: (input) => {
-        if (!this.#llm) throw new HttpError(409, "NO_LLM", "还没有配置模型，没法整理话题");
-        if (input.refresh !== true && this.#reorganizePlan) return this.#reorganizePlan;
-        const run = planTopicReorganization(
-          this.#llm,
-          reorganizeTopics(foldEvents(store.listEvents())),
+        const llm = this.#llm;
+        if (!llm) throw new HttpError(409, "NO_LLM", "还没有配置模型，没法整理话题");
+        return this.#reorganizeJob.start(
+          (onRunning) =>
+            planTopicReorganization(llm, reorganizeTopics(foldEvents(store.listEvents())), { onRunning }),
+          input,
         );
-        // Held here so leaving the page does not throw away minutes of model time.
-        this.#reorganizePlan = run;
-        run.catch(() => {
-          if (this.#reorganizePlan === run) this.#reorganizePlan = null;
-        });
-        return run;
       },
+      topicReorganizeStatus: () => this.#reorganizeJob.status(),
       applyTopicReorganization: (body) =>
         this.#run(async () => {
           const { events, merged } = reorganizeEvents(foldEvents(store.listEvents()), body.groups);
           await this.#emitUserBatch(events);
-          this.#reorganizePlan = null;
+          this.#reorganizeJob.clear();
           return { merged };
         }),
       reminders: async (all) => {

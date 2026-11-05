@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { TopicReorganizePlan } from "@you-brain/core/http/types.js";
+import type { TopicReorganizePlan, TopicReorganizeStatus } from "@you-brain/core/http/types.js";
 
 import { BrowserDaemonError } from "../../api/client.js";
 import { Button } from "../../components/button.js";
@@ -7,43 +7,96 @@ import { Dialog } from "../../components/dialog.js";
 import { Spinner } from "../../components/spinner.js";
 import { useToast } from "../../components/toast.js";
 import { useDaemon } from "../../daemon-context.js";
-import { selectedGroups, topicsAfter, toggled } from "./reorganize-logic.js";
+import { formatElapsed, selectedGroups, topicsAfter, toggled, watchReorganize } from "./reorganize-logic.js";
 
 type Phase =
-  | { kind: "planning" }
+  | { kind: "planning"; state: "queued" | "running"; startedAt: string }
   | { kind: "ready"; plan: TopicReorganizePlan }
   | { kind: "failed"; message: string };
 
+function WaitingNote({ startedAt }: { startedAt: string }) {
+  const { t } = useDaemon();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <span>
+      {t("reorganizeElapsed", { time: formatElapsed(now - Date.parse(startedAt)) })}
+      {t("reorganizeWait")}
+    </span>
+  );
+}
+
 /**
  * Merging has no undo, so the plan is shown in full and every group can be declined.
- * The daemon holds the plan: it costs minutes of model time, so leaving the page or
- * closing this dialog must not lose it. Reopening picks up the same run.
+ * The daemon owns the run: it costs minutes of model time, so leaving the page or
+ * closing this dialog must not lose it. This dialog only asks the daemon how it is going.
  */
 export function ReorganizeDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { client, reload, t } = useDaemon();
   const { push } = useToast();
+  // Null while the first answer from the daemon is on its way.
   const [phase, setPhase] = useState<Phase | null>(null);
   const [declined, setDeclined] = useState<ReadonlySet<string>>(new Set());
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [applying, setApplying] = useState(false);
 
-  const plan = async (refresh: boolean): Promise<void> => {
-    setPhase({ kind: "planning" });
+  const show = (status: TopicReorganizeStatus): void => {
+    if (status.state === "ready") setPhase({ kind: "ready", plan: status.plan });
+    else if (status.state === "failed") setPhase({ kind: "failed", message: status.message });
+    else if (status.state === "idle") setPhase({ kind: "failed", message: t("reorganizeLost") });
+    else setPhase({ kind: "planning", state: status.state, startedAt: status.startedAt });
+  };
+  const showError = (caught: unknown): void => {
+    const message = caught instanceof BrowserDaemonError ? caught.message : t("reorganizeFailedBody");
+    setPhase({ kind: "failed", message });
+  };
+
+  const regenerate = async (): Promise<void> => {
+    setPhase(null);
     setDeclined(new Set());
     setExpanded(new Set());
     try {
-      setPhase({ kind: "ready", plan: await client.planTopicReorganization(refresh ? { refresh } : {}) });
+      show(await client.planTopicReorganization({ refresh: true }));
     } catch (caught) {
-      const message = caught instanceof BrowserDaemonError ? caught.message : t("reorganizeFailedBody");
-      setPhase({ kind: "failed", message });
+      showError(caught);
     }
   };
 
+  // Opening reports whatever the daemon has: a run in progress, a finished plan, or a
+  // failure that happened while this was closed. Only an idle daemon starts a new run.
   useEffect(() => {
-    if (open && phase === null) void plan(false);
-    // Only opening starts a run. `plan` is rebuilt on every render.
+    if (!open || phase?.kind === "ready") return;
+    let stale = false;
+    void (async () => {
+      try {
+        const current = await client.topicReorganizeStatus();
+        const status = current.state === "idle" ? await client.planTopicReorganization() : current;
+        if (!stale) show(status);
+      } catch (caught) {
+        if (!stale) showError(caught);
+      }
+    })();
+    return () => {
+      stale = true;
+    };
+    // Only opening asks. `show` and `showError` are rebuilt on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  const watching = open && phase?.kind === "planning";
+  useEffect(() => {
+    if (!watching) return;
+    return watchReorganize({
+      read: () => client.topicReorganizeStatus(),
+      onStatus: show,
+      onLost: () => setPhase({ kind: "failed", message: t("reorganizeUnreachable") }),
+    });
+    // Restarted only when watching starts or stops, not on each status.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watching]);
 
   const ready = phase?.kind === "ready" ? phase.plan : null;
   const chosen = ready ? selectedGroups(ready, declined) : [];
@@ -71,13 +124,15 @@ export function ReorganizeDialog({ open, onClose }: { open: boolean; onClose: ()
     }
   };
 
+  const waitingLabel =
+    phase?.kind === "planning" && phase.state === "queued" ? t("reorganizeQueued") : t("reorganizePlanning");
   const description = ready
     ? ready.groups.length === 0
       ? t("reorganizeNothing")
       : t("reorganizeSummary", { before: ready.topicCount, after: topicsAfter(ready, declined) })
     : phase?.kind === "failed"
       ? t("reorganizeFailedTitle")
-      : t("reorganizePlanning");
+      : waitingLabel;
 
   return (
     <Dialog
@@ -90,10 +145,10 @@ export function ReorganizeDialog({ open, onClose }: { open: boolean; onClose: ()
       footer={
         <>
           <Button variant="ghost" data-cancel="" onClick={onClose}>
-            {phase?.kind === "planning" ? t("reorganizeBackground") : t("cancel")}
+            {phase === null || phase.kind === "planning" ? t("reorganizeBackground") : t("cancel")}
           </Button>
           {phase?.kind === "failed" || ready ? (
-            <Button disabled={applying} onClick={() => void plan(true)}>
+            <Button disabled={applying} onClick={() => void regenerate()}>
               {t("reorganizeAgain")}
             </Button>
           ) : null}
@@ -105,12 +160,12 @@ export function ReorganizeDialog({ open, onClose }: { open: boolean; onClose: ()
         </>
       }
     >
-      {phase?.kind === "planning" ? (
+      {phase === null || phase.kind === "planning" ? (
         <div className="topics-reorganize-wait">
-          <Spinner label={t("reorganizePlanning")} />
-          <span>{t("reorganizeWait")}</span>
+          <Spinner label={waitingLabel} />
+          {phase === null ? <span>{t("reorganizeWait")}</span> : <WaitingNote startedAt={phase.startedAt} />}
         </div>
-      ) : phase?.kind === "failed" ? (
+      ) : phase.kind === "failed" ? (
         <p className="topics-note">{phase.message}</p>
       ) : ready && ready.groups.length > 0 ? (
         <>

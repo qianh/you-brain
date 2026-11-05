@@ -274,7 +274,10 @@ export async function createCliBackend(options: CreateCliBackendOptions): Promis
       requiresApiKey: false,
     },
     complete(request) {
-      return withCliSlot(() => execute(driver, bin, options, request));
+      return withCliSlot(() => {
+        request.onStart?.();
+        return execute(driver, bin, options, request);
+      });
     },
     ...(driver.stream
       ? {

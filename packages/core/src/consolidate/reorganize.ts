@@ -236,7 +236,10 @@ export function parseReorganizePlan(
 export async function planTopicReorganization(
   llm: LlmBackend,
   topics: readonly ReorganizeTopic[],
+  options: { onRunning?: () => void } = {},
 ): Promise<ReorganizePlan> {
+  // Only a CLI waits for a slot. An API backend starts as soon as it is called.
+  if (llm.descriptor.kind !== "cli") options.onRunning?.();
   const reviewed = topics.slice(0, REORGANIZE_TOPIC_LIMIT);
   if (reviewed.length < 2) {
     return {
@@ -258,6 +261,7 @@ export async function planTopicReorganization(
       user,
       jsonSchema: REORGANIZE_JSON_SCHEMA,
       timeoutMs: REORGANIZE_TIMEOUT_MS,
+      ...(options.onRunning ? { onStart: options.onRunning } : {}),
     });
     try {
       return parseReorganizePlan(extractJson(raw), reviewed, topics.length);

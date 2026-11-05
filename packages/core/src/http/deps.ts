@@ -62,8 +62,8 @@ import type {
   DeckDshLoginResponse,
   DeckDshWebResponse,
   TopicReorganizeApplyBody,
-  TopicReorganizePlan,
   TopicReorganizeResult,
+  TopicReorganizeStatus,
 } from "./types.js";
 
 /** Read and write ports for the local API. The daemon supplies the implementations. */
@@ -96,8 +96,9 @@ export interface HttpDeps {
   upload(input: UploadActionInput): Promise<UploadActionResult>;
   /** Optional so older test doubles keep compiling. The daemon always supplies it. */
   consolidate?(input: { force?: boolean }): Promise<ConsolidateActionResult>;
-  /** Optional so older test doubles keep compiling. The daemon always supplies both. */
-  planTopicReorganization?(input: { refresh?: boolean }): Promise<TopicReorganizePlan>;
+  /** Optional so older test doubles keep compiling. The daemon always supplies all three. */
+  planTopicReorganization?(input: { refresh?: boolean }): TopicReorganizeStatus;
+  topicReorganizeStatus?(): TopicReorganizeStatus;
   applyTopicReorganization?(body: TopicReorganizeApplyBody): Promise<TopicReorganizeResult>;
   /** Optional so older test doubles keep compiling. The daemon always supplies it. */
   readWebhook?(): Promise<WebhookPublic>;

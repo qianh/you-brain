@@ -137,6 +137,31 @@ describe("planTopicReorganization", () => {
     const llm = backend(["坏", "还是坏"]);
     await expect(planTopicReorganization(llm, [row("a"), row("b")])).rejects.toThrow("话题整理方案生成失败");
   });
+
+  it("is running at once on an API backend, but waits for the CLI to say its turn has come", async () => {
+    const answer = JSON.stringify({ groups: [], noise: [] });
+    const onRunning = (): void => {
+      running += 1;
+    };
+    let running = 0;
+
+    const api = { ...backend([answer]), descriptor: { kind: "openai-compatible" } } as unknown as LlmBackend;
+    await planTopicReorganization(api, [row("a"), row("b")], { onRunning });
+    expect(running).toBe(1);
+
+    running = 0;
+    let handed: (() => void) | undefined;
+    const cli = {
+      descriptor: { kind: "cli" },
+      complete: async (request: { onStart?: () => void }) => {
+        handed = request.onStart;
+        return answer;
+      },
+    } as unknown as LlmBackend;
+    await planTopicReorganization(cli, [row("a"), row("b")], { onRunning });
+    expect(running).toBe(0);
+    expect(handed).toBe(onRunning);
+  });
 });
 
 describe("reorganizeEvents", () => {

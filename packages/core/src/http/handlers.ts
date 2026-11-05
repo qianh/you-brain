@@ -312,6 +312,9 @@ export async function handleApi(
   if (path === "/api/actions/topics-reorganize/plan") {
     return method(request, "POST", () => planReorganize(request, context));
   }
+  if (path === "/api/actions/topics-reorganize/status") {
+    return method(request, "GET", () => reorganizeStatus(context));
+  }
   if (path === "/api/actions/topics-reorganize/apply") {
     return method(request, "POST", () => applyReorganize(request, context));
   }
@@ -929,9 +932,12 @@ async function consolidate(request: Request, context: ApiContext): Promise<Respo
 async function planReorganize(request: Request, context: ApiContext): Promise<Response> {
   if (!context.deps.planTopicReorganization) return apiError(404, "NOT_FOUND", "找不到接口");
   const body = TopicReorganizePlanBodySchema.parse(await readJson(request));
-  return json(
-    await context.deps.planTopicReorganization(body.refresh === true ? { refresh: true } : {}),
-  );
+  return json(context.deps.planTopicReorganization(body.refresh === true ? { refresh: true } : {}));
+}
+
+function reorganizeStatus(context: ApiContext): Response {
+  if (!context.deps.topicReorganizeStatus) return apiError(404, "NOT_FOUND", "找不到接口");
+  return json(context.deps.topicReorganizeStatus());
 }
 
 async function applyReorganize(request: Request, context: ApiContext): Promise<Response> {

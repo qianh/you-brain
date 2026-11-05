@@ -123,7 +123,7 @@ async function withServer(
   const status: StatusResponse = {
     deviceId: "11111111-1111-4111-8111-111111111111",
     drive: { reachable: true, accountEmail: "a@example.com" },
-    sync: { lastSyncAt: null, pendingOutbox: 0 },
+    sync: { lastSyncAt: null, pendingOutbox: 0, pendingOutboxSessions: 0 },
     search: { ready: true, documents: 2 },
     refine: { pending: 0, lastError: null },
     consolidation: {
