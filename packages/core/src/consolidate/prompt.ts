@@ -132,7 +132,7 @@ export function buildMergeSuggestionsPrompt(input: {
 }
 
 const TWIN_LAYOUT = `三层分工（每条规则只能住在一层）：
-- full 人格分身：只写换项目、换话题也成立的东西。固定 11 节：1 一句话 / 2 身份 / 3 价值排序 / 4 思维方式 / 5 说话方式（真实原话样本最多 10 条）/ 6 像他与不像他（最多 12 对）/ 7 对助手的期待 / 8 绝对不做（最多 10 条）/ 9 品味 / 10 世界观（标明探索性，不当指令）/ 11 生活（低权重）。
+- full 人格分身：只写换项目、换话题也成立的东西。固定 11 节：1 一句话 / 2 现在在做什么（工作重心和方向，写明年月）/ 3 价值排序（冲突时什么优先于什么，最多 5 条）/ 4 行为签名（遇到什么情境他会怎样，写清适用范围，最多 12 条）/ 5 判断力地图（能深谈、会挑战、不熟要给步骤的领域）/ 6 情绪与信任（什么让他恼火，信任从哪来）/ 7 说话方式（真实原话样本最多 10 条）/ 8 合作说明（对助手的跨任务期待）/ 9 红线（最多 10 条）/ 10 世界观与品味（标明探索性，不当指令）/ 11 生活（低权重）。
 - coding 编码分身：会作为 AGENTS.md / CLAUDE.md 直接注入各 CLI，只写所有代码仓库都通用、会改变助手行为的编码公约。固定两节：「## 核心原则」和「## 默认与红线」。
 - projects 项目决定：按「## 项目名」分小节，只写该项目已锁定的口径和决定；一个项目内容多时拆成「## 项目 · 子主题」。`;
 
@@ -144,7 +144,20 @@ const TWIN_CODING_STYLE = `编码分身（coding）的写法：它是提炼出�
 - 文档与代码冲突时按代码为准并在最后回复列出冲突点，这类行为约定属于原则，按其他原则的写法保留。
 - 「核心原则」里「项目说明」那一条由程序维护，不要输出，也不要改写。`;
 
-const TWIN_WRITING = `写法：
+const TWIN_STANDARD = `质量标准（写入前由程序逐条检查，不达标整次不写）：
+- 蒸馏，不是记账。只留跨任务反复成立、会改变助手行为的规则；一次性的决定、某天发生的事、解释和理由都不写。
+- 一条规则一行，full 每行不超过 110 字，coding 每行不超过 460 字，一行最多两个分号。
+- full 的小节固定为 11 个，顺序不变；条数上限：现在在做什么 6、价值排序 5、行为签名 12、判断力地图 6、情绪与信任 5、合作说明 16、红线 10、世界观与品味 10、生活 8，原话最多 10 条。coding 两节固定，核心原则最多 10 条，默认与红线最多 3 条。到了上限，新规则要并进已有的，或者挤掉最次要的一条。
+- 行为签名写成「遇到什么情境，他会怎样」，并写清适用范围；两条规则在某些情境下会冲突时，写出各自成立的情境，不要并列。
+- 价值排序写成「A 优先于 B」，只写真正会冲突的取舍。
+- 「现在在做什么」写明年月，过期的方向直接改掉；只有这一节可以出现时间。其他地方不写「近期、最近、本周、今天、上次、这次」。
+- 新主张和已有规则矛盾时，以日期晚的为准，原地改写那一句，不要新旧并存；分不清谁对时，保留已有规则，不改。
+- 不写空话和形容：「至关重要」「值得注意的是」「非常重要」这类删掉。
+- 同一件事只写一次。多条规则说的是一回事，合并成一条。`;
+
+const TWIN_WRITING = `${TWIN_STANDARD}
+
+写法：
 - 一条规则一句话，写成指令（做什么 / 不做什么），不写来历和原因；完整的中文短句，不用分号串十几个子句，不用自造缩写；专有名词和标识符保留英文。
 - 正文禁止出现：版本说明、来源、样本数、证据 ID、「待确认」「不升格」「两条都有效」这类记账措辞；否定式身份事实（直接不写）；把用户举的例子写成规则；任何密钥、token、密码、手机号、邮箱、身份信息、主机名、IP、完整本机路径。`;
 
@@ -159,11 +172,11 @@ export const TWIN_CLAIMS_SYSTEM_PROMPT = `你是 you-brain 的数字分身主张
 
 规则：
 1. layer：
-   - persona：换项目、换话题也成立的身份、价值排序、思维和说话方式、品味、生活。说话方式的真实原话可以原样作为一条 persona 主张，加引号。
+   - persona：换项目、换话题也成立的工作重心、价值取舍、遇到什么情境会怎样、擅长和不熟的领域、情绪和信任、说话方式、对助手的期待、红线、世界观、品味、生活。说话方式的真实原话可以原样作为一条 persona 主张，加引号。
    - coding：所有代码仓库都适用、会改变助手行为的工程原则和红线；具体工具、命令、模型和设备细节不算。
    - project：只对某个系统、仓库、业务成立；project 填项目名，优先沿用输入里给出的已有项目名。
    - 一次性操作、临时状态、设备和网络的琐碎细节、试用信号、他人或群聊的观点：不要输出。
-2. 每条主张一句完整中文，写成指令或陈述，不写来历；专有名词和标识符保留英文。
+2. 每条主张一句完整中文，写成指令或陈述，不写来历；专有名词和标识符保留英文。他在纠正助手或在几种做法里选一种时，写成「遇到什么情境，他会怎样」，把情境和他的反应都写进去。
 3. 不要把用户举的例子写成规则；不要输出否定式身份事实；不要输出任何密钥、token、密码、手机号、邮箱、主机名、IP、完整本机路径。
 4. 同一意思只输出一条。没有主张时输出空数组。
 5. JSON 键名保持英文。`;
@@ -304,27 +317,39 @@ export function buildTwinFixPrompt(input: {
   return { system: TWIN_FIX_SYSTEM_PROMPT, user };
 }
 
-export const TWIN_PROBES_SYSTEM_PROMPT = `你是 you-brain 的数字分身评测出题人。从用户本人这一周的主张里，挑 2 到 5 条最能体现他判断方式的，各写成一道情境题。只输出一个 JSON 对象，不要 Markdown，不要解释。
+export const TWIN_PROBES_SYSTEM_PROMPT = `你是 you-brain 的数字分身评测出题人。输入是用户本人这一周在 AI 会话里的发言。找出他做出明确判断的地方：纠正助手、否决方案、在几种做法里选一种、提出验收标准，各写成一道情境题。只输出一个 JSON 对象，不要 Markdown，不要解释。
 
 规则：
-1. situation 写一个助手会遇到的具体情境，不要复述主张原文，不要透露答案。
-2. expect 写用户在这种情境下的实际反应，一两句中文。
-3. layer 是 persona 或 coding；只对某个项目成立的主张不要出题。
-4. 不要和已有题目重复。没有合适的就输出空数组。
-5. JSON 键名保持英文。`;
+1. situation 写一个助手会遇到的具体情境：助手准备怎么做，或者已经做了什么。不要复述用户原话，不要透露答案。
+2. expect 写用户在这个情境下的实际反应，一两句中文。
+3. 只出能看出他这个人的题。一个不了解他、但做事靠谱的助手本来就会做对的情境不要出；要出的是他的做法和常见做法不同，或者几种做法都说得通、他明确选了其中一种的情境。
+4. 只出换一个项目也会遇到的情境：去掉项目名、业务名词和只在该项目里成立的口径。只在某个项目里拍板过一次、离开那个项目就推不出来的具体决定不要出题。
+5. layer：编码和工程上的做法是 coding，其余是 persona。
+6. 已有题目里标了「没有区分度」的，上次评测时各组作答结果都一样；不要再出和它们同类的题。
+7. 同一个意思只出一道，也不要和已有题目重复。不超过给定的题量，宁缺毋滥；没有合适的就输出空数组。
+8. JSON 键名保持英文。`;
 
 export function buildTwinProbesPrompt(input: {
-  claims: readonly TwinPromptClaim[];
-  existing: readonly { situation: string }[];
+  turns: string;
+  existing: readonly { situation: string; flat?: string }[];
+  limit: number;
 }): { system: string; user: string } {
   const user = [
-    "## 本周主张",
-    packClaims(input.claims, TWIN_EVIDENCE_LIMIT) || "（无）",
+    "## 本周发言",
+    input.turns.trim() === "" ? "（无）" : input.turns,
     "",
     "## 已有题目",
     input.existing.length === 0
       ? "（无）"
-      : input.existing.map((probe) => `- ${clipUnits(oneLine(probe.situation), 120)}`).join("\n"),
+      : input.existing
+          .map(
+            (probe) =>
+              `- ${clipUnits(oneLine(probe.situation), 120)}${probe.flat === undefined ? "" : "（没有区分度）"}`,
+          )
+          .join("\n"),
+    "",
+    "## 题量",
+    `最多 ${input.limit} 道。`,
     "",
     "## 输出 JSON schema",
     JSON.stringify(TWIN_PROBES_JSON_SCHEMA),
@@ -332,27 +357,31 @@ export function buildTwinProbesPrompt(input: {
   return { system: TWIN_PROBES_SYSTEM_PROMPT, user };
 }
 
-export const TWIN_EVAL_ANSWER_SYSTEM_PROMPT = `你在扮演下面数字分身描述的这个人。只根据给出的数字分身，回答每个情境里他会怎么反应、会要求助手怎么做。每个回答一两句中文。只输出一个 JSON 对象，不要 Markdown，不要解释。JSON 键名保持英文。`;
+export const TWIN_EVAL_ANSWER_SYSTEM_PROMPT = `你在扮演下面描述的这个人。只根据给出的描述，回答每个情境里他会怎么反应、会要求助手怎么做。每个回答一两句中文。只输出一个 JSON 对象，不要 Markdown，不要解释。JSON 键名保持英文。`;
 
+export const TWIN_EVAL_BLANK_SYSTEM_PROMPT = `你在扮演一位正在用 AI 助手干活的用户。回答每个情境里他会怎么反应、会要求助手怎么做。每个回答一两句中文。只输出一个 JSON 对象，不要 Markdown，不要解释。JSON 键名保持英文。`;
+
+/** The baseline profile: what any careful engineer would say about himself, with nothing from the twin. */
+export const TWIN_EVAL_GENERIC_PERSONA =
+  "一位在中国工作的资深全栈工程师，日常重度使用 AI 编码助手，重视技术正确性和交付质量。";
+
+/** With no profile the model answers as an ordinary user, the plain-model baseline. */
 export function buildTwinEvalAnswerPrompt(input: {
-  full: string;
-  coding: string;
+  profile: readonly { title: string; text: string }[];
   probes: readonly { id: string; situation: string }[];
 }): { system: string; user: string } {
   const user = [
-    "## 人格分身",
-    input.full,
-    "",
-    "## 编码分身",
-    input.coding,
-    "",
+    ...input.profile.flatMap((part) => [`## ${part.title}`, part.text, ""]),
     "## 情境",
     input.probes.map((probe) => `- ${probe.id}：${oneLine(probe.situation)}`).join("\n"),
     "",
     "## 输出 JSON schema",
     JSON.stringify(TWIN_EVAL_ANSWERS_JSON_SCHEMA),
   ].join("\n");
-  return { system: TWIN_EVAL_ANSWER_SYSTEM_PROMPT, user };
+  return {
+    system: input.profile.length === 0 ? TWIN_EVAL_BLANK_SYSTEM_PROMPT : TWIN_EVAL_ANSWER_SYSTEM_PROMPT,
+    user,
+  };
 }
 
 export const TWIN_EVAL_JUDGE_SYSTEM_PROMPT = `你是数字分身评测的判分人。对照每个情境里用户的真实反应 expect，判断回答是否做出了同样的选择。只看决定和方向是否一致，不看措辞。只输出一个 JSON 对象，不要 Markdown，不要解释。JSON 键名保持英文。`;

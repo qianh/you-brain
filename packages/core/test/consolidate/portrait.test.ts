@@ -25,6 +25,7 @@ import {
   portraitMonthlyStep,
   portraitStep,
   rebuildTwin,
+  reviewProbes,
   runConsolidation,
   twinVersion,
   withHeader,
@@ -33,11 +34,15 @@ import {
 } from "../../src/consolidate/index.js";
 import {
   TWIN_EVAL_ANSWER_SYSTEM_PROMPT,
+  TWIN_EVAL_BLANK_SYSTEM_PROMPT,
+  TWIN_EVAL_GENERIC_PERSONA,
   TWIN_EVAL_JUDGE_SYSTEM_PROMPT,
   TWIN_FIX_SYSTEM_PROMPT,
   TWIN_MONTHLY_SYSTEM_PROMPT,
   TWIN_PROBES_SYSTEM_PROMPT,
 } from "../../src/consolidate/prompt.js";
+import { TWIN_SKELETON } from "../../src/consolidate/twin.js";
+import { twinStandardProblems } from "../../src/consolidate/twin-standard.js";
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
 import type { LlmCompleteRequest } from "../../src/llm/types.js";
 import {
@@ -57,6 +62,7 @@ const CLAIMS = `digital-twin/claims/${LOCAL_DAY}.jsonl`;
 const PENDING = "digital-twin/claims/pending.jsonl";
 const CHANGELOG = "digital-twin/changelog-latest.md";
 const PROBES = "digital-twin/eval/probes.jsonl";
+const PENDING_PROBES = "digital-twin/eval/pending-probes.jsonl";
 const VERSION_LINE = "版本 v2.0.0 · 2026-10-20 · 变更见 changelog";
 
 const FULL_TEXT = `# 数字分身 · 人格\n${VERSION_LINE}\n\n## 1. 一句话\n先问再做。\n\n## 3. 价值排序\n${"可靠优先。".repeat(20)}\n`;
@@ -168,7 +174,9 @@ function model(replies: Replies) {
     if (request.system === TWIN_MERGE_SYSTEM_PROMPT) return pick(replies.merge ?? noEdits);
     if (request.system === TWIN_FIX_SYSTEM_PROMPT) return pick(replies.fix ?? noEdits);
     if (request.system === TWIN_PROBES_SYSTEM_PROMPT) return pick(replies.probes ?? { probes: [] });
-    if (request.system === TWIN_EVAL_ANSWER_SYSTEM_PROMPT) return pick(replies.answers ?? { answers: [] });
+    if (request.system === TWIN_EVAL_ANSWER_SYSTEM_PROMPT || request.system === TWIN_EVAL_BLANK_SYSTEM_PROMPT) {
+      return pick(replies.answers ?? { answers: [] });
+    }
     if (request.system === TWIN_EVAL_JUDGE_SYSTEM_PROMPT) return pick(replies.judge ?? { results: [] });
     if (request.system === TWIN_MONTHLY_SYSTEM_PROMPT) return pick(replies.monthly ?? { notes: [] });
     throw new Error(`unexpected prompt ${request.system.slice(0, 20)}`);
@@ -654,46 +662,286 @@ describe("portrait consolidation", () => {
   });
 });
 
-describe("portrait eval", () => {
-  const probe = { id: "p01", layer: "coding", situation: "用户问为什么报错", expect: "只排查不改代码" };
+describe("twin quality standard", () => {
+  const head = (title: string) => `${title}\n${VERSION_LINE}\n\n`;
+  const section = (heading: string, body: string) => `${heading}\n${body}\n`;
+  const fullWith = (overrides: Record<string, string> = {}) =>
+    head("# 数字分身 · 人格") +
+    TWIN_SKELETON.full
+      .map((heading, index) =>
+        section(
+          heading,
+          overrides[heading] ?? (index === 1 ? "以下是 2026 年 11 月的状态。" : `第${index + 1}节：先查证再动手。`),
+        ),
+      )
+      .join("\n");
+  const codingWith = (principles = `${POINTER}\n- **先证据**：先读代码再给方案。`) =>
+    `${head("# 数字分身 · 编码")}${section("## 核心原则", principles)}\n${section("## 默认与红线", "- 技术栈：默认 Python。")}`;
 
-  it("adds probes from the week's claims, scores them, and logs the score", async () => {
+  it("accepts a layer that follows the standard", () => {
+    expect(twinStandardProblems("full", fullWith())).toEqual([]);
+    expect(twinStandardProblems("coding", codingWith())).toEqual([]);
+    expect(twinStandardProblems("projects", "任意内容")).toEqual([]);
+  });
+
+  it("rejects a changed skeleton, over-long lists and lines, and loose semicolons", () => {
+    expect(twinStandardProblems("full", FULL_TEXT)[0]).toContain("小节要固定为");
+    const crowded = [
+      "技术正确优先于对话舒服。",
+      "通用方案优先于现象补丁。",
+      "真实数据优先于好看的入口。",
+      "可复现优先于单次更好。",
+      "守住范围优先于顺手多做。",
+      "验收通过优先于先交再改。",
+    ].join("\n");
+    expect(twinStandardProblems("full", fullWith({ "## 3. 价值排序": crowded }))).toEqual([
+      expect.stringContaining("价值排序 有 6 条，最多 5 条"),
+    ]);
+    expect(twinStandardProblems("full", fullWith({ "## 9. 红线": "长".repeat(111) }))[0]).toContain("最多 110 字");
+    expect(twinStandardProblems("full", fullWith({ "## 9. 红线": "甲；乙；丙；丁。" }))[0]).toContain("分号");
+    expect(twinStandardProblems("coding", codingWith(`${POINTER}\n先证据，没有主题。`))[0]).toContain("**主题**");
+  });
+
+  it("counts quote samples apart and exempts them from the line rules", () => {
+    const quotes = Array.from({ length: 10 }, (_, index) => `「最近这句话是第 ${index} 句。」`).join("\n");
+    expect(twinStandardProblems("full", fullWith({ "## 7. 说话方式": `原话样本：\n${quotes}` }))).toEqual([]);
+    expect(
+      twinStandardProblems("full", fullWith({ "## 7. 说话方式": `${quotes}\n「第十一句。」` }))[0],
+    ).toContain("11 条原话");
+  });
+
+  it("rejects diary wording, filler, a missing date, and rules that say the same thing", () => {
+    expect(twinStandardProblems("full", fullWith({ "## 9. 红线": "最近不要直接改线上。" }))[0]).toContain("流水账");
+    expect(twinStandardProblems("full", fullWith({ "## 9. 红线": "验证至关重要。" }))[0]).toContain("空话");
+    expect(twinStandardProblems("full", fullWith({ "## 2. 现在在做什么": "主业在做合同比对。" }))[0]).toContain("年月");
+    expect(
+      twinStandardProblems("full", fullWith({ "## 2. 现在在做什么": "以下是 2026 年 11 月的状态。\n近期在做合同比对。" })),
+    ).toEqual([]);
+    const same = "交付前助手要自己把功能跑通再交给用户。\n交付前助手要自己把功能跑通再交给用户试用。";
+    expect(twinStandardProblems("full", fullWith({ "## 9. 红线": same }))[0]).toContain("同一件事");
+  });
+
+  it("sends a merge that breaks the standard through the fix pass, and drops it if still broken", async () => {
+    const box = await world();
+    await seedTwin(box, { full: fullWith(), coding: codingWith(), projects: PROJECTS_TEXT });
+    box.events.push(correction("corr-1", "full"));
+    const edit = (text: string) => ({
+      ...noEdits,
+      bump: "minor",
+      edits: [{ layer: "full", heading: "## 9. 红线", text: `## 9. 红线\n${text}` }],
+    });
+    const fixed = await run(box, model({ merge: edit("最近不要直接改线上。"), fix: edit("不要直接改线上。") }));
+    expect(fixed.ok).toBe(true);
+    expect(box.requests.map((request) => request.system)).toEqual([TWIN_MERGE_SYSTEM_PROMPT, TWIN_FIX_SYSTEM_PROMPT]);
+    expect(box.requests[1]?.user).toContain("像流水账");
+    expect(await textAt(box.drive, FULL)).toContain("## 9. 红线\n不要直接改线上。");
+
+    box.requests.length = 0;
+    box.events.push(correction("corr-2", "full"));
+    const before = await textAt(box.drive, FULL);
+    const stuck = await run(box, model({ merge: edit("今天不要直接改线上。"), fix: noEdits }));
+    expect(stuck.warnings[0]).toContain("数字分身没有通过写入前检查，已跳过");
+    expect(stuck.warnings[0]).toContain("像流水账");
+    expect(await textAt(box.drive, FULL)).toBe(before);
+  });
+
+  it("does not hold a layer still in an older shape to the standard", async () => {
     const box = await world();
     await seedTwin(box);
-    await seed(box.drive, PROBES, `${JSON.stringify(probe)}\n`);
-    await seed(box.drive, CLAIMS, `${JSON.stringify({ ...highCoding, day: LOCAL_DAY })}\n`);
+    box.events.push(correction("corr-1", "coding"));
+    const result = await run(box, model({ merge: codingEdit }));
+    expect(result.ok).toBe(true);
+    expect(box.requests.map((request) => request.system)).toEqual([TWIN_MERGE_SYSTEM_PROMPT]);
+    expect(await textAt(box.drive, CODING)).toContain("交付前先跑测试。");
+  });
+});
+
+describe("portrait eval", () => {
+  const probe = { id: "p01", layer: "coding", situation: "用户问为什么报错", expect: "只排查不改代码" };
+  const OLD_FULL = `# 数字分身 · 人格\n${VERSION_LINE}\n\n## 1. 一句话\n上上周的分身。\n`;
+  const backup = (name: string, day: string) => `digital-twin/consolidate-backup/${name}-${day}.md`;
+
+  /** Each answer prompt gets its own marks; the judge passes answers marked ✓. */
+  function scripted(marks: { twin: string[]; old: string[]; generic: string[]; blank: string[] }) {
+    return (request: LlmCompleteRequest): string => {
+      if (request.system === TWIN_PROBES_SYSTEM_PROMPT) {
+        return JSON.stringify({ probes: [{ layer: "coding", situation: "用户说先别跑", expect: "停下不执行" }] });
+      }
+      if (request.system === TWIN_EVAL_JUDGE_SYSTEM_PROMPT) {
+        const results = request.user
+          .split("\n### ")
+          .slice(1)
+          .map((block) => ({ id: block.split("\n")[0]?.trim() ?? "", pass: block.includes("回答：✓") }));
+        return JSON.stringify({ results });
+      }
+      const pick =
+        request.system === TWIN_EVAL_BLANK_SYSTEM_PROMPT
+          ? marks.blank
+          : request.user.includes(OLD_FULL)
+            ? marks.old
+            : request.user.includes(TWIN_EVAL_GENERIC_PERSONA)
+              ? marks.generic
+              : marks.twin;
+      const ids = [...request.user.matchAll(/^- (p\d+)：/gmu)].map((match) => match[1] ?? "");
+      return JSON.stringify({ answers: ids.map((id, index) => ({ id, answer: pick[index] ?? "✗" })) });
+    };
+  }
+
+  it("puts new probes up for review and scores the reviewed ones against the held-out twin and both baselines", async () => {
+    const box = await world();
+    await seedTwin(box);
+    const dated = { id: "p02", layer: "persona", situation: "助手准备长篇汇报进度", expect: "一句话说还没好", day: LOCAL_DAY };
+    await seed(box.drive, PROBES, `${JSON.stringify(probe)}\n${JSON.stringify(dated)}\n`);
+    await seed(box.drive, backup("JOHN-DIGITAL-TWIN-latest", "2026-10-12"), "太早的备份");
+    await seed(box.drive, backup("JOHN-DIGITAL-TWIN-latest", "2026-10-19"), OLD_FULL);
+    box.sessions = [{ sessionKey: "s1", title: "会话一", turns: ["先别跑，我还没确认"] }];
     const result = await run(
       box,
-      model({
-        probes: { probes: [{ layer: "coding", situation: "用户说先别跑", expect: "停下不执行" }] },
-        answers: { answers: [{ id: "p01", answer: "先排查" }, { id: "p02", answer: "继续跑" }] },
-        judge: { results: [{ id: "p01", pass: true }, { id: "p02", pass: false }] },
-      }),
+      scripted({ twin: ["✓", "✓"], old: ["✗"], generic: ["✓", "✗"], blank: ["✗", "✗"] }),
       { steps: [portraitEvalStep] },
     );
     expect(result.ok).toBe(true);
+    // Each condition agrees with itself across two rounds, so no third round is needed.
     expect(box.requests.map((request) => request.system)).toEqual([
       TWIN_PROBES_SYSTEM_PROMPT,
-      TWIN_EVAL_ANSWER_SYSTEM_PROMPT,
-      TWIN_EVAL_JUDGE_SYSTEM_PROMPT,
+      ...Array.from({ length: 8 }).flatMap((_, index) => [
+        index === 2 || index === 3 ? TWIN_EVAL_BLANK_SYSTEM_PROMPT : TWIN_EVAL_ANSWER_SYSTEM_PROMPT,
+        TWIN_EVAL_JUDGE_SYSTEM_PROMPT,
+      ]),
     ]);
-    expect(box.requests[1]?.user).toContain(FULL_TEXT);
-    expect(box.requests[1]?.user).not.toContain(PROJECTS_TEXT);
-    expect(box.requests[1]?.user).not.toContain("只排查不改代码");
-    expect(jsonl(await textAt(box.drive, PROBES))).toEqual([
-      probe,
-      { id: "p02", layer: "coding", situation: "用户说先别跑", expect: "停下不执行" },
+    expect(box.requests[0]?.user).toContain("先别跑，我还没确认");
+    const [current, blank, generic, held] = [1, 5, 9, 13].map((index) => box.requests[index]?.user ?? "");
+    expect(current).toContain(FULL_TEXT);
+    expect(current).not.toContain(PROJECTS_TEXT);
+    expect(current).not.toContain("只排查不改代码");
+    expect(current).not.toContain("用户说先别跑");
+    expect(blank).not.toContain("人格分身");
+    expect(generic).not.toContain(FULL_TEXT);
+    expect(held).toContain(OLD_FULL);
+    expect(held).toContain(CODING_TEXT);
+    expect(held).toContain("- p02：");
+    expect(held).not.toContain("- p01：");
+    expect(jsonl(await textAt(box.drive, PROBES))).toEqual([probe, dated]);
+    expect(jsonl(await textAt(box.drive, PENDING_PROBES))).toEqual([
+      { id: "p03", layer: "coding", situation: "用户说先别跑", expect: "停下不执行", day: LOCAL_DAY },
     ]);
     const log = await textAt(box.drive, CHANGELOG);
-    expect(log).toContain(`## 评测 · ${LOCAL_DAY}\n- 得分 1/2\n`);
-    expect(log).toContain("- 答错：p02");
-    expect(JSON.parse(box.cursors.get(PORTRAIT_EVAL_CURSOR) ?? "{}")).toMatchObject({ day: LOCAL_DAY, pass: 1, total: 2 });
-    expect(reminders(box.events)).toEqual([]);
+    expect(log).toContain(
+      [
+        `## 评测 · ${LOCAL_DAY}`,
+        "- 全部 2 道，当前分身作答：分身 2，不读分身 0，通用人设 1；比两组对照里较好的多答对 1 道",
+        "- 留出 1 道，出题前一周的分身作答：分身 0，不读分身 0，通用人设 0；和两组对照里较好的持平",
+        "- 新出 1 道题，1 道等你过目后才计分",
+      ].join("\n"),
+    );
+    expect(log).not.toContain("当前分身答错");
+    expect(JSON.parse(box.cursors.get(PORTRAIT_EVAL_CURSOR) ?? "{}")).toMatchObject({ day: LOCAL_DAY, pass: 2, total: 2 });
+    expect(reminders(box.events)).toEqual([
+      {
+        kind: "portrait_eval",
+        text: "留出题上分身没有比对照答得更好；有 1 道新题等你过目，运行 you-brain portrait-probes。答错的题：无",
+      },
+    ]);
 
     box.requests.length = 0;
     const soon = await run(box, model({}), { steps: [portraitEvalStep], day: "2026-10-29" });
     expect(soon.ok).toBe(true);
     expect(box.requests).toEqual([]);
+  });
+
+  it("marks probes every condition agrees on and shows the mark to the probe writer", async () => {
+    const box = await world();
+    await seedTwin(box);
+    const probes = [
+      { ...probe, flat: "2026-10-16" },
+      { id: "p02", layer: "persona", situation: "助手准备长篇汇报进度", expect: "一句话说还没好" },
+      { id: "p03", layer: "persona", situation: "助手准备抢前台焦点", expect: "静默处理" },
+    ];
+    await seed(box.drive, PROBES, probes.map((row) => `${JSON.stringify(row)}\n`).join(""));
+    box.sessions = [{ sessionKey: "s1", title: "会话一", turns: ["先别跑，我还没确认"] }];
+    const result = await run(
+      box,
+      scripted({
+        twin: ["✓", "✓", "✗", "✓"],
+        old: [],
+        blank: ["✓", "✓", "✗", "✗"],
+        generic: ["✗", "✓", "✗", "✗"],
+      }),
+      { steps: [portraitEvalStep] },
+    );
+    expect(result.ok).toBe(true);
+    const writer = box.requests[0]?.user ?? "";
+    expect(writer).toContain("- 用户问为什么报错（没有区分度）");
+    expect(writer).not.toContain("助手准备长篇汇报进度（没有区分度）");
+    const [, p02, p03] = probes;
+    expect(jsonl(await textAt(box.drive, PROBES))).toEqual([probe, { ...p02, flat: LOCAL_DAY }, { ...p03, flat: LOCAL_DAY }]);
+    expect(jsonl(await textAt(box.drive, PENDING_PROBES))).toEqual([
+      { id: "p04", layer: "coding", situation: "用户说先别跑", expect: "停下不执行", day: LOCAL_DAY },
+    ]);
+    expect(await textAt(box.drive, CHANGELOG)).toContain("- 没有区分度 2 道：三组都答对 p02；三组都答错 p03");
+  });
+
+  it("settles a probe the first two rounds split on with a third round over that probe alone", async () => {
+    const box = await world();
+    await seedTwin(box);
+    const steady = { id: "p02", layer: "persona", situation: "助手准备长篇汇报进度", expect: "一句话说还没好" };
+    await seed(box.drive, PROBES, `${JSON.stringify(probe)}\n${JSON.stringify(steady)}\n`);
+    const judge = scripted({ twin: [], old: [], generic: [], blank: [] });
+    let twinRounds = 0;
+    const result = await run(
+      box,
+      (request) => {
+        if (request.system === TWIN_EVAL_JUDGE_SYSTEM_PROMPT) return judge(request);
+        const twin = request.system === TWIN_EVAL_ANSWER_SYSTEM_PROMPT && request.user.includes(FULL_TEXT);
+        if (twin) twinRounds += 1;
+        // With the twin, p01 passes in rounds one and three and fails in round two.
+        const ids = [...request.user.matchAll(/^- (p\d+)：/gmu)].map((match) => match[1] ?? "");
+        const mark = (id: string) => (twin && (id === "p02" || twinRounds !== 2) ? "✓" : "✗");
+        return JSON.stringify({ answers: ids.map((id) => ({ id, answer: mark(id) })) });
+      },
+      { steps: [portraitEvalStep] },
+    );
+    expect(result.ok).toBe(true);
+    const twinAnswers = box.requests.filter(
+      (request) => request.system === TWIN_EVAL_ANSWER_SYSTEM_PROMPT && request.user.includes(FULL_TEXT),
+    );
+    expect(twinAnswers).toHaveLength(3);
+    expect(twinAnswers[2]?.user).toContain("- p01：");
+    expect(twinAnswers[2]?.user).not.toContain("- p02：");
+    expect(await textAt(box.drive, CHANGELOG)).toContain("分身 2，不读分身 0，通用人设 0");
+  });
+
+  it("moves kept probes into the scored set, drops the rest, and leaves skipped ones pending", async () => {
+    const box = await world();
+    const pending = ["p02", "p03", "p04"].map((id) => ({
+      id,
+      layer: "persona",
+      situation: `情境 ${id}`,
+      expect: `反应 ${id}`,
+      day: LOCAL_DAY,
+    }));
+    await seed(box.drive, PROBES, `${JSON.stringify(probe)}\n`);
+    await seed(box.drive, PENDING_PROBES, pending.map((row) => `${JSON.stringify(row)}\n`).join(""));
+    const verdicts: Record<string, boolean | null> = { p02: true, p03: false, p04: null };
+    const result = await reviewProbes({
+      portrait: box.portrait,
+      decide: async (row) => verdicts[row.id] ?? null,
+    });
+    expect(result).toEqual({ kept: 1, dropped: 1, left: 1 });
+    expect(jsonl(await textAt(box.drive, PROBES))).toEqual([probe, pending[0]]);
+    expect(jsonl(await textAt(box.drive, PENDING_PROBES))).toEqual([pending[2]]);
+  });
+
+  it("restores the twin from before a run out of the backups", async () => {
+    const box = await world();
+    await seedTwin(box);
+    await seed(box.drive, backup("JOHN-DIGITAL-TWIN-latest", "2026-10-12"), "十月十二日之前");
+    await seed(box.drive, backup("JOHN-DIGITAL-TWIN-latest", "2026-10-19"), "十月十九日之前");
+    await seed(box.drive, backup("JOHN-TWIN-coding", "2026-10-15"), "编码 十月十五日之前");
+    const twinBefore = box.portrait.twinBefore?.bind(box.portrait);
+    expect(await twinBefore?.("2026-10-12")).toEqual({ full: "十月十二日之前", coding: "编码 十月十五日之前" });
+    expect(await twinBefore?.("2026-10-16")).toEqual({ full: "十月十九日之前", coding: CODING_TEXT });
+    expect(await twinBefore?.("2026-10-20")).toEqual({ full: FULL_TEXT, coding: CODING_TEXT });
   });
 
   it("flags a score drop in the weekly review", async () => {

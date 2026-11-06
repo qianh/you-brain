@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { existsSync, readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -10,7 +11,16 @@ import {
   type SharedConfig,
 } from "@you-brain/protocol";
 import { getLlmApiKey, resolveSecretBackend } from "@you-brain/core/auth";
-import { createDrivePortrait, localDayKey, rebuildTwin } from "@you-brain/core/consolidate";
+import {
+  createDrivePortrait,
+  evaluateTwin,
+  localDayKey,
+  readTwinSessions,
+  rebuildTwin,
+  reviewProbes,
+  twinEvalLog,
+  type TwinSessionRow,
+} from "@you-brain/core/consolidate";
 import { openGoogleDrive } from "@you-brain/core/daemon";
 import { isProcessAlive } from "@you-brain/core/http";
 import { createLlmBackend } from "@you-brain/core/llm";
@@ -109,8 +119,8 @@ function readLocalShared(dataDir: string): SharedConfig {
   }
 }
 
-/** Rebuild the three twin layers on Drive from the current files, without the daemon. */
-export async function rebuildPortrait(options: { timeoutSeconds: number }): Promise<void> {
+/** Drive portrait and model for maintenance commands, without the daemon. */
+async function openDrivePortrait(timeoutSeconds: number) {
   const platform = supportedPlatform();
   const homeDir = homedir();
   const loaded = await loadLocalConfig({ homeDir, platform, env: process.env });
@@ -135,21 +145,93 @@ export async function rebuildPortrait(options: { timeoutSeconds: number }): Prom
     dataDir,
     env: process.env,
     homeDir,
-    timeoutMs: options.timeoutSeconds * 1000,
+    timeoutMs: timeoutSeconds * 1000,
   });
+  const drive = opened.drive;
   const portrait = createDrivePortrait({
-    drive: opened.drive,
+    drive,
     driveRoot: opened.config.driveRoot,
     config: () => ({
       variants: shared.portrait.variants,
       snapshotPattern: shared.portrait.snapshotPattern,
     }),
     events: () => [],
+    sessions: (day) =>
+      readTwinSessions({ drive, sessions: sessionRows(loaded.paths.stateFile), timeZone: roles.timezone, day }),
   });
+  return { llm, portrait, day: localDayKey(new Date(), roles.timezone) };
+}
+
+/** Session rows from the daemon's database, opened read-only so a running daemon is not disturbed. */
+function sessionRows(stateFile: string): TwinSessionRow[] {
+  if (!existsSync(stateFile)) return [];
+  const db = new Database(stateFile, { readonly: true });
+  try {
+    return db
+      .query<{ session_key: string; title: string; file_id: string | null; updated_at: string | null }, []>(
+        "SELECT session_key, title, file_id, updated_at FROM sessions",
+      )
+      .all()
+      .map((row) => ({
+        sessionKey: row.session_key,
+        title: row.title,
+        fileId: row.file_id,
+        updatedAt: row.updated_at,
+      }));
+  } finally {
+    db.close();
+  }
+}
+
+/** Run the twin eval now and prepend the result to the Drive changelog. */
+export async function evaluatePortrait(options: { timeoutSeconds: number; newProbes: number }): Promise<void> {
+  const { llm, portrait, day } = await openDrivePortrait(options.timeoutSeconds);
+  console.log("开始评测：出新题放进待审，再让当前分身、出题前的分身、两组对照各作答三轮并判分");
+  const result = await evaluateTwin({ llm, portrait, day, newProbes: options.newProbes });
+  if (!result) throw new CliError("Drive 上缺少人格分身或编码分身，无法评测");
+  if (result.current.twin.total === 0) {
+    console.log(`题库里还没有过目过的题。待审 ${result.pending} 道，用 you-brain portrait-probes 过目`);
+    return;
+  }
+  const log = twinEvalLog(day, result);
+  await portrait.appendChangelog(log);
+  console.log(log);
+}
+
+/** Show each probe waiting for review and move the kept ones into the scored set. */
+export async function reviewPortraitProbes(): Promise<void> {
+  if (!process.stdin.isTTY) throw new CliError("当前不是交互终端，无法逐题过目");
+  const { portrait } = await openDrivePortrait(60);
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const result = await reviewProbes({
+      portrait,
+      decide: async (probe) => {
+        console.log(`\n${probe.id}（${probe.layer === "coding" ? "编码" : "人格"}${probe.day ? `，${probe.day} 出题` : ""}）`);
+        console.log(`  情境：${probe.situation}`);
+        console.log(`  你的反应：${probe.expect}`);
+        const answer = (await rl.question("保留这道题？[y 保留 / n 丢掉 / 回车跳过] ")).trim().toLowerCase();
+        return answer === "y" ? true : answer === "n" ? false : null;
+      },
+    });
+    if (result.kept + result.dropped + result.left === 0) {
+      console.log("没有待审的题");
+      return;
+    }
+    console.log(`\n保留 ${result.kept} 道，丢掉 ${result.dropped} 道，还有 ${result.left} 道待审`);
+  } finally {
+    rl.close();
+  }
+}
+
+/** Rebuild the three twin layers on Drive from the current files, without the daemon. */
+export async function rebuildPortrait(options: { timeoutSeconds: number }): Promise<void> {
+  const { llm, portrait, day } = await openDrivePortrait(options.timeoutSeconds);
   const result = await rebuildTwin({
     llm,
     portrait,
-    day: localDayKey(new Date(), roles.timezone),
+    day,
     log: (line) => console.log(line),
   });
   console.log(

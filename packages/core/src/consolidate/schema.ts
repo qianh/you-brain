@@ -60,7 +60,6 @@ export const TWIN_PROBES_JSON_SCHEMA: Record<string, unknown> = {
   properties: {
     probes: {
       type: "array",
-      maxItems: 5,
       items: {
         type: "object",
         additionalProperties: false,

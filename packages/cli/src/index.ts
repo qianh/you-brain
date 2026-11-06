@@ -42,9 +42,11 @@ import {
 import { registerProtocolCommand } from "./protocol-command.js";
 import {
   applyIntegrations,
+  evaluatePortrait,
   listIntegrations,
   rebuildPortrait,
   restoreBrainHub,
+  reviewPortraitProbes,
   uninstall,
 } from "./maintenance.js";
 import { registerServiceCommand } from "./service/command.js";
@@ -255,6 +257,34 @@ program
       const seconds = Number(opts.timeout);
       if (!Number.isFinite(seconds) || seconds <= 0) throw new CliError("--timeout 必须是正数");
       await rebuildPortrait({ timeoutSeconds: seconds });
+    } catch (error) {
+      fail(error);
+    }
+  });
+
+program
+  .command("portrait-probes")
+  .description("逐题过目待审的评测题：保留的进题库参加计分，丢掉的删除，跳过的留到下次")
+  .action(async () => {
+    try {
+      await reviewPortraitProbes();
+    } catch (error) {
+      fail(error);
+    }
+  });
+
+program
+  .command("portrait-eval")
+  .description("现在跑一次数字分身保真评测：从近 7 天的会话出新题放进待审，再用题库对比当前分身、出题前的分身和两组对照，结果写进 Drive 上的 changelog")
+  .option("--probes <count>", "这次最多新增几道题", "8")
+  .option("--timeout <seconds>", "单次模型调用的超时秒数", "900")
+  .action(async (opts: { probes: string; timeout: string }) => {
+    try {
+      const seconds = Number(opts.timeout);
+      if (!Number.isFinite(seconds) || seconds <= 0) throw new CliError("--timeout 必须是正数");
+      const probes = Number(opts.probes);
+      if (!Number.isInteger(probes) || probes < 0) throw new CliError("--probes 必须是非负整数");
+      await evaluatePortrait({ timeoutSeconds: seconds, newProbes: probes });
     } catch (error) {
       fail(error);
     }

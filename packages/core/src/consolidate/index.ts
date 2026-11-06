@@ -108,16 +108,24 @@ export {
   driveViewUrl,
   fillSnapshotPattern,
   pendingCorrections,
+  readTwinSessions,
   type DrivePortraitSource,
+  type TwinSessionRow,
 } from "./portrait-drive.js";
 export {
   PORTRAIT_EVAL_CURSOR,
   PORTRAIT_MONTHLY_CURSOR,
   PORTRAIT_TURNS_CURSOR,
   cleanUserTurn,
+  evaluateTwin,
+  reviewProbes,
   rebuildTwin,
+  twinEvalLog,
   type RebuildTwinInput,
   type RebuildTwinResult,
+  type TwinEvalResult,
+  type TwinEvalScore,
+  type TwinEvalScores,
 } from "./portrait.js";
 export {
   TWIN_BUDGET,
@@ -140,6 +148,7 @@ export {
   type TwinTexts,
   type VersionBump,
 } from "./twin.js";
+export { twinStandardProblems } from "./twin-standard.js";
 export {
   MERGE_SUGGESTIONS_CURSOR,
   mergeSuggestionLines,

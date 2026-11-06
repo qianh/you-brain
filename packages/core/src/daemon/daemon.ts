@@ -111,16 +111,15 @@ import {
   createDrivePortrait,
   emptyConsolidationState,
   executeConsolidation,
-  localDayKey,
   mergeSuggestionLines,
   parseMergeSuggestions,
   planTopicReorganization,
+  readTwinSessions,
   reorganizeEvents,
   reorganizeTopics,
   ReorganizeJob,
   type ReorganizeEvent,
   readConsolidateLease,
-  shiftDateKey,
   writeConsolidateLease,
   MERGE_SUGGESTIONS_CURSOR,
   type ConsolidationState,
@@ -3703,31 +3702,7 @@ export class YouBrainDaemon {
     const drive = this.#drive;
     const store = this.#store;
     if (!drive || !store) return [];
-    const timeZone = this.#roles.timezone;
-    // A 03:00 run would miss yesterday's evening without the extra day; the turn cursor skips repeats.
-    const since = shiftDateKey(day, -1);
-    const rows = store
-      .listSessions()
-      .filter(
-        (session) =>
-          session.fileId !== null &&
-          session.updatedAt !== null &&
-          localDayKey(new Date(session.updatedAt), timeZone) >= since,
-      )
-      .sort((left, right) => (left.updatedAt ?? "").localeCompare(right.updatedAt ?? ""));
-    const sessions: Array<{ sessionKey: string; title: string; turns: string[] }> = [];
-    for (const session of rows) {
-      if (session.fileId === null) continue;
-      const object = await drive.read(session.fileId).catch(() => null);
-      const parsed = object ? parseWebSession(object.bytes.toString("utf8")) : null;
-      if (!parsed) continue;
-      sessions.push({
-        sessionKey: session.sessionKey,
-        title: session.title,
-        turns: parsed.turns.filter((turn) => turn.role === "user").map((turn) => turn.text),
-      });
-    }
-    return sessions;
+    return readTwinSessions({ drive, sessions: store.listSessions(), timeZone: this.#roles.timezone, day });
   }
 
   #consolidationView() {

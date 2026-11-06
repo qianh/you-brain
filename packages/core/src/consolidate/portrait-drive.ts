@@ -3,10 +3,12 @@ import { posix } from "node:path";
 import { DEFAULT_PORTRAIT_VARIANTS, type Event } from "@you-brain/protocol";
 
 import { ConflictError } from "../drive/errors.js";
-import type { DrivePort } from "../drive/drive-port.js";
+import type { DriveObject, DrivePort } from "../drive/drive-port.js";
 import { classifyPortraitCorrections } from "../portrait/corrections.js";
 import type { PortraitConfig, PortraitService } from "../portrait/service.js";
 import { resolveDrivePath } from "../portrait/path.js";
+import { parseWebSession } from "../web-sessions/parse.js";
+import { localDayKey, shiftDateKey } from "./schedule.js";
 import type {
   ConsolidationPortrait,
   StoredTwinClaim,
@@ -20,6 +22,8 @@ const MARKDOWN = "text/markdown";
 const JSONL = "application/x-ndjson";
 const CORRECTION_LIMIT = 20;
 const CHANGELOG_TITLE = "# 数字分身变更记录";
+/** Session files downloaded at the same time; a week of sessions is a few hundred reads. */
+const SESSION_READ_CONCURRENCY = 8;
 
 export interface DrivePortraitSource {
   drive: DrivePort;
@@ -118,6 +122,22 @@ export function createDrivePortrait(source: DrivePortraitSource): ConsolidationP
     async saveProbes(probes) {
       await writeJsonl(source.drive, paths().probes, probes);
     },
+    async pendingProbes() {
+      return readJsonl(source.drive, paths().pendingProbes, parseProbe);
+    },
+    async savePendingProbes(probes) {
+      await writeJsonl(source.drive, paths().pendingProbes, probes);
+    },
+    async twinBefore(day) {
+      const texts: Partial<Record<"full" | "coding", string>> = {};
+      for (const layer of ["full", "coding"] as const) {
+        const path = paths().layers[layer];
+        const object = (await backupFrom(source.drive, path, day)) ?? (await source.drive.readPath(path));
+        if (!object) return null;
+        texts[layer] = object.bytes.toString("utf8");
+      }
+      return { full: texts.full ?? "", coding: texts.coding ?? "" };
+    },
     async appendChangelog(entry) {
       await prependChangelog(source.drive, paths().changelog, entry);
     },
@@ -170,6 +190,52 @@ function snapshotMatcher(basename: string): RegExp | null {
   return new RegExp(`^${source}$`, "u");
 }
 
+export interface TwinSessionRow {
+  sessionKey: string;
+  title: string;
+  fileId: string | null;
+  updatedAt: string | null;
+}
+
+/** The user's own turns for sessions last updated on or after the day before `day`, oldest session first. */
+export async function readTwinSessions(input: {
+  drive: DrivePort;
+  sessions: readonly TwinSessionRow[];
+  timeZone: string;
+  day: string;
+}): Promise<Array<{ sessionKey: string; title: string; turns: string[] }>> {
+  // A 03:00 run would miss yesterday's evening without the extra day; the turn cursor skips repeats.
+  const since = shiftDateKey(input.day, -1);
+  const rows = input.sessions
+    .filter(
+      (session) =>
+        session.fileId !== null &&
+        session.updatedAt !== null &&
+        localDayKey(new Date(session.updatedAt), input.timeZone) >= since,
+    )
+    .sort((left, right) => (left.updatedAt ?? "").localeCompare(right.updatedAt ?? ""));
+  const sessions: Array<{ sessionKey: string; title: string; turns: string[] }> = [];
+  for (let start = 0; start < rows.length; start += SESSION_READ_CONCURRENCY) {
+    const batch = rows.slice(start, start + SESSION_READ_CONCURRENCY);
+    const objects = await Promise.all(
+      batch.map((session) =>
+        session.fileId === null ? null : input.drive.read(session.fileId).catch(() => null),
+      ),
+    );
+    batch.forEach((session, index) => {
+      const object = objects[index];
+      const parsed = object ? parseWebSession(object.bytes.toString("utf8")) : null;
+      if (!parsed) return;
+      sessions.push({
+        sessionKey: session.sessionKey,
+        title: session.title,
+        turns: parsed.turns.filter((turn) => turn.role === "user").map((turn) => turn.text),
+      });
+    });
+  }
+  return sessions;
+}
+
 export function pendingCorrections(
   events: readonly Event[],
 ): Array<{ correctionId: string; variant: string; section: string; text: string }> {
@@ -208,6 +274,7 @@ interface TwinPaths {
   pending: string;
   changelog: string;
   probes: string;
+  pendingProbes: string;
 }
 
 /** Layer paths come from config, falling back to the defaults. Side files sit next to `full`. */
@@ -229,13 +296,31 @@ function twinPaths(source: DrivePortraitSource): TwinPaths {
     pending: posix.join(base, "claims", "pending.jsonl"),
     changelog: posix.join(base, "changelog-latest.md"),
     probes: posix.join(base, "eval", "probes.jsonl"),
+    pendingProbes: posix.join(base, "eval", "pending-probes.jsonl"),
   };
 }
 
-async function writeBackup(drive: DrivePort, latestPath: string, previous: string, day: string): Promise<void> {
+function backupPrefix(latestPath: string): string {
   const directory = posix.dirname(latestPath);
   const base = posix.basename(latestPath, posix.extname(latestPath));
-  const backup = posix.join(directory === "." ? "" : directory, "consolidate-backup", `${base}-${day}.md`);
+  return posix.join(directory === "." ? "" : directory, "consolidate-backup", `${base}-`);
+}
+
+/**
+ * The first backup written on or after `day`. A backup holds the text from before that day's
+ * first write, so this is the layer as it stood right before the run of `day`.
+ */
+async function backupFrom(drive: DrivePort, latestPath: string, day: string): Promise<DriveObject | null> {
+  const prefix = backupPrefix(latestPath);
+  const days = (await drive.list({ prefix }))
+    .map((entry) => /^(\d{4}-\d{2}-\d{2})\.md$/u.exec(entry.path.slice(prefix.length))?.[1])
+    .filter((value): value is string => value !== undefined && value >= day)
+    .sort();
+  return days[0] === undefined ? null : drive.readPath(`${prefix}${days[0]}.md`);
+}
+
+async function writeBackup(drive: DrivePort, latestPath: string, previous: string, day: string): Promise<void> {
+  const backup = `${backupPrefix(latestPath)}${day}.md`;
   const existing = await drive.findByPath(backup);
   if (existing) return;
   await drive.create({
@@ -306,5 +391,11 @@ function parseProbe(value: unknown): TwinProbe | null {
     layer: row.layer === "persona" ? "persona" : "coding",
     situation: row.situation,
     expect: row.expect,
+    ...(isDayKey(row.day) ? { day: row.day } : {}),
+    ...(isDayKey(row.flat) ? { flat: row.flat } : {}),
   };
+}
+
+function isDayKey(value: unknown): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/u.test(value);
 }

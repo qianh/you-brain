@@ -40,6 +40,10 @@ export interface TwinProbe {
   layer: "persona" | "coding";
   situation: string;
   expect: string;
+  /** Day the probe was written from that week's sessions. Probes without it are only scored in-sample. */
+  day?: string;
+  /** Day of the latest eval where the twin and both baselines all got it right, or all got it wrong. */
+  flat?: string;
 }
 
 /** One dated snapshot of the full layer, parsed from the snapshot file name. */
@@ -79,6 +83,14 @@ export interface ConsolidationPortrait {
   }): Promise<{ snapshot: string | null; links: Partial<Record<TwinLayer, string>> }>;
   probes(): Promise<TwinProbe[]>;
   saveProbes(probes: readonly TwinProbe[]): Promise<void>;
+  /** Probes written from recent sessions that the user has not reviewed yet. They are never scored. */
+  pendingProbes(): Promise<TwinProbe[]>;
+  savePendingProbes(probes: readonly TwinProbe[]): Promise<void>;
+  /**
+   * full and coding as they stood right before the run of `day`. Null when a layer is missing.
+   * Absent where history is unavailable; held-out scoring is then skipped.
+   */
+  twinBefore?(day: string): Promise<{ full: string; coding: string } | null>;
   /** Prepend an entry to the changelog. */
   appendChangelog(entry: string): Promise<void>;
   /** full snapshots written on change, oldest first. Absent where listing is unavailable. */

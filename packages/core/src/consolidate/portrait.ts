@@ -19,6 +19,7 @@ import {
   buildTwinMergePrompt,
   buildTwinMonthlyPrompt,
   buildTwinProbesPrompt,
+  TWIN_EVAL_GENERIC_PERSONA,
   type TwinPromptCorrection,
 } from "./prompt.js";
 import { shiftDateKey } from "./schedule.js";
@@ -50,10 +51,12 @@ import {
   twinVersion,
   withHeader,
   withProjectsPointer,
+  type TwinCheck,
   type TwinLayer,
   type TwinTexts,
   type VersionBump,
 } from "./twin.js";
+import { twinStandardProblems } from "./twin-standard.js";
 
 const MAX_ATTEMPTS = 2;
 const EXTRACT_CONCURRENCY = 3;
@@ -67,6 +70,13 @@ const REBUILD_BATCH_UNITS = 11_000;
 const REBUILD_FIX_PASSES = 3;
 const PENDING_KEEP_DAYS = 60;
 const EVAL_INTERVAL_DAYS = 7;
+/** New probes one weekly run may add. */
+const WEEKLY_PROBES = 8;
+/** Rounds of answering and judging per condition; one round flipped two or three of 16 probes. */
+const EVAL_ROUNDS = 3;
+/** Units of the week's user turns sent to the probe writer, and the most one session may take. */
+const PROBE_INPUT_UNITS = 30_000;
+const PROBE_SESSION_UNITS = 4_000;
 
 export const PORTRAIT_TURNS_CURSOR = "portrait.turns";
 export const PORTRAIT_EVAL_CURSOR = "portrait.eval";
@@ -169,79 +179,325 @@ export const portraitEvalStep: ConsolidationStep = {
     if (!portrait) return;
     const last = parseEvalCursor(ctx.cursors.get(PORTRAIT_EVAL_CURSOR));
     if (last && last.day > shiftDateKey(ctx.day, -EVAL_INTERVAL_DAYS)) return;
-    const files = await portrait.read();
-    if (!files.full || !files.coding) return;
-
-    let probes = await portrait.probes();
-    const days = Array.from({ length: EVAL_INTERVAL_DAYS }, (_, index) => shiftDateKey(ctx.day, -index));
-    const weekClaims = (await portrait.claimsOf(days)).filter(
-      (claim) => claim.confidence === "high" && claim.layer !== "project",
+    const result = await evaluateTwin({ llm: ctx.llm, portrait, day: ctx.day, newProbes: WEEKLY_PROBES });
+    if (!result) return;
+    const { twin } = result.current;
+    ctx.cursors.set(
+      PORTRAIT_EVAL_CURSOR,
+      JSON.stringify({ day: ctx.day, pass: twin.pass, total: twin.total, ...result.sizes }),
     );
-    if (weekClaims.length > 0) {
-      const prompt = buildTwinProbesPrompt({ claims: weekClaims, existing: probes });
-      const drafts = await completeJson(ctx.llm, prompt, TWIN_PROBES_JSON_SCHEMA, parseTwinProbes);
-      if (drafts.length > 0) {
-        let next = nextProbeNumber(probes);
-        probes = [
-          ...probes,
-          ...drafts.map((draft) => ({ id: `p${String(next++).padStart(2, "0")}`, ...draft })),
-        ];
-        await portrait.saveProbes(probes);
-      }
-    }
-    const sizes = { full: byteSize(files.full.text), coding: byteSize(files.coding.text) };
-    if (probes.length === 0) {
-      ctx.cursors.set(PORTRAIT_EVAL_CURSOR, JSON.stringify({ day: ctx.day, pass: 0, total: 0, ...sizes }));
-      return;
-    }
-    const answers = await completeJson(
-      ctx.llm,
-      buildTwinEvalAnswerPrompt({ full: files.full.text, coding: files.coding.text, probes }),
-      TWIN_EVAL_ANSWERS_JSON_SCHEMA,
-      parseTwinAnswers,
-    );
-    const verdicts = await completeJson(
-      ctx.llm,
-      buildTwinEvalJudgePrompt({
-        items: probes.map((probe) => ({
-          id: probe.id,
-          situation: probe.situation,
-          expect: probe.expect,
-          answer: answers.get(probe.id) ?? "",
-        })),
-      }),
-      TWIN_EVAL_JUDGE_JSON_SCHEMA,
-      parseTwinJudge,
-    );
-    const failed = probes.filter((probe) => verdicts.get(probe.id) !== true).map((probe) => probe.id);
-    const pass = probes.length - failed.length;
-    const lines = [
-      `## 评测 · ${ctx.day}`,
-      `- 得分 ${pass}/${probes.length}`,
-      `- 常驻层 full ${sizes.full} 字节，coding ${sizes.coding} 字节`,
-    ];
-    if (failed.length > 0) lines.push(`- 答错：${failed.join("、")}`);
-    await portrait.appendChangelog(lines.join("\n"));
-    ctx.cursors.set(PORTRAIT_EVAL_CURSOR, JSON.stringify({ day: ctx.day, pass, total: probes.length, ...sizes }));
-
     const notes: string[] = [];
-    if (last && last.total > 0) {
-      const before = last.pass / last.total;
-      const now = pass / probes.length;
-      if (now < before) notes.push(`保真评测得分从 ${last.pass}/${last.total} 降到 ${pass}/${probes.length}`);
-      const grew = sizes.full + sizes.coding > last.full + last.coding;
-      if (grew && now <= before) notes.push("常驻层变长了，评测得分没有上升");
+    if (twin.total > 0) {
+      await portrait.appendChangelog(twinEvalLog(ctx.day, result));
+      if (last && last.total > 0) {
+        const before = last.pass / last.total;
+        const now = twin.pass / twin.total;
+        if (now < before) notes.push(`保真评测得分从 ${last.pass}/${last.total} 降到 ${twin.pass}/${twin.total}`);
+        const grew = result.sizes.full + result.sizes.coding > last.full + last.coding;
+        if (grew && now <= before) notes.push("常驻层变长了，评测得分没有上升");
+      }
+      if (result.heldOut && lift(result.heldOut) <= 0) notes.push("留出题上分身没有比对照答得更好");
     }
+    if (result.pending > 0) notes.push(`有 ${result.pending} 道新题等你过目，运行 you-brain portrait-probes`);
     if (notes.length > 0) {
+      const failed = twin.total > 0 ? `答错的题：${twin.failed.join("、") || "无"}` : "";
       await ctx.emit("reminder.issued", {
         reminderId: `portrait-eval-${ctx.day}`,
         kind: "portrait_eval",
         topicId: null,
-        text: `${notes.join("；")}。答错的题：${failed.join("、") || "无"}`,
+        text: `${notes.join("；")}。${failed}`,
       });
     }
   },
 };
+
+export interface TwinEvalScore {
+  pass: number;
+  total: number;
+  failed: string[];
+}
+
+/** The same probes answered with a twin, with no profile at all, and with a generic engineer profile. */
+export interface TwinEvalScores {
+  twin: TwinEvalScore;
+  blank: TwinEvalScore;
+  generic: TwinEvalScore;
+}
+
+export interface TwinEvalResult {
+  added: number;
+  /** Probes waiting for the user's review after this run, new ones included. */
+  pending: number;
+  /** Every probe, answered with the current twin. */
+  current: TwinEvalScores;
+  /** Dated probes, each answered with the twin from before the sessions it was written from. */
+  heldOut: TwinEvalScores | null;
+  /** Probes that cannot tell the twin from the baselines this run: all three right, or all three wrong. */
+  flat: { right: string[]; wrong: string[] };
+  sizes: { full: number; coding: number };
+}
+
+/**
+ * Write up to `newProbes` probes from the past week's sessions for the user to review, then
+ * score every reviewed probe against the current twin, the twin from before each probe's week,
+ * and the two baselines (spec §7).
+ */
+export async function evaluateTwin(input: {
+  llm: LlmBackend;
+  portrait: ConsolidationPortrait;
+  day: string;
+  newProbes: number;
+}): Promise<TwinEvalResult | null> {
+  const { llm, portrait, day } = input;
+  const files = await portrait.read();
+  if (!files.full || !files.coding) return null;
+  const sizes = { full: byteSize(files.full.text), coding: byteSize(files.coding.text) };
+
+  const probes = await portrait.probes();
+  let pending = await portrait.pendingProbes();
+  let added = 0;
+  if (input.newProbes > 0) {
+    const turns = probeTurns(await portrait.sessions(shiftDateKey(day, 1 - EVAL_INTERVAL_DAYS)));
+    if (turns !== "") {
+      const existing = [...probes, ...pending];
+      const prompt = buildTwinProbesPrompt({ turns, existing, limit: input.newProbes });
+      const drafts = (await completeJson(llm, prompt, TWIN_PROBES_JSON_SCHEMA, parseTwinProbes)).slice(
+        0,
+        input.newProbes,
+      );
+      if (drafts.length > 0) {
+        let next = nextProbeNumber(existing);
+        pending = [...pending, ...drafts.map((draft) => ({ id: `p${String(next++).padStart(2, "0")}`, ...draft, day }))];
+        await portrait.savePendingProbes(pending);
+        added = drafts.length;
+      }
+    }
+  }
+  if (probes.length === 0) {
+    const none = { pass: 0, total: 0, failed: [] };
+    return {
+      added,
+      pending: pending.length,
+      current: { twin: none, blank: none, generic: none },
+      heldOut: null,
+      flat: { right: [], wrong: [] },
+      sizes,
+    };
+  }
+
+  const current: TwinEvalScores = {
+    twin: await scoreProbes(llm, twinProfile(files.full.text, files.coding.text), probes),
+    blank: await scoreProbes(llm, [], probes),
+    generic: await scoreProbes(llm, [{ title: "人设", text: TWIN_EVAL_GENERIC_PERSONA }], probes),
+  };
+  const flat = flatProbes(probes, current);
+  const marked = probes.map(({ flat: _, ...probe }): TwinProbe =>
+    flat.right.includes(probe.id) || flat.wrong.includes(probe.id) ? { ...probe, flat: day } : probe,
+  );
+  if (marked.some((probe, index) => probe.flat !== probes[index]?.flat)) {
+    await portrait.saveProbes(marked);
+  }
+
+  // The daemon reads sessions from one day before the window, so the held-out twin predates that day too.
+  const groups = new Map<string, TwinProbe[]>();
+  for (const probe of probes) {
+    if (probe.day === undefined) continue;
+    const before = shiftDateKey(probe.day, -EVAL_INTERVAL_DAYS);
+    groups.set(before, [...(groups.get(before) ?? []), probe]);
+  }
+  let heldOut: TwinEvalScores | null = null;
+  if (groups.size > 0 && portrait.twinBefore) {
+    const scores: TwinEvalScore[] = [];
+    const scored = new Set<string>();
+    for (const [before, group] of groups) {
+      const old = await portrait.twinBefore(before);
+      if (!old) continue;
+      scores.push(await scoreProbes(llm, twinProfile(old.full, old.coding), group));
+      for (const probe of group) scored.add(probe.id);
+    }
+    if (scored.size > 0) {
+      heldOut = {
+        twin: {
+          pass: scores.reduce((sum, score) => sum + score.pass, 0),
+          total: scored.size,
+          failed: scores.flatMap((score) => score.failed),
+        },
+        blank: scoreSubset(current.blank, scored),
+        generic: scoreSubset(current.generic, scored),
+      };
+    }
+  }
+  return { added, pending: pending.length, current, heldOut, flat, sizes };
+}
+
+/**
+ * Walk the probes waiting for review. Kept probes join the scored set, dropped ones are gone,
+ * and a probe the user skips stays pending.
+ */
+export async function reviewProbes(input: {
+  portrait: ConsolidationPortrait;
+  decide: (probe: TwinProbe) => Promise<boolean | null>;
+}): Promise<{ kept: number; dropped: number; left: number }> {
+  const kept: TwinProbe[] = [];
+  const left: TwinProbe[] = [];
+  let dropped = 0;
+  for (const probe of await input.portrait.pendingProbes()) {
+    const verdict = await input.decide(probe);
+    if (verdict === true) kept.push(probe);
+    else if (verdict === false) dropped += 1;
+    else left.push(probe);
+  }
+  // Kept probes are saved first, so a failure in between leaves them pending rather than lost.
+  if (kept.length > 0) {
+    const ids = new Set(kept.map((probe) => probe.id));
+    const scored = (await input.portrait.probes()).filter((probe) => !ids.has(probe.id));
+    await input.portrait.saveProbes([...scored, ...kept]);
+  }
+  if (kept.length + dropped > 0) await input.portrait.savePendingProbes(left);
+  return { kept: kept.length, dropped, left: left.length };
+}
+
+function flatProbes(probes: readonly TwinProbe[], scores: TwinEvalScores): TwinEvalResult["flat"] {
+  const failed = [scores.twin.failed, scores.blank.failed, scores.generic.failed].map((ids) => new Set(ids));
+  const ids = probes.map((probe) => probe.id);
+  return {
+    right: ids.filter((id) => failed.every((set) => !set.has(id))),
+    wrong: ids.filter((id) => failed.every((set) => set.has(id))),
+  };
+}
+
+export function twinEvalLog(day: string, result: TwinEvalResult): string {
+  const lines = [
+    `## 评测 · ${day}`,
+    scoreLine(`全部 ${result.current.twin.total} 道，当前分身作答`, result.current),
+  ];
+  if (result.heldOut) {
+    lines.push(scoreLine(`留出 ${result.heldOut.twin.total} 道，出题前一周的分身作答`, result.heldOut));
+  }
+  if (result.added > 0 || result.pending > 0) {
+    lines.push(`- 新出 ${result.added} 道题，${result.pending} 道等你过目后才计分`);
+  }
+  const { right, wrong } = result.flat;
+  if (right.length + wrong.length > 0) {
+    const parts = [
+      ...(right.length > 0 ? [`三组都答对 ${right.join("、")}`] : []),
+      ...(wrong.length > 0 ? [`三组都答错 ${wrong.join("、")}`] : []),
+    ];
+    lines.push(`- 没有区分度 ${right.length + wrong.length} 道：${parts.join("；")}`);
+  }
+  lines.push(`- 常驻层 full ${result.sizes.full} 字节，coding ${result.sizes.coding} 字节`);
+  if (result.current.twin.failed.length > 0) {
+    lines.push(`- 当前分身答错：${result.current.twin.failed.join("、")}`);
+  }
+  return lines.join("\n");
+}
+
+/** How many more probes the twin got right than the better of the two baselines. */
+function lift(scores: TwinEvalScores): number {
+  return scores.twin.pass - Math.max(scores.blank.pass, scores.generic.pass);
+}
+
+function scoreLine(label: string, scores: TwinEvalScores): string {
+  const gap = lift(scores);
+  const verdict =
+    gap > 0
+      ? `比两组对照里较好的多答对 ${gap} 道`
+      : gap < 0
+        ? `比两组对照里较好的少答对 ${-gap} 道`
+        : "和两组对照里较好的持平";
+  return `- ${label}：分身 ${scores.twin.pass}，不读分身 ${scores.blank.pass}，通用人设 ${scores.generic.pass}；${verdict}`;
+}
+
+function twinProfile(full: string, coding: string): Array<{ title: string; text: string }> {
+  return [
+    { title: "人格分身", text: full },
+    { title: "编码分身", text: coding },
+  ];
+}
+
+/**
+ * A probe passes when most of `EVAL_ROUNDS` rounds of answering and judging pass it. A probe
+ * leaves the loop once one side has a majority, so the last round only covers split probes.
+ */
+async function scoreProbes(
+  llm: LlmBackend,
+  profile: readonly { title: string; text: string }[],
+  probes: readonly TwinProbe[],
+): Promise<TwinEvalScore> {
+  const majority = Math.floor(EVAL_ROUNDS / 2) + 1;
+  const passes = new Map<string, number>();
+  const fails = new Map<string, number>();
+  let open = [...probes];
+  for (let round = 0; round < EVAL_ROUNDS && open.length > 0; round += 1) {
+    const passed = await scoreRound(llm, profile, open);
+    for (const probe of open) {
+      const tally = passed.has(probe.id) ? passes : fails;
+      tally.set(probe.id, (tally.get(probe.id) ?? 0) + 1);
+    }
+    open = open.filter(
+      (probe) => (passes.get(probe.id) ?? 0) < majority && (fails.get(probe.id) ?? 0) < majority,
+    );
+  }
+  const failed = probes.filter((probe) => (passes.get(probe.id) ?? 0) < majority).map((probe) => probe.id);
+  return { pass: probes.length - failed.length, total: probes.length, failed };
+}
+
+/** One answer call and one blind judge call; returns the ids that passed. */
+async function scoreRound(
+  llm: LlmBackend,
+  profile: readonly { title: string; text: string }[],
+  probes: readonly TwinProbe[],
+): Promise<Set<string>> {
+  const answers = await completeJson(
+    llm,
+    buildTwinEvalAnswerPrompt({ profile, probes }),
+    TWIN_EVAL_ANSWERS_JSON_SCHEMA,
+    parseTwinAnswers,
+  );
+  const verdicts = await completeJson(
+    llm,
+    buildTwinEvalJudgePrompt({
+      items: probes.map((probe) => ({
+        id: probe.id,
+        situation: probe.situation,
+        expect: probe.expect,
+        answer: answers.get(probe.id) ?? "",
+      })),
+    }),
+    TWIN_EVAL_JUDGE_JSON_SCHEMA,
+    parseTwinJudge,
+  );
+  return new Set(probes.filter((probe) => verdicts.get(probe.id) === true).map((probe) => probe.id));
+}
+
+function scoreSubset(score: TwinEvalScore, ids: ReadonlySet<string>): TwinEvalScore {
+  const failed = score.failed.filter((id) => ids.has(id));
+  return { pass: ids.size - failed.length, total: ids.size, failed };
+}
+
+/**
+ * The week's user turns for the probe writer, rendered oldest first. Newest sessions and each
+ * session's latest turns go in first, so one long session cannot fill the budget.
+ */
+function probeTurns(sessions: ReadonlyArray<{ title: string; turns: readonly string[] }>): string {
+  const pieces: string[] = [];
+  let used = 0;
+  for (const session of [...sessions].reverse()) {
+    const lines: string[] = [];
+    let share = 0;
+    for (let index = session.turns.length - 1; index >= 0; index -= 1) {
+      const text = cleanUserTurn(session.turns[index] ?? "");
+      if (text === "") continue;
+      const size = textUnits(text) + 2;
+      if (share + size > PROBE_SESSION_UNITS || used + size > PROBE_INPUT_UNITS) break;
+      lines.unshift(`- ${text}`);
+      share += size;
+      used += size;
+    }
+    if (lines.length > 0) pieces.unshift([`### ${session.title.trim() || "（无标题）"}`, ...lines].join("\n"));
+  }
+  return pieces.join("\n\n");
+}
 
 export const PORTRAIT_MONTHLY_CURSOR = "portrait.monthly";
 /** How far apart monthly comparisons sit, in days (spec §8). */
@@ -454,6 +710,20 @@ type FinishOutcome =
       sizes: { full: number; coding: number; maxSection: number };
     };
 
+/**
+ * The write-time check plus the quality standard (twin-standard.ts) for the resident layers.
+ * The standard holds a layer only once its current text meets it: a layer still in an older
+ * shape is not blocked forever, and a layer that meets it can never slip back.
+ */
+function checkWithStandard(before: TwinTexts, texts: TwinTexts, changed: ReadonlySet<TwinLayer>): TwinCheck {
+  const check = checkTwin(texts, changed);
+  for (const layer of ["full", "coding"] as const) {
+    if (!changed.has(layer) || twinStandardProblems(layer, before[layer]).length > 0) continue;
+    check.blocking.push(...twinStandardProblems(layer, texts[layer]));
+  }
+  return check;
+}
+
 /** Checks before writing, with one fix pass. Unchanged layers come back byte for byte. */
 async function finishTwin(
   llm: LlmBackend,
@@ -464,11 +734,11 @@ async function finishTwin(
   let texts = merged;
   let changed = changedLayers(before, texts);
   if (changed.size === 0) return { texts: before, changed, warnings: [], sizes: checkTwin(before, changed).sizes };
-  let check = checkTwin(texts, changed);
+  let check = checkWithStandard(before, texts, changed);
   if (check.blocking.length > 0 || check.warnings.length > 0) {
     texts = await fixOnce(llm, texts, [...check.blocking, ...check.warnings]);
     changed = changedLayers(before, texts);
-    check = checkTwin(texts, changed);
+    check = checkWithStandard(before, texts, changed);
   }
   if (check.blocking.length > 0) return { skip: `数字分身没有通过写入前检查，已跳过：${check.blocking.join("；")}` };
   if (check.scanHits.length > 0) {
