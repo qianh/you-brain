@@ -19,6 +19,8 @@ declare global {
   interface Window {
     __YOU_BRAIN__?: YouBrainBootstrap;
     __TAURI__?: TauriNamespace;
+    /** 退出 App 前由桌面外壳调用:把还没写回的编辑写完再退出。 */
+    __youBrainBeforeQuit?: () => Promise<void>;
   }
 }
 

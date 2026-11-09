@@ -177,6 +177,12 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Lets the Web UI open a local file or folder referenced by a path in a knowledge page.",
+          "type": "string",
+          "const": "allow-open-local-path",
+          "markdownDescription": "Lets the Web UI open a local file or folder referenced by a path in a knowledge page."
+        },
+        {
           "description": "Lets the daemon-served Web UI open the full window.",
           "type": "string",
           "const": "allow-open-main-window",
@@ -187,6 +193,12 @@
           "type": "string",
           "const": "allow-quit",
           "markdownDescription": "Lets the daemon-served Web UI quit the shell."
+        },
+        {
+          "description": "Lets the Web UI finish quitting after pending saves are written.",
+          "type": "string",
+          "const": "allow-quit-now",
+          "markdownDescription": "Lets the Web UI finish quitting after pending saves are written."
         },
         {
           "description": "This permission set configures if your\napplication can enable or disable auto\nstarting the application on boot.\n\n#### Granted Permissions\n\nIt allows all to check, enable and\ndisable the automatic start on boot.\n\n\n#### This default permission set includes:\n\n- `allow-enable`\n- `allow-disable`\n- `allow-is-enabled`",

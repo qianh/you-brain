@@ -1,4 +1,4 @@
-import type { NotionApiClient, NotionPageStub } from "./api-client.js";
+import type { NotionApiClient, NotionBlock, NotionPageStub } from "./api-client.js";
 import { propertiesToPlainText, titleOfPage } from "./api-client.js";
 import {
   buildBlockModel,
@@ -26,6 +26,11 @@ export interface NotionSyncOptions {
 
 const MAX_DEPTH = 6;
 const MAX_BLOCKS_PER_PAGE = 800;
+/** 这些块指向另一个页面/数据库,不展开它们的子块。 */
+const NESTED_PAGE_TYPES = new Set(["child_page", "child_database"]);
+
+/** 本机写过一页后,这么久之内后台同步不拉它(Notion 写后读有延迟)。 */
+const LOCAL_WRITE_QUIET_MS = 120_000;
 /** 同时拉几页正文。Notion 普通工作区平均每秒 3 次请求，这一路正好用满。 */
 const CONTENT_CONCURRENCY = 3;
 
@@ -96,8 +101,10 @@ export class NotionSync {
       }
 
       // Oldest first so backfills read roughly chronologically.
+      // 刚在本机写过的页面这一轮先不拉:Notion 的子块列表写完后会滞后一会儿,
+      // 这时读回来的是旧内容,会盖掉本地刚写进去的块。过了静默期下一轮再对齐。
       const dirty = [...stubs.values()]
-        .filter((stub) => !stub.archived && this.#isDirty(stub))
+        .filter((stub) => !stub.archived && this.#isDirty(stub) && !this.#recentlyWritten(stub.id))
         .sort((a, b) => a.createdTime.localeCompare(b.createdTime));
 
       let cursor = 0;
@@ -136,6 +143,11 @@ export class NotionSync {
       summary.error = error instanceof Error ? error.message : String(error);
       return summary;
     }
+  }
+
+  #recentlyWritten(pageId: string, since = Date.now() - LOCAL_WRITE_QUIET_MS): boolean {
+    const wrote = Number(this.#index.meta(`wrote:${pageId}`) ?? "0");
+    return Number.isFinite(wrote) && wrote > since;
   }
 
   #isDirty(stub: NotionPageStub): boolean {
@@ -184,7 +196,7 @@ export class NotionSync {
       lastEditedTime: stub.lastEditedTime,
       createdAt: stub.createdTime,
     });
-    await this.#syncPage(stub);
+    await this.#syncPage(stub, true);
   }
 
   #markSynced(stub: NotionPageStub, at: string): void {
@@ -192,8 +204,11 @@ export class NotionSync {
     this.#index.setMeta(`failed:${stub.id}`, "");
   }
 
-  async #syncPage(stub: NotionPageStub): Promise<void> {
+  async #syncPage(stub: NotionPageStub, force = false): Promise<void> {
+    const startedAt = Date.now();
     const { roots } = await this.#fetchBlockTree(stub.id);
+    // 拉取期间本机又写了这一页:手里这份已经过时,不能覆盖(下一轮再拉)。
+    if (!force && this.#recentlyWritten(stub.id, startedAt)) return;
     const storeRows: NotionPageBlockRow[] = [];
     const flatten = (models: readonly NotionBlockModel[], parentBlockId: string | null): void => {
       models.forEach((model, idx) => {
@@ -236,15 +251,29 @@ export class NotionSync {
     roots: NotionBlockModel[];
     count: number;
   }> {
+    return this.#expand(await this.#client.blockChildren(pageId));
+  }
+
+  /**
+   * 把几个刚建好的块展开成完整模型(子块、表格行一并拉回),给写入后直接更新本地索引用,
+   * 不必整页重拉。
+   */
+  async expandBlocks(raws: readonly NotionBlock[]): Promise<NotionBlockModel[]> {
+    return (await this.#expand(raws)).roots;
+  }
+
+  async #expand(rootRaw: readonly NotionBlock[]): Promise<{
+    roots: NotionBlockModel[];
+    count: number;
+  }> {
     let count = 0;
     const roots: NotionBlockModel[] = [];
     const queue: Array<{
-      raw: { id: string; type: string; hasChildren: boolean; data: Record<string, unknown> };
+      raw: NotionBlock;
       model: NotionBlockModel | null;
       parentModel: NotionBlockModel | null;
       depth: number;
     }> = [];
-    const rootRaw = await this.#client.blockChildren(pageId);
     for (const raw of rootRaw) {
       queue.push({ raw, model: null, parentModel: null, depth: 0 });
     }
@@ -256,6 +285,7 @@ export class NotionSync {
       // Table rows do not become standalone blocks; they land on their table.
       if (raw.type === "table_row" && parentModel && parentModel.kind === "table") {
         parentModel.rows.push(tableRowCells(raw.data));
+        (parentModel.rowIds ??= []).push(raw.id);
         count += 1;
         continue;
       }
@@ -263,7 +293,9 @@ export class NotionSync {
       count += 1;
       if (parentModel) parentModel.children.push(model);
       else roots.push(model);
-      if (raw.hasChildren && depth < MAX_DEPTH) {
+      // 子页面/子数据库的 has_children 为 true,但它们的正文属于自己那一页,单独同步。
+      // 展开会把子页面的块记到父页面名下(块 id 唯一),子页面随之变空。
+      if (raw.hasChildren && depth < MAX_DEPTH && !NESTED_PAGE_TYPES.has(raw.type)) {
         const children = await this.#client.blockChildren(raw.id);
         for (const child of children) {
           queue.push({ raw: child, model: null, parentModel: model, depth: depth + 1 });
@@ -271,6 +303,11 @@ export class NotionSync {
       }
     }
     return { roots, count };
+  }
+
+  /** 立刻重拉一个数据库的结构和行(改了列之后用)。 */
+  async syncDatabase(databaseId: string): Promise<void> {
+    await this.#syncDatabase(databaseId);
   }
 
   async #syncDatabase(databaseId: string): Promise<void> {

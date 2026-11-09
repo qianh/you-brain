@@ -39,6 +39,20 @@ import {
   type WebhookTestResult,
   type NotionDatabaseView,
   type NotionDeleteBlockBody,
+  type NotionTableEditBody,
+  type NotionDbCellBody,
+  type NotionCreateDatabaseBody,
+  type NotionDbSchemaBody,
+  type NotionDuplicatePageBody,
+  type NotionDbAddRowBody,
+  type NotionDbDeleteRowBody,
+  type NotionRelocateBlocksBody,
+  type NotionPatchBlockBody,
+  type NotionCreateBlocksBody,
+  type NotionRestoreBlocksBody,
+  type NotionUploadFileBody,
+  type NotionPageMetaBody,
+  type NotionBlocksCreatedResult,
   type NotionDuplicateBlockBody,
   type NotionKeyPutBody,
   type SearchActivePutBody,
@@ -113,6 +127,7 @@ export interface DaemonClient {
   notionTree(): Promise<NotionTreeView>;
   notionPage(pageId: string): Promise<NotionPageView>;
   notionSearch(query: string, limit?: number): Promise<NotionSearchView>;
+  notionUsers(): Promise<{ users: Array<{ id: string; name: string }> }>;
   notionDatabase(databaseId: string): Promise<NotionDatabaseView>;
   notionSync(): Promise<NotionSyncResult>;
   notionTest(): Promise<NotionTestResult>;
@@ -124,6 +139,19 @@ export interface DaemonClient {
   notionUpdateBlock(body: NotionUpdateBlockBody): Promise<NotionPageMutationResult>;
   notionAppendBlock(body: NotionAppendBlockBody): Promise<NotionPageMutationResult>;
   notionDeleteBlock(body: NotionDeleteBlockBody): Promise<NotionPageMutationResult>;
+  notionTableEdit(body: NotionTableEditBody): Promise<NotionPageMutationResult>;
+  notionRelocateBlocks(body: NotionRelocateBlocksBody): Promise<NotionBlocksCreatedResult>;
+  notionPatchBlock(body: NotionPatchBlockBody): Promise<NotionPageMutationResult>;
+  notionCreateBlocks(body: NotionCreateBlocksBody): Promise<NotionBlocksCreatedResult>;
+  notionRestoreBlocks(body: NotionRestoreBlocksBody): Promise<NotionBlocksCreatedResult>;
+  notionUploadFile(body: NotionUploadFileBody): Promise<{ uploadId: string }>;
+  notionPageMeta(body: NotionPageMetaBody): Promise<NotionPageMutationResult>;
+  notionDbCell(body: NotionDbCellBody): Promise<NotionDatabaseView>;
+  notionCreateDatabase(body: NotionCreateDatabaseBody): Promise<{ page: NotionPageView; databaseId: string }>;
+  notionDbSchema(body: NotionDbSchemaBody): Promise<NotionDatabaseView>;
+  notionDuplicatePage(body: NotionDuplicatePageBody): Promise<NotionArchivePageResult & { pageId: string }>;
+  notionDbAddRow(body: NotionDbAddRowBody): Promise<NotionDatabaseView>;
+  notionDbDeleteRow(body: NotionDbDeleteRowBody): Promise<NotionDatabaseView>;
   notionMoveBlock(body: NotionMoveBlockBody): Promise<NotionPageMutationResult>;
   notionDuplicateBlock(body: NotionDuplicateBlockBody): Promise<NotionPageMutationResult>;
   notionPatchTitle(body: NotionPatchTitleBody): Promise<NotionPageMutationResult>;
@@ -230,6 +258,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     notionTree: () => request("GET", "/api/notion/tree"),
     notionPage: (pageId) =>
       request("GET", `/api/notion/page?id=${encodeURIComponent(pageId)}`),
+    notionUsers: () => request("GET", "/api/notion/users"),
     notionSearch: (query, limit) =>
       request(
         "GET",
@@ -246,6 +275,19 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     notionUpdateBlock: (body) => request("POST", "/api/actions/notion-update-block", body),
     notionAppendBlock: (body) => request("POST", "/api/actions/notion-append-block", body),
     notionDeleteBlock: (body) => request("POST", "/api/actions/notion-delete-block", body),
+    notionTableEdit: (body) => request("POST", "/api/actions/notion-table-edit", body),
+    notionRelocateBlocks: (body) => request("POST", "/api/actions/notion-relocate-blocks", body),
+    notionPatchBlock: (body) => request("POST", "/api/actions/notion-patch-block", body),
+    notionCreateBlocks: (body) => request("POST", "/api/actions/notion-create-blocks", body),
+    notionRestoreBlocks: (body) => request("POST", "/api/actions/notion-restore-blocks", body),
+    notionUploadFile: (body) => request("POST", "/api/actions/notion-upload-file", body),
+    notionPageMeta: (body) => request("POST", "/api/actions/notion-page-meta", body),
+    notionDbCell: (body) => request("POST", "/api/actions/notion-db-cell", body),
+    notionCreateDatabase: (body) => request("POST", "/api/actions/notion-create-database", body),
+    notionDbSchema: (body) => request("POST", "/api/actions/notion-db-schema", body),
+    notionDuplicatePage: (body) => request("POST", "/api/actions/notion-duplicate-page", body),
+    notionDbAddRow: (body) => request("POST", "/api/actions/notion-db-add-row", body),
+    notionDbDeleteRow: (body) => request("POST", "/api/actions/notion-db-delete-row", body),
     notionMoveBlock: (body) => request("POST", "/api/actions/notion-move-block", body),
     notionDuplicateBlock: (body) => request("POST", "/api/actions/notion-duplicate-block", body),
     notionPatchTitle: (body) => request("POST", "/api/actions/notion-patch-title", body),

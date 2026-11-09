@@ -17,6 +17,11 @@
   --accent: #5046e5;
   --accent-solid: #5046e5;
   --accent-soft: rgba(80, 70, 229, 0.1);
+  /* 知识库编辑器的选中色,沿用 Notion 的蓝。 */
+  --nb-select: #2383e2;
+  --nb-select-ring: rgba(35, 131, 226, 0.57);
+  --nb-select-bg: rgba(35, 131, 226, 0.14);
+  --nb-text-select: rgba(45, 170, 219, 0.3);
   --success: #16a34a;
   --success-text: #15803d;
   --success-soft: rgba(22, 163, 74, 0.12);
@@ -76,6 +81,10 @@
   --accent: #8b84f5;
   --accent-solid: #5b52ee;
   --accent-soft: rgba(139, 132, 245, 0.16);
+  --nb-select: #529cca;
+  --nb-select-ring: rgba(82, 156, 202, 0.6);
+  --nb-select-bg: rgba(35, 131, 226, 0.22);
+  --nb-text-select: rgba(45, 170, 219, 0.35);
   --success: #4ade80;
   --success-text: #4ade80;
   --success-soft: rgba(74, 222, 128, 0.14);

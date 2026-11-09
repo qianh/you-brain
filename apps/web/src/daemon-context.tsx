@@ -264,6 +264,42 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
   );
 
   const timeZone = snapshot.roles?.timezone || snapshot.today?.timeZone || "Asia/Shanghai";
+
+  // 窗口常开着过夜或电脑休眠后,没有事件推来,页面会停在旧的一天(及旧的同步状态)。
+  // 两个兜底:窗口重新可见/获得焦点时刷新(30 秒内不重复);每分钟检查一次日期,跨天就刷新。
+  const todayDateRef = useRef<string | null>(null);
+  todayDateRef.current = snapshot.today?.date ?? null;
+  useEffect(() => {
+    const STALE_AFTER_MS = 30_000;
+    let lastRefresh = Date.now();
+    const refresh = (): void => {
+      lastRefresh = Date.now();
+      void reload("all");
+    };
+    const onWake = (): void => {
+      if (document.visibilityState === "hidden") return;
+      if (Date.now() - lastRefresh < STALE_AFTER_MS) return;
+      refresh();
+    };
+    const dayFormat = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    const timer = setInterval(() => {
+      const shown = todayDateRef.current;
+      if (shown !== null && shown !== dayFormat.format(new Date())) refresh();
+    }, 60_000);
+    document.addEventListener("visibilitychange", onWake);
+    window.addEventListener("focus", onWake);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onWake);
+      window.removeEventListener("focus", onWake);
+    };
+  }, [reload, timeZone]);
+
   const t = useCallback(
     (key: MessageKey, vars?: Record<string, string | number>) => translate(language, key, vars),
     [language],

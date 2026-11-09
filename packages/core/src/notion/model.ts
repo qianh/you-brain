@@ -17,30 +17,66 @@ export interface NotionSegment {
   underline: boolean;
   code: boolean;
   color: string;
+  /** @ 提及:Notion 原样的 mention 对象(如 { type: "page", page: { id } }),编辑时整体保留。 */
+  mention?: Record<string, unknown> | undefined;
+  /** 行内公式的 LaTeX(text 里同样是这段表达式)。 */
+  equation?: string | undefined;
 }
 
 interface BlockBase {
   id: string;
   children: NotionBlockModel[];
+  /** 块颜色(文字色或 *_background 背景色);只有文本类块有,缺省等于 default。 */
+  color?: string | undefined;
 }
+
+/** 媒体块的来源:external = 外链(可改链接);file = Notion 托管(签名链接会过期,只改说明)。 */
+export type NotionMediaSource = "external" | "file";
 
 export type NotionBlockModel = BlockBase &
   (
-    | { kind: "paragraph"; segments: NotionSegment[] }
+    | {
+        kind: "paragraph";
+        segments: NotionSegment[];
+        /** 标签页(tab)的标签图标;普通段落没有。 */
+        icon?: string | null | undefined;
+      }
     | { kind: "quote"; segments: NotionSegment[] }
     | { kind: "callout"; segments: NotionSegment[]; emoji: string | null; color: string }
     | { kind: "toggle"; segments: NotionSegment[] }
-    | { kind: "heading"; level: 1 | 2 | 3; segments: NotionSegment[] }
+    | {
+        kind: "heading";
+        level: 1 | 2 | 3 | 4;
+        segments: NotionSegment[];
+        /** 可折叠标题:可以带子块。 */
+        toggleable?: boolean | undefined;
+      }
     | { kind: "bulleted"; segments: NotionSegment[] }
     | { kind: "numbered"; segments: NotionSegment[] }
     | { kind: "todo"; segments: NotionSegment[]; checked: boolean }
     | { kind: "code"; language: string; text: string; caption: NotionSegment[] }
     | { kind: "divider" }
-    | { kind: "image"; url: string; caption: NotionSegment[] }
-    | { kind: "file"; url: string; name: string }
-    | { kind: "pdf"; url: string; name: string }
+    | { kind: "image"; url: string; caption: NotionSegment[]; source?: NotionMediaSource | undefined; uploadId?: string | undefined }
+    | { kind: "video"; url: string; caption: NotionSegment[]; source?: NotionMediaSource | undefined; uploadId?: string | undefined }
+    | { kind: "audio"; url: string; caption: NotionSegment[]; source?: NotionMediaSource | undefined; uploadId?: string | undefined }
+    | {
+        kind: "file";
+        url: string;
+        name: string;
+        caption?: NotionSegment[] | undefined;
+        source?: NotionMediaSource | undefined;
+        uploadId?: string | undefined;
+      }
+    | {
+        kind: "pdf";
+        url: string;
+        name: string;
+        caption?: NotionSegment[] | undefined;
+        source?: NotionMediaSource | undefined;
+        uploadId?: string | undefined;
+      }
     | { kind: "bookmark"; url: string; caption: NotionSegment[] }
-    | { kind: "embed"; url: string }
+    | { kind: "embed"; url: string; caption?: NotionSegment[] | undefined }
     | { kind: "link_preview"; url: string }
     | { kind: "link_to_page"; targetId: string | null; targetKind: "page" | "database" }
     | { kind: "child_page"; title: string; pageId: string }
@@ -50,7 +86,16 @@ export type NotionBlockModel = BlockBase &
     | { kind: "equation"; expression: string }
     | { kind: "column_list" }
     | { kind: "column"; widthRatio: number | null }
-    | { kind: "table"; hasHeader: boolean; rows: NotionSegment[][][] }
+    | { kind: "tab" }
+    | {
+        kind: "table";
+        hasHeader: boolean;
+        /** 首列是否表头。旧索引里没有这个字段。 */
+        hasRowHeader?: boolean;
+        rows: NotionSegment[][][];
+        /** 每行 table_row 块的 id,与 rows 一一对应;旧索引里没有,编辑时按需补拉。 */
+        rowIds?: string[];
+      }
     | { kind: "synced"; state: "original" | "duplicate"; note: string | null }
     | { kind: "unknown"; type: string }
   );
@@ -81,6 +126,9 @@ function segmentsOf(block: NotionBlockModel): NotionSegment[] {
     case "code":
       return block.caption;
     case "bookmark":
+    case "image":
+    case "video":
+    case "audio":
       return block.caption;
     default:
       return [];
@@ -174,11 +222,18 @@ export function blocksToMarkdown(blocks: readonly NotionBlockModel[]): string {
   return lines.join("\n");
 }
 
-const HEADING_TYPES: Record<string, 1 | 2 | 3> = {
+const HEADING_TYPES: Record<string, 1 | 2 | 3 | 4> = {
   heading_1: 1,
   heading_2: 2,
   heading_3: 3,
+  heading_4: 4,
 };
+
+/** 文本类块的颜色;default 不存,省得每个块都多一个字段。 */
+function colorOf(data: Record<string, unknown>): { color?: string } {
+  const color = stringOf(data.color);
+  return color && color !== "default" ? { color } : {};
+}
 
 /** Build a render model from a raw API block. Children are attached by the sync pass. */
 export function buildBlockModel(raw: {
@@ -191,13 +246,22 @@ export function buildBlockModel(raw: {
   const base = { id: raw.id, children: [] as NotionBlockModel[] };
   const segments = () => segmentsFrom(data.rich_text);
   if (HEADING_TYPES[raw.type]) {
-    return { ...base, kind: "heading", level: HEADING_TYPES[raw.type]!, segments: segments() };
+    return {
+      ...base,
+      ...colorOf(data),
+      kind: "heading",
+      level: HEADING_TYPES[raw.type]!,
+      segments: segments(),
+      ...(data.is_toggleable === true ? { toggleable: true } : {}),
+    };
   }
   switch (raw.type) {
-    case "paragraph":
-      return { ...base, kind: "paragraph", segments: segments() };
+    case "paragraph": {
+      const icon = iconEmoji(data.icon);
+      return { ...base, ...colorOf(data), kind: "paragraph", segments: segments(), ...(icon ? { icon } : {}) };
+    }
     case "quote":
-      return { ...base, kind: "quote", segments: segments() };
+      return { ...base, ...colorOf(data), kind: "quote", segments: segments() };
     case "callout":
       return {
         ...base,
@@ -207,14 +271,15 @@ export function buildBlockModel(raw: {
         color: stringOf(data.color) ?? "default",
       };
     case "toggle":
-      return { ...base, kind: "toggle", segments: segments() };
+      return { ...base, ...colorOf(data), kind: "toggle", segments: segments() };
     case "bulleted_list_item":
-      return { ...base, kind: "bulleted", segments: segments() };
+      return { ...base, ...colorOf(data), kind: "bulleted", segments: segments() };
     case "numbered_list_item":
-      return { ...base, kind: "numbered", segments: segments() };
+      return { ...base, ...colorOf(data), kind: "numbered", segments: segments() };
     case "to_do":
       return {
         ...base,
+        ...colorOf(data),
         kind: "todo",
         segments: segments(),
         checked: data.checked === true,
@@ -230,25 +295,24 @@ export function buildBlockModel(raw: {
     case "divider":
       return { ...base, kind: "divider" };
     case "image":
+    case "video":
+    case "audio":
       return {
         ...base,
-        kind: "image",
+        kind: raw.type as "image" | "video" | "audio",
         url: fileUrl(data) ?? "",
         caption: segmentsFrom(data.caption),
+        source: mediaSource(data),
       };
     case "file":
-      return {
-        ...base,
-        kind: "file",
-        url: fileUrl(data) ?? "",
-        name: fileName(data),
-      };
     case "pdf":
       return {
         ...base,
-        kind: "pdf",
+        kind: raw.type as "file" | "pdf",
         url: fileUrl(data) ?? "",
         name: fileName(data),
+        caption: segmentsFrom(data.caption),
+        source: mediaSource(data),
       };
     case "bookmark":
       return {
@@ -258,7 +322,9 @@ export function buildBlockModel(raw: {
         caption: segmentsFrom(data.caption),
       };
     case "embed":
-      return { ...base, kind: "embed", url: stringOf(data.url) ?? "" };
+      return { ...base, kind: "embed", url: stringOf(data.url) ?? "", caption: segmentsFrom(data.caption) };
+    case "tab":
+      return { ...base, kind: "tab" };
     case "link_preview":
       return { ...base, kind: "link_preview", url: stringOf(data.url) ?? "" };
     case "link_to_page": {
@@ -295,7 +361,8 @@ export function buildBlockModel(raw: {
       return {
         ...base,
         kind: "equation",
-        expression: stringOf((data.equation as Record<string, unknown> | undefined)?.expression) ?? "",
+        // data 已经是 equation 的 payload({ expression })。
+        expression: stringOf(data.expression) ?? "",
       };
     case "column_list":
       return { ...base, kind: "column_list" };
@@ -306,7 +373,14 @@ export function buildBlockModel(raw: {
         widthRatio: ratioOf(data.width_ratio),
       };
     case "table":
-      return { ...base, kind: "table", hasHeader: data.has_column_header === true, rows: [] };
+      return {
+        ...base,
+        kind: "table",
+        hasHeader: data.has_column_header === true,
+        hasRowHeader: data.has_row_header === true,
+        rows: [],
+        rowIds: [],
+      };
     case "table_row": {
       // Table rows live under table blocks; the model attaches their cells to the parent.
       return { ...base, kind: "unknown", type: "table_row" };
@@ -345,6 +419,8 @@ function segmentsFrom(value: unknown): NotionSegment[] {
     underline: segment.underline,
     code: segment.code,
     color: segment.color,
+    ...(segment.mention ? { mention: segment.mention } : {}),
+    ...(segment.equation !== undefined ? { equation: segment.equation } : {}),
   }));
 }
 
@@ -370,6 +446,10 @@ function fileUrl(data: Record<string, unknown>): string | null {
   const file = data.file as { url?: unknown } | null;
   if (file && typeof file.url === "string") return file.url;
   return null;
+}
+
+function mediaSource(data: Record<string, unknown>): NotionMediaSource {
+  return data.type === "external" || (data.external && !data.file) ? "external" : "file";
 }
 
 function fileName(data: Record<string, unknown>): string {

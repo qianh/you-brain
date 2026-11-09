@@ -497,6 +497,95 @@
   font-weight: 600;
 }
 
+/* 可编辑表格:单元格即编辑区;工具栏在表格聚焦或悬停时出现。 */
+.nb-table-wrap {
+  position: relative;
+  margin: 8px 0;
+  overflow-x: auto;
+}
+
+.nb-table-wrap .nb-table {
+  margin: 0;
+}
+
+.nb-table-edit th,
+.nb-table-edit td {
+  padding: 0;
+  /* 和 Notion 一样给列留最小宽度,窄列不再被挤成一字一行;放不下时横向滚动。 */
+  min-width: 96px;
+}
+
+.nb-cell-edit {
+  min-height: 1.5em;
+  padding: 5px 10px;
+  outline: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: text;
+  border-radius: 1px;
+}
+
+/* 正在编辑的单元格:Notion 的浅蓝描边,不填底色。 */
+.nb-cell-edit:focus {
+  box-shadow: inset 0 0 0 2px var(--nb-select-ring);
+}
+
+.nb-table-edit ::selection,
+.knowledge-blocks ::selection {
+  background: var(--nb-text-select);
+}
+
+.nb-table-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  margin-bottom: 4px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.nb-table-wrap:hover .nb-table-tools,
+.nb-table-wrap[data-table-editing="true"] .nb-table-tools {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 工具栏用 Notion 式的无边框文字按钮,开着的开关只加浅底色。 */
+.nb-table-tools button {
+  font: inherit;
+  font-size: 12px;
+  color: var(--text-3);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  padding: 3px 7px;
+  cursor: pointer;
+}
+
+.nb-table-tools button:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.nb-table-tools button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.nb-table-tools button.is-on {
+  color: var(--text);
+  background: var(--pressed);
+}
+
+.nb-table-tools-sep {
+  width: 1px;
+  height: 14px;
+  background: var(--border);
+  margin: 0 2px;
+}
+
 .nb-synced {
   border-left: 2px solid var(--border-strong);
   padding-left: 12px;
@@ -1079,6 +1168,133 @@
   background: var(--hover);
 }
 
+.nb-floatbar button.is-on {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.nb-floatbar-color {
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: var(--accent);
+}
+
+/* 格式栏下方展开的面板:链接输入、颜色列表、公式编辑 */
+.nb-floatbar-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 220px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-pop);
+  padding: 6px;
+}
+
+.nb-floatbar-link {
+  display: flex;
+  gap: 6px;
+}
+
+.nb-floatbar-hint {
+  align-self: center;
+  color: #d93025;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.nb-floatbar-panel input[aria-invalid] {
+  border-color: #d93025;
+}
+
+.nb-floatbar-panel input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  outline: none;
+}
+
+.nb-floatbar-panel input:focus {
+  border-color: var(--accent);
+}
+
+.nb-floatbar-colors {
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.nb-floatbar-colors button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-start;
+  text-align: left;
+  padding: 0 6px;
+}
+
+.nb-floatbar-group {
+  font-size: 11px;
+  color: var(--text-3);
+  padding: 6px 6px 2px;
+}
+
+.nb-color-swatch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+/* 公式编辑框:不再带格式栏的居中上移 */
+.nb-floatbar.nb-equation-edit {
+  transform: none;
+  position: fixed;
+  top: auto;
+  min-width: 260px;
+}
+
+/* @ 提及与行内公式:整体不可拆,像 Notion 一样是一个小块 */
+.nb-mention {
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 1px solid var(--border-strong);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.nb-mention:hover {
+  background: var(--hover);
+}
+
+.nb-mention-date,
+.nb-mention-user {
+  color: var(--text-2);
+  cursor: default;
+}
+
+.nb-equation {
+  font-family: "Latin Modern Math", "STIX Two Math", "Cambria Math", ui-serif, serif;
+  font-style: italic;
+  padding: 0 2px;
+  border-radius: 3px;
+  background: var(--surface-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
 /* 侧栏:新建页面与条目菜单 */
 
 .knowledge-sidebar-actions {
@@ -1349,3 +1565,477 @@
   text-overflow: ellipsis;
   pointer-events: none;
 }
+
+/* —— 块颜色、折叠、多选、拖放(Notion 同款)—— */
+
+.nb-row.nb-bg { border-radius: 4px; }
+.nb-row[data-selected="true"] {
+  background: var(--nb-select-bg);
+}
+.nb-row[data-drop="before"]::before,
+.nb-row[data-drop="after"]::after,
+.nb-row[data-drop="inside"]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--nb-select-ring);
+  pointer-events: none;
+}
+.nb-row[data-drop="before"]::before { top: -2px; }
+.nb-row[data-drop="after"]::after { bottom: -2px; }
+.nb-row[data-drop="inside"]::after { bottom: -2px; left: 28px; }
+.nb-handle { cursor: grab; }
+
+.nb-toggle-arrow {
+  flex: none;
+  border: none;
+  background: none;
+  color: var(--text-2);
+  cursor: pointer;
+  width: 20px;
+  height: 22px;
+  margin-top: 2px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1;
+  transition: transform 0.12s ease;
+}
+.nb-toggle-arrow:hover { background: var(--hover); }
+.nb-toggle-arrow.is-open { transform: rotate(90deg); }
+.nb-row.is-toggle-heading { display: flex; gap: 4px; align-items: flex-start; }
+.nb-row.is-toggle-heading .nb-toggle-arrow { margin-top: 18px; }
+.nb-toggle-empty {
+  border: none;
+  background: none;
+  color: var(--text-3);
+  font-size: 14px;
+  padding: 3px 4px;
+  cursor: pointer;
+  text-align: left;
+  border-radius: 4px;
+}
+.nb-toggle-empty:hover { background: var(--hover); }
+
+.nb-editable-heading-4,
+.nb-h4 {
+  font-size: 15.5px;
+  font-weight: 600;
+  line-height: 1.35;
+  margin-top: 10px;
+}
+
+.nb-callout-icon-wrap { position: relative; flex: none; }
+button.nb-callout-icon {
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1.4;
+  padding: 0 2px;
+  border-radius: 4px;
+}
+button.nb-callout-icon:hover { background: var(--hover); }
+
+.nb-emoji-picker {
+  position: absolute;
+  z-index: 60;
+  top: 30px;
+  left: 0;
+  width: 300px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-pop);
+  padding: 8px;
+}
+.nb-emoji-head { display: flex; gap: 6px; margin-bottom: 6px; }
+.nb-emoji-head input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+.nb-emoji-head button,
+.nb-emoji-grid button {
+  border: none;
+  background: none;
+  cursor: pointer;
+  border-radius: 6px;
+  color: var(--text-2);
+}
+.nb-emoji-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; }
+.nb-emoji-grid button { font-size: 20px; padding: 4px 0; }
+.nb-emoji-head button:hover,
+.nb-emoji-grid button:hover { background: var(--hover); }
+
+/* 媒体、嵌入与来源选择 */
+.nb-source {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 8px 10px 10px;
+  margin: 4px 0;
+}
+.nb-source-tabs { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; }
+.nb-source-tabs button {
+  border: none;
+  background: none;
+  color: var(--text-2);
+  padding: 3px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.nb-source-tabs button.is-on { color: var(--text); background: var(--hover); font-weight: 600; }
+.nb-source-kind { margin-left: auto; color: var(--text-3); font-size: 12px; }
+.nb-source-close { margin-left: 4px; }
+.nb-source-upload {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  cursor: pointer;
+  color: var(--text-2);
+}
+.nb-source-upload input { display: none; }
+.nb-source-upload small { color: var(--text-3); }
+.nb-source-link { display: flex; gap: 8px; flex-wrap: wrap; }
+.nb-source-link input,
+.nb-page-picker > input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  background: var(--surface);
+  color: var(--text);
+  width: 100%;
+}
+.nb-source-error { color: var(--danger, #d44c47); font-size: 12px; width: 100%; margin-top: 4px; }
+.nb-source-status { color: var(--text-2); font-size: 13px; padding: 10px; }
+.nb-page-picker { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow: auto; }
+
+.nb-media-editable { position: relative; margin: 6px 0; }
+.nb-media-editable .nb-image { max-width: 100%; border-radius: 6px; display: block; }
+.nb-media-tools {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.nb-media-editable:hover .nb-media-tools,
+.nb-linkcard:hover .nb-media-tools { opacity: 1; }
+.nb-media-tools button,
+.nb-media-tools a {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
+}
+.nb-media-caption {
+  width: 100%;
+  border: none;
+  background: none;
+  color: var(--text-2);
+  font-size: 13px;
+  padding: 4px 2px;
+  outline: none;
+}
+.nb-video,
+.nb-video-embed { width: 100%; aspect-ratio: 16 / 9; border: 0; border-radius: 6px; background: #000; }
+.nb-audio { width: 100%; }
+.nb-pdf iframe { width: 100%; height: 520px; border: 1px solid var(--border); border-radius: 6px; }
+.nb-linkcard { position: relative; margin: 6px 0; }
+.nb-embed-frame { width: 100%; height: 420px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 4px; }
+
+.nb-equation-block { text-align: center; cursor: pointer; padding: 12px; }
+.nb-equation-block:hover { background: var(--hover); }
+.nb-equation-block-edit textarea {
+  width: 100%;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 13px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+.nb-equation-preview { text-align: center; padding: 8px; }
+.nb-editable .nb-equation { cursor: pointer; padding: 0 2px; border-radius: 3px; background: none; margin: 0; }
+.nb-editable .nb-equation:hover { background: var(--hover); }
+
+.nb-toc { display: flex; flex-direction: column; margin: 6px 0; }
+.nb-toc button {
+  border: none;
+  background: none;
+  text-align: left;
+  color: var(--text-2);
+  text-decoration: underline;
+  text-decoration-color: var(--border);
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 14px;
+}
+.nb-toc button:hover { background: var(--hover); color: var(--text); }
+.nb-toc.is-empty { color: var(--text-3); font-size: 13px; }
+.nb-breadcrumb { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 13px; margin: 4px 0; }
+.nb-breadcrumb button { border: none; background: none; color: var(--text-2); cursor: pointer; border-radius: 4px; padding: 1px 4px; }
+.nb-breadcrumb button:hover { background: var(--hover); }
+.nb-breadcrumb-sep { color: var(--text-3); margin: 0 2px; }
+button.nb-page-link { border: none; background: none; cursor: pointer; text-decoration: underline; color: var(--text); padding: 2px 0; font-size: 15px; }
+
+.nb-tabs { border: 1px solid var(--border); border-radius: 8px; margin: 6px 0; padding: 0 10px 8px; }
+.nb-tabs-bar { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 0 -10px 6px; padding: 0 6px; }
+.nb-tabs-bar button {
+  border: none;
+  background: none;
+  padding: 7px 10px;
+  color: var(--text-2);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.nb-tabs-bar button.is-on { color: var(--text); border-bottom-color: var(--text); font-weight: 600; }
+
+.nb-readonly-note {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 11px;
+  color: var(--text-3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 5px;
+  vertical-align: middle;
+}
+
+.nb-menu-note { font-size: 12px; color: var(--text-3); padding: 2px 8px 6px; }
+.nb-menu-key { margin-left: auto; padding-left: 16px; color: var(--text-3); font-size: 11px; }
+.nb-menu button.is-current { font-weight: 600; }
+.nb-menu-colors { max-height: 320px; overflow: auto; }
+
+/* 页面图标与封面 */
+.knowledge-cover {
+  position: relative;
+  height: 200px;
+  margin: -8px 0 16px;
+  border-radius: 8px;
+  background-size: cover;
+  background-position: center;
+}
+.knowledge-cover-actions {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.knowledge-cover:hover .knowledge-cover-actions { opacity: 1; }
+.knowledge-cover-actions button,
+.knowledge-page-meta-actions button {
+  border: none;
+  background: var(--surface);
+  color: var(--text-2);
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.knowledge-page-meta-actions { display: flex; gap: 4px; min-height: 24px; opacity: 0; transition: opacity 0.12s; }
+.knowledge-page-meta-actions button { background: none; }
+.knowledge-page-meta-actions button:hover { background: var(--hover); }
+.knowledge-page-head:hover .knowledge-page-meta-actions { opacity: 1; }
+.knowledge-page-head { position: relative; }
+button.knowledge-page-icon { border: none; background: none; cursor: pointer; padding: 0; border-radius: 8px; }
+button.knowledge-page-icon:hover { background: var(--hover); }
+.knowledge-cover-panel { position: absolute; z-index: 60; width: 420px; max-width: calc(100% - 32px); box-shadow: var(--shadow-pop); background: var(--surface); }
+.knowledge-cover-panel .nb-source-link { margin-top: 8px; }
+
+/* 内嵌数据库编辑 */
+.knowledge-db-cell { cursor: text; min-width: 80px; }
+.knowledge-db-cell:hover { background: var(--hover); }
+.knowledge-db-cell.is-readonly { cursor: default; color: var(--text-2); }
+.knowledge-db-cell.is-readonly:hover { background: none; }
+.knowledge-db-editing input {
+  width: 100%;
+  min-width: 100px;
+  border: none;
+  outline: 2px solid var(--nb-select-ring);
+  border-radius: 4px;
+  padding: 2px 4px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+.knowledge-db-empty { color: var(--text-3); }
+.knowledge-db-delete {
+  border: none;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+  opacity: 0;
+  border-radius: 4px;
+}
+tr:hover .knowledge-db-delete { opacity: 1; }
+.knowledge-db-delete:hover { background: var(--hover); color: var(--danger, #d44c47); }
+.knowledge-db-add {
+  margin-top: 6px;
+  border: none;
+  background: none;
+  color: var(--text-3);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+.knowledge-db-add:hover { background: var(--hover); color: var(--text); }
+.nb-tab-rename {
+  border: none;
+  outline: 2px solid var(--accent-soft);
+  border-radius: 4px;
+  padding: 4px 8px;
+  margin: 3px 2px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  width: 120px;
+}
+
+/* 代码块行内编辑:高亮层在下,透明输入框在上,字形逐像素对齐 */
+.nb-code-live { position: relative; }
+.nb-code-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px 0;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.nb-code-live:hover .nb-code-bar,
+.nb-code-live:focus-within .nb-code-bar { opacity: 1; }
+.nb-code-language,
+.nb-code-copy {
+  border: none;
+  background: none;
+  color: var(--text-3);
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 4px;
+  padding: 2px 4px;
+}
+.nb-code-language:hover,
+.nb-code-copy:hover { background: var(--hover); color: var(--text); }
+.nb-code-editor { position: relative; }
+.nb-code-editor pre,
+.nb-code-input {
+  margin: 0;
+  padding: 8px 14px 14px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 13px;
+  line-height: 1.6;
+  tab-size: 2;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  letter-spacing: normal;
+}
+.nb-code-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: none;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  background: transparent;
+  color: transparent;
+  caret-color: var(--text);
+}
+.nb-code-input::placeholder { color: var(--text-3); }
+.nb-code-input::selection { background: var(--nb-text-select); color: transparent; }
+.nb-url-menu { z-index: 60; min-width: 160px; }
+.nb-code-editor pre { overflow: hidden; }
+.nb-code-editor code { font: inherit; }
+.nb-code-editor .token.comment { font-style: normal; }
+
+/* 数据库视图 */
+.knowledge-db-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid var(--border); margin-bottom: 8px; flex-wrap: wrap; }
+.knowledge-db-views { display: flex; gap: 2px; }
+.knowledge-db-views button { border: none; background: none; padding: 6px 10px; color: var(--text-2); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.knowledge-db-views button.is-on { color: var(--text); border-bottom-color: var(--text); font-weight: 600; }
+.knowledge-db-views button:disabled { opacity: 0.4; cursor: default; }
+.knowledge-db-tools { display: flex; gap: 6px; align-items: center; padding-bottom: 4px; }
+.knowledge-db-tools select,
+.knowledge-db-search { border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; background: var(--surface); color: var(--text); font-size: 13px; }
+.knowledge-db-search { width: 160px; }
+.knowledge-db-th { position: relative; }
+.knowledge-db-th-button { border: none; background: none; color: inherit; font: inherit; cursor: pointer; padding: 0; text-align: left; }
+.knowledge-db-th input { width: 100%; font: inherit; border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; }
+.knowledge-db-column-menu { top: 100%; left: 0; }
+.knowledge-db-new-column { display: flex; gap: 4px; align-items: center; }
+.knowledge-db-new-column input { width: 110px; border: 1px solid var(--border); border-radius: 4px; padding: 2px 4px; }
+.knowledge-db-chip { display: inline-block; background: var(--surface-3, var(--hover)); border-radius: 4px; padding: 0 6px; margin: 1px 4px 1px 0; font-size: 12.5px; }
+span.knowledge-db-cell { display: block; min-height: 1.4em; border-radius: 4px; padding: 0 2px; }
+.knowledge-db-board { display: flex; gap: 12px; overflow-x: auto; padding-bottom: 8px; align-items: flex-start; }
+.knowledge-db-lane { flex: 0 0 240px; background: var(--surface-2); border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
+.knowledge-db-lane-head { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
+.knowledge-db-lane-count { color: var(--text-3); }
+.knowledge-db-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; cursor: pointer; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04); }
+.knowledge-db-card:hover { background: var(--hover); }
+.knowledge-db-card.is-dragging { opacity: 0.5; }
+.knowledge-db-card-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.knowledge-db-card-prop { font-size: 12px; color: var(--text-2); }
+.knowledge-db-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; }
+.knowledge-db-gallery .knowledge-db-card { min-height: 90px; }
+.knowledge-db-list { display: flex; flex-direction: column; }
+.knowledge-db-list-row { display: flex; justify-content: space-between; gap: 12px; border: none; border-bottom: 1px solid var(--border); background: none; padding: 7px 4px; cursor: pointer; text-align: left; color: var(--text); font-size: 14px; }
+.knowledge-db-list-row:hover { background: var(--hover); }
+.knowledge-db-list-props { color: var(--text-3); font-size: 12.5px; }
+.knowledge-db-calendar-head { display: flex; gap: 10px; align-items: center; margin-bottom: 6px; }
+.knowledge-db-calendar-head button { border: 1px solid var(--border); background: var(--surface); border-radius: 6px; cursor: pointer; padding: 0 8px; }
+.knowledge-db-calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); border-top: 1px solid var(--border); border-left: 1px solid var(--border); }
+.knowledge-db-day { min-height: 92px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: 4px; display: flex; flex-direction: column; gap: 2px; }
+.knowledge-db-day.is-other { background: var(--surface-2); color: var(--text-3); }
+.knowledge-db-day-num { font-size: 12px; color: var(--text-3); }
+.knowledge-db-event { border: none; background: var(--accent-soft); color: var(--text); border-radius: 4px; padding: 1px 6px; font-size: 12px; text-align: left; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.knowledge-db-inline { margin: 10px 0; }
+.knowledge-db-inline-title { border: none; background: none; font-size: 18px; font-weight: 700; cursor: pointer; padding: 2px 0; color: var(--text); }
+.knowledge-property dd .knowledge-db-cell { cursor: text; }
+.nb-drag-ghost {
+  position: fixed;
+  z-index: 90;
+  pointer-events: none;
+  max-width: 320px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-pop);
+  font-size: 13px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.9;
+}
+body.nb-block-dragging,
+body.nb-block-dragging * { cursor: grabbing !important; user-select: none !important; }
+.nb-handle { touch-action: none; }
+.knowledge-tail-space { min-height: 30vh; cursor: text; }

@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import { MemoryKeychain } from "../../src/auth/secret-store.js";
-import { NotionApiClient } from "../../src/notion/api-client.js";
-import { buildBlockModel, blocksToMarkdown, tableRowCells } from "../../src/notion/model.js";
+import { MOVE_PAGE_NOTION_VERSION, NotionApiClient } from "../../src/notion/api-client.js";
+import { buildBlockModel, blocksToMarkdown, tableRowCells, type NotionBlockModel } from "../../src/notion/model.js";
 import { NotionService, type NotionTreeNode } from "../../src/notion/service.js";
 import { NotionSync } from "../../src/notion/sync.js";
 
@@ -95,6 +95,7 @@ const PAGES: Record<string, PageDef> = {
 
 /** patchTitle 会改写 fixture;每个用例前恢复,防用例间污染。 */
 function resetFixture(): void {
+  DB_SCHEMA_PATCH = {};
   const rowA = PAGES[ROW_PAGE_A];
   if (rowA) {
     rowA.title = "第一行";
@@ -149,6 +150,9 @@ function apiPage(def: PageDef): Record<string, unknown> {
   };
 }
 
+/** 测试里改过的数据库列(新增/改名/删除),每个用例前清空。 */
+let DB_SCHEMA_PATCH: Record<string, Record<string, unknown> | null> = {};
+
 function databaseObject(): Record<string, unknown> {
   return {
     object: "database",
@@ -158,12 +162,40 @@ function databaseObject(): Record<string, unknown> {
     created_time: "2026-01-05T00:00:00.000Z",
     last_edited_time: "2026-10-04T00:00:00.000Z",
     title: [text("任务表")],
-    properties: {
-      名称: { type: "title" },
-      状态: { type: "select" },
-      优先级: { type: "number" },
-    },
+    properties: (() => {
+      const props: Record<string, Record<string, unknown>> = {
+        名称: { type: "title" },
+        状态: { type: "select" },
+        优先级: { type: "number" },
+      };
+      for (const [name, change] of Object.entries(DB_SCHEMA_PATCH)) {
+        if (change === null) delete props[name];
+        else if (typeof change.name === "string") {
+          props[change.name] = props[name] ?? {};
+          delete props[name];
+        } else props[name] = { type: Object.keys(change)[0] };
+      }
+      return props;
+    })(),
   };
+}
+
+/** fake 里「插到最前面」的 after 标记。 */
+const START = "__start__";
+
+/** 真实 Notion 会给每段 rich_text 补上只读的 plain_text / href;写入端不再发送它们,fake 要替它补。 */
+function fillReadOnly(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(fillReadOnly);
+  if (value === null || typeof value !== "object") return value;
+  const record = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(record)) out[key] = fillReadOnly(child);
+  const inner = record.text as { content?: unknown; link?: { url?: unknown } | null } | undefined;
+  if (record.type === "text" && inner && typeof inner.content === "string") {
+    out.plain_text ??= inner.content;
+    out.href ??= typeof inner.link?.url === "string" ? inner.link.url : null;
+  }
+  return out;
 }
 
 function fakeFetch() {
@@ -177,18 +209,29 @@ function fakeFetch() {
     emptyPages: new Set<string>(),
     /** 「移动页面」请求记录(接口要求新版本头)。 */
     moves: [] as Array<{ pageId: string; parentId: string; version: string | null }>,
+    /** 每次追加块请求带的版本头。 */
+    appendVersions: [] as Array<string | null>,
+    /** 恢复过的块:列子块时排到最后(Notion 的行为)。 */
+    restored: new Set<string>(),
+    /** 测试里新建的数据库。 */
+    createdDatabases: new Map<string, Record<string, unknown>>(),
   };
   const serveChildren = (base: Array<Record<string, unknown>>, parentId: string) => {
     let list = [...base];
     for (const ins of state.inserted.get(parentId) ?? []) {
-      const idx = ins.after === null ? list.length : list.findIndex((b) => b.id === ins.after);
+      // position: start 记作 after = START,插到最前面。
+      const idx = ins.after === START ? -1 : ins.after === null ? list.length : list.findIndex((b) => b.id === ins.after);
       list.splice(idx + 1, 0, ins.block);
     }
+    list = [...list.filter((b) => !state.restored.has(String(b.id))), ...list.filter((b) => state.restored.has(String(b.id)))];
     list = list
       .filter((b) => !state.deleted.has(String(b.id)))
       .map((b) => {
         const override = state.overrides.get(String(b.id));
-        return override ? { ...b, ...override } : b;
+        const merged = override ? { ...b, ...override } : b;
+        // 真实 Notion 会标出后来追加过子块的块。
+        const added = (state.inserted.get(String(b.id)) ?? []).some((entry) => !state.deleted.has(String(entry.block.id)));
+        return added ? { ...merged, has_children: true } : merged;
       });
     return list;
   };
@@ -247,9 +290,56 @@ function fakeFetch() {
           next_cursor: null,
         });
       }
-      return json({ results: [], has_more: false, next_cursor: null });
+      // 追加时随请求一起建的子块(新表格的行、分栏的列和列里的内容):按请求里的 children 逐层返回,
+      // 子块 id 记作「父 id-c序号」。
+      const nestedOf = (block: Record<string, unknown>, blockId: string): Array<Record<string, unknown>> => {
+        const payload = block[String(block.type)] as { children?: Array<Record<string, unknown>> } | undefined;
+        return (payload?.children ?? []).map((child, index) => {
+          const childId = `${blockId}-c${index}`;
+          const grand = (child[String(child.type)] as { children?: unknown[] } | undefined)?.children ?? [];
+          return { ...child, id: childId, has_children: grand.length > 0 };
+        });
+      };
+      const findInline = (block: Record<string, unknown>, blockId: string): Array<Record<string, unknown>> | null => {
+        if (blockId === id) return nestedOf(block, blockId);
+        for (const child of nestedOf(block, blockId)) {
+          const found = findInline(child, String(child.id));
+          if (found) return found;
+        }
+        return null;
+      };
+      for (const list of state.inserted.values()) {
+        for (const entry of list) {
+          const nested = findInline(entry.block, String(entry.block.id));
+          if (nested) return json({ results: serveChildren(nested, id), has_more: false, next_cursor: null });
+        }
+      }
+      return json({ results: serveChildren([], id), has_more: false, next_cursor: null });
+    }
+    if (key === "POST /databases") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      const id = `new-db-${state.createdDatabases.size + 1}`;
+      // 真实 Notion 返回的每一列都带 type。
+      const properties = Object.fromEntries(
+        Object.entries((body.properties ?? {}) as Record<string, Record<string, unknown>>).map(([name, config]) => {
+          const type = Object.keys(config)[0] ?? "rich_text";
+          return [name, { type, ...config }];
+        }),
+      );
+      const db = { object: "database", id, created_time: "2026-10-30T01:00:00.000Z", last_edited_time: "2026-10-30T01:00:00.000Z", ...body, properties };
+      state.createdDatabases.set(id, db);
+      return json(db);
+    }
+    const createdDb = /^(GET|POST) \/databases\/([^/]+)(\/query)?$/u.exec(key);
+    if (createdDb && state.createdDatabases.has(createdDb[2] ?? "")) {
+      return createdDb[3] ? json({ results: [], has_more: false, next_cursor: null }) : json(state.createdDatabases.get(createdDb[2] ?? ""));
     }
     if (key === `GET /databases/${DATABASE}`) return json(databaseObject());
+    if (key === `PATCH /databases/${DATABASE}`) {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { properties: Record<string, Record<string, unknown> | null> };
+      Object.assign(DB_SCHEMA_PATCH, body.properties);
+      return json(databaseObject());
+    }
     if (key === `POST /databases/${DATABASE}/query`) {
       const rowA = PAGES[ROW_PAGE_A];
       const rowB = PAGES[ROW_PAGE_B];
@@ -286,7 +376,13 @@ function fakeFetch() {
       return json({ object: "page", id: moveMatch[1] });
     }
     if (key === "POST /pages") {
-      const body = JSON.parse(String(init?.body ?? "{}")) as {
+      const raw = JSON.parse(String(init?.body ?? "{}")) as { parent: { page_id?: string; database_id?: string }; properties: Record<string, unknown> };
+      if (raw.parent.database_id) {
+        const id = `new-row-${Object.keys(PAGES).length + 1}`;
+        PAGES[id] = { id, parent: { type: "database_id", database_id: raw.parent.database_id }, title: "", lastEdited: "2026-10-30T01:00:00.000Z", created: "2026-10-30T01:00:00.000Z", blocks: [], properties: raw.properties };
+        return json({ object: "page", id, parent: PAGES[id]?.parent, archived: false, created_time: "2026-10-30T01:00:00.000Z", last_edited_time: "2026-10-30T01:00:00.000Z", properties: raw.properties });
+      }
+      const body = raw as unknown as {
         parent: { page_id: string };
         properties: { title: { title: Array<{ text: { content: string } }> } };
       };
@@ -315,8 +411,19 @@ function fakeFetch() {
     if (updateBlockMatch) {
       const id = decodeURIComponent(updateBlockMatch[1] ?? "");
       const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
-      state.overrides.set(id, body);
-      return json({ object: "block", id, ...body });
+      if (body.archived === false) {
+        // 恢复归档:块回到原位置,返回它原来的样子。
+        state.deleted.delete(id);
+        // 真实 Notion 把恢复的块放到父块末尾。
+        state.restored.add(id);
+        const all = [...Object.values(PAGES).flatMap((def) => def.blocks), ...[...state.inserted.values()].flat().map((entry) => entry.block)];
+        const raw = all.find((block) => block.id === id) ?? { object: "block", id, type: "paragraph", paragraph: { rich_text: [] } };
+        return json({ has_children: false, ...raw, ...(state.overrides.get(id) ?? {}) });
+      }
+      const filled = fillReadOnly(body) as Record<string, unknown>;
+      state.overrides.set(id, filled);
+      const type = typeof body.type === "string" ? body.type : Object.keys(body)[0];
+      return json({ object: "block", id, type, ...filled });
     }
     const appendMatch = /^PATCH \/blocks\/([^/]+)\/children$/u.exec(key);
     if (appendMatch) {
@@ -324,18 +431,27 @@ function fakeFetch() {
       const body = JSON.parse(String(init?.body ?? "{}")) as {
         children: Array<Record<string, unknown>>;
         after?: string;
+        position?: { type: string };
       };
-      const after = body.after ?? null;
+      state.appendVersions.push(new Headers(init?.headers).get("notion-version"));
+      const after = body.position?.type === "start" ? START : (body.after ?? null);
       const list = state.inserted.get(id) ?? [];
+      const created: Array<Record<string, unknown>> = [];
       body.children.forEach((child, index) => {
         // 真实 API 会分配块 id;fake 里补上,页面树才挂得起来。
-        const withId = child.id ? child : { ...child, id: `new-${state.inserted.size}-${list.length + index}` };
+        const filledChild = fillReadOnly(child) as Record<string, unknown>;
+        const withId = child.id ? filledChild : { ...filledChild, id: `new-${state.inserted.size}-${list.length + index}` };
         // 一次追加多个块时,真实 API 按顺序依次排在 after 之后:后一个接在前一个后面。
         const previous = index > 0 ? list[list.length - 1]?.block.id : undefined;
         list.push({ after: typeof previous === "string" ? previous : after, block: withId });
+        created.push(withId);
       });
       state.inserted.set(id, list);
-      return json({ results: body.children });
+      // 真实 Notion 用 position: start 插入时,返回的是整列子块(新块在最前),不只是新块。
+      // 真实 Notion 返回「新块 + 插入点之后的所有兄弟块」;插在末尾时就只有新块。
+      const all = serveChildren(PAGES[id]?.blocks ?? [], id);
+      const firstNew = all.findIndex((block) => block.id === created[0]?.id);
+      return json({ results: firstNew >= 0 ? all.slice(firstNew) : created });
     }
     const deleteMatch = /^DELETE \/blocks\/([^/]+)$/u.exec(key);
     if (deleteMatch) {
@@ -359,12 +475,17 @@ function fakeFetch() {
       const id = decodeURIComponent(patchPageMatch[1] ?? "");
       const def = PAGES[id];
       const body = JSON.parse(String(init?.body ?? "{}")) as {
-        properties: Record<string, { title: Array<{ text: { content: string } }> }>;
+        properties?: Record<string, Record<string, unknown>>;
       };
       if (def) {
         const props = (def.properties ??= {});
-        for (const [name, value] of Object.entries(body.properties)) {
-          props[name] = { type: "title", title: value.title.map((part) => text(part.text.content)) };
+        for (const [name, value] of Object.entries(body.properties ?? {})) {
+          if (Array.isArray(value.title)) {
+            props[name] = { type: "title", title: (value.title as Array<{ text: { content: string } }>).map((part) => text(part.text.content)) };
+          } else {
+            const type = Object.keys(value)[0] ?? "rich_text";
+            props[name] = { type, ...value };
+          }
         }
         def.lastEdited = "2026-10-30T00:00:00.000Z";
       }
@@ -430,6 +551,22 @@ describe("notion sync", () => {
     const db = index.database(DATABASE);
     expect(db?.rows).toHaveLength(2);
     expect(db?.rows[0]?.title).toBe("第一行");
+  });
+
+  test("父页面里的 child_page 块不展开:子页面正文仍归子页面,重同步父页面也不抢走", async () => {
+    // 真实 Notion:父页面的 child_page 块 id 就是子页面 id,has_children 为 true。
+    const rootBlocks = PAGES[ROOT_PAGE]?.blocks ?? [];
+    rootBlocks.push(blockRaw(CHILD_PAGE, "child_page", { title: "子页面" }, true));
+    try {
+      const sync = new NotionSync(client(fetches.fetchImpl), index);
+      await sync.syncAll();
+      await sync.resyncPage(ROOT_PAGE);
+      expect(index.pageBlocks(CHILD_PAGE).map((block) => block.id)).toEqual(["p2"]);
+      const childBlock = index.pageBlocks(ROOT_PAGE).find((block) => block.kind === "child_page");
+      expect(childBlock?.children).toEqual([]);
+    } finally {
+      rootBlocks.pop();
+    }
   });
 
   test("增量:只重新拉取 last_edited 变化的页面", async () => {
@@ -593,6 +730,39 @@ function findModel(models: import("../../src/notion/model.js").NotionBlockModel[
   return visit(models);
 }
 
+describe("notion api client retries", () => {
+  test("追加子块遇到 5xx 不重发(避免重复建块);读请求照常重试", async () => {
+    const calls: string[] = [];
+    let failNext = true;
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const method = (init?.method as string) ?? "GET";
+      calls.push(`${method} ${new URL(String(input)).pathname}`);
+      if (failNext) {
+        failNext = false;
+        return new Response("bad gateway", { status: 502 });
+      }
+      return new Response(JSON.stringify({ results: [], has_more: false, next_cursor: null }), { status: 200 });
+    }) as unknown as typeof fetch;
+    const api = client(fetchImpl);
+    await expect(api.appendBlocks("p", [{ type: "paragraph", paragraph: { rich_text: [] } }])).rejects.toThrow();
+    expect(calls).toEqual(["PATCH /v1/blocks/p/children"]);
+    failNext = true;
+    await api.blockChildren("p");
+    expect(calls.slice(1)).toEqual(["GET /v1/blocks/p/children", "GET /v1/blocks/p/children"]);
+  });
+});
+
+describe("block model", () => {
+  test("公式块、标题 4、可折叠标题、块颜色、视频从接口形状读出", () => {
+    const equation = buildBlockModel({ id: "e", type: "equation", hasChildren: false, data: { expression: "E=mc^2" } });
+    expect(equation.kind === "equation" ? equation.expression : null).toBe("E=mc^2");
+    const h4 = buildBlockModel({ id: "h", type: "heading_4", hasChildren: true, data: { rich_text: [text("四")], is_toggleable: true, color: "blue" } });
+    expect(h4.kind === "heading" ? [h4.level, h4.toggleable, h4.color] : null).toEqual([4, true, "blue"]);
+    const video = buildBlockModel({ id: "v", type: "video", hasChildren: false, data: { type: "external", external: { url: "https://youtu.be/x" }, caption: [] } });
+    expect(video.kind === "video" ? [video.url, video.source] : null).toEqual(["https://youtu.be/x", "external"]);
+  });
+});
+
 describe("notion write path", () => {
   let dataDir: string;
   let fake: ReturnType<typeof fakeFetch>;
@@ -666,6 +836,352 @@ describe("notion write path", () => {
     expect(fresh.map((id) => findModel(appended.blocks, id)?.kind)).toEqual(["paragraph", "numbered", "todo"]);
     const todo = findModel(appended.blocks, fresh[2] ?? "");
     expect(todo && todo.kind === "todo" ? todo.checked : false).toBe(true);
+  });
+
+  test("写入后直接更新本地索引,不再整页回拉 Notion", async () => {
+    const service = await prepare();
+    const before = fake.calls.length;
+    await service.updateBlock("p1", "**改了**");
+    const appended = await service.appendBlock({ afterBlockId: "p1", markdown: "新段", kind: "paragraph" });
+    const newId = appended.blocks[1]?.id ?? "";
+    await service.patchTitle(ROOT_PAGE, "新标题");
+    const view = await service.deleteBlock("todo1");
+    const reads = fake.calls.slice(before).filter((call) => call.startsWith("GET "));
+    expect(reads).toEqual([]);
+    const text = (id: string) => {
+      const model = findModel(view.blocks, id);
+      return model && "segments" in model ? model.segments.map((segment) => segment.text).join("") : null;
+    };
+    expect(view.title).toBe("新标题");
+    expect(view.blocks.map((block) => block.id)).toEqual(["p1", newId, "h1", "tbl"]);
+    expect(text("p1")).toBe("改了");
+    expect(text(newId)).toBe("新段");
+    // 表格行等未改动的块原样保留;全文索引跟着更新
+    const table = findModel(view.blocks, "tbl");
+    expect(table && table.kind === "table" ? table.rows.length : 0).toBe(2);
+    expect(service.search("新段").some((hit) => hit.pageId === ROOT_PAGE)).toBe(true);
+  });
+
+  const seg = (value: string) => ({
+    text: value, href: null, bold: false, italic: false, strikethrough: false, underline: false, code: false, color: "default",
+  });
+  const textOf = (model: NotionBlockModel | null) =>
+    model && "segments" in model ? model.segments.map((segment) => segment.text).join("") : null;
+
+  test("移动整棵子树:表格可以移动,行内容不丢,原块删除", async () => {
+    const service = await prepare();
+    const { page, created } = await service.relocateBlocks({ blockIds: ["tbl"], mode: "move", afterBlockId: "p1" });
+    const ids = page.blocks.map((block) => block.id);
+    expect(ids).not.toContain("tbl");
+    expect(ids[1]).toBe(created[0]?.id);
+    expect(ids.slice(2)).toEqual(["h1", "todo1"]);
+    const table = created[0];
+    expect(table?.kind).toBe("table");
+    expect(table && table.kind === "table" ? table.rows.map((row) => row.map((cell) => cell.map((s) => s.text).join(""))) : []).toEqual(TABLE_ROWS);
+    expect(fake.state.deleted.has("tbl")).toBe(true);
+  });
+
+  test("移动返回原 id → 新 id 的对应(整棵子树)", async () => {
+    const service = await prepare();
+    const { created } = await service.createBlocks({
+      afterBlockId: "p1",
+      models: [{ kind: "toggle", segments: [seg("父")], children: [{ kind: "paragraph", segments: [seg("子")], children: [] }] }],
+    });
+    const parent = created[0]!;
+    const child = parent.children[0]!;
+    const moved = await service.relocateBlocks({ blockIds: [parent.id], mode: "move", atStart: true });
+    const newParent = moved.created[0]!;
+    expect(moved.idMap).toEqual([
+      [parent.id, newParent.id],
+      [child.id, newParent.children[0]!.id],
+    ]);
+  });
+
+  test("新建任意块:三层嵌套、分栏与图片;复制与转类型保留子树", async () => {
+    const service = await prepare();
+    const { page, created } = await service.createBlocks({
+      afterBlockId: "p1",
+      models: [
+        {
+          kind: "bulleted",
+          segments: [seg("一")],
+          children: [{ kind: "bulleted", segments: [seg("二")], children: [{ kind: "paragraph", segments: [seg("三")], children: [] }] }],
+        },
+        {
+          kind: "column_list",
+          children: [
+            { kind: "column", children: [{ kind: "paragraph", segments: [seg("左")], children: [] }] },
+            { kind: "column", children: [{ kind: "paragraph", segments: [seg("右")], children: [] }] },
+          ],
+        },
+        { kind: "image", url: "https://example.com/a.png", caption: [seg("说明")], children: [] },
+      ],
+    });
+    expect(created.map((model) => model.kind)).toEqual(["bulleted", "column_list", "image"]);
+    const list = created[0]!;
+    expect(textOf(list.children[0]?.children[0] ?? null)).toBe("三");
+    const columns = created[1]!.children;
+    expect(columns.map((column) => textOf(column.children[0] ?? null))).toEqual(["左", "右"]);
+    const image = created[2]!;
+    expect(image.kind === "image" ? [image.url, image.caption[0]?.text] : []).toEqual(["https://example.com/a.png", "说明"]);
+    expect(page.blocks.map((block) => block.id).slice(0, 4)).toEqual(["p1", ...created.map((model) => model.id)]);
+
+    // 复制:副本带整棵子树,原块还在
+    const copy = await service.relocateBlocks({ blockIds: [list.id], mode: "copy", afterBlockId: list.id });
+    expect(textOf(copy.created[0]?.children[0]?.children[0] ?? null)).toBe("三");
+    expect(copy.page.blocks.some((block) => block.id === list.id)).toBe(true);
+
+    // 转类型:原地重建成可折叠标题,带颜色,子块跟着走
+    const turned = await service.relocateBlocks({
+      blockIds: [list.id],
+      mode: "move",
+      afterBlockId: list.id,
+      root: { kind: "heading", level: 2, toggleable: true, color: "blue", segments: [seg("一")] },
+    });
+    const heading = turned.created[0]!;
+    expect(heading.kind === "heading" ? [heading.level, heading.toggleable, heading.color] : []).toEqual([2, true, "blue"]);
+    expect(textOf(heading.children[0] ?? null)).toBe("二");
+    expect(findModel(turned.page.blocks, list.id)).toBeNull();
+  });
+
+  test("分栏里放表格、标签页带内容:第二层随请求建,表格先占位再替换", async () => {
+    const service = await prepare();
+    const { created } = await service.createBlocks({
+      afterBlockId: "p1",
+      models: [
+        {
+          kind: "column_list",
+          children: [
+            { kind: "column", children: [{ kind: "paragraph", segments: [seg("左")], children: [{ kind: "paragraph", segments: [seg("左下")], children: [] }] }] },
+            { kind: "column", children: [{ kind: "table", hasHeader: true, rows: [[[seg("A")], [seg("B")]]], children: [] }] },
+          ],
+        },
+        { kind: "tab", children: [{ kind: "paragraph", segments: [seg("标签一")], children: [{ kind: "paragraph", segments: [seg("内容一")], children: [] }] }] },
+      ],
+    });
+    const [columns, tabs] = created;
+    expect(textOf(columns?.children[0]?.children[0] ?? null)).toBe("左");
+    expect(textOf(columns?.children[0]?.children[0]?.children[0] ?? null)).toBe("左下");
+    const right = columns?.children[1]?.children ?? [];
+    expect(right.map((model) => model.kind)).toEqual(["table"]);
+    expect(textOf(tabs?.children[0]?.children[0] ?? null)).toBe("内容一");
+  });
+
+  test("刚在本机写过的页面,后台同步读到滞后的旧内容时不覆盖", async () => {
+    const service = await prepare();
+    await service.deleteBlock("todo1");
+    // 模拟 Notion 写后读滞后:页面已改(时间戳变了),但子块列表还是删除前的样子。
+    fake.state.deleted.delete("todo1");
+    const root = PAGES[ROOT_PAGE]!;
+    const lastEdited = root.lastEdited;
+    root.lastEdited = "2026-10-31T00:00:00.000Z";
+    try {
+      await service.sync();
+      const view = await service.page(ROOT_PAGE);
+      expect(view?.blocks.map((block) => block.id)).toEqual(["p1", "h1", "tbl"]);
+    } finally {
+      root.lastEdited = lastEdited;
+    }
+  });
+
+  test("移动到另一个页面;复制页面连正文一起", async () => {
+    const service = await prepare();
+    const moved = await service.relocateBlocks({ blockIds: ["p1"], mode: "move", targetPageId: CHILD_PAGE, atStart: false });
+    expect(moved.page.id).toBe(ROOT_PAGE);
+    expect(moved.page.blocks.map((block) => block.id)).toEqual(["h1", "todo1", "tbl"]);
+    const child = await service.page(CHILD_PAGE);
+    expect(child?.blocks.map((block) => textOf(block))).toEqual(["子页面内容", "你好,"]);
+    expect(moved.idMap[0]?.[0]).toBe("p1");
+
+    const copy = await service.duplicatePage(CHILD_PAGE, " (副本)");
+    const view = await service.page(copy.pageId);
+    expect(view?.title).toBe("子页面 (副本)");
+    expect(view?.blocks.map((block) => textOf(block))).toEqual(["子页面内容", "你好,"]);
+    await expect(service.duplicatePage(ROOT_PAGE, " (副本)")).rejects.toThrow("子页面");
+  });
+
+  test("移到最前面:返回整列子块时认出真正的新块,原块删除后新块还在", async () => {
+    const service = await prepare();
+    const { page, created } = await service.relocateBlocks({ blockIds: ["todo1"], mode: "move", atStart: true });
+    expect(created[0]?.id).not.toBe("todo1");
+    expect(created[0]?.kind).toBe("todo");
+    expect(page.blocks.map((block) => block.id)).toEqual([created[0]!.id, "p1", "h1", "tbl"]);
+  });
+
+  test("改属性:颜色与可折叠写进 PATCH,改文字时颜色不丢;删除可以撤销", async () => {
+    const service = await prepare();
+    await service.patchBlock("p1", { kind: "paragraph", segments: [seg("你好,")], color: "red_background" });
+    expect((fake.state.overrides.get("p1")?.paragraph as Record<string, unknown>).color).toBe("red_background");
+    await service.updateBlock("p1", "", undefined, undefined, [seg("改字")]);
+    expect((fake.state.overrides.get("p1")?.paragraph as Record<string, unknown>).color).toBe("red_background");
+    await expect(service.patchBlock("p1", { kind: "heading", level: 1, segments: [] })).rejects.toThrow("转换为");
+
+    await service.deleteBlock("todo1");
+    const restored = await service.restoreBlocks({ blockIds: ["todo1"], pageId: ROOT_PAGE, afterBlockId: "h1" });
+    // Notion 恢复到末尾后再移回原位置:新 id 在 h1 后面,内容不变
+    const back = restored.idMap[0]?.[1];
+    expect(restored.idMap[0]?.[0]).toBe("todo1");
+    expect(restored.page.blocks.map((block) => block.id)).toEqual(["p1", "h1", back ?? "", "tbl"]);
+    expect(restored.page.blocks[2]?.kind).toBe("todo");
+  });
+
+  test("内嵌数据库:改单元格、新建行、删除行,本地索引立刻更新", async () => {
+    const service = await prepare();
+    let view = await service.updateDatabaseCell({ databaseId: DATABASE, rowId: ROW_PAGE_A, property: "优先级", value: "5" });
+    expect(view.rows.find((row) => row.id === ROW_PAGE_A)?.cells.find((cell) => cell.name === "优先级")?.text).toBe("5");
+    view = await service.updateDatabaseCell({ databaseId: DATABASE, rowId: ROW_PAGE_A, property: "名称", value: "改名" });
+    expect(view.rows.find((row) => row.id === ROW_PAGE_A)?.title).toBe("改名");
+    await expect(service.updateDatabaseCell({ databaseId: DATABASE, rowId: ROW_PAGE_A, property: "优先级", value: "abc" })).rejects.toThrow("数字");
+    view = await service.addDatabaseRow({ databaseId: DATABASE, title: "第三行" });
+    const added = view.rows.find((row) => row.title === "第三行");
+    expect(added).toBeDefined();
+    view = await service.deleteDatabaseRow({ databaseId: DATABASE, rowId: added!.id });
+    expect(view.rows.some((row) => row.title === "第三行")).toBe(false);
+    expect(view.columns.find((column) => column.name === "状态")?.type).toBe("select");
+  });
+
+  test("数据库的列:新增、改名、删除;数据库行页面带列信息", async () => {
+    const service = await prepare();
+    let view = await service.updateDatabaseSchema({ op: "add", databaseId: DATABASE, name: "备注", type: "rich_text" });
+    expect(view.columns.map((column) => column.name)).toContain("备注");
+    view = await service.updateDatabaseSchema({ op: "rename", databaseId: DATABASE, name: "备注", newName: "说明" });
+    expect(view.columns.map((column) => column.name)).toContain("说明");
+    view = await service.updateDatabaseSchema({ op: "delete", databaseId: DATABASE, name: "说明" });
+    expect(view.columns.map((column) => column.name)).not.toContain("说明");
+    await expect(service.updateDatabaseSchema({ op: "delete", databaseId: DATABASE, name: "名称" })).rejects.toThrow("标题列");
+    const row = await service.page(ROW_PAGE_A);
+    expect(row?.database?.id).toBe(DATABASE);
+    expect(row?.database?.columns.find((column) => column.name === "优先级")?.type).toBe("number");
+  });
+
+  test("新建内嵌数据库:页面末尾多一个数据库块,带默认列,可以直接加行", async () => {
+    const service = await prepare();
+    const { page, databaseId } = await service.createDatabase({ pageId: ROOT_PAGE, title: "任务", inline: true });
+    expect(page.blocks.at(-1)).toMatchObject({ kind: "child_database", databaseId, title: "任务" });
+    const view = service.databaseView(databaseId);
+    expect(view?.columns.map((column) => column.type).sort()).toEqual(["date", "multi_select", "select", "title"]);
+    expect(view?.columns.find((column) => column.type === "select")?.options).toEqual(["未开始", "进行中", "完成"]);
+  });
+
+  test("子页面等接口建不了的块拒绝移动", async () => {
+    const service = await prepare();
+    const { NotionIndex } = await import("../../src/notion/store.js");
+    const index = new NotionIndex(join(dataDir, "notion-index.sqlite"));
+    const blocks = index.pageBlocks(ROOT_PAGE);
+    index.replaceBlocks(ROOT_PAGE, [
+      ...blocks.map((model, idx) => ({ blockId: model.id, pageId: ROOT_PAGE, parentBlockId: null, idx, model })),
+      { blockId: "cp", pageId: ROOT_PAGE, parentBlockId: null, idx: blocks.length, model: { id: "cp", children: [], kind: "child_page", title: "x", pageId: "cp" } },
+    ]);
+    index.close();
+    await expect(service.relocateBlocks({ blockIds: ["cp"], mode: "move", afterBlockId: "p1" })).rejects.toThrow("子页面");
+  });
+
+  test("表格编辑:改一行、插入/删除行、切换表头,行 id 跟着走,不回拉 Notion", async () => {
+    const service = await prepare();
+    const cell = (value: string) => [
+      { text: value, href: null, bold: false, italic: false, strikethrough: false, underline: false, code: false, color: "default" },
+    ];
+    const before = fake.calls.length;
+    await service.tableEdit({ op: "update-row", tableId: "tbl", rowIndex: 1, cells: [cell("改A"), cell("改B")] });
+    await service.tableEdit({ op: "insert-row", tableId: "tbl", afterIndex: 0, cells: [cell("新1")] });
+    await service.tableEdit({ op: "insert-row", tableId: "tbl", afterIndex: -1, cells: [cell("最前"), cell("x")] });
+    await service.tableEdit({ op: "delete-row", tableId: "tbl", rowIndex: 3 });
+    const view = await service.tableEdit({ op: "set-header", tableId: "tbl", hasRowHeader: true });
+    expect(fake.calls.slice(before).filter((call) => call.startsWith("GET "))).toEqual([]);
+    const table = findModel(view.blocks, "tbl");
+    if (!table || table.kind !== "table") throw new Error("表格不见了");
+    const text = (row: (typeof table.rows)[number]) => row.map((c) => c.map((s) => s.text).join(""));
+    // 行宽对齐到表格列数(少的补空)
+    expect(table.rows.map(text)).toEqual([["最前", "x"], ["列一", "列二"], ["新1", ""]]);
+    expect(table.rowIds?.length).toBe(3);
+    expect(table.rowIds?.[1]).toBe("row-0");
+    expect(table.hasRowHeader).toBe(true);
+    expect(table.hasHeader).toBe(true);
+    await expect(service.tableEdit({ op: "delete-row", tableId: "tbl", rowIndex: 9 })).rejects.toThrow("不存在");
+  });
+
+  test("表格编辑:旧索引没有行 id 时补拉一次;增删列整表重建换成新表", async () => {
+    const service = await prepare();
+    const { NotionIndex } = await import("../../src/notion/store.js");
+    const index = new NotionIndex(join(dataDir, "notion-index.sqlite"));
+    const strip = (models: NotionBlockModel[]): NotionBlockModel[] =>
+      models.map((model) => {
+        if (model.kind !== "table") return model;
+        const { rowIds: _dropped, ...rest } = model;
+        return rest;
+      });
+    const rows: Array<{ blockId: string; pageId: string; parentBlockId: string | null; idx: number; model: NotionBlockModel }> = [];
+    strip(index.pageBlocks(ROOT_PAGE)).forEach((model, idx) => rows.push({ blockId: model.id, pageId: ROOT_PAGE, parentBlockId: null, idx, model }));
+    index.replaceBlocks(ROOT_PAGE, rows);
+    index.close();
+    const cell = (value: string) => [
+      { text: value, href: null, bold: false, italic: false, strikethrough: false, underline: false, code: false, color: "default" },
+    ];
+    const before = fake.calls.length;
+    await service.tableEdit({ op: "update-row", tableId: "tbl", rowIndex: 0, cells: [cell("表头改"), cell("二")] });
+    expect(fake.calls.slice(before).filter((call) => call === "GET /blocks/tbl/children")).toHaveLength(1);
+
+    const view = await service.tableEdit({
+      op: "rebuild",
+      tableId: "tbl",
+      hasHeader: true,
+      hasRowHeader: false,
+      rows: [[cell("a"), cell("b"), cell("c")], [cell("1"), cell("2"), cell("3")]],
+    });
+    expect(findModel(view.blocks, "tbl")).toBeNull();
+    const rebuilt = view.blocks.find((block) => block.kind === "table");
+    if (!rebuilt || rebuilt.kind !== "table") throw new Error("新表格不见了");
+    expect(rebuilt.rows.map((row) => row.map((c) => c.map((s) => s.text).join("")))).toEqual([["a", "b", "c"], ["1", "2", "3"]]);
+    expect(rebuilt.rowIds?.length).toBe(2);
+    // 新表在原位置(todo1 之后)
+    expect(view.blocks.map((block) => block.kind)).toEqual(["paragraph", "heading", "todo", "table"]);
+  });
+
+  test("atStart:新块插到页面最前面,用新版本头", async () => {
+    const service = await prepare();
+    const appended = await service.appendBlock({ pageId: ROOT_PAGE, markdown: "标题下的新行", kind: "paragraph", atStart: true });
+    const first = appended.blocks[0];
+    expect(first && first.kind === "paragraph" ? first.segments[0]?.text : "").toBe("标题下的新行");
+    expect(appended.blocks[1]?.id).toBe("p1");
+    expect(fake.state.appendVersions.at(-1)).toBe(MOVE_PAGE_NOTION_VERSION);
+    await expect(
+      service.appendBlock({ afterBlockId: "p1", markdown: "x", atStart: true }),
+    ).rejects.toThrow("atStart");
+  });
+
+  test("粘贴表格:建 table 块带表头与行,超过 100 行的部分续写到表格下", async () => {
+    const bodies: Array<{ key: string; body: { children: Array<Record<string, unknown>> } }> = [];
+    const original = fake.fetchImpl;
+    fake = {
+      ...fake,
+      fetchImpl: (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        const path = new URL(String(input)).pathname.replace(/^\/v1/u, "");
+        if (init?.method === "PATCH" && path.endsWith("/children")) {
+          bodies.push({ key: path, body: JSON.parse(String(init.body)) });
+        }
+        return original(input, init);
+      }) as typeof fetch,
+    };
+    const service = await prepare();
+    const cell = (value: string) => [
+      { text: value, href: null, bold: false, italic: false, strikethrough: false, underline: false, code: false, color: "default" },
+    ];
+    // 第二行只给一格:补齐到表头的列数
+    const rows = [[cell("问题"), cell("文件数")], [cell("甲")], ...Array.from({ length: 148 }, (_, i) => [cell(`r${i}`), cell(String(i))])];
+    await service.appendBlock({ afterBlockId: "p1", markdown: "", children: [{ kind: "table", markdown: "", table: { hasHeader: true, rows } }] });
+
+    expect(bodies).toHaveLength(2);
+    const table = bodies[0]?.body.children[0] as { type: string; table: Record<string, unknown> };
+    expect(table.type).toBe("table");
+    expect(table.table).toMatchObject({ table_width: 2, has_column_header: true, has_row_header: false });
+    const firstRows = table.table.children as Array<{ table_row: { cells: unknown[][] } }>;
+    expect(firstRows).toHaveLength(100);
+    expect(firstRows[1]?.table_row.cells).toHaveLength(2);
+    expect(firstRows[1]?.table_row.cells[1]).toEqual([]);
+    // 续写:追加到新建表格的 id 下,剩下 50 行
+    expect(bodies[1]?.key).toMatch(/^\/blocks\/new-[^/]+\/children$/u);
+    expect(bodies[1]?.body.children).toHaveLength(50);
+    expect(bodies[1]?.body.children[0]?.type).toBe("table_row");
   });
 
   test("移动:上移后顺序交换;带子块的块拒绝移动", async () => {

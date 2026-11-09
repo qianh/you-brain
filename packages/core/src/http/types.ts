@@ -31,6 +31,8 @@ export const NotionSegmentSchema = z.object({
   underline: z.boolean(),
   code: z.boolean(),
   color: z.string(),
+  mention: z.record(z.string(), z.unknown()).optional(),
+  equation: z.string().max(2_000).optional(),
 });
 import { z } from "zod";
 
@@ -726,7 +728,8 @@ export interface NotionSearchView {
 export interface NotionDatabaseView {
   databaseId: string;
   title: string;
-  columns: Array<{ name: string; type: string }>;
+  /** options:单选/多选/状态列的可选值。 */
+  columns: Array<{ name: string; type: string; options?: string[] }>;
   rows: Array<{
     id: string;
     title: string;
@@ -775,16 +778,29 @@ const NotionNewBlockKindSchema = z.enum([
   "divider",
 ]);
 
+/** 粘贴 Markdown 表格:第一行是否表头;每行一组单元格,每格是富文本。超过 100 行由 core 分批续写。 */
+const NotionNewTableSchema = z
+  .object({
+    hasHeader: z.boolean(),
+    rows: z
+      .array(z.array(z.array(NotionSegmentSchema).max(100)).min(1).max(100))
+      .min(1)
+      .max(5_000),
+  })
+  .strict();
+
 /** 追加时一个新块的描述;children 是嵌套子块(Notion 单次请求最多嵌两层)。 */
 export const NotionNewChildSchema = z
   .object({
-    kind: NotionNewBlockKindSchema,
+    kind: z.enum([...NotionNewBlockKindSchema.options, "table"]),
     markdown: z.string().max(20_000),
     rich: z.array(NotionSegmentSchema).max(200).optional(),
     language: z.string().max(40).optional(),
     checked: z.boolean().optional(),
     /** callout 的图标。 */
     emoji: z.string().max(16).optional(),
+    /** kind 为 table 时必填。 */
+    table: NotionNewTableSchema.optional(),
     get children() {
       return z.array(NotionNewChildSchema).max(100).optional();
     },
@@ -805,6 +821,8 @@ export const NotionAppendBlockSchema = z
     rich: z.array(NotionSegmentSchema).max(200).optional(),
     /** 一次追加多个块(粘贴 Markdown、缩进):给了它就忽略上面的 kind/markdown/rich。Notion 单次最多 100 个。 */
     children: z.array(NotionNewChildSchema).min(1).max(100).optional(),
+    /** 插到最前面(标题上按回车新起正文第一行);不能与 afterBlockId 同用。 */
+    atStart: z.boolean().optional(),
   })
   .strict()
   .refine(
@@ -814,6 +832,166 @@ export const NotionAppendBlockSchema = z
   );
 
 export type NotionAppendBlockBody = z.infer<typeof NotionAppendBlockSchema>;
+
+const NotionTableCellsSchema = z.array(z.array(NotionSegmentSchema).max(100)).min(1).max(100);
+
+/**
+ * POST /api/actions/notion-table-edit:表格的单元格与行列编辑。行按下标定位(前端与 core 的写入
+ * 走同一条串行队列,下标一致);增删列要整表重建(Notion 建表后不能改列数),表格块 id 会变。
+ */
+export const NotionTableEditSchema = z.discriminatedUnion("op", [
+  z.object({ op: z.literal("update-row"), tableId: z.string().min(1), rowIndex: z.number().int().min(0), cells: NotionTableCellsSchema }).strict(),
+  z.object({ op: z.literal("insert-row"), tableId: z.string().min(1), afterIndex: z.number().int().min(-1), cells: NotionTableCellsSchema }).strict(),
+  z.object({ op: z.literal("delete-row"), tableId: z.string().min(1), rowIndex: z.number().int().min(0) }).strict(),
+  z.object({ op: z.literal("set-header"), tableId: z.string().min(1), hasHeader: z.boolean().optional(), hasRowHeader: z.boolean().optional() }).strict(),
+  z
+    .object({
+      op: z.literal("rebuild"),
+      tableId: z.string().min(1),
+      hasHeader: z.boolean(),
+      hasRowHeader: z.boolean(),
+      rows: z.array(NotionTableCellsSchema).min(1).max(5_000),
+    })
+    .strict(),
+]);
+
+export type NotionTableEditBody = z.infer<typeof NotionTableEditSchema>;
+
+/** 前端发来的块模型(新建/修改用):形状由 core 的 sanitizeModel 收敛,这里只限大小。 */
+const NotionModelInputSchema: z.ZodType<Record<string, unknown>> = z
+  .object({ kind: z.string().min(1).max(40) })
+  .passthrough()
+  .refine((value) => JSON.stringify(value).length <= 2_000_000, { message: "块内容太大" });
+
+const NotionPlacementShape = {
+  afterBlockId: z.string().min(1).optional(),
+  parentBlockId: z.string().min(1).optional(),
+  atStart: z.boolean().optional(),
+};
+
+/** POST /api/actions/notion-relocate-blocks:移动或复制一组块(带子树);转类型时 root 覆盖第一个块的内容。 */
+export const NotionRelocateBlocksSchema = z
+  .object({
+    blockIds: z.array(z.string().min(1)).min(1).max(100),
+    mode: z.enum(["move", "copy"]),
+    ...NotionPlacementShape,
+    root: NotionModelInputSchema.optional(),
+    /** 移到另一个页面(「移动到」)。 */
+    targetPageId: z.string().min(1).optional(),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      value.afterBlockId !== undefined || value.parentBlockId !== undefined || value.atStart !== undefined || value.targetPageId !== undefined,
+    { message: "缺少目标位置" },
+  );
+
+export type NotionRelocateBlocksBody = z.infer<typeof NotionRelocateBlocksSchema>;
+
+/** POST /api/actions/notion-patch-block:改块内容或属性(颜色、可折叠、图标、链接、说明、公式),类型不变。 */
+export const NotionPatchBlockSchema = z.object({ blockId: z.string().min(1), model: NotionModelInputSchema }).strict();
+
+export type NotionPatchBlockBody = z.infer<typeof NotionPatchBlockSchema>;
+
+/** POST /api/actions/notion-create-blocks:新建任意类型的块(带子树)。 */
+export const NotionCreateBlocksSchema = z
+  .object({ models: z.array(NotionModelInputSchema).min(1).max(100), pageId: z.string().min(1).optional(), ...NotionPlacementShape })
+  .strict()
+  .refine((value) => value.pageId !== undefined || value.afterBlockId !== undefined || value.parentBlockId !== undefined, {
+    message: "缺少 pageId、afterBlockId 或 parentBlockId",
+  });
+
+export type NotionCreateBlocksBody = z.infer<typeof NotionCreateBlocksSchema>;
+
+/** POST /api/actions/notion-restore-blocks:撤销删除,恢复归档的块到原位置。 */
+export const NotionRestoreBlocksSchema = z
+  .object({ blockIds: z.array(z.string().min(1)).min(1).max(100), pageId: z.string().min(1), ...NotionPlacementShape })
+  .strict();
+
+export type NotionRestoreBlocksBody = z.infer<typeof NotionRestoreBlocksSchema>;
+
+/** POST /api/actions/notion-upload-file:上传文件(≤20 MB,base64),返回 file_upload id。 */
+export const NotionUploadFileSchema = z
+  .object({
+    filename: z.string().min(1).max(300),
+    contentType: z.string().max(200),
+    dataBase64: z.string().min(1).max(28_000_000),
+  })
+  .strict();
+
+export type NotionUploadFileBody = z.infer<typeof NotionUploadFileSchema>;
+
+const NotionFileRefSchema = z.union([
+  z.object({ url: z.string().url().max(2_000) }).strict(),
+  z.object({ uploadId: z.string().min(1) }).strict(),
+]);
+
+/** POST /api/actions/notion-page-meta:页面图标与封面;null 表示移除。 */
+export const NotionPageMetaSchema = z
+  .object({
+    pageId: z.string().min(1),
+    icon: z.union([z.object({ emoji: z.string().min(1).max(16) }).strict(), NotionFileRefSchema]).nullable().optional(),
+    cover: NotionFileRefSchema.nullable().optional(),
+  })
+  .strict();
+
+export type NotionPageMetaBody = z.infer<typeof NotionPageMetaSchema>;
+
+/** POST /api/actions/notion-duplicate-page:复制页面(正文一起)。 */
+export const NotionDuplicatePageSchema = z.object({ pageId: z.string().min(1), suffix: z.string().max(40) }).strict();
+
+export type NotionDuplicatePageBody = z.infer<typeof NotionDuplicatePageSchema>;
+
+/** POST /api/actions/notion-create-database:在页面里新建数据库。 */
+export const NotionCreateDatabaseSchema = z.object({ pageId: z.string().min(1), title: z.string().max(200), inline: z.boolean() }).strict();
+
+export type NotionCreateDatabaseBody = z.infer<typeof NotionCreateDatabaseSchema>;
+
+/** POST /api/actions/notion-db-cell:改数据库单元格。 */
+export const NotionDbCellSchema = z
+  .object({
+    databaseId: z.string().min(1),
+    rowId: z.string().min(1),
+    property: z.string().min(1).max(200),
+    value: z.union([z.string().max(2_000), z.boolean(), z.array(z.string().max(100)).max(100), z.null()]),
+  })
+  .strict();
+
+export type NotionDbCellBody = z.infer<typeof NotionDbCellSchema>;
+
+/** POST /api/actions/notion-db-schema:新增/改名/删除数据库的列。 */
+export const NotionDbSchemaSchema = z.discriminatedUnion("op", [
+  z
+    .object({
+      op: z.literal("add"),
+      databaseId: z.string().min(1),
+      name: z.string().min(1).max(100),
+      type: z.enum(["rich_text", "number", "select", "multi_select", "date", "checkbox", "url", "email", "phone_number"]),
+    })
+    .strict(),
+  z.object({ op: z.literal("rename"), databaseId: z.string().min(1), name: z.string().min(1).max(200), newName: z.string().min(1).max(100) }).strict(),
+  z.object({ op: z.literal("delete"), databaseId: z.string().min(1), name: z.string().min(1).max(200) }).strict(),
+]);
+
+export type NotionDbSchemaBody = z.infer<typeof NotionDbSchemaSchema>;
+
+/** POST /api/actions/notion-db-add-row。 */
+export const NotionDbAddRowSchema = z.object({ databaseId: z.string().min(1), title: z.string().max(2_000) }).strict();
+
+export type NotionDbAddRowBody = z.infer<typeof NotionDbAddRowSchema>;
+
+/** POST /api/actions/notion-db-delete-row。 */
+export const NotionDbDeleteRowSchema = z.object({ databaseId: z.string().min(1), rowId: z.string().min(1) }).strict();
+
+export type NotionDbDeleteRowBody = z.infer<typeof NotionDbDeleteRowSchema>;
+
+export interface NotionBlocksCreatedResult {
+  page: NotionPageView;
+  /** 新建块的模型(带真实 id 与子树),与请求里的块按顺序一一对应。 */
+  created: NotionBlockModel[];
+  /** 移动/复制:原块 id → 新块 id(整棵子树)。 */
+  idMap?: Array<[string, string]>;
+}
 
 export const NotionDeleteBlockSchema = z
   .object({ blockId: z.string().min(1) })
@@ -885,6 +1063,8 @@ export interface NotionPageView {
   markdown: string;
   /** 数据库行的属性(已拍平),普通页面没有这个字段。 */
   properties?: Record<string, string>;
+  /** 数据库行:所在数据库和它的列(页面顶部可直接改属性)。 */
+  database?: { id: string; columns: Array<{ name: string; type: string; options?: string[] }> };
 }
 
 export type { WebhookEventKind };

@@ -33,6 +33,19 @@ import {
   NotionMovePageSchema,
   NotionCreatePageSchema,
   NotionDeleteBlockSchema,
+  NotionTableEditSchema,
+  NotionRelocateBlocksSchema,
+  NotionPatchBlockSchema,
+  NotionCreateBlocksSchema,
+  NotionRestoreBlocksSchema,
+  NotionUploadFileSchema,
+  NotionPageMetaSchema,
+  NotionDbCellSchema,
+  NotionCreateDatabaseSchema,
+  NotionDbSchemaSchema,
+  NotionDuplicatePageSchema,
+  NotionDbAddRowSchema,
+  NotionDbDeleteRowSchema,
   NotionDuplicateBlockSchema,
   NotionKeyPutSchema,
   NotionMoveBlockSchema,
@@ -236,6 +249,12 @@ export async function handleApi(
   if (path === "/api/notion/tree") return method(request, "GET", () => notionTree(context));
   if (path === "/api/notion/page") return method(request, "GET", () => notionPage(url, context));
   if (path === "/api/notion/search") return method(request, "GET", () => notionSearch(url, context));
+  if (path === "/api/notion/users") {
+    return method(request, "GET", async () => {
+      if (!context.deps.notionUsers) notSupported();
+      return json({ users: await context.deps.notionUsers() });
+    });
+  }
   if (path === "/api/notion/database") {
     return method(request, "GET", () => notionDatabase(url, context));
   }
@@ -245,6 +264,45 @@ export async function handleApi(
   }
   if (path === "/api/actions/notion-append-block") {
     return method(request, "POST", () => notionMutation(request, context, "notionAppendBlock", NotionAppendBlockSchema));
+  }
+  if (path === "/api/actions/notion-table-edit") {
+    return method(request, "POST", () => notionMutation(request, context, "notionTableEdit", NotionTableEditSchema));
+  }
+  if (path === "/api/actions/notion-relocate-blocks") {
+    return method(request, "POST", () => notionMutation(request, context, "notionRelocateBlocks", NotionRelocateBlocksSchema));
+  }
+  if (path === "/api/actions/notion-patch-block") {
+    return method(request, "POST", () => notionMutation(request, context, "notionPatchBlock", NotionPatchBlockSchema));
+  }
+  if (path === "/api/actions/notion-create-blocks") {
+    return method(request, "POST", () => notionMutation(request, context, "notionCreateBlocks", NotionCreateBlocksSchema));
+  }
+  if (path === "/api/actions/notion-restore-blocks") {
+    return method(request, "POST", () => notionMutation(request, context, "notionRestoreBlocks", NotionRestoreBlocksSchema));
+  }
+  if (path === "/api/actions/notion-upload-file") {
+    return method(request, "POST", () => notionMutation(request, context, "notionUploadFile", NotionUploadFileSchema));
+  }
+  if (path === "/api/actions/notion-page-meta") {
+    return method(request, "POST", () => notionMutation(request, context, "notionPageMeta", NotionPageMetaSchema));
+  }
+  if (path === "/api/actions/notion-duplicate-page") {
+    return method(request, "POST", () => notionMutation(request, context, "notionDuplicatePage", NotionDuplicatePageSchema));
+  }
+  if (path === "/api/actions/notion-db-schema") {
+    return method(request, "POST", () => notionMutation(request, context, "notionDbSchema", NotionDbSchemaSchema));
+  }
+  if (path === "/api/actions/notion-create-database") {
+    return method(request, "POST", () => notionMutation(request, context, "notionCreateDatabase", NotionCreateDatabaseSchema));
+  }
+  if (path === "/api/actions/notion-db-cell") {
+    return method(request, "POST", () => notionMutation(request, context, "notionDbCell", NotionDbCellSchema));
+  }
+  if (path === "/api/actions/notion-db-add-row") {
+    return method(request, "POST", () => notionMutation(request, context, "notionDbAddRow", NotionDbAddRowSchema));
+  }
+  if (path === "/api/actions/notion-db-delete-row") {
+    return method(request, "POST", () => notionMutation(request, context, "notionDbDeleteRow", NotionDbDeleteRowSchema));
   }
   if (path === "/api/actions/notion-delete-block") {
     return method(request, "POST", () => notionMutation(request, context, "notionDeleteBlock", NotionDeleteBlockSchema));
@@ -803,6 +861,19 @@ async function notionMutation<
     | "notionUpdateBlock"
     | "notionAppendBlock"
     | "notionDeleteBlock"
+    | "notionTableEdit"
+    | "notionRelocateBlocks"
+    | "notionPatchBlock"
+    | "notionCreateBlocks"
+    | "notionRestoreBlocks"
+    | "notionUploadFile"
+    | "notionPageMeta"
+    | "notionDbCell"
+    | "notionCreateDatabase"
+    | "notionDbSchema"
+    | "notionDuplicatePage"
+    | "notionDbAddRow"
+    | "notionDbDeleteRow"
     | "notionMoveBlock"
     | "notionDuplicateBlock"
     | "notionPatchTitle"

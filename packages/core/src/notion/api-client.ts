@@ -8,7 +8,7 @@
 
 export const NOTION_API_BASE = "https://api.notion.com/v1";
 export const NOTION_VERSION = "2022-06-28";
-/** 「移动页面」接口只在这个版本及以后提供;只有这一个请求用它,其余仍走 NOTION_VERSION。 */
+/** 「移动页面」接口和追加块的 `position: start` 只在这个版本及以后提供;只有这两个请求用它,其余仍走 NOTION_VERSION。 */
 export const MOVE_PAGE_NOTION_VERSION = "2026-03-11";
 
 export interface NotionRichText {
@@ -105,6 +105,9 @@ export class NotionApiClient {
     let attempt = 0;
     // Notion's published average rate limit is about three requests per second;
     // back off on 429 and on transient 5xx, then give up.
+    // 新建类请求(追加子块、新建页面)不能盲目重发:网络断开或 5xx 时 Notion 往往已经写进去了,
+    // 重发会多出一份。只有 429(明确没执行)才重试。
+    const replayable = !((method === "PATCH" && /\/children$/u.test(path)) || (method === "POST" && path === "/pages"));
     while (true) {
       attempt += 1;
       const headers: Record<string, string> = {
@@ -120,7 +123,7 @@ export class NotionApiClient {
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         });
       } catch (error) {
-        if (attempt < 3) {
+        if (replayable && attempt < 3) {
           await this.#sleep(attempt);
           continue;
         }
@@ -131,7 +134,7 @@ export class NotionApiClient {
         await this.#sleep(attempt);
         continue;
       }
-      if (response.status >= 500 && attempt < 3) {
+      if (response.status >= 500 && replayable && attempt < 3) {
         await this.#sleep(attempt);
         continue;
       }
@@ -211,6 +214,108 @@ export class NotionApiClient {
       afterBlockId ? { children, after: afterBlockId } : { children },
     );
     return response.results;
+  }
+
+  /**
+   * 插到父块(或页面)子块的最前面。旧版接口只有 `after`,做不到「插在第一个之前」;
+   * `position: start` 要用新版本头,与「移动页面」同一个版本。
+   */
+  async prependBlocks(parentId: string, children: Array<Record<string, unknown>>): Promise<Array<Record<string, unknown>>> {
+    const response = await this.#request<{ results: Array<Record<string, unknown>> }>(
+      "PATCH",
+      `/blocks/${parentId}/children`,
+      { children, position: { type: "start" } },
+      MOVE_PAGE_NOTION_VERSION,
+    );
+    return response.results;
+  }
+
+  /**
+   * 上传一个文件(单段,≤20 MB),返回 file_upload id;建块或改封面时用
+   * `{ type: "file_upload", file_upload: { id } }` 引用它,一小时内有效。
+   */
+  async uploadFile(filename: string, contentType: string, bytes: Uint8Array): Promise<string> {
+    const created = await this.#request<{ id?: unknown }>("POST", "/file_uploads", {
+      mode: "single_part",
+      filename,
+      content_type: contentType,
+    });
+    if (typeof created.id !== "string") throw new NotionApiError(0, "UPLOAD_FAILED", "Notion 没有返回上传 id");
+    const form = new FormData();
+    form.append("file", new Blob([Uint8Array.from(bytes)], { type: contentType }), filename);
+    let attempt = 0;
+    while (true) {
+      attempt += 1;
+      const response = await this.#fetch(`${NOTION_API_BASE}/file_uploads/${created.id}/send`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${this.#token}`, "notion-version": NOTION_VERSION },
+        body: form,
+      });
+      if ((response.status === 429 || response.status >= 500) && attempt < 3) {
+        await this.#sleep(attempt);
+        continue;
+      }
+      if (!response.ok) {
+        const text = await response.text();
+        let message = text.slice(0, 200);
+        try {
+          const parsed = JSON.parse(text) as { message?: unknown };
+          if (typeof parsed.message === "string") message = parsed.message;
+        } catch {
+          // 非 JSON 错误体,原样截断。
+        }
+        throw new NotionApiError(response.status, "UPLOAD_FAILED", message);
+      }
+      return created.id;
+    }
+  }
+
+  /** 工作区成员(@ 提及用);集成没有「读取用户信息」权限时 Notion 返回 403。 */
+  async listUsers(): Promise<Array<{ id: string; name: string; type: string }>> {
+    const users: Array<{ id: string; name: string; type: string }> = [];
+    let cursor: string | undefined;
+    do {
+      const query = cursor ? `?start_cursor=${encodeURIComponent(cursor)}&page_size=100` : "?page_size=100";
+      const response = await this.#request<{ results: Array<Record<string, unknown>>; next_cursor: string | null; has_more: boolean }>(
+        "GET",
+        `/users${query}`,
+      );
+      for (const user of response.results) {
+        if (typeof user.id === "string") users.push({ id: user.id, name: typeof user.name === "string" ? user.name : "", type: String(user.type ?? "") });
+      }
+      cursor = response.has_more && response.next_cursor ? response.next_cursor : undefined;
+    } while (cursor);
+    return users;
+  }
+
+  /** 在页面里新建数据库(inline = 内嵌表格,否则是整页数据库)。 */
+  async createDatabase(parentPageId: string, title: string, properties: Record<string, unknown>, inline: boolean): Promise<Record<string, unknown>> {
+    return this.#request("POST", "/databases", {
+      parent: { type: "page_id", page_id: parentPageId },
+      title: [{ type: "text", text: { content: title } }],
+      is_inline: inline,
+      properties,
+    });
+  }
+
+  /** 改数据库结构(新增/改名/删除列)。 */
+  async updateDatabase(databaseId: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.#request("PATCH", `/databases/${databaseId}`, body);
+  }
+
+  /** 在数据库里新建一行(页面),properties 是接口形状。 */
+  async createDatabaseRow(databaseId: string, properties: Record<string, unknown>): Promise<Record<string, unknown>> {
+    return this.#request("POST", "/pages", { parent: { database_id: databaseId }, properties });
+  }
+
+  /** 读单个块(取 Notion 托管文件的最新签名链接)。 */
+  async retrieveBlock(blockId: string): Promise<Record<string, unknown>> {
+    return this.#request("GET", `/blocks/${blockId}`);
+  }
+
+  /** 恢复已删除(归档)的块:撤销删除用,块 id 与内容都不变。 */
+  async restoreBlock(blockId: string): Promise<Record<string, unknown>> {
+    return this.#request("PATCH", `/blocks/${blockId}`, { archived: false });
   }
 
   /** Archive (soft-delete) a block. */
@@ -395,6 +500,8 @@ export function richTextSegments(
   underline: boolean;
   code: boolean;
   color: string;
+  mention?: Record<string, unknown>;
+  equation?: string;
 }> {
   return parts.map((part) => {
     const text = part.type === "text" ? part.text : {};
@@ -412,6 +519,12 @@ export function richTextSegments(
       underline: annotations.underline === true,
       code: annotations.code === true,
       color: typeof annotations.color === "string" ? annotations.color : "default",
+      ...(part.type === "mention" && typeof part.mention === "object" && part.mention !== null
+        ? { mention: part.mention as Record<string, unknown> }
+        : {}),
+      ...(part.type === "equation"
+        ? { equation: String((part.equation as { expression?: unknown } | undefined)?.expression ?? part.plain_text ?? "") }
+        : {}),
     };
   });
 }

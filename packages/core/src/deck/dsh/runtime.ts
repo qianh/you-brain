@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -84,6 +84,8 @@ export class DshRuntime {
   readonly #bundled: BundledDsh | null;
   #base: BaseStatus | null = null;
   #web: DshWeb | null = null;
+  /** 正在创建 dsh 界面:页面并发轮询时只建一次,避免重复建链(EEXIST)和多开进程。 */
+  #webInit: Promise<DshWebState | null> | null = null;
   #login: DshLogin | null = null;
 
   constructor(options: DshRuntimeOptions) {
@@ -137,6 +139,18 @@ export class DshRuntime {
    */
   async webState(retry = false): Promise<DshWebState> {
     if (this.#web !== null) return this.#web.ensureStarted(retry);
+    this.#webInit ??= this.#initWeb().finally(() => {
+      this.#webInit = null;
+    });
+    const problem = await this.#webInit;
+    if (problem !== null) return problem;
+    // await 之后 #web 已由 #initWeb 赋值(期间被 close 掉则为空)。
+    const web = this.#web as DshWeb | null;
+    return web === null ? { state: "error", error: "DeepSeek Harness 已关闭" } : web.ensureStarted();
+  }
+
+  /** 建好 dsh 界面并赋给 #web;前置条件不满足时返回 error 状态。 */
+  async #initWeb(): Promise<DshWebState | null> {
     const base = await this.#baseStatus(false);
     if (base.problem !== null || base.node === null) {
       return { state: "error", error: base.problem ?? "找不到 Node ≥ 24.9" };
@@ -209,7 +223,7 @@ export class DshRuntime {
         return files;
       },
     });
-    return this.#web.ensureStarted();
+    return null;
   }
 
   /**
@@ -301,7 +315,14 @@ export class DshRuntime {
     await mkdir(profileDir, { recursive: true });
     const link = join(profileDir, "node_modules");
     const target = join(this.sidecarDir, "node_modules");
+    // 已经指向同一目录就不动:dsh 进程可能正在用它。
+    if ((await readlink(link).catch(() => null)) === target) return;
     await rm(link, { recursive: true, force: true });
-    await symlink(target, link, "dir");
+    try {
+      await symlink(target, link, "dir");
+    } catch (error) {
+      // 另一个进程(比如退出中的旧 daemon)刚建好同样的链接,也算成功。
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST" || (await readlink(link).catch(() => null)) !== target) throw error;
+    }
   }
 }

@@ -6,6 +6,10 @@ export type TurnIntoKind =
   | "heading1"
   | "heading2"
   | "heading3"
+  | "heading4"
+  | "toggleHeading1"
+  | "toggleHeading2"
+  | "toggleHeading3"
   | "bulleted"
   | "numbered"
   | "todo"
@@ -20,6 +24,10 @@ export const BLOCK_KINDS: Array<{ kind: TurnIntoKind | "divider"; labelKey: stri
   { kind: "heading1", labelKey: "knowledgeTypeHeading1" },
   { kind: "heading2", labelKey: "knowledgeTypeHeading2" },
   { kind: "heading3", labelKey: "knowledgeTypeHeading3" },
+  { kind: "heading4", labelKey: "knowledgeTypeHeading4" },
+  { kind: "toggleHeading1", labelKey: "knowledgeTypeToggleHeading1" },
+  { kind: "toggleHeading2", labelKey: "knowledgeTypeToggleHeading2" },
+  { kind: "toggleHeading3", labelKey: "knowledgeTypeToggleHeading3" },
   { kind: "bulleted", labelKey: "knowledgeTypeBulleted" },
   { kind: "numbered", labelKey: "knowledgeTypeNumbered" },
   { kind: "todo", labelKey: "knowledgeTypeTodo" },
@@ -45,9 +53,50 @@ export function isEditableBlock(block: NotionBlockModel): boolean {
   ].includes(block.kind);
 }
 
-/** 移动/复制需要整块复制,带子块的块会丢子树,禁止。 */
+/** 接口建不了的块(子页面、内嵌数据库、同步块、链接预览、Notion 专有块):只能看,不能移动/复制。 */
+const UNCREATABLE_KINDS = new Set(["child_page", "child_database", "synced", "link_preview", "unknown"]);
+
+export function isReadOnlyBlock(block: NotionBlockModel): boolean {
+  return UNCREATABLE_KINDS.has(block.kind);
+}
+
+/** 移动/复制要在新位置整棵重建:子树里有接口建不了的块就不行。 */
 export function canMoveBlock(block: NotionBlockModel): boolean {
-  return isEditableBlock(block) && block.children.length === 0;
+  if (isReadOnlyBlock(block) || isLocalPending(block)) return false;
+  return block.children.every(canMoveBlock);
+}
+
+/** 还没选好来源的媒体/书签/嵌入占位块(只在本地,不写 Notion)。 */
+export function isLocalPending(block: NotionBlockModel): boolean {
+  if (!isLocalId(block.id)) return false;
+  switch (block.kind) {
+    case "image":
+    case "video":
+    case "audio":
+    case "file":
+    case "pdf":
+      return block.url === "" && !block.uploadId;
+    case "bookmark":
+    case "embed":
+      return block.url === "";
+    case "equation":
+      return block.expression === "";
+    case "link_to_page":
+      return block.targetId === null;
+    default:
+      return false;
+  }
+}
+
+/** 文本类块能设颜色(callout 自带颜色字段,目录也有颜色)。 */
+export function canColorBlock(block: NotionBlockModel): boolean {
+  return hasSegments(block) || block.kind === "table_of_contents";
+}
+
+/** 能带子块的块(缩进、拖进去、折叠内容)。 */
+export function acceptsChildren(block: NotionBlockModel): boolean {
+  if (block.kind === "heading") return block.toggleable === true;
+  return canHaveChildren(block.kind);
 }
 
 /** 块文本 → 编辑框预填的 markdown(code 块是裸文本)。 */
@@ -256,6 +305,14 @@ export function makeLocalBlock(
       return { ...base, kind: "heading", level: 2, segments };
     case "heading3":
       return { ...base, kind: "heading", level: 3, segments };
+    case "heading4":
+      return { ...base, kind: "heading", level: 4, segments };
+    case "toggleHeading1":
+      return { ...base, kind: "heading", level: 1, segments, toggleable: true };
+    case "toggleHeading2":
+      return { ...base, kind: "heading", level: 2, segments, toggleable: true };
+    case "toggleHeading3":
+      return { ...base, kind: "heading", level: 3, segments, toggleable: true };
     case "bulleted":
       return { ...base, kind: "bulleted", segments };
     case "numbered":
@@ -285,9 +342,176 @@ export function convertBlock(block: NotionBlockModel, kind: TurnIntoKind): Notio
   if (next.kind === "callout" && block.kind === "callout") {
     next.emoji = block.emoji;
     next.color = block.color;
+  } else if (block.color && next.kind !== "code" && next.kind !== "callout") {
+    // 块颜色跟着走(Notion 转类型保留颜色)。
+    next.color = block.color;
   }
+  // 普通标题转成别的块时,子块只能挂在能带子块的块下面;不能带的由调用方拒绝。
   next.children = block.children;
   return next;
+}
+
+/** 当前块对应的转换目标(菜单里打勾用)。 */
+export function turnIntoKindOf(block: NotionBlockModel): TurnIntoKind | null {
+  switch (block.kind) {
+    case "heading":
+      if (block.toggleable && block.level <= 3) return `toggleHeading${block.level as 1 | 2 | 3}`;
+      return `heading${block.level}`;
+    case "paragraph":
+    case "bulleted":
+    case "numbered":
+    case "todo":
+    case "quote":
+    case "callout":
+    case "toggle":
+    case "code":
+      return block.kind;
+    default:
+      return null;
+  }
+}
+
+/** 块在树里的位置:父块(null = 页面顶层)与前一个兄弟(null = 第一个)。撤销时按它插回去。 */
+export interface BlockPlacement {
+  parentId: string | null;
+  afterId: string | null;
+}
+
+export function placementOf(blocks: readonly NotionBlockModel[], id: string): BlockPlacement | null {
+  const visit = (list: readonly NotionBlockModel[], parentId: string | null): BlockPlacement | null => {
+    const index = list.findIndex((block) => block.id === id);
+    if (index >= 0) return { parentId, afterId: index > 0 ? (list[index - 1]?.id ?? null) : null };
+    for (const block of list) {
+      const nested = visit(block.children, block.id);
+      if (nested) return nested;
+    }
+    return null;
+  };
+  return visit(blocks, null);
+}
+
+/** 按位置插入一组块(afterId 找不到就放到父块末尾)。 */
+export function insertAtPlacement(
+  blocks: readonly NotionBlockModel[],
+  placement: BlockPlacement,
+  items: readonly NotionBlockModel[],
+): NotionBlockModel[] {
+  const place = (list: readonly NotionBlockModel[]): NotionBlockModel[] => {
+    if (placement.afterId === null) return [...items, ...list];
+    const index = list.findIndex((block) => block.id === placement.afterId);
+    if (index < 0) return [...list, ...items];
+    return [...list.slice(0, index + 1), ...items, ...list.slice(index + 1)];
+  };
+  if (placement.parentId === null) return place(blocks);
+  return updateBlockIn(blocks, placement.parentId, (parent) => ({ ...parent, children: place(parent.children) }));
+}
+
+/** 块是否在 ancestorId 的子树里(含自己)。 */
+export function isInside(blocks: readonly NotionBlockModel[], ancestorId: string, id: string): boolean {
+  const ancestor = findBlockIn(blocks, ancestorId);
+  return ancestor !== null && findBlockIn([ancestor], id) !== null;
+}
+
+/** 文档顺序的所有块 id(深度优先)。 */
+export function documentOrder(blocks: readonly NotionBlockModel[]): string[] {
+  return collectIds(blocks);
+}
+
+/** 选中的一组块去掉「祖先也被选中」的(整棵子树一起处理),按文档顺序。 */
+export function topmostSelected(blocks: readonly NotionBlockModel[], ids: ReadonlySet<string>): string[] {
+  const out: string[] = [];
+  const visit = (list: readonly NotionBlockModel[]): void => {
+    for (const block of list) {
+      if (ids.has(block.id)) out.push(block.id);
+      else visit(block.children);
+    }
+  };
+  visit(blocks);
+  return out;
+}
+
+/** 复制成 Markdown(带行内格式、嵌套缩进、表格、媒体链接)。 */
+export function blocksToMarkdownText(blocks: readonly NotionBlockModel[]): string {
+  const lines: string[] = [];
+  const walk = (list: readonly NotionBlockModel[], depth: number): void => {
+    let number = 0;
+    for (const block of list) {
+      const indent = "    ".repeat(depth);
+      number = block.kind === "numbered" ? number + 1 : 0;
+      const text = segmentsToMarkdown(segmentsOf(block));
+      let nested = depth + 1;
+      switch (block.kind) {
+        case "heading":
+          lines.push(`${indent}${"#".repeat(block.level)} ${text}`);
+          nested = depth;
+          break;
+        case "bulleted":
+          lines.push(`${indent}- ${text}`);
+          break;
+        case "numbered":
+          lines.push(`${indent}${number}. ${text}`);
+          break;
+        case "todo":
+          lines.push(`${indent}- [${block.checked ? "x" : " "}] ${text}`);
+          break;
+        case "quote":
+          lines.push(`${indent}> ${text}`);
+          break;
+        case "callout":
+          lines.push(`${indent}> ${block.emoji ?? "💡"} ${text}`);
+          break;
+        case "toggle":
+          lines.push(`${indent}- ${text}`);
+          break;
+        case "code":
+          lines.push(`${indent}\`\`\`${block.language === "plain text" ? "" : block.language}`, ...block.text.split("\n").map((line) => indent + line), `${indent}\`\`\``);
+          break;
+        case "divider":
+          lines.push(`${indent}---`);
+          break;
+        case "equation":
+          lines.push(`${indent}$$${block.expression}$$`);
+          break;
+        case "image":
+          lines.push(`${indent}![${segmentsText(block.caption)}](${block.url})`);
+          break;
+        case "video":
+        case "audio":
+        case "file":
+        case "pdf":
+          lines.push(`${indent}[${block.kind === "file" || block.kind === "pdf" ? block.name : segmentsText(block.caption) || block.url}](${block.url})`);
+          break;
+        case "bookmark":
+        case "embed":
+        case "link_preview":
+          lines.push(`${indent}${block.url}`);
+          break;
+        case "child_page":
+        case "child_database":
+          lines.push(`${indent}${block.title}`);
+          break;
+        case "table": {
+          block.rows.forEach((row, index) => {
+            lines.push(`${indent}| ${row.map((cell) => segmentsToMarkdown(cell).replaceAll("|", "\\|").replaceAll("\n", "<br>")).join(" | ")} |`);
+            if (index === 0) lines.push(`${indent}|${row.map(() => " --- ").join("|")}|`);
+          });
+          break;
+        }
+        case "column_list":
+        case "column":
+        case "tab":
+        case "synced":
+          nested = depth;
+          break;
+        default:
+          if (text !== "") lines.push(`${indent}${text}`);
+          break;
+      }
+      walk(block.children, nested);
+    }
+  };
+  walk(blocks, 0);
+  return lines.join("\n");
 }
 
 /** 换掉块的行内文本;不带文本的块原样返回。 */
@@ -454,13 +678,25 @@ export function locateNewBlockIds(
 
 // —— 粘贴 Markdown:一段多行文本 → 一组块 ——
 
+/** Markdown 表格:每行是一组单元格,每格是富文本。 */
+export interface PastedTable {
+  hasHeader: boolean;
+  rows: NotionSegment[][][];
+}
+
 export interface PastedBlock {
-  kind: TurnIntoKind | "divider";
+  kind: TurnIntoKind | "divider" | "table" | "image" | "equation";
+  /** image 的链接。 */
+  url?: string;
+  /** equation 的 LaTeX。 */
+  expression?: string;
   segments: NotionSegment[];
   /** code 块的裸文本与语言。 */
   text?: string;
   language?: string;
   checked?: boolean;
+  /** kind 为 table 时的行。 */
+  table?: PastedTable;
   /** 缩进形成的子块(Notion 单次请求最多嵌两层,更深的并入第二层)。 */
   children?: PastedBlock[];
 }
@@ -470,11 +706,70 @@ const TODO_LINE = /^[-*+]\s+\[([ xX])\]\s+(.*)$/u;
 const BULLET_LINE = /^[-*+]\s+(.*)$/u;
 const NUMBER_LINE = /^\d+[.)]\s+(.*)$/u;
 const QUOTE_LINE = /^>\s?(.*)$/u;
+const IMAGE_LINE = /^!\[([^\]]*)\]\((\S+?)(?:\s+"[^"]*")?\)$/u;
+const MATH_LINE = /^\$\$(.+)\$\$$/u;
 const RULE_LINE = /^(?:-{3,}|\*{3,}|_{3,})$/u;
 const FENCE_LINE = /^```\s*([\w+#-]*)\s*$/u;
+const TABLE_DELIMITER_CELL = /^:?-+:?$/u;
+const TABLE_BREAK = /<br\s*\/?>/giu;
+
+/** 拆一行表格的单元格:去掉首尾的 |,按未转义的 | 切开;不含 | 的行不是表格行。 */
+function splitTableRow(line: string): string[] | null {
+  let body = line.trim();
+  if (!body.includes("|")) return null;
+  if (body.startsWith("|")) body = body.slice(1);
+  if (body.endsWith("|") && !body.endsWith("\\|")) body = body.slice(0, -1);
+  const cells: string[] = [];
+  let current = "";
+  for (let index = 0; index < body.length; index += 1) {
+    const char = body[index];
+    if (char === "\\" && body[index + 1] === "|") {
+      current += "|";
+      index += 1;
+    } else if (char === "|") {
+      cells.push(current.trim());
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+/** 表格单元格的富文本:<br> 换成换行,其余按行内 Markdown 解析。 */
+function tableCellSegments(cell: string): NotionSegment[] {
+  return markdownToSegments(cell.replace(TABLE_BREAK, "\n"));
+}
 
 /**
- * 把粘贴的 Markdown 文本拆成块:标题、列表、待办、引用、代码围栏、分隔线,
+ * 从 lines[start] 起识别一张 GFM 表格:表头行 + 分隔行(列数一致),
+ * 之后直到空行或不含 | 的行都是数据行;列数多的截掉、少的补空。
+ * 不是表格返回 null。
+ */
+function parseTableAt(lines: readonly string[], start: number): { table: PastedTable; next: number } | null {
+  const header = splitTableRow(lines[start] ?? "");
+  const delimiter = splitTableRow(lines[start + 1] ?? "");
+  if (!header || !delimiter || delimiter.length !== header.length) return null;
+  if (!delimiter.every((cell) => TABLE_DELIMITER_CELL.test(cell))) return null;
+  const width = header.length;
+  const toRow = (cells: readonly string[]): NotionSegment[][] =>
+    Array.from({ length: width }, (_, index) => tableCellSegments(cells[index] ?? ""));
+  const rows = [toRow(header)];
+  let next = start + 2;
+  while (next < lines.length) {
+    const line = (lines[next] ?? "").trim();
+    if (line === "") break;
+    const cells = splitTableRow(line);
+    if (!cells) break;
+    rows.push(toRow(cells));
+    next += 1;
+  }
+  return { table: { hasHeader: true, rows }, next };
+}
+
+/**
+ * 把粘贴的 Markdown 文本拆成块:标题、列表、待办、引用、代码围栏、分隔线、表格,
  * 其余按行成段落;行内 **粗体** *斜体* `代码` ~~删除线~~ [链接](url) 转成富文本。
  * 空行丢弃(与 Notion 粘贴一致);缩进的嵌套列表按同层处理。
  */
@@ -485,11 +780,10 @@ export function parseMarkdownBlocks(input: string): PastedBlock[] {
   let stack: Array<{ indent: number; block: PastedBlock }> = [];
   const place = (block: PastedBlock, indent: number): void => {
     while (stack.length > 0 && (stack[stack.length - 1]?.indent ?? 0) >= indent) stack.pop();
-    // 最多两层嵌套:栈已有三层时,挂到第二层之下(与第三层并列)。
-    const parent = stack.length > 2 ? stack[1] : stack[stack.length - 1];
+    // 嵌套不限层数:新建时由 core 逐层追加子块。
+    const parent = stack[stack.length - 1];
     if (parent && canHaveChildren(parent.block.kind)) {
       (parent.block.children ??= []).push(block);
-      if (stack.length > 2) stack = stack.slice(0, 2);
     } else {
       out.push(block);
       stack = [];
@@ -514,6 +808,13 @@ export function parseMarkdownBlocks(input: string): PastedBlock[] {
       stack = [];
       continue;
     }
+    const table = parseTableAt(lines, index);
+    if (table) {
+      out.push({ kind: "table", segments: [], table: table.table });
+      stack = [];
+      index = table.next - 1;
+      continue;
+    }
     if (RULE_LINE.test(line)) {
       out.push({ kind: "divider", segments: [] });
       stack = [];
@@ -521,8 +822,20 @@ export function parseMarkdownBlocks(input: string): PastedBlock[] {
     }
     const heading = HEADING_LINE.exec(line);
     if (heading) {
-      const level = Math.min(3, heading[1]?.length ?? 1);
-      out.push({ kind: level === 1 ? "heading1" : level === 2 ? "heading2" : "heading3", segments: markdownToSegments(heading[2] ?? "") });
+      const level = Math.min(4, heading[1]?.length ?? 1);
+      out.push({ kind: `heading${level as 1 | 2 | 3 | 4}`, segments: markdownToSegments(heading[2] ?? "") });
+      stack = [];
+      continue;
+    }
+    const image = IMAGE_LINE.exec(line);
+    if (image) {
+      out.push({ kind: "image", segments: markdownToSegments(image[1] ?? ""), url: image[2] ?? "" });
+      stack = [];
+      continue;
+    }
+    const math = MATH_LINE.exec(line);
+    if (math) {
+      out.push({ kind: "equation", segments: [], expression: (math[1] ?? "").trim() });
       stack = [];
       continue;
     }
@@ -573,18 +886,29 @@ function canHaveChildren(kind: PastedBlock["kind"] | NotionBlockModel["kind"]): 
 
 /** 追加请求里的一个新块(与 core 的 NotionNewChildSchema 同形)。 */
 export interface AppendChild {
-  kind: TurnIntoKind | "divider";
+  kind: TurnIntoKind | "divider" | "table";
   markdown: string;
   rich?: NotionSegment[];
   language?: string;
   checked?: boolean;
   emoji?: string;
+  table?: PastedTable;
   children?: AppendChild[];
 }
 
 /** 粘贴块 → 本地块树(每个块一个新本地 id,嵌套保留)。 */
 export function pastedToLocal(items: readonly PastedBlock[], newId: () => string): NotionBlockModel[] {
   return items.map((item) => {
+    if (item.kind === "table") {
+      const table = item.table ?? { hasHeader: true, rows: [] };
+      return { id: newId(), children: [], kind: "table", hasHeader: table.hasHeader, rows: table.rows };
+    }
+    if (item.kind === "image") {
+      return { id: newId(), children: [], kind: "image", url: item.url ?? "", caption: item.segments, source: "external" };
+    }
+    if (item.kind === "equation") {
+      return { id: newId(), children: [], kind: "equation", expression: item.expression ?? "" };
+    }
     const made = makeLocalBlock(
       newId(),
       item.kind,
@@ -600,13 +924,44 @@ export function pastedToLocal(items: readonly PastedBlock[], newId: () => string
 /** 粘贴块 → 追加请求的 children。 */
 export function pastedToAppend(items: readonly PastedBlock[]): AppendChild[] {
   return items.map((item) => ({
-    kind: item.kind,
+    kind: item.kind === "image" || item.kind === "equation" ? "paragraph" : item.kind,
     markdown: item.kind === "code" ? (item.text ?? "") : "",
     ...(item.segments.length > 0 && item.kind !== "code" ? { rich: item.segments } : {}),
     ...(item.kind === "code" && item.language ? { language: item.language } : {}),
     ...(item.kind === "todo" ? { checked: item.checked === true } : {}),
+    ...(item.kind === "table" && item.table ? { table: item.table } : {}),
     ...(item.children?.length ? { children: pastedToAppend(item.children) } : {}),
   }));
+}
+
+/** Notion 单次追加:顶层最多 100 个,连同子块与表格行总共最多 1000 个。 */
+const APPEND_MAX_CHILDREN = 100;
+const APPEND_MAX_BLOCKS = 1000;
+/** 表格第一次请求最多带的行数(其余由 core 分批续写,不计入这次请求)。 */
+const TABLE_ROWS_PER_REQUEST = 100;
+
+function appendWeight(child: AppendChild): number {
+  const rows = child.kind === "table" ? Math.min(child.table?.rows.length ?? 0, TABLE_ROWS_PER_REQUEST) : 0;
+  return 1 + rows + (child.children ?? []).reduce((sum, entry) => sum + appendWeight(entry), 0);
+}
+
+/** 把追加的块切成多次请求,每批都不超过 Notion 的数量上限;顺序不变。 */
+export function appendBatches(children: readonly AppendChild[]): AppendChild[][] {
+  const batches: AppendChild[][] = [];
+  let current: AppendChild[] = [];
+  let weight = 0;
+  for (const child of children) {
+    const next = appendWeight(child);
+    if (current.length > 0 && (current.length >= APPEND_MAX_CHILDREN || weight + next > APPEND_MAX_BLOCKS)) {
+      batches.push(current);
+      current = [];
+      weight = 0;
+    }
+    current.push(child);
+    weight += next;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
 }
 
 /** 本地块(带子树)→ 追加请求的块;含不支持复制的块(图片、表格…)返回 null。 */
@@ -648,11 +1003,6 @@ export function blockToAppend(block: NotionBlockModel): AppendChild | null {
   }
 }
 
-/** 块子树的层数(只有自己 = 0)。 */
-function subtreeDepth(block: NotionBlockModel): number {
-  return block.children.reduce((max, child) => Math.max(max, subtreeDepth(child) + 1), 0);
-}
-
 /**
  * Tab 缩进:块变成上一个兄弟的最后一个子块。没有上一个兄弟、上一个兄弟不能带子块、
  * 或块的子树已嵌了两层(Notion 单次请求的上限)时返回 null。
@@ -666,8 +1016,7 @@ export function indentIn(
     if (index >= 0) {
       const block = list[index];
       const previous = list[index - 1];
-      if (!block || !previous || !canHaveChildren(previous.kind) || subtreeDepth(block) > 1) return null;
-      if (blockToAppend(block) === null) return null;
+      if (!block || !previous || !acceptsChildren(previous) || !canMoveBlock(block)) return null;
       const merged: NotionBlockModel = { ...previous, children: [...previous.children, block] };
       return {
         blocks: [...list.slice(0, index - 1), merged, ...list.slice(index + 1)],
@@ -699,7 +1048,7 @@ export function outdentIn(
       const childIndex = parent.children.findIndex((child) => child.id === id);
       if (childIndex >= 0) {
         const child = parent.children[childIndex];
-        if (!child || blockToAppend(child) === null) return null;
+        if (!child || !canMoveBlock(child)) return null;
         const rest: NotionBlockModel = { ...parent, children: parent.children.filter((entry) => entry.id !== id) };
         return {
           blocks: [...list.slice(0, i), rest, child, ...list.slice(i + 1)],
@@ -819,4 +1168,60 @@ export function moveNodeIn(
       return node.children.length === 0 ? node : { ...node, children: insert(node.children) };
     });
   return insert(without(roots));
+}
+
+// —— 表格编辑 ——
+
+type TableBlock = Extract<NotionBlockModel, { kind: "table" }>;
+
+/** 表格编辑操作(与 core 的 NotionTableEditSchema 同形,少了 tableId)。 */
+export type TableOp =
+  | { op: "update-row"; rowIndex: number; cells: NotionSegment[][] }
+  | { op: "insert-row"; afterIndex: number; cells: NotionSegment[][] }
+  | { op: "delete-row"; rowIndex: number }
+  | { op: "set-header"; hasHeader?: boolean; hasRowHeader?: boolean }
+  | { op: "rebuild"; hasHeader: boolean; hasRowHeader: boolean; rows: NotionSegment[][][] };
+
+export function tableWidthOf(table: TableBlock): number {
+  return Math.max(1, ...table.rows.map((row) => row.length));
+}
+
+/** 本地先应用表格操作(乐观更新);行宽对齐到列数,与 core 一致。 */
+export function applyTableOp(table: TableBlock, op: TableOp): TableBlock {
+  const width = tableWidthOf(table);
+  const fit = (cells: readonly NotionSegment[][]): NotionSegment[][] =>
+    Array.from({ length: width }, (_, index) => cells[index] ?? []);
+  switch (op.op) {
+    case "update-row":
+      return { ...table, rows: table.rows.map((row, index) => (index === op.rowIndex ? fit(op.cells) : row)) };
+    case "insert-row": {
+      const at = op.afterIndex + 1;
+      return { ...table, rows: [...table.rows.slice(0, at), fit(op.cells), ...table.rows.slice(at)] };
+    }
+    case "delete-row":
+      return table.rows.length <= 1 ? table : { ...table, rows: table.rows.filter((_, index) => index !== op.rowIndex) };
+    case "set-header":
+      return {
+        ...table,
+        hasHeader: op.hasHeader ?? table.hasHeader,
+        hasRowHeader: op.hasRowHeader ?? table.hasRowHeader ?? false,
+      };
+    case "rebuild":
+      return { ...table, hasHeader: op.hasHeader, hasRowHeader: op.hasRowHeader, rows: op.rows };
+  }
+}
+
+/** 在第 after 列之后插入一个空列(after = -1 插到最前)。 */
+export function insertTableColumn(rows: readonly NotionSegment[][][], after: number): NotionSegment[][][] {
+  return rows.map((row) => [...row.slice(0, after + 1), [], ...row.slice(after + 1)]);
+}
+
+/** 删除第 col 列;只剩一列时不删。 */
+export function deleteTableColumn(rows: readonly NotionSegment[][][], col: number): NotionSegment[][][] {
+  if (rows.every((row) => row.length <= 1)) return rows.map((row) => [...row]);
+  return rows.map((row) => row.filter((_, index) => index !== col));
+}
+
+export function isEmptyRow(row: readonly NotionSegment[][]): boolean {
+  return row.every((cell) => cell.every((segment) => segment.text.trim() === ""));
 }

@@ -35,6 +35,20 @@ import type {
   NotionCreatePageResult,
   NotionDatabaseView,
   NotionDeleteBlockBody,
+  NotionTableEditBody,
+  NotionDbCellBody,
+  NotionCreateDatabaseBody,
+  NotionDbSchemaBody,
+  NotionDuplicatePageBody,
+  NotionDbAddRowBody,
+  NotionDbDeleteRowBody,
+  NotionRelocateBlocksBody,
+  NotionPatchBlockBody,
+  NotionCreateBlocksBody,
+  NotionRestoreBlocksBody,
+  NotionUploadFileBody,
+  NotionPageMetaBody,
+  NotionBlocksCreatedResult,
   NotionDuplicateBlockBody,
   NotionKeyPutBody,
   SearchActivePutBody,
@@ -120,6 +134,8 @@ export interface BrowserDaemon
   notionTree(): Promise<NotionTreeView>;
   notionPage(pageId: string): Promise<NotionPageView>;
   notionSearch(query: string, limit?: number): Promise<NotionSearchView>;
+  /** 工作区成员(@ 提及)。 */
+  notionUsers(): Promise<{ users: Array<{ id: string; name: string }> }>;
   notionDatabase(databaseId: string): Promise<NotionDatabaseView>;
   notionSync(): Promise<NotionSyncResult>;
   notionTest(): Promise<NotionTestResult>;
@@ -131,6 +147,26 @@ export interface BrowserDaemon
   notionUpdateBlock(body: NotionUpdateBlockBody): Promise<NotionPageMutationResult>;
   notionAppendBlock(body: NotionAppendBlockBody): Promise<NotionPageMutationResult>;
   notionDeleteBlock(body: NotionDeleteBlockBody): Promise<NotionPageMutationResult>;
+  notionTableEdit(body: NotionTableEditBody): Promise<NotionPageMutationResult>;
+  /** 移动/复制/转类型(带整棵子树,任意可新建的块类型)。 */
+  notionRelocateBlocks(body: NotionRelocateBlocksBody): Promise<NotionBlocksCreatedResult>;
+  /** 改块属性(颜色、可折叠、图标、链接、说明、公式等),类型不变。 */
+  notionPatchBlock(body: NotionPatchBlockBody): Promise<NotionPageMutationResult>;
+  /** 新建任意类型的块(带子树)。 */
+  notionCreateBlocks(body: NotionCreateBlocksBody): Promise<NotionBlocksCreatedResult>;
+  /** 撤销删除:恢复归档的块。 */
+  notionRestoreBlocks(body: NotionRestoreBlocksBody): Promise<NotionBlocksCreatedResult>;
+  notionUploadFile(body: NotionUploadFileBody): Promise<{ uploadId: string }>;
+  /** 页面图标与封面。 */
+  notionPageMeta(body: NotionPageMetaBody): Promise<NotionPageMutationResult>;
+  /** 内嵌数据库:改单元格、新建/删除行。 */
+  notionDbCell(body: NotionDbCellBody): Promise<NotionDatabaseView>;
+  notionCreateDatabase(body: NotionCreateDatabaseBody): Promise<{ page: NotionPageView; databaseId: string }>;
+  notionDbSchema(body: NotionDbSchemaBody): Promise<NotionDatabaseView>;
+  /** 复制页面(正文一起)。 */
+  notionDuplicatePage(body: NotionDuplicatePageBody): Promise<NotionArchivePageResult & { pageId: string }>;
+  notionDbAddRow(body: NotionDbAddRowBody): Promise<NotionDatabaseView>;
+  notionDbDeleteRow(body: NotionDbDeleteRowBody): Promise<NotionDatabaseView>;
   notionMoveBlock(body: NotionMoveBlockBody): Promise<NotionPageMutationResult>;
   notionDuplicateBlock(body: NotionDuplicateBlockBody): Promise<NotionPageMutationResult>;
   notionPatchTitle(body: NotionPatchTitleBody): Promise<NotionPageMutationResult>;
@@ -260,6 +296,7 @@ export function createBrowserDaemon(options?: {
     notionTree: () => request<NotionTreeView>("GET", "/api/notion/tree"),
     notionPage: (pageId: string) =>
       request<NotionPageView>("GET", `/api/notion/page?id=${encodeURIComponent(pageId)}`),
+    notionUsers: () => request<{ users: Array<{ id: string; name: string }> }>("GET", "/api/notion/users"),
     notionSearch: (query: string, limit?: number) =>
       request<NotionSearchView>(
         "GET",
@@ -286,6 +323,28 @@ export function createBrowserDaemon(options?: {
       request<NotionPageMutationResult>("POST", "/api/actions/notion-append-block", body),
     notionDeleteBlock: (body: NotionDeleteBlockBody) =>
       request<NotionPageMutationResult>("POST", "/api/actions/notion-delete-block", body),
+    notionTableEdit: (body: NotionTableEditBody) =>
+      request<NotionPageMutationResult>("POST", "/api/actions/notion-table-edit", body),
+    notionRelocateBlocks: (body: NotionRelocateBlocksBody) =>
+      request<NotionBlocksCreatedResult>("POST", "/api/actions/notion-relocate-blocks", body),
+    notionPatchBlock: (body: NotionPatchBlockBody) =>
+      request<NotionPageMutationResult>("POST", "/api/actions/notion-patch-block", body),
+    notionCreateBlocks: (body: NotionCreateBlocksBody) =>
+      request<NotionBlocksCreatedResult>("POST", "/api/actions/notion-create-blocks", body),
+    notionRestoreBlocks: (body: NotionRestoreBlocksBody) =>
+      request<NotionBlocksCreatedResult>("POST", "/api/actions/notion-restore-blocks", body),
+    notionUploadFile: (body: NotionUploadFileBody) =>
+      request<{ uploadId: string }>("POST", "/api/actions/notion-upload-file", body),
+    notionPageMeta: (body: NotionPageMetaBody) =>
+      request<NotionPageMutationResult>("POST", "/api/actions/notion-page-meta", body),
+    notionDbCell: (body: NotionDbCellBody) => request<NotionDatabaseView>("POST", "/api/actions/notion-db-cell", body),
+    notionCreateDatabase: (body: NotionCreateDatabaseBody) =>
+      request<{ page: NotionPageView; databaseId: string }>("POST", "/api/actions/notion-create-database", body),
+    notionDbSchema: (body: NotionDbSchemaBody) => request<NotionDatabaseView>("POST", "/api/actions/notion-db-schema", body),
+    notionDuplicatePage: (body: NotionDuplicatePageBody) =>
+      request<NotionArchivePageResult & { pageId: string }>("POST", "/api/actions/notion-duplicate-page", body),
+    notionDbAddRow: (body: NotionDbAddRowBody) => request<NotionDatabaseView>("POST", "/api/actions/notion-db-add-row", body),
+    notionDbDeleteRow: (body: NotionDbDeleteRowBody) => request<NotionDatabaseView>("POST", "/api/actions/notion-db-delete-row", body),
     notionMoveBlock: (body: NotionMoveBlockBody) =>
       request<NotionPageMutationResult>("POST", "/api/actions/notion-move-block", body),
     notionDuplicateBlock: (body: NotionDuplicateBlockBody) =>

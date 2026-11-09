@@ -241,6 +241,39 @@ describe("dsh web process", () => {
     }
   });
 
+  it("runtime webState links the profile once when the page polls concurrently", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dsh-concurrent-"));
+    const sidecar = join(dir, "sidecar");
+    const bin = join(sidecar, "node_modules", "@deepseek-ai", "dsh", "lib");
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(bin, "bin.js"), `console.log("dsh web: http://127.0.0.1:43210/?token=t"); setInterval(() => {}, 1000);`, "utf8");
+    const runtime = new DshRuntime({
+      dataDir: dir,
+      homeDir: dir,
+      sidecarDir: sidecar,
+      locateNodeImpl: async () => ({ path: process.execPath, version: [24, 15, 0] }),
+      detectPluginsImpl: () => [],
+    });
+    try {
+      const states = await Promise.all([runtime.webState(), runtime.webState(), runtime.webState()]);
+      for (const state of states) expect(state.state).not.toBe("error");
+      // 已存在的同目标链接(比如上次启动留下的)也不报 EEXIST。
+      await runtime.close();
+      const again = new DshRuntime({
+        dataDir: dir,
+        homeDir: dir,
+        sidecarDir: sidecar,
+        locateNodeImpl: async () => ({ path: process.execPath, version: [24, 15, 0] }),
+        detectPluginsImpl: () => [],
+      });
+      expect((await again.webState()).state).not.toBe("error");
+      await again.close();
+    } finally {
+      await runtime.close();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("runtime webState explains a missing sidecar instead of spawning", async () => {
     const dir = await mkdtemp(join(tmpdir(), "dsh-nosidecar-"));
     const runtime = new DshRuntime({

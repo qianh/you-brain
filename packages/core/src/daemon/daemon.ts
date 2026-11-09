@@ -3160,6 +3160,7 @@ export class YouBrainDaemon {
         const hits = this.#requireNotion().search(query, limit ?? 20);
         return Promise.resolve({ query, hits });
       },
+      notionUsers: () => this.#requireNotion().users(),
       notionDatabase: (databaseId) =>
         Promise.resolve(this.#requireNotion().databaseView(databaseId)),
       notionAsset: (blockId) => this.#requireNotion().asset(blockId),
@@ -3179,6 +3180,33 @@ export class YouBrainDaemon {
       notionDeleteBlock: async (body) => ({
         page: await this.#requireNotion().deleteBlock(body.blockId),
       }),
+      notionTableEdit: async (body) => ({
+        page: await this.#requireNotion().tableEdit(body),
+      }),
+      notionRelocateBlocks: (body) => this.#requireNotion().relocateBlocks(body),
+      notionPatchBlock: async (body) => ({
+        page: await this.#requireNotion().patchBlock(body.blockId, body.model),
+      }),
+      notionCreateBlocks: (body) => this.#requireNotion().createBlocks(body),
+      notionRestoreBlocks: (body) => this.#requireNotion().restoreBlocks(body),
+      notionUploadFile: (body) => this.#requireNotion().uploadFile(body),
+      notionPageMeta: async (body) => ({
+        page: await this.#requireNotion().patchPageMeta(body),
+      }),
+      notionDbCell: (body) => this.#requireNotion().updateDatabaseCell(body),
+      notionCreateDatabase: async (body) => {
+        const result = await this.#requireNotion().createDatabase(body);
+        this.changes.publish("notion", this.#clock.now().toISOString());
+        return result;
+      },
+      notionDbSchema: (body) => this.#requireNotion().updateDatabaseSchema(body),
+      notionDuplicatePage: async (body) => {
+        const result = await this.#requireNotion().duplicatePage(body.pageId, body.suffix);
+        this.changes.publish("notion", this.#clock.now().toISOString());
+        return result;
+      },
+      notionDbAddRow: (body) => this.#requireNotion().addDatabaseRow(body),
+      notionDbDeleteRow: (body) => this.#requireNotion().deleteDatabaseRow(body),
       notionMoveBlock: async (body) => ({
         page: await this.#requireNotion().moveBlock(body.blockId, body.direction),
       }),

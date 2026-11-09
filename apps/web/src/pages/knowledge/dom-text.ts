@@ -1,11 +1,14 @@
 import type { NotionSegment } from "@you-brain/core/http/types.js";
+import { renderMath } from "../../lib/math.js";
 
 /**
  * 所见即所得编辑的 DOM 层:富文本段落 ↔ contentEditable 内容,
  * 以及光标在纯文本偏移上的定位工具。
  *
  * 支持的行内标签与 core 的 markdown-text 同一集合:
- * b/strong、i/em、u、s/strike/del、code、a[href]。
+ * b/strong、i/em、u、s/strike/del、code、a[href];
+ * 另有 span[data-color](文字/背景色)、span[data-mention](@ 提及,整体不可编辑)、
+ * span[data-equation](行内公式,整体不可编辑),保证编辑后这些格式原样写回 Notion。
  */
 
 function escapeHtml(text: string): string {
@@ -21,19 +24,36 @@ export function segmentsToHtml(segments: readonly NotionSegment[]): string {
   return segments[segments.length - 1]?.text.endsWith("\n") ? `${html}<br>` : html;
 }
 
+function escapeAttr(text: string): string {
+  return escapeHtml(text).replaceAll('"', "&quot;");
+}
+
 function segmentsToHtmlRaw(segments: readonly NotionSegment[]): string {
   return segments
     .map((segment) => {
       let html = escapeHtml(segment.text).replaceAll("\n", "<br>");
+      if (segment.equation !== undefined) {
+        html = equationHtml(segment.equation);
+      } else if (segment.mention) {
+        html = `<span class="nb-mention" contenteditable="false" data-mention="${escapeAttr(JSON.stringify(segment.mention))}">${html}</span>`;
+      }
       if (segment.code) html = `<code>${html}</code>`;
       if (segment.bold) html = `<b>${html}</b>`;
       if (segment.italic) html = `<i>${html}</i>`;
       if (segment.underline) html = `<u>${html}</u>`;
       if (segment.strikethrough) html = `<s>${html}</s>`;
-      if (segment.href) html = `<a href="${escapeHtml(segment.href)}">${html}</a>`;
+      if (segment.href && !segment.mention) html = `<a href="${escapeHtml(segment.href)}">${html}</a>`;
+      if (segment.color !== "default") html = `<span data-color="${escapeAttr(segment.color)}" class="${colorClass(segment.color)}">${html}</span>`;
       return html;
     })
     .join("");
+}
+
+/** 与渲染层(blocks-view 的 RichSegment)同一套颜色类名。 */
+export function colorClass(color: string): string {
+  if (color === "default") return "";
+  if (color.endsWith("_background")) return `nb-bg nb-bg-${color.slice(0, -"_background".length)}`;
+  return `nb-color-${color}`;
 }
 
 interface FormatState {
@@ -43,6 +63,7 @@ interface FormatState {
   strikethrough: boolean;
   code: boolean;
   href: string | null;
+  color: string;
 }
 
 function domToSegmentsImpl(
@@ -51,17 +72,21 @@ function domToSegmentsImpl(
   out: NotionSegment[],
 ): void {
   if (node.nodeType === Node.TEXT_NODE) {
-    const text = node.textContent ?? "";
+    // 零宽空格只是行内格式化后让光标跳出格式用的,不是内容。
+    const text = (node.textContent ?? "").replace(/\u200B/gu, "");
     if (text === "") return;
     const last = out[out.length - 1];
     if (
       last &&
+      !last.mention &&
+      last.equation === undefined &&
       last.bold === state.bold &&
       last.italic === state.italic &&
       last.underline === state.underline &&
       last.strikethrough === state.strikethrough &&
       last.code === state.code &&
-      last.href === state.href
+      last.href === state.href &&
+      last.color === state.color
     ) {
       last.text += text;
       return;
@@ -74,18 +99,45 @@ function domToSegmentsImpl(
       strikethrough: state.strikethrough,
       underline: state.underline,
       code: state.code,
-      color: "default",
+      color: state.color,
     });
     return;
   }
   if (node.nodeType !== Node.ELEMENT_NODE) return;
   const element = node as Element;
   const tag = element.tagName.toLowerCase();
+  // 提及、公式是不可拆的整体:取出原对象,不再往里走。
+  const equation = element.getAttribute("data-equation");
+  if (equation !== null) {
+    out.push({ ...segmentBase(state), text: equation, equation });
+    return;
+  }
+  const mention = element.getAttribute("data-mention");
+  if (mention !== null) {
+    let parsed: Record<string, unknown> | null = null;
+    try {
+      parsed = JSON.parse(mention) as Record<string, unknown>;
+    } catch {
+      parsed = null;
+    }
+    const text = element.textContent ?? "";
+    out.push(parsed ? { ...segmentBase(state), text, mention: parsed } : { ...segmentBase(state), text });
+    return;
+  }
   if (tag === "br") {
     // Shift+Enter 的软换行;末尾那个占位 br 在 domToSegments 里统一扣掉。
     domToSegmentsImpl(document.createTextNode("\n"), state, out);
     return;
   }
+  const next = applyTag(state, element);
+  for (const child of Array.from(element.childNodes)) {
+    domToSegmentsImpl(child, next, out);
+  }
+}
+
+/** 一个元素给内部文字加上的格式。颜色只认 data-color(浏览器 foreColor 之类的标签不认)。 */
+function applyTag(state: FormatState, element: Element): FormatState {
+  const tag = element.tagName.toLowerCase();
   const next: FormatState = { ...state };
   if (tag === "b" || tag === "strong") next.bold = true;
   else if (tag === "i" || tag === "em") next.italic = true;
@@ -93,9 +145,105 @@ function domToSegmentsImpl(
   else if (tag === "s" || tag === "strike" || tag === "del") next.strikethrough = true;
   else if (tag === "code") next.code = true;
   else if (tag === "a") next.href = element.getAttribute("href");
-  for (const child of Array.from(element.childNodes)) {
-    domToSegmentsImpl(child, next, out);
+  const color = element.getAttribute("data-color");
+  if (color) next.color = color;
+  return next;
+}
+
+function initialState(): FormatState {
+  return { bold: false, italic: false, underline: false, strikethrough: false, code: false, href: null, color: "default" };
+}
+
+/** 选区里的富文本(带上选区外层元素的格式,例如整段粗体里选中的几个字也算粗体)。 */
+export function selectionSegments(element: HTMLElement): NotionSegment[] | null {
+  const selection = selectionInside(element);
+  if (!selection) return null;
+  const range = selection.getRangeAt(0);
+  const chain: Element[] = [];
+  let current: Node | null = range.commonAncestorContainer;
+  if (current && !(current instanceof Element)) current = current.parentNode;
+  while (current instanceof Element && current !== element) {
+    chain.unshift(current);
+    current = current.parentNode;
   }
+  let state = initialState();
+  for (const ancestor of chain) state = applyTag(state, ancestor);
+  const out: NotionSegment[] = [];
+  for (const child of Array.from(range.cloneContents().childNodes)) domToSegmentsImpl(child, state, out);
+  return out;
+}
+
+/** 用富文本替换当前选区;color 给定时整体包一层显式颜色(含 default,用来清掉外层颜色)。 */
+export function replaceSelection(segments: readonly NotionSegment[], color?: string): void {
+  let html = segmentsToHtmlRaw(segments.map((segment) => (color ? { ...segment, color: "default" } : segment)));
+  if (color) html = `<span data-color="${escapeAttr(color)}" class="${colorClass(color)}">${html}</span>`;
+  document.execCommand("insertHTML", false, html);
+}
+
+/** 选区在元素纯文本里的起止偏移(DOM 重画后也能按偏移还原)。 */
+export function selectionOffsets(element: HTMLElement): { start: number; end: number } | null {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0) return null;
+  const range = selection.getRangeAt(0);
+  if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) return null;
+  const probe = document.createRange();
+  probe.selectNodeContents(element);
+  probe.setEnd(range.startContainer, range.startOffset);
+  const start = probe.toString().length;
+  return { start, end: start + range.toString().length };
+}
+
+/** 按纯文本偏移选中一段。 */
+export function selectOffsets(element: HTMLElement, start: number, end: number): void {
+  const selection = window.getSelection();
+  if (!selection) return;
+  const locate = (offset: number): [Node, number] => {
+    let remaining = offset;
+    for (const node of textNodesOf(element)) {
+      const length = node.textContent?.length ?? 0;
+      if (remaining <= length) return [node, remaining];
+      remaining -= length;
+    }
+    return [element, element.childNodes.length];
+  };
+  const range = document.createRange();
+  range.setStart(...locate(start));
+  range.setEnd(...locate(end));
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+/** 光标前紧挨着的文字(不跨元素边界),给 @ 提及、/ 菜单判断触发用。 */
+export function textBeforeCaret(element: HTMLElement): string {
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || !selection.isCollapsed) return "";
+  const range = selection.getRangeAt(0);
+  if (!element.contains(range.startContainer)) return "";
+  const probe = document.createRange();
+  probe.selectNodeContents(element);
+  probe.setEnd(range.startContainer, range.startOffset);
+  return probe.toString();
+}
+
+export function mentionHtml(text: string, mention: Record<string, unknown>): string {
+  return `<span class="nb-mention" contenteditable="false" data-mention="${escapeAttr(JSON.stringify(mention))}">${escapeHtml(text)}</span>`;
+}
+
+export function equationHtml(expression: string): string {
+  return `<span class="nb-equation" contenteditable="false" data-equation="${escapeAttr(expression)}">${renderMath(expression)}</span>`;
+}
+
+function segmentBase(state: FormatState): NotionSegment {
+  return {
+    text: "",
+    href: state.href,
+    bold: state.bold,
+    italic: state.italic,
+    strikethrough: state.strikethrough,
+    underline: state.underline,
+    code: state.code,
+    color: state.color,
+  };
 }
 
 function lastLeaf(node: Node): Node {
@@ -107,14 +255,7 @@ function lastLeaf(node: Node): Node {
 export function domToSegments(element: readonly Node[] | Node): NotionSegment[] {
   const root = element instanceof Node ? element : wrapNodes(element);
   const out: NotionSegment[] = [];
-  const initial: FormatState = {
-    bold: false,
-    italic: false,
-    underline: false,
-    strikethrough: false,
-    code: false,
-    href: null,
-  };
+  const initial = initialState();
   for (const child of Array.from(root.childNodes)) {
     domToSegmentsImpl(child, initial, out);
   }
@@ -263,9 +404,16 @@ export function moveCaretToNeighbor(
 ): boolean {
   const scope = element.closest(".knowledge-blocks");
   if (!scope) return false;
-  const all = Array.from(scope.querySelectorAll<HTMLElement>("[contenteditable='true'], [contenteditable='']"));
+  const all = Array.from(scope.querySelectorAll<HTMLElement>("[contenteditable='true'], [contenteditable=''], textarea.nb-code-input"));
   const next = all[all.indexOf(element) + dir];
   if (!next) return false;
+  if (next instanceof HTMLTextAreaElement) {
+    // 代码块:光标进到首行开头或末行结尾。
+    next.focus();
+    const at = dir < 0 ? next.value.length : 0;
+    next.setSelectionRange(at, at);
+    return true;
+  }
   const x = options.keepX ? caretRect(element)?.left ?? null : null;
   next.focus();
   if (x !== null && typeof document.caretRangeFromPoint === "function") {
@@ -281,4 +429,41 @@ export function moveCaretToNeighbor(
   }
   setCaretAtOffset(next, dir < 0 ? (next.textContent?.length ?? 0) : 0);
   return true;
+}
+
+/** Notion 的行内 Markdown:输入闭合符号的瞬间把 **粗体**、*斜体*、`代码`、~~删除线~~、$$公式$$ 转成格式。 */
+const INLINE_RULES: ReadonlyArray<{ pattern: RegExp; open: number; tag: "b" | "i" | "s" | "code" | "equation" }> = [
+  { pattern: /\$\$([^$\n]+?)\$\$$/u, open: 2, tag: "equation" },
+  { pattern: /\*\*([^*\n]+?)\*\*$/u, open: 2, tag: "b" },
+  { pattern: /~~([^~\n]+?)~~$/u, open: 2, tag: "s" },
+  { pattern: /`([^`\n]+?)`$/u, open: 1, tag: "code" },
+  { pattern: /(?:^|[^*\w])\*([^*\s](?:[^*\n]*[^*\s])?)\*$/u, open: 1, tag: "i" },
+  { pattern: /(?:^|[^_\w])_([^_\s](?:[^_\n]*[^_\s])?)_$/u, open: 1, tag: "i" },
+];
+
+export function applyInlineMarkdown(element: HTMLElement): boolean {
+  const selection = window.getSelection();
+  if (!selection || !selection.isCollapsed || selection.rangeCount === 0) return false;
+  const node = selection.anchorNode;
+  if (!node || node.nodeType !== Node.TEXT_NODE || !element.contains(node)) return false;
+  // 代码、公式、提及里面不转换。
+  if (node.parentElement?.closest("code, .nb-equation, .nb-mention")) return false;
+  const offset = selection.anchorOffset;
+  const before = (node.textContent ?? "").slice(0, offset);
+  for (const rule of INLINE_RULES) {
+    const match = rule.pattern.exec(before);
+    const inner = match?.[1];
+    if (!match || !inner || inner.trim() === "") continue;
+    const length = inner.length + rule.open * 2;
+    const range = document.createRange();
+    range.setStart(node, offset - length);
+    range.setEnd(node, offset);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const html = rule.tag === "equation" ? equationHtml(inner) : `<${rule.tag}>${escapeHtml(inner)}</${rule.tag}>`;
+    // 末尾补一个零宽空格,接着打的字落在格式外面(Notion 同款)。
+    document.execCommand("insertHTML", false, `${html}\u200B`);
+    return true;
+  }
+  return false;
 }

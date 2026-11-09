@@ -16,6 +16,10 @@ import {
   readOAuthClientConfig,
   revokeGoogleCredential,
 } from "../../src/auth/google-oauth.js";
+import {
+  OFFICIAL_OAUTH_CLIENT_ID_PLACEHOLDER,
+  OFFICIAL_OAUTH_CLIENT_SECRET_PLACEHOLDER,
+} from "../../src/auth/official-oauth-client.js";
 import { createOAuthClientSecretStore } from "../../src/auth/secret-store-factory.js";
 import { saveUserOAuthCredentials } from "../../src/auth/user-oauth.js";
 import { createDefaultLocalConfig } from "../../src/domain/config.js";
@@ -102,7 +106,13 @@ describe("Google OAuth", () => {
       clientSecret: "official-secret",
       redirectUris: ["http://127.0.0.1"],
     });
-    await expect(readOAuthClientConfig("")).rejects.toMatchObject({
+    await expect(
+      readOAuthClientConfig("", {
+        clientId: OFFICIAL_OAUTH_CLIENT_ID_PLACEHOLDER,
+        clientSecret: OFFICIAL_OAUTH_CLIENT_SECRET_PLACEHOLDER,
+        redirectUris: ["http://127.0.0.1"],
+      }),
+    ).rejects.toMatchObject({
       code: "AUTH_REQUIRED",
     });
   });

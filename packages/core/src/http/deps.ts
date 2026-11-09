@@ -35,6 +35,20 @@ import type {
   NotionCreatePageResult,
   NotionDatabaseView,
   NotionDeleteBlockBody,
+  NotionTableEditBody,
+  NotionDbCellBody,
+  NotionCreateDatabaseBody,
+  NotionDbSchemaBody,
+  NotionDuplicatePageBody,
+  NotionDbAddRowBody,
+  NotionDbDeleteRowBody,
+  NotionRelocateBlocksBody,
+  NotionPatchBlockBody,
+  NotionCreateBlocksBody,
+  NotionRestoreBlocksBody,
+  NotionUploadFileBody,
+  NotionPageMetaBody,
+  NotionBlocksCreatedResult,
   NotionDuplicateBlockBody,
   NotionKeyPutBody,
   SearchActivePutBody,
@@ -127,11 +141,25 @@ export interface HttpDeps {
   notionTree?(): Promise<NotionTreeView>;
   notionPage?(pageId: string): Promise<NotionPageView | null>;
   notionSearch?(query: string, limit?: number): Promise<NotionSearchView>;
+  notionUsers?(): Promise<Array<{ id: string; name: string }>>;
   notionDatabase?(databaseId: string): Promise<NotionDatabaseView | null>;
   notionAsset?(blockId: string): Promise<NotionAsset | null>;
   notionUpdateBlock?(body: NotionUpdateBlockBody): Promise<NotionPageMutationResult>;
   notionAppendBlock?(body: NotionAppendBlockBody): Promise<NotionPageMutationResult>;
   notionDeleteBlock?(body: NotionDeleteBlockBody): Promise<NotionPageMutationResult>;
+  notionTableEdit?(body: NotionTableEditBody): Promise<NotionPageMutationResult>;
+  notionRelocateBlocks?(body: NotionRelocateBlocksBody): Promise<NotionBlocksCreatedResult>;
+  notionPatchBlock?(body: NotionPatchBlockBody): Promise<NotionPageMutationResult>;
+  notionCreateBlocks?(body: NotionCreateBlocksBody): Promise<NotionBlocksCreatedResult>;
+  notionRestoreBlocks?(body: NotionRestoreBlocksBody): Promise<NotionBlocksCreatedResult>;
+  notionUploadFile?(body: NotionUploadFileBody): Promise<{ uploadId: string }>;
+  notionPageMeta?(body: NotionPageMetaBody): Promise<NotionPageMutationResult>;
+  notionDbCell?(body: NotionDbCellBody): Promise<NotionDatabaseView>;
+  notionCreateDatabase?(body: NotionCreateDatabaseBody): Promise<{ page: NotionPageView; databaseId: string }>;
+  notionDbSchema?(body: NotionDbSchemaBody): Promise<NotionDatabaseView>;
+  notionDuplicatePage?(body: NotionDuplicatePageBody): Promise<NotionArchivePageResult & { pageId: string }>;
+  notionDbAddRow?(body: NotionDbAddRowBody): Promise<NotionDatabaseView>;
+  notionDbDeleteRow?(body: NotionDbDeleteRowBody): Promise<NotionDatabaseView>;
   notionMoveBlock?(body: NotionMoveBlockBody): Promise<NotionPageMutationResult>;
   notionDuplicateBlock?(body: NotionDuplicateBlockBody): Promise<NotionPageMutationResult>;
   notionPatchTitle?(body: NotionPatchTitleBody): Promise<NotionPageMutationResult>;

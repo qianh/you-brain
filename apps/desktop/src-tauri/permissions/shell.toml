@@ -7,3 +7,13 @@ commands.allow = ["open_main_window"]
 identifier = "allow-quit"
 description = "Lets the daemon-served Web UI quit the shell."
 commands.allow = ["quit"]
+
+[[permission]]
+identifier = "allow-quit-now"
+description = "Lets the Web UI finish quitting after pending saves are written."
+commands.allow = ["quit_now"]
+
+[[permission]]
+identifier = "allow-open-local-path"
+description = "Lets the Web UI open a local file or folder referenced by a path in a knowledge page."
+commands.allow = ["open_local_path"]

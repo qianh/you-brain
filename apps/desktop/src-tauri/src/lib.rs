@@ -9,7 +9,7 @@ mod status_view;
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Mutex;
 use std::thread;
@@ -83,7 +83,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![open_main_window, quit])
+        .invoke_handler(tauri::generate_handler![open_main_window, quit, quit_now, open_local_path])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             // 常驻 Dock 图标:应用是用户的主入口,不再隐藏为纯菜单栏进程。
@@ -122,6 +122,15 @@ pub fn run() {
 /// second time (Finder, `open -a you-brain`); answering with the main window is what
 /// the user expects from double-clicking an app.
 fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    // ⌘Q、应用菜单「退出」等用户发起的退出(code 为 None):先让页面把保存写完。
+    // 页面写完调用 quit_now → app.exit(0),那一次带 code,直接放行。
+    if let tauri::RunEvent::ExitRequested { code: None, api, .. } = &event {
+        if app.get_webview_window(MAIN).is_some() {
+            api.prevent_exit();
+            exit_app(app);
+            return;
+        }
+    }
     #[cfg(target_os = "macos")]
     if let tauri::RunEvent::Reopen {
         has_visible_windows, ..
@@ -658,13 +667,109 @@ fn spa_route_script(path: &str) -> String {
     )
 }
 
+/// 退出时先让主窗口把还在路上的保存写完(知识库的编辑是后台写回 Notion 的),
+/// 页面写完会调用 `quit_now`;页面没响应时最多等这么久再强制退出。
+const QUIT_FLUSH_LIMIT: Duration = Duration::from_secs(20);
+static QUITTING: AtomicBool = AtomicBool::new(false);
+
+const FLUSH_SCRIPT: &str = "(async()=>{try{if(window.__youBrainBeforeQuit)await window.__youBrainBeforeQuit();}catch(e){}finally{window.__TAURI__?.core?.invoke('quit_now');}})()";
+
 fn exit_app(app: &tauri::AppHandle) {
-    app.exit(0);
+    if QUITTING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let Some(main) = app.get_webview_window(MAIN) else {
+        app.exit(0);
+        return;
+    };
+    if main.eval(FLUSH_SCRIPT).is_err() {
+        app.exit(0);
+        return;
+    }
+    let handle = app.clone();
+    thread::spawn(move || {
+        thread::sleep(QUIT_FLUSH_LIMIT);
+        handle.exit(0);
+    });
 }
 
 #[tauri::command]
 fn quit(app: tauri::AppHandle) {
     exit_app(&app);
+}
+
+/// 页面的保存都写完了,真正退出。
+#[tauri::command]
+fn quit_now(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
+/// 直接用系统默认程序打开的文件类型;其余(可执行文件、脚本、安装包、.app 等)只在 Finder 里定位,
+/// 免得页面里的一段路径文字就能启动程序。
+const OPENABLE_EXTENSIONS: &[&str] = &[
+    "html", "htm", "md", "markdown", "txt", "log", "pdf", "json", "csv", "tsv", "xml", "yaml", "yml",
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "mp3", "m4a", "wav", "mp4", "mov",
+    "doc", "docx", "xls", "xlsx", "ppt", "pptx", "key", "pages", "numbers",
+];
+
+/// 知识库里点行内代码形式的本地路径:文件按默认程序打开,目录在 Finder 里打开,
+/// 不在白名单里的类型只定位不打开。路径不存在时返回错误,由页面提示。
+#[tauri::command]
+fn open_local_path(path: String) -> Result<(), String> {
+    let raw = path.trim();
+    let expanded = match raw.strip_prefix("~/") {
+        Some(rest) => match std::env::var_os("HOME") {
+            Some(home) => PathBuf::from(home).join(rest),
+            None => return Err("无法解析 ~".to_string()),
+        },
+        None => PathBuf::from(raw),
+    };
+    if !expanded.is_absolute() {
+        return Err("只支持绝对路径".to_string());
+    }
+    let resolved = expanded
+        .canonicalize()
+        .map_err(|_| "路径不存在".to_string())?;
+    let openable = resolved.is_dir()
+        || resolved
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| OPENABLE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
+            .unwrap_or(false);
+    // 带 .app 之类后缀的目录是应用包:只定位,不启动。
+    let is_bundle = resolved.is_dir()
+        && resolved
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| !ext.is_empty())
+            .unwrap_or(false);
+    let reveal = !openable || is_bundle;
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        if reveal {
+            command.arg("-R");
+        }
+        command
+    };
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("explorer");
+        if reveal {
+            command.arg("/select,");
+        }
+        command
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let mut command = {
+        let _ = reveal;
+        std::process::Command::new("xdg-open")
+    };
+    command
+        .arg(&resolved)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("打开失败: {err}"))
 }
 
 #[tauri::command]
@@ -945,6 +1050,8 @@ fn build_main(app: &tauri::AppHandle, url: WebviewUrl) -> tauri::Result<WebviewW
         .inner_size(MAIN_WIDTH, MAIN_HEIGHT)
         .resizable(true)
         .visible(false)
+        // 把拖进窗口的文件交给网页处理(知识库拖图片/文件进页面直接上传),外壳自己不接。
+        .disable_drag_drop_handler()
         .center();
     // The Web UI's top bar shares the row with the traffic lights; the bar is 56px in
     // overlay mode (see shell.css `html.shell-overlay`), centre 28. Measured on a live
