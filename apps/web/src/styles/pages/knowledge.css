@@ -542,9 +542,12 @@
   border-radius: 1px;
 }
 
-/* 正在编辑的单元格:Notion 的浅蓝描边,不填底色。 */
-.nb-cell-edit:focus {
-  box-shadow: inset 0 0 0 2px var(--nb-select-ring);
+/* 正在编辑的单元格:和 Notion、Google Sheets 一样,2px 描边包住整个单元格(td),直角、不填底色。
+   不加圆角:相邻单元格共用边,圆角会在网格交点处留缺口。 */
+.nb-table-edit td:focus-within,
+.nb-table-edit th:focus-within {
+  outline: 2px solid var(--nb-select-ring);
+  outline-offset: -2px;
 }
 
 .nb-table-edit ::selection,
@@ -1029,15 +1032,19 @@
   background: var(--hover);
 }
 
-.knowledge-title-input {
+.knowledge-title-input,
+.knowledge-title-input:focus-visible {
   width: 100%;
   font-size: 30px;
   font-weight: 700;
   letter-spacing: -0.01em;
-  border: 2px solid var(--accent);
-  border-radius: 8px;
+  /* 标题就地编辑不画框(同 Notion):只留淡底色,并盖掉全局 :focus-visible 的描边,
+     否则会和边框叠成双层蓝框。 */
+  border: none;
+  outline: none;
+  border-radius: 6px;
   padding: 2px 8px;
-  background: var(--surface);
+  background: var(--hover);
   color: var(--text);
 }
 
@@ -2141,4 +2148,84 @@ body.nb-block-dragging * { cursor: grabbing !important; user-select: none !impor
   .nb-add-below {
     transition-duration: 0.01ms !important;
   }
+}
+
+/* —— 知识库正文主题 ——
+   亮、暗两套独立设计,配色和标题字体都在 tokens.css 的 --kn-* / --font-heading,随应用主题切换,
+   背景仍用应用底色。层级不只靠颜色,还靠形态区分:
+   H1 底部发丝线,H2 左侧色条,H3 只变色,H4 小一号的次要色。 */
+
+.knowledge-page-head h1,
+.knowledge-title-input {
+  color: var(--kn-h1);
+  font-family: var(--font-heading);
+}
+
+.nb-h1,
+.nb-h2,
+.nb-h3,
+.nb-h4,
+.nb-editable-heading-1,
+.nb-editable-heading-2,
+.nb-editable-heading-3,
+.nb-editable-heading-4 {
+  font-family: var(--font-heading);
+  font-weight: 700;
+}
+
+.nb-h1,
+.nb-editable-heading-1 {
+  color: var(--kn-h1);
+  padding-bottom: 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--kn-h1) 28%, transparent);
+}
+
+.nb-h2,
+.nb-editable-heading-2 {
+  color: var(--kn-h2);
+  border-left: 3px solid currentColor;
+  border-radius: 2px;
+  padding-left: 10px;
+}
+
+.nb-h3,
+.nb-editable-heading-3 { color: var(--kn-h3); }
+
+.nb-h4,
+.nb-editable-heading-4 {
+  color: var(--kn-h4);
+  letter-spacing: 0.02em;
+}
+
+.knowledge-blocks :is(b, strong) { color: var(--kn-strong); font-weight: 650; }
+.knowledge-blocks :is(i, em) { color: var(--kn-em); }
+
+/* 标题里的粗体斜体、手动设了颜色的文字、链接里的粗体斜体,都跟随外层颜色。 */
+.knowledge-blocks :is(.nb-h1, .nb-h2, .nb-h3, .nb-h4, .nb-editable-heading-1, .nb-editable-heading-2, .nb-editable-heading-3, .nb-editable-heading-4, [class*="nb-color-"], a) :is(b, strong, i, em) {
+  color: inherit;
+}
+
+.nb-link,
+.nb-editable a {
+  color: var(--kn-link);
+  text-decoration-color: color-mix(in srgb, var(--kn-link) 45%, transparent);
+  text-underline-offset: 3px;
+}
+
+.nb-inline-code,
+.nb-editable code {
+  color: var(--kn-code);
+  font-family: var(--mono);
+}
+
+.nb-bullet,
+.nb-number,
+.nb-row-bulleted .nb-bullet,
+.nb-row-numbered .nb-number {
+  color: var(--text-3);
+}
+
+.nb-quote,
+.nb-row-quote {
+  border-left-color: var(--kn-quote);
 }

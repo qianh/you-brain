@@ -22,6 +22,18 @@
   --nb-select-ring: rgba(35, 131, 226, 0.57);
   --nb-select-bg: rgba(35, 131, 226, 0.14);
   --nb-text-select: rgba(45, 170, 219, 0.3);
+  /* 知识库正文主题(亮):墨蓝系。标题沿 藏青→海蓝→靛紫 的同族冷色递进,
+     强调只用一个暖色(砖红)做粗体,其余克制。标题用宋体系衬线,有纸面书卷感。 */
+  --kn-h1: #12355b;
+  --kn-h2: #1c6a8f;
+  --kn-h3: #5b4b9a;
+  --kn-h4: #66707e;
+  --kn-strong: #b5472d;
+  --kn-em: #a0446f;
+  --kn-link: #1d5fd1;
+  --kn-code: #176b42;
+  --kn-quote: #1c6a8f;
+  --font-heading: "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", "Iowan Old Style", Georgia, serif;
   --success: #16a34a;
   --success-text: #15803d;
   --success-soft: rgba(22, 163, 74, 0.12);
@@ -116,6 +128,18 @@
   --nb-select-ring: rgba(82, 156, 202, 0.6);
   --nb-select-bg: rgba(35, 131, 226, 0.22);
   --nb-text-select: rgba(45, 170, 219, 0.35);
+  /* 知识库正文主题(暗):夜色薄荷系,不是亮色的简单提亮。标题沿 薄荷→天蓝→薰衣草 递进,
+     强调用琥珀色做粗体;标题用黑体系无衬线,深底上更清晰。 */
+  --kn-h1: #7fdcc6;
+  --kn-h2: #7ec3ec;
+  --kn-h3: #b4a7f5;
+  --kn-h4: #9aa3b5;
+  --kn-strong: #f0c674;
+  --kn-em: #eaa7bd;
+  --kn-link: #82aaff;
+  --kn-code: #9fd8a8;
+  --kn-quote: #7ec3ec;
+  --font-heading: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif;
   --success: #4ade80;
   --success-text: #4ade80;
   --success-soft: rgba(74, 222, 128, 0.14);
