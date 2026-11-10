@@ -79,6 +79,66 @@ describe("process embedder", () => {
     }
   });
 
+  it("passes a worker failure code through", async () => {
+    const embedder = new ProcessEmbedder({
+      command: [
+        process.execPath,
+        "-e",
+        `for await (const chunk of Bun.stdin.stream()) {
+          const request = JSON.parse(new TextDecoder().decode(chunk));
+          process.stdout.write(JSON.stringify({ id: request.id, ok: false, error: "no model", code: "MODEL_DOWNLOAD" }) + "\\n");
+        }`,
+      ],
+      model: "subprocess-test",
+      revision: "v1",
+      dimensions: 3,
+      cacheDir: tmpdir(),
+    });
+
+    try {
+      const failure = await embedder.embedQuery("release").catch((error: unknown) => error);
+      expect(failure).toMatchObject({ message: "no model", code: "MODEL_DOWNLOAD" });
+    } finally {
+      await embedder.close();
+    }
+  });
+
+  it("reset abandons a hung request and the next one gets a fresh worker", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "you-brain-embed-reset-"));
+    const marker = join(directory, "started");
+    const workerPath = join(directory, "hang-once-worker.ts");
+    // The first worker never answers. Any later worker answers at once.
+    await writeFile(
+      workerPath,
+      `import { existsSync, writeFileSync } from "node:fs";
+const first = !existsSync(${JSON.stringify(marker)});
+writeFileSync(${JSON.stringify(marker)}, "1");
+for await (const chunk of Bun.stdin.stream()) {
+  if (first) continue;
+  const request = JSON.parse(new TextDecoder().decode(chunk));
+  process.stdout.write(JSON.stringify({ id: request.id, ok: true, vector: [1, 0, 0] }) + "\\n");
+}
+`,
+    );
+    const embedder = new ProcessEmbedder({
+      command: [process.execPath, workerPath],
+      model: "subprocess-test",
+      revision: "v1",
+      dimensions: 3,
+      cacheDir: directory,
+    });
+
+    try {
+      const hung = embedder.embedQuery("first").catch((error: unknown) => error);
+      await waitForFile(marker);
+      embedder.reset();
+      expect(String(await hung)).toMatch(/embed worker/u);
+      expect(await embedder.embedQuery("second")).toEqual([1, 0, 0]);
+    } finally {
+      await embedder.close();
+    }
+  });
+
   it("fails when the worker exits before answering", async () => {
     const embedder = new ProcessEmbedder({
       command: [process.execPath, "-e", "process.exit(1)"],
@@ -295,4 +355,12 @@ async function waitForText(path: string, needle: string): Promise<void> {
     await Bun.sleep(20);
   }
   throw new Error(`timed out waiting for ${needle}`);
+}
+
+async function waitForFile(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (await Bun.file(path).exists()) return;
+    await Bun.sleep(20);
+  }
+  throw new Error(`timed out waiting for ${path}`);
 }

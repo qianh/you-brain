@@ -157,12 +157,15 @@ import {
 import type { CandidateTopic, OpenTodo, PreviousRefine } from "../refine/types.js";
 import {
   E5_SMALL,
+  ModelDownloadError,
   ProcessEmbedder,
   SearchService,
   assertSearchRange,
   embedWorkerCommand,
+  ensureModelFiles,
   inScope,
   inboxScopePrefixes,
+  missingModelFiles,
   type Embedder,
   type SearchDrive,
 } from "../search/index.js";
@@ -499,6 +502,11 @@ function readCaptureFiles(raw: string | null): Map<string, CaptureFileCursor> {
   return files;
 }
 
+/**
+ * Starts the embed worker on first use. A missing model is downloaded here, in
+ * the background, and callers are refused until it is on disk: the worker only
+ * ever loads local files, and no embed call waits on a download.
+ */
 class LazyEmbedder implements Embedder {
   readonly model = E5_SMALL.model;
   readonly revision = E5_SMALL.revision;
@@ -507,19 +515,27 @@ class LazyEmbedder implements Embedder {
   #close: (() => Promise<void>) | null = null;
   #loading: Promise<Embedder> | null = null;
   #closed = false;
+  #filesReady = false;
+  #download: Promise<void> | null = null;
+  readonly #abortDownload = new AbortController();
 
   constructor(private readonly cacheDir: string) {}
 
   embedQuery(text: string): Promise<number[]> {
-    return this.#load().then((inner) => inner.embedQuery(text));
+    return this.#run((inner) => inner.embedQuery(text));
   }
 
   embedPassages(texts: string[]): Promise<number[][]> {
-    return this.#load().then((inner) => inner.embedPassages(texts));
+    return this.#run((inner) => inner.embedPassages(texts));
+  }
+
+  reset(): void {
+    this.#inner?.reset?.();
   }
 
   async close(): Promise<void> {
     this.#closed = true;
+    this.#abortDownload.abort();
     try {
       await this.#loading;
     } catch {
@@ -528,14 +544,47 @@ class LazyEmbedder implements Embedder {
     await this.#close?.();
   }
 
-  #load(): Promise<Embedder> {
-    if (this.#closed) return Promise.reject(new Error("embed worker is closed"));
-    if (this.#inner) return Promise.resolve(this.#inner);
+  async #run<T>(call: (inner: Embedder) => Promise<T>): Promise<T> {
+    try {
+      return await call(await this.#load());
+    } catch (error) {
+      // The worker deletes damaged files. Look at the disk again next time.
+      this.#filesReady = false;
+      throw error;
+    }
+  }
+
+  async #load(): Promise<Embedder> {
+    if (this.#closed) throw new Error("embed worker is closed");
+    await this.#requireModelFiles();
+    if (this.#inner) return this.#inner;
     this.#loading ??= this.#open().then((inner) => {
       this.#inner = inner;
       return inner;
     });
     return this.#loading;
+  }
+
+  async #requireModelFiles(): Promise<void> {
+    if (this.#filesReady) return;
+    if (!this.#download) {
+      if ((await missingModelFiles(this.cacheDir, this)).length === 0) {
+        this.#filesReady = true;
+        return;
+      }
+      // A failure is not kept: the next call checks the disk and starts over.
+      this.#download ??= ensureModelFiles(this.cacheDir, this, {
+        signal: this.#abortDownload.signal,
+      })
+        .then(
+          () => undefined,
+          () => undefined,
+        )
+        .finally(() => {
+          this.#download = null;
+        });
+    }
+    throw new ModelDownloadError("embedding model is downloading");
   }
 
   async #open(): Promise<Embedder> {

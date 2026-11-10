@@ -269,6 +269,96 @@ describe("vector backfill", () => {
     expect(skipped.warnings).toEqual([]);
   }, 3_000);
 
+  it("retries soon when the model is still downloading, and resets a timed-out embedder", async () => {
+    const drive = new MemoryDrive();
+    await drive.put({
+      path: "inbox/mac/download.md",
+      bytes: markdown({
+        conversationId: "download",
+        updatedAt: "2026-07-18T02:00:00.000Z",
+        text: "waiting for the model",
+      }),
+      mimeType: "text/markdown",
+    });
+    let mode: "downloading" | "hung" = "downloading";
+    let resets = 0;
+    const embedder: Embedder = {
+      model: "download-test",
+      revision: "v1",
+      dimensions: 3,
+      embedQuery: () => Promise.resolve([1, 0, 0]),
+      embedPassages: () =>
+        mode === "downloading"
+          ? Promise.reject(Object.assign(new Error("downloading"), { code: "MODEL_DOWNLOAD" }))
+          : new Promise<number[][]>(() => undefined),
+      reset: () => {
+        resets += 1;
+      },
+    };
+    const database = openDatabase();
+    const service = new SearchService({ drive, embedder, database, embedCallTimeoutMs: 50 });
+    await service.sync({ embed: false });
+
+    await service.backfillVectors({ budgetMs: 10_000 });
+    const soon = Number(manifestValue(database, "vector_retry_after")) - Date.now();
+    expect(soon).toBeGreaterThan(60 * 1000);
+    expect(soon).toBeLessThan(10 * 60 * 1000);
+    expect(resets).toBe(0);
+
+    mode = "hung";
+    database.prepare("UPDATE manifest SET value = '0' WHERE key = 'vector_retry_after'").run();
+    await service.backfillVectors({ budgetMs: 10_000 });
+    expect(resets).toBe(1);
+    expect(Number(manifestValue(database, "vector_retry_after"))).toBeGreaterThan(
+      Date.now() + 60 * 60 * 1000,
+    );
+  }, 3_000);
+
+  it("drops a retry window left by the old network-bound model load, once", async () => {
+    const drive = new MemoryDrive();
+    await drive.put({
+      path: "inbox/mac/locked.md",
+      bytes: markdown({
+        conversationId: "locked",
+        updatedAt: "2026-07-18T02:00:00.000Z",
+        text: "locked out for six hours",
+      }),
+      mimeType: "text/markdown",
+    });
+    const embedder = fastEmbedder();
+    const database = openDatabase();
+    const service = new SearchService({ drive, embedder, database });
+    await service.sync({ embed: false });
+    const lock = (): void => {
+      database
+        .prepare(
+          "INSERT INTO manifest(key, value) VALUES ('vector_retry_after', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .run(String(Date.now() + 60 * 60 * 1000));
+    };
+
+    lock();
+    const first = await service.backfillVectors({ budgetMs: 10_000 });
+    expect(first.embedded).toBeGreaterThan(0);
+    expect(first.remaining).toBe(0);
+
+    // A window opened after the fix is respected.
+    await drive.put({
+      path: "inbox/mac/later.md",
+      bytes: markdown({
+        conversationId: "later",
+        updatedAt: "2026-07-18T03:00:00.000Z",
+        text: "indexed after the fix",
+      }),
+      mimeType: "text/markdown",
+    });
+    await service.sync({ embed: false });
+    lock();
+    const second = await service.backfillVectors({ budgetMs: 10_000 });
+    expect(second.embedded).toBe(0);
+    expect(second.remaining).toBeGreaterThan(0);
+  });
+
   it("resumes an existing pending_sync without rereading finished documents", async () => {
     const memory = new MemoryDrive();
     for (let index = 0; index < 5; index += 1) {

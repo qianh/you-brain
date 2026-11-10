@@ -166,6 +166,17 @@ export class ProcessEmbedder implements Embedder {
     await this.#request({ method: "prepare" });
   }
 
+  /** Kills the worker. The request in flight rejects and the next one starts a new worker. */
+  reset(): void {
+    const child = this.#child;
+    const lines = this.#lines;
+    if (!child) return;
+    this.#child = null;
+    this.#clearIdle();
+    if (child.exitCode === null) child.kill();
+    lines.fail(new Error("embed worker reset"));
+  }
+
   async close(): Promise<void> {
     this.#stopped = true;
     this.#clearIdle();
@@ -251,7 +262,9 @@ export class ProcessEmbedder implements Embedder {
       );
     }
     if (!parsed.ok) {
-      throw new Error(parsed.error ?? "embed worker failed");
+      const failure = new Error(parsed.error ?? "embed worker failed");
+      if (parsed.code) Object.assign(failure, { code: parsed.code });
+      throw failure;
     }
     return parsed;
   }

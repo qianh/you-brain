@@ -15,6 +15,7 @@ import {
   type Embedder,
 } from "./embedder.js";
 import { isInboxSessionFile } from "../drive/inbox-file.js";
+import { isModelDownloadError } from "./model-files.js";
 import { chunkKey, indexBody, keywordHits, keywordScoresFrom } from "./fts.js";
 import { redactText, type RedactionOptions } from "./redact.js";
 import { ensureSearchSchema, SEARCH_DRIVE_CURSOR } from "./schema.js";
@@ -131,6 +132,14 @@ export const BACKFILL_CHUNK_BATCH = 8;
 const EMBED_CALL_TIMEOUT_MS = 60_000;
 /** Without a model, rows stay vectorless. Do not rebuild the index to fill them more often than this. */
 const VECTOR_RETRY_MS = 6 * 60 * 60 * 1000;
+/** A model still downloading, or a download that failed, is worth another look much sooner. */
+const MODEL_DOWNLOAD_RETRY_MS = 2 * 60 * 1000;
+/**
+ * Retry windows written before this epoch came from a model load that needed
+ * huggingface.co even with the files on disk. They are dropped once.
+ */
+const VECTOR_RETRY_EPOCH_KEY = "vector_retry_epoch";
+const VECTOR_RETRY_EPOCH = "2";
 const PENDING_KEY = "pending_sync";
 const PENDING_DONE_KEY = "pending_done";
 const VECTOR_RETRY_KEY = "vector_retry_after";
@@ -710,6 +719,7 @@ export class SearchService {
       return { embedded: 0, remaining: 0, warnings: [] };
     }
     ensureSearchSchema(this.#database);
+    this.#dropStaleRetryWindow();
     const retryAfter = Number(metadataMap(this.#database)[VECTOR_RETRY_KEY] ?? "0");
     if (Date.now() < retryAfter) {
       return { embedded: 0, remaining: this.#countMissingVectors(), warnings: [] };
@@ -741,9 +751,10 @@ export class SearchService {
         if (vectors.length !== batch.length) {
           throw new Error("Embedding model returned the wrong number of vectors");
         }
-      } catch {
+      } catch (error) {
         addWarning(warnings, keywordFallback);
-        this.#setManifest(VECTOR_RETRY_KEY, String(Date.now() + VECTOR_RETRY_MS));
+        const wait = isModelDownloadError(error) ? MODEL_DOWNLOAD_RETRY_MS : VECTOR_RETRY_MS;
+        this.#setManifest(VECTOR_RETRY_KEY, String(Date.now() + wait));
         return { embedded, remaining: this.#countMissingVectors(), warnings };
       }
       this.#writeVectors(batch, vectors);
@@ -751,6 +762,12 @@ export class SearchService {
       if (Date.now() >= deadline) break;
     }
     return { embedded, remaining: this.#countMissingVectors(), warnings };
+  }
+
+  #dropStaleRetryWindow(): void {
+    if (metadataMap(this.#database)[VECTOR_RETRY_EPOCH_KEY] === VECTOR_RETRY_EPOCH) return;
+    this.#database.prepare("DELETE FROM manifest WHERE key = ?").run(VECTOR_RETRY_KEY);
+    this.#setManifest(VECTOR_RETRY_EPOCH_KEY, VECTOR_RETRY_EPOCH);
   }
 
   #countMissingVectors(): number {
@@ -1100,6 +1117,7 @@ export class SearchService {
         pending,
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
+            embedder.reset?.();
             reject(new Error("Embedding model timed out"));
           }, this.#embedCallTimeoutMs);
         }),

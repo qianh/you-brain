@@ -4,6 +4,11 @@ export interface Embedder {
   readonly dimensions: number;
   embedQuery(text: string): Promise<number[]>;
   embedPassages(texts: string[]): Promise<number[][]>;
+  /**
+   * Drops work in flight after the caller gave up on it. Without this a late
+   * answer to an abandoned call can be read as the answer to the next one.
+   */
+  reset?(): void;
 }
 
 export const E5_SMALL = {

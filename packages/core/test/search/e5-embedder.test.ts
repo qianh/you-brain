@@ -4,6 +4,8 @@ import { join } from "node:path";
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 
+const env: Record<string, unknown> = { allowRemoteModels: true, useFSCache: true };
+
 const pipeline = mock((_task: string, _model: string, _options: unknown) =>
   Promise.resolve(async (texts: string[]) => ({
     tolist: () => texts.map(() => [1, 0, 0]),
@@ -12,10 +14,14 @@ const pipeline = mock((_task: string, _model: string, _options: unknown) =>
 
 mock.module("@huggingface/transformers", () => ({
   pipeline,
+  env,
 }));
 
 const { E5Embedder } = await import("../../src/search/e5-embedder.js");
 const { isModelReady } = await import("../../src/search/model-cache.js");
+
+const modelDirectory = "/models/test/model/revision-1";
+const ensureFiles = (): Promise<string> => Promise.resolve(modelDirectory);
 
 describe("E5 model cache completion", () => {
   beforeEach(() => {
@@ -32,26 +38,37 @@ describe("E5 model cache completion", () => {
     pipeline.mockResolvedValue(async () => ({
       tolist: () => [[1, 0, 0]],
     }));
-    const embedder = new E5Embedder({ ...identity, cacheDir });
+    const embedder = new E5Embedder({ ...identity, cacheDir, ensureFiles });
 
     expect(await isModelReady(cacheDir, identity)).toBe(false);
     await embedder.prepare();
     expect(await isModelReady(cacheDir, identity)).toBe(true);
-    expect(pipeline).toHaveBeenCalledWith(
-      "feature-extraction",
-      identity.model,
-      expect.objectContaining({
-        device: "cpu",
-        dtype: "q8",
-        revision: identity.revision,
-        cache_dir: cacheDir,
-        session_options: {
-          executionProviders: ["cpu"],
-          intraOpNumThreads: 2,
-          interOpNumThreads: 1,
-        },
-      }),
-    );
+    // The local directory is the model source, so the library has nothing to look up remotely.
+    expect(pipeline).toHaveBeenCalledWith("feature-extraction", modelDirectory, {
+      device: "cpu",
+      dtype: "q8",
+      local_files_only: true,
+      session_options: {
+        executionProviders: ["cpu"],
+        intraOpNumThreads: 2,
+        interOpNumThreads: 1,
+      },
+    });
+    expect(env).toEqual({ allowRemoteModels: false, useFSCache: false });
+  });
+
+  it("does not load the library when the model files cannot be fetched", async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), "you-brain-model-"));
+    const embedder = new E5Embedder({
+      model: "test/model",
+      revision: "revision-1",
+      dimensions: 3,
+      cacheDir,
+      ensureFiles: () => Promise.reject(new Error("offline")),
+    });
+
+    await expect(embedder.prepare()).rejects.toThrow(/offline/u);
+    expect(pipeline).not.toHaveBeenCalled();
   });
 
   it("embeds passages in capped batches and clamps overlong text", async () => {
@@ -66,6 +83,7 @@ describe("E5 model cache completion", () => {
       revision: "revision-1",
       dimensions: 3,
       cacheDir,
+      ensureFiles,
     });
     const texts = [...Array.from({ length: 9 }, (_, index) => `chunk-${index}`), "y".repeat(20_000)];
 
@@ -86,7 +104,7 @@ describe("E5 model cache completion", () => {
       dimensions: 3,
     };
     pipeline.mockRejectedValue(new Error("incomplete model"));
-    const embedder = new E5Embedder({ ...identity, cacheDir });
+    const embedder = new E5Embedder({ ...identity, cacheDir, ensureFiles });
 
     await expect(embedder.prepare()).rejects.toThrow(/incomplete model/);
     expect(await isModelReady(cacheDir, identity)).toBe(false);
@@ -103,7 +121,7 @@ describe("E5 model cache completion", () => {
     pipeline.mockResolvedValue(async () => ({
       tolist: () => [[1, 0, 0]],
     }));
-    const embedder = new E5Embedder({ ...identity, cacheDir });
+    const embedder = new E5Embedder({ ...identity, cacheDir, ensureFiles });
 
     await expect(embedder.prepare()).rejects.toThrow(/incomplete model/);
     await embedder.prepare();

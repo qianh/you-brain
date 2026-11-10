@@ -71,9 +71,11 @@ export async function serveEmbedWorker(): Promise<void> {
         respond(request.id, { ok: true, ...result });
         if (request.method === "shutdown") return;
       } catch (error) {
+        const code = (error as { code?: unknown } | null)?.code;
         respond(request.id, {
           ok: false,
           error: error instanceof Error ? error.message : String(error),
+          ...(typeof code === "string" ? { code } : {}),
         });
       }
     }
