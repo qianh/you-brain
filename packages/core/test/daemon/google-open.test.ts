@@ -71,10 +71,9 @@ describe("describeGoogleDriveOpenError", () => {
 });
 
 describe("openGoogleDrive official credentials", () => {
-  it("uses the client shipped in source when the build did not inject another one", () => {
+  it("stays unusable until a build or the environment supplies a client", () => {
     isolateBundledEnv();
     const client = resolveOfficialOAuthClient({});
-    expect(isUsableOfficialOAuthClient(client)).toBe(true);
-    expect(client.clientId.endsWith(".apps.googleusercontent.com")).toBe(true);
+    expect(isUsableOfficialOAuthClient(client)).toBe(false);
   });
 });

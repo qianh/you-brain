@@ -5,3 +5,6 @@ dist/
 .orchestration/
 apps/desktop/src-tauri/target/
 .worktrees/
+.env
+.env.local
+.env.*.local
