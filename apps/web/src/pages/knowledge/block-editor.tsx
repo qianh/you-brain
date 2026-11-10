@@ -6,6 +6,7 @@ import type { MessageKey } from "../../i18n/messages.js";
 import { useImeGuard } from "../../lib/ime-guard.js";
 import { renderMath } from "../../lib/math.js";
 import { ConfirmDialog } from "../../components/dialog.js";
+import { Icon } from "../../components/icons.js";
 import {
   applyInlineMarkdown,
   caretOffsetIn,
@@ -29,6 +30,7 @@ import { PagePicker, type MediaEditor } from "./block-media.js";
 import { CodeBlock } from "./code-block.js";
 import type { DatabaseOps } from "./database-view.js";
 import { colorClass } from "./dom-text.js";
+import { useBlockFocus, type FocusStore } from "./focus-store.js";
 import { htmlToMarkdown, isStructuredHtml } from "./html-paste.js";
 import { FormatBar, localDate, MentionMenu, searchEmoji, TEXT_COLORS, type InlineCommand, type MentionOption } from "./inline-format.js";
 import {
@@ -41,11 +43,18 @@ import {
   parseMarkdownBlocks,
   segmentsOf as safeSegmentsOf,
   turnIntoKindOf,
+  caretAfterTextChange,
   type BlockPlacement,
   type PastedBlock,
   type TableOp,
   type TurnIntoKind,
 } from "./logic.js";
+
+/** 一段连续输入的停顿阈值与上限(毫秒):决定撤销一步的粒度。 */
+const BURST_PAUSE_MS = 500;
+const MAX_BURST_MS = 3000;
+/** 页面在撤销前派发给正在编辑的行,要求它立刻提交未记录的输入。 */
+export const COMMIT_EVENT = "nb-commit";
 
 export type Translate = (key: MessageKey, vars?: Record<string, string | number>) => string;
 
@@ -203,6 +212,12 @@ export interface FocusRequest {
   at: "start" | "end" | number;
   /** 聚焦后直接打开「/」菜单(＋ 按钮)。 */
   slash?: boolean;
+  /**
+   * 撤销/重做后:按块模型重画这一行(它正有焦点,平时不会被外部更新覆盖)。
+   * at 是撤销前的光标;文字变了就落在变化处(prevText 是撤销前的文字)。
+   */
+  refresh?: boolean;
+  prevText?: string;
 }
 
 export interface BlockEditorCallbacks extends MediaEditor {
@@ -264,9 +279,8 @@ export interface BlockEditorCallbacks extends MediaEditor {
   tableEdit(block: NotionBlockModel, op: TableOp): void;
   /** @ 提及的候选页面(按标题过滤)。 */
   mentionPages(query: string): Array<{ id: string; title: string; object: "page" | "database" }>;
-  busy: boolean;
-  focus: FocusRequest | null;
-  onFocusHandled(): void;
+  /** 光标焦点请求:按块订阅,只有目标行会重渲染。 */
+  focusStore: FocusStore;
 }
 
 /** 可编辑块的行内容器:contentEditable,回车分块、退格合并、/ 唤菜单、划词格式栏。 */
@@ -310,6 +324,7 @@ export function EditableRow({
   const ime = useImeGuard();
   const editable = isEditableBlock(block);
   const isCode = block.kind === "code";
+  const focus = useBlockFocus(editor.focusStore, block.id);
 
   useEffect(() => {
     const el = ref.current;
@@ -329,28 +344,37 @@ export function EditableRow({
   }, [block, isCode]);
 
   useEffect(() => {
-    if (editor.focus?.blockId !== block.id) return;
+    if (focus === null) return;
     // 代码块没有行内编辑区:被要求聚焦(刚插入/刚转成代码块)就直接打开代码编辑面板。
     // 代码块的聚焦由 CodeBlock 自己处理。
     if (isCode) return;
     const el = ref.current;
     if (!el) return;
     el.focus();
-    if (editor.focus.slash) {
+    if (focus.refresh) {
+      const html = segmentsToHtml(safeSegmentsOf(block));
+      if (el.innerHTML !== html) el.innerHTML = html;
+      const text = el.textContent ?? "";
+      const caret = focus.prevText !== undefined && focus.prevText !== text ? caretAfterTextChange(focus.prevText, text) : focus.at;
+      setCaretAtOffset(el, caret === "start" ? 0 : caret === "end" ? text.length : Math.min(caret, text.length));
+      editor.focusStore.clear();
+      return;
+    }
+    if (focus.slash) {
       // ＋ 按钮:新行里放一个「/」并打开菜单(Notion 同款)。
       el.textContent = "/";
       setCaretAtOffset(el, 1);
       setSlashOpen(true);
       setSlashQuery("");
       setSlashActive(0);
-      editor.onFocusHandled();
+      editor.focusStore.clear();
       return;
     }
-    const at = editor.focus.at;
+    const at = focus.at;
     setCaretAtOffset(el, at === "start" ? 0 : at === "end" ? el.textContent?.length ?? 0 : at);
-    editor.onFocusHandled();
+    editor.focusStore.clear();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editor.focus, block.id]);
+  }, [focus, block.id]);
 
   const flushSave = useCallback(() => {
     const el = ref.current;
@@ -360,16 +384,39 @@ export function EditableRow({
     void editor.saveSegments(block, segments).catch(() => undefined);
   }, [block, editor, isCode]);
 
+  // 一段连续输入记成一步撤销:停顿约 0.5 秒就提交(⌘Z 一次撤销这一段);一直不停也最多 3 秒一步。
+  const burstStart = useRef<number | null>(null);
   const scheduleSave = useCallback(() => {
     if (saveTimer.current) clearTimeout(saveTimer.current);
+    const now = Date.now();
+    burstStart.current ??= now;
+    const wait = now - burstStart.current >= MAX_BURST_MS ? 0 : BURST_PAUSE_MS;
     const tick = (): void => {
       // 组词中的拼音还不是内容,等输入法落字再存。
       if (ime.isComposingNow()) saveTimer.current = setTimeout(tick, 400);
-      else flushSave();
+      else {
+        burstStart.current = null;
+        flushSave();
+      }
     };
-    saveTimer.current = setTimeout(tick, 900);
+    saveTimer.current = setTimeout(tick, wait);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [flushSave]);
+
+  // ⌘Z/⌘⇧Z 前由页面发来:把这一行还没提交的输入立刻记成一步,不用让它失焦。
+  const commitNow = useRef<() => void>(() => undefined);
+  commitNow.current = () => {
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    burstStart.current = null;
+    flushSave();
+  };
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const onCommit = (): void => commitNow.current();
+    el.addEventListener(COMMIT_EVENT, onCommit);
+    return () => el.removeEventListener(COMMIT_EVENT, onCommit);
+  }, []);
 
   // 卸载(切页、块被替换)时,没落盘的输入补发一次,不丢字。
   const latest = useRef({ block, editor });
@@ -903,8 +950,8 @@ export function EditableRow({
             <CodeBlock
               block={block}
               t={t}
-              focusRequested={editor.focus?.blockId === block.id}
-              onFocusHandled={editor.onFocusHandled}
+              focusRequested={focus !== null}
+              onFocusHandled={editor.focusStore.clear}
               onSave={(text, language) => {
                 if (text !== block.text || language !== block.language) void editor.saveCode(block.id, text, language);
               }}
@@ -1244,7 +1291,7 @@ function BlockHandles({
           setMenuOpen(!menuOpen);
         }}
       >
-        ⋮⋮
+        <Icon name="grip" size={14} />
       </button>
       <button
         type="button"
@@ -1257,7 +1304,7 @@ function BlockHandles({
           void editor.addBelow(block.id, "paragraph", true);
         }}
       >
-        ＋
+        <Icon name="plus" size={14} />
       </button>
     </>
   );

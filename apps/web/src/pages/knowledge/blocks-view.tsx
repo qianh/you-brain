@@ -1,11 +1,12 @@
-import { useState, type ReactNode } from "react";
+import { createContext, memo, useContext, useState, type ReactNode } from "react";
 
 import type { NotionBlockModel, NotionSegment } from "@you-brain/core/http/types.js";
 
 import type { MessageKey } from "../../i18n/messages.js";
+import { Icon } from "../../components/icons.js";
 import { highlightCode } from "../../lib/highlight.js";
 import { renderMath } from "../../lib/math.js";
-import { EditableRow, type BlockEditorCallbacks, type FocusRequest } from "./block-editor.js";
+import { EditableRow, type BlockEditorCallbacks } from "./block-editor.js";
 import {
   BreadcrumbView,
   EmojiPicker,
@@ -104,21 +105,23 @@ function segmentColorClass(color: string): string | null {
   return `nb-color-${color}`;
 }
 
+/**
+ * 折叠块的展开状态变了就换一个值:行和块视图用它在展开/收起时重渲染。
+ * 其余时候行靠 memo 跳过渲染。
+ */
+export const OpenStateContext = createContext<unknown>(null);
+
 /** Renders sibling lists with correct numbering continuity. */
 export function BlockList({
   blocks,
   t,
   assetBase,
   editor,
-  focus,
-  onFocusHandled,
 }: {
   blocks: readonly NotionBlockModel[];
   t: Translate;
   assetBase: (blockId: string) => string;
   editor?: BlockEditorCallbacks | undefined;
-  focus?: FocusRequest | null | undefined;
-  onFocusHandled?: (() => void) | undefined;
 }): ReactNode {
   const out: ReactNode[] = [];
   let numberedIndex = 0;
@@ -129,75 +132,79 @@ export function BlockList({
     } else {
       numberedIndex = 0;
     }
-    const focusProps =
-      editor && focus ? { focus, onFocusHandled } : {};
-    if (editor && isEditableBlock(block)) {
-      const foldable = isFoldable(block);
-      const open = !foldable || editor.isOpen(block.id);
-      const nested =
-        foldable && open && block.children.length === 0 ? (
-          <button type="button" className="nb-toggle-empty" onClick={() => editor.addChild(block.id)}>
-            {t("knowledgeToggleEmpty")}
-          </button>
-        ) : open && block.children.length > 0 ? (
-          <BlockList
-            blocks={block.children}
-            t={t}
-            assetBase={assetBase}
-            editor={editor}
-            focus={focus}
-            onFocusHandled={onFocusHandled}
-          />
-        ) : null;
+    if (editor) {
       out.push(
-        <EditableRow
+        <BlockRow
           key={`row-${block.id}`}
           block={block}
           editor={editor}
-          t={t}
-          prevEditableId={prevEditableId}
-          numberedIndex={block.kind === "numbered" ? numberedIndex : undefined}
-          chrome={chromeFor(block, numberedIndex, editor, t)}
-          {...focusProps}
-        >
-          {nested}
-        </EditableRow>,
-      );
-      prevEditableId = block.id;
-      continue;
-    }
-    const view =
-      block.kind === "numbered" ? (
-        <BlockView
-          key={block.id}
-          block={block}
           t={t}
           assetBase={assetBase}
-          editor={editor}
-          numberedIndex={numberedIndex}
-        />
-      ) : (
-        <BlockView key={block.id} block={block} t={t} assetBase={assetBase} editor={editor} />
-      );
-    out.push(
-      editor ? (
-        <EditableRow
-          key={`row-${block.id}`}
-          block={block}
-          editor={editor}
-          t={t}
           prevEditableId={prevEditableId}
-          {...focusProps}
-        >
-          {view}
-        </EditableRow>
+          numberedIndex={block.kind === "numbered" ? numberedIndex : undefined}
+        />,
+      );
+      if (isEditableBlock(block)) prevEditableId = block.id;
+      continue;
+    }
+    out.push(
+      block.kind === "numbered" ? (
+        <BlockView key={block.id} block={block} t={t} assetBase={assetBase} numberedIndex={numberedIndex} />
       ) : (
-        view
+        <BlockView key={block.id} block={block} t={t} assetBase={assetBase} />
       ),
     );
   }
   return <>{out}</>;
 }
+
+/** 编辑模式下的一行:props 没变就不重渲染(装饰和子块都在行内部生成)。 */
+const BlockRow = memo(function BlockRow({
+  block,
+  editor,
+  t,
+  assetBase,
+  prevEditableId,
+  numberedIndex,
+}: {
+  block: NotionBlockModel;
+  editor: BlockEditorCallbacks;
+  t: Translate;
+  assetBase: (blockId: string) => string;
+  prevEditableId: string | null;
+  numberedIndex: number | undefined;
+}): ReactNode {
+  useContext(OpenStateContext);
+  if (isEditableBlock(block)) {
+    const foldable = isFoldable(block);
+    const open = !foldable || editor.isOpen(block.id);
+    const nested =
+      foldable && open && block.children.length === 0 ? (
+        <button type="button" className="nb-toggle-empty" onClick={() => editor.addChild(block.id)}>
+          {t("knowledgeToggleEmpty")}
+        </button>
+      ) : open && block.children.length > 0 ? (
+        <BlockList blocks={block.children} t={t} assetBase={assetBase} editor={editor} />
+      ) : null;
+    return (
+      <EditableRow
+        block={block}
+        editor={editor}
+        t={t}
+        prevEditableId={prevEditableId}
+        numberedIndex={numberedIndex}
+        chrome={chromeFor(block, numberedIndex ?? 0, editor, t)}
+      >
+        {nested}
+      </EditableRow>
+    );
+  }
+  return (
+    <EditableRow block={block} editor={editor} t={t} prevEditableId={prevEditableId}>
+      <BlockView block={block} t={t} assetBase={assetBase} editor={editor} numberedIndex={numberedIndex} />
+    </EditableRow>
+  );
+});
 
 /** 折叠块与可折叠标题:箭头展开/收起子块。 */
 export function isFoldable(block: NotionBlockModel): boolean {
@@ -215,7 +222,7 @@ function ToggleArrow({ block, editor, t }: { block: NotionBlockModel; editor: Bl
       onMouseDown={(event) => event.preventDefault()}
       onClick={() => editor.toggleOpen(block.id)}
     >
-      ▸
+      <Icon name="chevron-right" size={14} />
     </button>
   );
 }
@@ -260,7 +267,6 @@ function chromeFor(
           className="nb-checkbox"
           checked={block.checked}
           onChange={() => void editor.toggleTodo(block)}
-          disabled={editor.busy}
         />
       );
     case "callout":
@@ -343,7 +349,7 @@ function TabsView({
   );
 }
 
-export function BlockView({
+export const BlockView = memo(function BlockView({
   block,
   t,
   assetBase,
@@ -356,6 +362,7 @@ export function BlockView({
   editor?: BlockEditorCallbacks | undefined;
   numberedIndex?: number | undefined;
 }): ReactNode {
+  useContext(OpenStateContext);
   if (editor) {
     switch (block.kind) {
       case "image":
@@ -603,7 +610,7 @@ export function BlockView({
     default:
       return null;
   }
-}
+});
 
 function ProxiedImage({
   blockId,

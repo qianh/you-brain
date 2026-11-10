@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  caretAfterTextChange,
   defaultPageId,
   flattenTree,
   fuzzyFilter,
   fuzzyScore,
   isProxyableAssetUrl,
+  jsonEqual,
   relativeTime,
 } from "../../src/pages/knowledge/logic.js";
 
@@ -68,5 +70,39 @@ describe("knowledge logic", () => {
     expect(relativeTime("2026-10-28T12:00:00Z", now, "zh")).toBe("1 天前");
     expect(relativeTime("2026-10-26T12:00:00Z", now, "zh")).toBe("3 天前");
     expect(relativeTime(null, now, "zh")).toBe("从未");
+  });
+});
+
+describe("jsonEqual", () => {
+  test("结构相同则相等,忽略 undefined 字段", () => {
+    expect(jsonEqual({ a: [1, { b: "x" }], c: undefined }, { a: [1, { b: "x" }] })).toBe(true);
+  });
+
+  test("值、长度、类型不同则不等", () => {
+    expect(jsonEqual({ a: 1 }, { a: 2 })).toBe(false);
+    expect(jsonEqual([1, 2], [1, 2, 3])).toBe(false);
+    expect(jsonEqual([], {})).toBe(false);
+    expect(jsonEqual(null, {})).toBe(false);
+    expect(jsonEqual({ a: 1 }, { b: 1 })).toBe(false);
+  });
+});
+
+describe("caretAfterTextChange", () => {
+  test("撤销输入:光标回到刚输入处", () => {
+    expect(caretAfterTextChange("abcdef", "abc")).toBe(3);
+  });
+
+  test("撤销删除:光标落在恢复出来的文字之后", () => {
+    expect(caretAfterTextChange("ab", "abXY")).toBe(4);
+    expect(caretAfterTextChange("ad", "abcd")).toBe(3);
+  });
+
+  test("中间改字:落在变化区域末尾,重复字符不算错位", () => {
+    expect(caretAfterTextChange("aXa", "aa")).toBe(1);
+    expect(caretAfterTextChange("你好世界", "你好")).toBe(2);
+  });
+
+  test("文字没变:落在末尾", () => {
+    expect(caretAfterTextChange("abc", "abc")).toBe(3);
   });
 });

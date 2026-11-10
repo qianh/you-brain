@@ -10,6 +10,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
+import { flushSync } from "react-dom";
 
 import type {
   NotionBlockModel,
@@ -31,12 +32,13 @@ import { useImeGuard } from "../lib/ime-guard.js";
 import { settingsHref } from "../lib/route.js";
 import { browserWindowBridge } from "../lib/window.js";
 import { useRoute } from "../router.js";
-import { BlockList, isFoldable } from "./knowledge/blocks-view.js";
+import { BlockList, isFoldable, OpenStateContext } from "./knowledge/blocks-view.js";
+import { createFocusStore } from "./knowledge/focus-store.js";
 import { EmojiPicker } from "./knowledge/block-media.js";
 import { DatabaseView, PropertyCell } from "./knowledge/database-view.js";
 import { useBlockInteractions } from "./knowledge/block-interactions.js";
-import { setCaretAtOffset } from "./knowledge/dom-text.js";
-import { type BlockEditorCallbacks, type FocusRequest, type SpecialKind, type Translate } from "./knowledge/block-editor.js";
+import { caretOffsetIn, setCaretAtOffset } from "./knowledge/dom-text.js";
+import { COMMIT_EVENT, type BlockEditorCallbacks, type FocusRequest, type SpecialKind, type Translate } from "./knowledge/block-editor.js";
 import {
   LOCAL_ID_PREFIX,
   convertBlock,
@@ -69,6 +71,7 @@ import {
   canMoveBlock,
   insertAtPlacement,
   isLocalPending,
+  jsonEqual,
   placementOf,
   topmostSelected,
   type BlockPlacement,
@@ -84,7 +87,7 @@ interface KnowledgeCache {
 
 const CACHE_KEY = "you-brain:knowledge:v1";
 
-function readKnowledgeCache(): KnowledgeCache {
+function loadKnowledgeCache(): KnowledgeCache {
   try {
     const raw = localStorage.getItem(CACHE_KEY);
     if (!raw) return { roots: null, status: null, pageId: null, page: null };
@@ -100,13 +103,41 @@ function readKnowledgeCache(): KnowledgeCache {
   }
 }
 
-function writeKnowledgeCache(patch: Partial<KnowledgeCache>): void {
+/** 内存里的最新缓存;写 localStorage 要序列化整页,所以只在空闲或离页时落盘。 */
+let memoryCache: KnowledgeCache | null = null;
+let cacheDirty = false;
+let cacheFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function readKnowledgeCache(): KnowledgeCache {
+  memoryCache ??= loadKnowledgeCache();
+  return memoryCache;
+}
+
+function flushKnowledgeCache(): void {
+  if (cacheFlushTimer) clearTimeout(cacheFlushTimer);
+  cacheFlushTimer = null;
+  if (!cacheDirty || !memoryCache) return;
+  cacheDirty = false;
   try {
-    const current = readKnowledgeCache();
-    localStorage.setItem(CACHE_KEY, JSON.stringify({ ...current, ...patch }));
+    localStorage.setItem(CACHE_KEY, JSON.stringify(memoryCache));
   } catch {
     // 隐私模式等写不进就算了,只影响下次的秒开。
   }
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", flushKnowledgeCache);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushKnowledgeCache();
+  });
+}
+
+function writeKnowledgeCache(patch: Partial<KnowledgeCache>): void {
+  // 整体替换成新对象:已经拿到旧快照的调用方(如挂载时读的缓存)不受影响。
+  memoryCache = { ...readKnowledgeCache(), ...patch };
+  cacheDirty = true;
+  if (cacheFlushTimer) return;
+  cacheFlushTimer = setTimeout(flushKnowledgeCache, 1000);
 }
 
 const COLLAPSED_KEY = "you-brain:knowledge:collapsed:v1";
@@ -157,7 +188,7 @@ function writeCollapsed(ids: ReadonlySet<string>): void {
 }
 
 export function KnowledgePage() {
-  const { client, t, language } = useDaemon();
+  const { client, t, language, notionRevision } = useDaemon();
   const { push } = useToast();
   const { location, navigate } = useRoute();
   const titleIme = useImeGuard();
@@ -181,8 +212,16 @@ export function KnowledgePage() {
   // 同步完成等场景要求「当前页按索引重读一次」。
   const [reloadTick, setReloadTick] = useState(0);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "error">("idle");
-  // 移动/复制要等 Notion 重排后才能显示,期间禁用这类菜单项。
-  const [structBusy, setStructBusy] = useState(false);
+  // 「保存中」只在挂起超过 1.5 秒才显示,正常打字时不闪;失败立即显示。
+  const [savingVisible, setSavingVisible] = useState(false);
+  useEffect(() => {
+    if (saveState !== "saving") {
+      setSavingVisible(false);
+      return;
+    }
+    const timer = setTimeout(() => setSavingVisible(true), 1500);
+    return () => clearTimeout(timer);
+  }, [saveState]);
   const [database, setDatabase] = useState<NotionDatabaseView | null>(null);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -207,7 +246,8 @@ export function KnowledgePage() {
   const endTitleEditRef = useRef<(mode: "save" | "revert") => void>(() => undefined);
   const focusTitleRef = useRef<() => void>(() => undefined);
   const [busy, setBusy] = useState(false);
-  const [focus, setFocus] = useState<FocusRequest | null>(null);
+  // 焦点请求走按块订阅的 store:回车、移动光标只重渲染目标行。
+  const focusStore = useMemo(() => createFocusStore(), []);
   // Tauri 的 WKWebView 不支持 window.confirm/prompt,确认与改名走 Dialog。
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [rename, setRename] = useState<{ id: string; current: string } | null>(null);
@@ -217,17 +257,45 @@ export function KnowledgePage() {
     return Number.isFinite(raw) && raw >= 200 && raw <= 520 ? raw : 264;
   });
   const [resizing, setResizing] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  // 正文版心:默认居中约 720px(易读),可切全宽;只是本机的显示偏好。
+  const [wide, setWide] = useState(() => {
+    try {
+      return localStorage.getItem("knowledge-wide") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleWide = (): void => {
+    setWide((value) => {
+      try {
+        localStorage.setItem("knowledge-wide", value ? "0" : "1");
+      } catch {
+        // 写不进只影响下次的显示偏好。
+      }
+      return !value;
+    });
+  };
   const startResize = (event: ReactMouseEvent<HTMLDivElement>): void => {
     event.preventDefault();
     const startX = event.clientX;
     const startWidth = sidebarWidth;
     const clamp = (value: number): number => Math.min(520, Math.max(200, value));
-    const onMove = (move: MouseEvent): void => setSidebarWidth(clamp(startWidth + move.clientX - startX));
+    // 拖动中只改 CSS 变量,不 setState,正文区不跟着重渲染;松手才落 state 和 localStorage。
+    const onMove = (move: MouseEvent): void => {
+      rootRef.current?.style.setProperty("--knowledge-sidebar-w", `${clamp(startWidth + move.clientX - startX)}px`);
+    };
     const onUp = (move: MouseEvent): void => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      const finalWidth = clamp(startWidth + move.clientX - startX);
+      setSidebarWidth(finalWidth);
       setResizing(false);
-      localStorage.setItem("knowledge-sidebar-w", String(clamp(startWidth + move.clientX - startX)));
+      try {
+        localStorage.setItem("knowledge-sidebar-w", String(finalWidth));
+      } catch {
+        // 写不进只影响下次的宽度。
+      }
     };
     setResizing(true);
     window.addEventListener("mousemove", onMove);
@@ -278,6 +346,25 @@ export function KnowledgePage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshMeta]);
+
+  // daemon 后台同步出了变化(Notion 那边改过):刷新目录;当前页等没有在途保存、没有在编辑时再重读,不打断输入。
+  const syncStale = useRef(false);
+  const seenNotionRevision = useRef(notionRevision);
+  useEffect(() => {
+    if (seenNotionRevision.current === notionRevision) return;
+    seenNotionRevision.current = notionRevision;
+    syncStale.current = true;
+    void refreshMeta().catch(() => undefined);
+  }, [notionRevision, refreshMeta]);
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!syncStale.current) return;
+      if (pendingJobs.current > 0 || titleInFlight.current > 0 || titleTarget.current || isEditingBlocks()) return;
+      syncStale.current = false;
+      setReloadTick((value) => value + 1);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
 
   // 标题编辑框:点外面就保存并收起(有的区域按下时会阻止失焦,不能只靠 blur)。
   useEffect(() => {
@@ -342,7 +429,7 @@ export function KnowledgePage() {
             title: keepTitle && local ? local.title : detail.title,
             blocks: remapBlockIds(detail.blocks, realToLocal.current),
           };
-          if (local?.id === selectedId && JSON.stringify(local) === JSON.stringify(next)) return;
+          if (local?.id === selectedId && jsonEqual(local, next)) return;
           commitPage(next);
         }
       } catch {
@@ -437,9 +524,10 @@ export function KnowledgePage() {
   const localToReal = useRef(new Map<string, string>());
   const realToLocal = useRef(new Map<string, string>());
   const sentText = useRef(new Map<string, string>());
+  /** 已入队但还没开始执行的文字保存(按块 id)。 */
+  const textQueued = useRef(new Set<string>());
   const queue = useRef<Promise<void>>(Promise.resolve());
   const pendingJobs = useRef(0);
-  const pendingStructural = useRef(0);
   const needAdopt = useRef(false);
   const failedJob = useRef(false);
   const lastServer = useRef<NotionPageView | null>(null);
@@ -463,15 +551,12 @@ export function KnowledgePage() {
       findBlockIn(pageRef.current?.blocks ?? [], id) ?? fallback,
     [],
   );
-  const requestFocus = useCallback((blockId: string, at: FocusRequest["at"]): void => {
-    setFocus({ blockId, at });
-  }, []);
-  // 请求的块若始终没出现(例如已被删除),别让它在以后意外抢走光标。
-  useEffect(() => {
-    if (focus === null) return;
-    const timer = setTimeout(() => setFocus(null), 1500);
-    return () => clearTimeout(timer);
-  }, [focus]);
+  const requestFocus = useCallback(
+    (blockId: string, at: FocusRequest["at"]): void => {
+      focusStore.request({ blockId, at });
+    },
+    [focusStore],
+  );
 
   const enqueue = useCallback(
     (
@@ -481,10 +566,6 @@ export function KnowledgePage() {
     ): void => {
       pendingJobs.current += 1;
       pendingByPage.current.set(pageId, (pendingByPage.current.get(pageId) ?? 0) + 1);
-      if (options?.structural) {
-        pendingStructural.current += 1;
-        setStructBusy(true);
-      }
       setSaveState("saving");
       queue.current = queue.current
         .then(async () => {
@@ -505,10 +586,6 @@ export function KnowledgePage() {
           const left = (pendingByPage.current.get(pageId) ?? 1) - 1;
           if (left > 0) pendingByPage.current.set(pageId, left);
           else pendingByPage.current.delete(pageId);
-          if (options?.structural) {
-            pendingStructural.current -= 1;
-            if (pendingStructural.current === 0) setStructBusy(false);
-          }
           if (pendingJobs.current > 0) return;
           const failed = failedJob.current;
           const adopt = needAdopt.current;
@@ -854,7 +931,11 @@ export function KnowledgePage() {
       redo: () => steps.forEach((step) => step.redo()),
     });
     const syncText = (pageId: string, blockId: string): void => {
+      // 这一块已有还没开始发的文字保存:它执行时读的是最新文字,不用再排一次(同一块连续修改合并成一次请求)。
+      if (textQueued.current.has(blockId)) return;
+      textQueued.current.add(blockId);
       enqueue(pageId, async () => {
+        textQueued.current.delete(blockId);
         const real = realId(blockId);
         const now = live(blockId);
         if (!real || !now || !hasSegments(now)) return null;
@@ -1056,9 +1137,7 @@ export function KnowledgePage() {
       }
     };
     return {
-      busy: structBusy,
-      focus,
-      onFocusHandled: () => setFocus(null),
+      focusStore,
       focusTitle: () => focusTitleRef.current(),
       mentionPages: (query) => {
         const needle = query.trim().toLowerCase();
@@ -1344,7 +1423,7 @@ export function KnowledgePage() {
         const models = kind === "divider" ? [made, emptyParagraph()] : [made];
         insertWithHistory(models, placement);
         const target = models[models.length - 1]!;
-        if (openSlash) setFocus({ blockId: target.id, at: "end", slash: true });
+        if (openSlash) focusStore.request({ blockId: target.id, at: "end", slash: true });
         else requestFocus(target.id, "start");
         return Promise.resolve();
       },
@@ -1533,7 +1612,7 @@ export function KnowledgePage() {
       /** 拖拽排序与多块移动(不在接口里暴露给行组件,由页面级的拖放处理调用)。 */
       relocateBlocks: (ids: string[], target: BlockPlacement) => relocateWithHistory(ids, target),
     };
-  }, [client, commitPage, editLocal, enqueue, focus, learnId, liveBlock, newLocalId, open, push, realId, record, refreshMeta, requestFocus, setSelection, structBusy, t]);
+  }, [client, commitPage, editLocal, enqueue, focusStore, learnId, liveBlock, newLocalId, open, push, realId, record, refreshMeta, requestFocus, setSelection, t]);
 
   // 退出 App 时(托盘「退出」)先把正在编辑的内容提交,并等保存队列写完,不丢字。
   useEffect(() => {
@@ -1546,6 +1625,7 @@ export function KnowledgePage() {
         await Promise.all([queue.current, titleQueue.current]).catch(() => undefined);
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
+      flushKnowledgeCache();
     };
     window.__youBrainBeforeQuit = flush;
     return () => {
@@ -1553,22 +1633,32 @@ export function KnowledgePage() {
     };
   }, []);
 
-  /** ⌘Z / ⌘⇧Z:先把正在编辑的行存下来(这本身也是一步),再撤销/重做一步。 */
+  /**
+   * ⌘Z / ⌘⇧Z:先让正在编辑的行把还没记录的输入提交成一步(不失焦),再撤销/重做一步。
+   * 撤销后光标留在这一行:文字变了落在变化处,没变回到原位。
+   */
   const runHistory = useCallback(
     (direction: "undo" | "redo"): void => {
       const active = document.activeElement as HTMLElement | null;
-      const rowId = active?.isContentEditable ? active.closest<HTMLElement>("[data-block-id]")?.dataset.blockId : undefined;
-      if (active?.isContentEditable) active.blur();
+      const editing = active?.isContentEditable ? active : null;
+      const rowId = editing?.closest<HTMLElement>("[data-block-id]")?.dataset.blockId;
+      editing?.dispatchEvent(new Event(COMMIT_EVENT));
+      const caret = editing ? caretOffsetIn(editing) : null;
+      const prevText = editing?.textContent ?? undefined;
       const stacks = history.current;
       const step = direction === "undo" ? stacks.past.pop() : stacks.future.pop();
       if (!step) return;
-      step[direction]();
+      // 同步提交这一步造成的状态变化,随后的聚焦请求读到的就是撤销后的块。
+      flushSync(() => step[direction]());
       (direction === "undo" ? stacks.future : stacks.past).push(step);
-      if (rowId && findBlockIn(pageRef.current?.blocks ?? [], rowId)) requestFocus(rowId, "end");
+      if (rowId && findBlockIn(pageRef.current?.blocks ?? [], rowId)) {
+        focusStore.request({ blockId: rowId, at: caret ?? "end", refresh: true, ...(prevText !== undefined ? { prevText } : {}) });
+      }
     },
-    [requestFocus],
+    [focusStore],
   );
   const blocksContainer = useRef<HTMLDivElement>(null);
+  const assetBase = useCallback((blockId: string): string => client.notionAssetUrl(blockId), [client]);
   useBlockInteractions({
     container: blocksContainer,
     editor,
@@ -1579,10 +1669,11 @@ export function KnowledgePage() {
     redo: () => runHistory("redo"),
     enabled: page !== null,
   });
-  // 重渲染后把多选状态重新画到行上。
+  // 块列表或折叠状态变了(行被新建/重挂载)才把多选状态重新画到行上;选区变化时 setSelection 自己会画。
+  const pageBlocks = page?.blocks;
   useEffect(() => {
     paintSelection();
-  });
+  }, [paintSelection, pageBlocks, openToggles]);
 
   // —— 页面图标与封面 ——
   const [iconPicking, setIconPicking] = useState(false);
@@ -1925,6 +2016,7 @@ export function KnowledgePage() {
 
   return (
     <div
+      ref={rootRef}
       className="knowledge"
       style={{ "--knowledge-sidebar-w": `${sidebarWidth}px` } as CSSProperties}
     >
@@ -1984,7 +2076,9 @@ export function KnowledgePage() {
                     onClick={() => open(hit.pageId)}
                     title={hit.excerpt}
                   >
-                    <span className="knowledge-tree-title">📄 {hit.title || t("knowledgeUntitled")}</span>
+                    <span className="knowledge-tree-title">
+                      <PageGlyph icon={null} object="page" /> {hit.title || t("knowledgeUntitled")}
+                    </span>
                   </button>
                 ))
               )}
@@ -2154,7 +2248,7 @@ export function KnowledgePage() {
           </div>
         </footer>
       </aside>
-      <section className="knowledge-main">
+      <section className="knowledge-main" data-wide={wide ? "true" : "false"}>
         {database ? (
           <DatabaseView
             database={database}
@@ -2222,7 +2316,7 @@ export function KnowledgePage() {
           />
         ) : page ? (
           <article className="knowledge-page">
-            {saveState !== "idle" ? (
+            {saveState === "error" || (saveState === "saving" && savingVisible) ? (
               <div className="knowledge-save-state" data-state={saveState} role="status">
                 {saveState === "saving" ? t("knowledgeSaving") : t("knowledgeSaveFailed")}
               </div>
@@ -2286,6 +2380,9 @@ export function KnowledgePage() {
             ) : null}
             <header className="knowledge-page-head">
               <div className="knowledge-page-meta-actions">
+                <button type="button" onClick={toggleWide}>
+                  {wide ? t("knowledgeWideOff") : t("knowledgeWideOn")}
+                </button>
                 {!page.icon ? (
                   <button type="button" onClick={() => setIconPicking(true)}>
                     ☺ {t("knowledgeAddIcon")}
@@ -2400,14 +2497,9 @@ export function KnowledgePage() {
                 tailLine();
               }}
             >
-              <BlockList
-                blocks={page.blocks}
-                t={t}
-                assetBase={(blockId) => client.notionAssetUrl(blockId)}
-                editor={editor}
-                focus={focus === null ? null : { ...focus }}
-                onFocusHandled={() => setFocus(null)}
-              />
+              <OpenStateContext.Provider value={openToggles}>
+                <BlockList blocks={page.blocks} t={t} assetBase={assetBase} editor={editor} />
+              </OpenStateContext.Provider>
               {/* Notion 式末尾幽灵行:仅当文末不是空段落且无创建中的空段时显示,保证永远只有一行。 */}
               {!tailIsEmptyParagraph ? (
                 <div
@@ -2432,7 +2524,11 @@ export function KnowledgePage() {
             </div>
           </article>
         ) : loading ? (
-          <p className="knowledge-hint">{t("knowledgeLoading")}</p>
+          <div className="knowledge-skeleton" role="status" aria-label={t("knowledgeLoading")}>
+            {Array.from({ length: 7 }, (_, index) => (
+              <span key={index} />
+            ))}
+          </div>
         ) : selectedId ? (
           <div className="empty-card">
             <h1>{t("knowledgePageMissing")}</h1>
@@ -2524,7 +2620,7 @@ function TreeNodes({
                   aria-label={node.title}
                   onClick={() => onToggle(node.id)}
                 >
-                  ▸
+                  <Icon name="chevron-right" size={12} />
                 </button>
               ) : (
                 <span className="knowledge-caret is-leaf" />
@@ -2536,7 +2632,7 @@ function TreeNodes({
                 onPointerDown={(event) => onDragStart(event, node)}
               >
                 <span className="knowledge-tree-title">
-                  {node.icon ?? (node.object === "database" ? "🗂" : "📄")} {node.title || untitled}
+                  <PageGlyph icon={node.icon} object={node.object} /> {node.title || untitled}
                 </span>
               </button>
               <button
@@ -2686,7 +2782,7 @@ function Switcher({
                 onMouseEnter={() => setActive(index)}
                 onClick={() => onPick(page.id)}
               >
-                {page.icon ?? (page.object === "database" ? "🗂" : "📄")} {page.title}
+                <PageGlyph icon={page.icon} object={page.object} /> {page.title}
               </button>
             </li>
           ))}
@@ -2713,6 +2809,16 @@ function mentionedPageId(target: HTMLElement): string | null {
   } catch {
     return null;
   }
+}
+
+/** 页面/数据库的小图标:有 emoji 用 emoji,没有就用统一的线性图标。 */
+function PageGlyph({ icon, object }: { icon: string | null | undefined; object: "page" | "database" }): ReactNode {
+  if (icon) return <span className="knowledge-glyph">{icon}</span>;
+  return (
+    <span className="knowledge-glyph is-default">
+      <Icon name={object === "database" ? "table" : "file"} size={14} />
+    </span>
+  );
 }
 
 function isEditingBlocks(): boolean {

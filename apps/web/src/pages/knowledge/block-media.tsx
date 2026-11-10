@@ -20,7 +20,6 @@ export interface MediaEditor {
   pagePath(): Array<{ id: string; title: string; icon: string | null }>;
   pageTitle(id: string): { title: string; icon: string | null } | null;
   openPage(id: string): void;
-  busy: boolean;
 }
 
 type MediaKind = "image" | "video" | "audio" | "file" | "pdf";

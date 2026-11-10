@@ -119,9 +119,22 @@
 }
 
 .knowledge-tree-item.is-active {
-  background: var(--accent-soft);
-  color: var(--accent);
+  background: var(--pressed);
+  color: var(--text);
   font-weight: 500;
+}
+
+/* 页面/数据库的小图标:emoji 或线性图标,统一占位和基线。 */
+.knowledge-glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.25em;
+  vertical-align: -0.12em;
+}
+
+.knowledge-glyph.is-default {
+  color: var(--text-3);
 }
 
 .knowledge-tree-title {
@@ -191,9 +204,15 @@
   pointer-events: none;
 }
 
-.knowledge-save-state[data-state="error"] { color: var(--danger, #d44c47); }
+.knowledge-save-state[data-state="error"] { color: var(--danger); }
 
+/* 正文版心:居中约 720px,宽窗口下一行不会过长;页头里可切全宽。 */
 .knowledge-page {
+  max-width: var(--knowledge-measure, 720px);
+  margin: 0 auto;
+}
+
+.knowledge-main[data-wide="true"] .knowledge-page {
   max-width: none;
 }
 
@@ -210,33 +229,31 @@
   margin-bottom: 4px;
 }
 
+/* 页头属性区:无边框列表,标签在左(次要色),值在右。 */
 .knowledge-properties {
-  border: 1px solid var(--border);
-  border-radius: 8px;
   margin: 0 0 20px;
-  overflow: hidden;
 }
 
 .knowledge-property {
   display: grid;
   grid-template-columns: 160px 1fr;
-  border-bottom: 1px solid var(--border);
+  align-items: baseline;
   font-size: 13px;
+  border-radius: 6px;
 }
 
-.knowledge-property:last-child {
-  border-bottom: none;
+.knowledge-property:hover {
+  background: var(--hover);
 }
 
 .knowledge-property dt {
-  color: var(--text-2);
-  padding: 7px 10px;
-  background: var(--surface-2);
+  color: var(--text-3);
+  padding: 5px 8px;
 }
 
 .knowledge-property dd {
   margin: 0;
-  padding: 7px 10px;
+  padding: 5px 8px;
 }
 
 /* —— 块渲染 —— */
@@ -603,25 +620,25 @@
 /* 文字颜色(Notion palette) */
 
 .nb-color-gray { color: var(--text-3); }
-.nb-color-brown { color: #a2593f; }
-.nb-color-orange { color: #d9730d; }
-.nb-color-yellow { color: #cb912f; }
-.nb-color-green { color: #448361; }
-.nb-color-blue { color: #337ea9; }
-.nb-color-purple { color: #9065b0; }
-.nb-color-pink { color: #c14c8a; }
-.nb-color-red { color: #d44c47; }
+.nb-color-brown { color: var(--nb-c-brown); }
+.nb-color-orange { color: var(--nb-c-orange); }
+.nb-color-yellow { color: var(--nb-c-yellow); }
+.nb-color-green { color: var(--nb-c-green); }
+.nb-color-blue { color: var(--nb-c-blue); }
+.nb-color-purple { color: var(--nb-c-purple); }
+.nb-color-pink { color: var(--nb-c-pink); }
+.nb-color-red { color: var(--nb-c-red); }
 
 .nb-bg { border-radius: 4px; padding: 0 2px; }
-.nb-bg-gray { background: rgba(127, 127, 135, 0.16); }
-.nb-bg-brown { background: rgba(162, 89, 63, 0.18); }
-.nb-bg-orange { background: rgba(217, 115, 13, 0.18); }
-.nb-bg-yellow { background: rgba(203, 145, 47, 0.2); }
-.nb-bg-green { background: rgba(68, 131, 97, 0.18); }
-.nb-bg-blue { background: rgba(51, 126, 169, 0.18); }
-.nb-bg-purple { background: rgba(144, 101, 176, 0.18); }
-.nb-bg-pink { background: rgba(193, 76, 138, 0.18); }
-.nb-bg-red { background: rgba(212, 76, 71, 0.18); }
+.nb-bg-gray { background: var(--nb-bg-gray); }
+.nb-bg-brown { background: var(--nb-bg-brown); }
+.nb-bg-orange { background: var(--nb-bg-orange); }
+.nb-bg-yellow { background: var(--nb-bg-yellow); }
+.nb-bg-green { background: var(--nb-bg-green); }
+.nb-bg-blue { background: var(--nb-bg-blue); }
+.nb-bg-purple { background: var(--nb-bg-purple); }
+.nb-bg-pink { background: var(--nb-bg-pink); }
+.nb-bg-red { background: var(--nb-bg-red); }
 
 /* 数据库视图 */
 
@@ -788,24 +805,29 @@
 .nb-handle,
 .nb-add-below {
   position: absolute;
-  top: 2px;
+  top: 3px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 22px;
   border: none;
   background: none;
   color: var(--text-3);
   cursor: pointer;
   opacity: 0;
   border-radius: 5px;
-  padding: 1px 4px;
-  font-size: 12px;
-  line-height: 1.4;
+  padding: 0;
+  transition: opacity var(--ease-color), background var(--ease-color), color var(--ease-color);
 }
 
+/* Notion 同款:＋ 和 ⋮⋮ 都在块左侧,＋ 在外、⋮⋮ 贴着正文。 */
 .nb-handle {
-  left: -28px;
+  left: -26px;
 }
 
 .nb-add-below {
-  right: -28px;
+  left: -48px;
 }
 
 .nb-row:hover .nb-handle,
@@ -1199,13 +1221,13 @@
 
 .nb-floatbar-hint {
   align-self: center;
-  color: #d93025;
+  color: var(--danger-text);
   font-size: 12px;
   white-space: nowrap;
 }
 
 .nb-floatbar-panel input[aria-invalid] {
-  border-color: #d93025;
+  border-color: var(--danger-text);
 }
 
 .nb-floatbar-panel input {
@@ -1352,32 +1374,6 @@
 
 /* —— 代码语法高亮(Prism token 映射到主题变量,配色贴近 Notion) —— */
 
-[data-theme="dark"] {
-  --hl-keyword: #ff7369;
-  --hl-function: #ff7369;
-  --hl-builtin: #ff7369;
-  --hl-string: #ffd382;
-  --hl-comment: #7f848e;
-  --hl-number: #d19a66;
-  --hl-type: #e5c07b;
-  --hl-variable: #e06c75;
-  --hl-attr: #7cc1e7;
-  --hl-punct: #abb2bf;
-}
-
-[data-theme="light"] {
-  --hl-keyword: #cf222e;
-  --hl-function: #cf222e;
-  --hl-builtin: #cf222e;
-  --hl-string: #0a3069;
-  --hl-comment: #6e7781;
-  --hl-number: #0550ae;
-  --hl-type: #953800;
-  --hl-variable: #953800;
-  --hl-attr: #0550ae;
-  --hl-punct: #24292f;
-}
-
 .nb-code .token.keyword,
 .nb-code .token.selector,
 .nb-code .token.important { color: var(--hl-keyword); }
@@ -1450,7 +1446,7 @@
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 12px 32px rgb(0 0 0 / 20%);
+  box-shadow: var(--shadow-pop);
 }
 
 .nb-slash-menu.is-flip {
@@ -1556,9 +1552,9 @@
   max-width: 240px;
   padding: 4px 10px;
   border-radius: 8px;
-  background: var(--surface, #fff);
-  border: 1px solid var(--border, rgba(0, 0, 0, 0.12));
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-float);
   font-size: 13px;
   white-space: nowrap;
   overflow: hidden;
@@ -1720,7 +1716,7 @@ button.nb-callout-icon:hover { background: var(--hover); }
   color: var(--text);
   width: 100%;
 }
-.nb-source-error { color: var(--danger, #d44c47); font-size: 12px; width: 100%; margin-top: 4px; }
+.nb-source-error { color: var(--danger); font-size: 12px; width: 100%; margin-top: 4px; }
 .nb-source-status { color: var(--text-2); font-size: 13px; padding: 10px; }
 .nb-page-picker { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow: auto; }
 
@@ -1758,7 +1754,7 @@ button.nb-callout-icon:hover { background: var(--hover); }
   outline: none;
 }
 .nb-video,
-.nb-video-embed { width: 100%; aspect-ratio: 16 / 9; border: 0; border-radius: 6px; background: #000; }
+.nb-video-embed { width: 100%; aspect-ratio: 16 / 9; border: 0; border-radius: 6px; background: var(--media-bg); }
 .nb-audio { width: 100%; }
 .nb-pdf iframe { width: 100%; height: 520px; border: 1px solid var(--border); border-radius: 6px; }
 .nb-linkcard { position: relative; margin: 6px 0; }
@@ -1848,18 +1844,26 @@ button.nb-page-link { border: none; background: none; cursor: pointer; text-deco
   transition: opacity 0.12s;
 }
 .knowledge-cover:hover .knowledge-cover-actions { opacity: 1; }
+/* 封面和页头的悬停操作:统一成半透明小按钮。 */
 .knowledge-cover-actions button,
 .knowledge-page-meta-actions button {
   border: none;
-  background: var(--surface);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
   color: var(--text-2);
   border-radius: 6px;
   padding: 3px 8px;
   font-size: 12px;
   cursor: pointer;
+  backdrop-filter: blur(6px);
+  transition: background var(--ease-color), color var(--ease-color);
+}
+.knowledge-cover-actions button:hover,
+.knowledge-page-meta-actions button:hover {
+  background: var(--surface);
+  color: var(--text);
 }
 .knowledge-page-meta-actions { display: flex; gap: 4px; min-height: 24px; opacity: 0; transition: opacity 0.12s; }
-.knowledge-page-meta-actions button { background: none; }
+.knowledge-page-meta-actions button { background: none; backdrop-filter: none; }
 .knowledge-page-meta-actions button:hover { background: var(--hover); }
 .knowledge-page-head:hover .knowledge-page-meta-actions { opacity: 1; }
 .knowledge-page-head { position: relative; }
@@ -1894,7 +1898,7 @@ button.knowledge-page-icon:hover { background: var(--hover); }
   border-radius: 4px;
 }
 tr:hover .knowledge-db-delete { opacity: 1; }
-.knowledge-db-delete:hover { background: var(--hover); color: var(--danger, #d44c47); }
+.knowledge-db-delete:hover { background: var(--hover); color: var(--danger); }
 .knowledge-db-add {
   margin-top: 6px;
   border: none;
@@ -1997,7 +2001,7 @@ span.knowledge-db-cell { display: block; min-height: 1.4em; border-radius: 4px; 
 .knowledge-db-lane { flex: 0 0 240px; background: var(--surface-2); border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 6px; }
 .knowledge-db-lane-head { display: flex; justify-content: space-between; align-items: center; font-size: 13px; }
 .knowledge-db-lane-count { color: var(--text-3); }
-.knowledge-db-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; cursor: pointer; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04); }
+.knowledge-db-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; cursor: pointer; box-shadow: var(--shadow-card); }
 .knowledge-db-card:hover { background: var(--hover); }
 .knowledge-db-card.is-dragging { opacity: 0.5; }
 .knowledge-db-card-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
@@ -2039,3 +2043,102 @@ body.nb-block-dragging,
 body.nb-block-dragging * { cursor: grabbing !important; user-select: none !important; }
 .nb-handle { touch-action: none; }
 .knowledge-tail-space { min-height: 30vh; cursor: text; }
+
+
+/* —— 动效:浮层淡入 + 4px 位移(约 120ms);折叠/展开箭头旋转 —— */
+
+@keyframes knowledge-pop-in {
+  from {
+    opacity: 0;
+    translate: 0 4px;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+.nb-menu,
+.nb-slash-menu,
+.nb-floatbar,
+.nb-emoji-picker,
+.knowledge-tree-menu,
+.knowledge-cover-panel {
+  animation: knowledge-pop-in 120ms ease-out;
+}
+
+.knowledge-tree-item,
+.knowledge-tree-more,
+.knowledge-new-page,
+.knowledge-switcher-trigger,
+.nb-menu button,
+.nb-toggle-arrow,
+.nb-toggle-empty {
+  transition: background var(--ease-color), color var(--ease-color), opacity var(--ease-color);
+}
+
+/* —— 键盘焦点环(只在键盘操作时出现)—— */
+
+.knowledge button:focus-visible,
+.knowledge a:focus-visible,
+.knowledge summary:focus-visible,
+.nb-menu button:focus-visible,
+.nb-floatbar button:focus-visible,
+.nb-scrim ~ .nb-slash-menu button:focus-visible {
+  outline: 2px solid var(--nb-select-ring);
+  outline-offset: 1px;
+}
+
+/* —— 骨架屏:首次打开页面、读索引时占位 —— */
+
+.knowledge-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: var(--knowledge-measure, 720px);
+  margin: 0 auto;
+  padding-top: 24px;
+}
+
+.knowledge-skeleton span {
+  display: block;
+  height: 14px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 50%, var(--surface-2) 75%);
+  background-size: 200% 100%;
+  animation: knowledge-shimmer var(--dur-shimmer) linear infinite;
+}
+
+.knowledge-skeleton span:first-child {
+  width: 55%;
+  height: 32px;
+  margin-bottom: 8px;
+}
+
+.knowledge-skeleton span:nth-child(3n) { width: 82%; }
+.knowledge-skeleton span:nth-child(4n) { width: 68%; }
+
+@keyframes knowledge-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+/* 减少动效:系统要求时去掉动画和过渡。 */
+@media (prefers-reduced-motion: reduce) {
+  .nb-menu,
+  .nb-slash-menu,
+  .nb-floatbar,
+  .nb-emoji-picker,
+  .knowledge-tree-menu,
+  .knowledge-cover-panel,
+  .knowledge-skeleton span {
+    animation: none;
+  }
+
+  .knowledge *,
+  .nb-menu button,
+  .nb-handle,
+  .nb-add-below {
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -1225,3 +1225,31 @@ export function deleteTableColumn(rows: readonly NotionSegment[][][], col: numbe
 export function isEmptyRow(row: readonly NotionSegment[][]): boolean {
   return row.every((cell) => cell.every((segment) => segment.text.trim() === ""));
 }
+
+/**
+ * 一步文字变化(before → after)之后光标该在哪:落在变化区域的末尾。
+ * 撤销输入 → 回到刚输入处;撤销删除 → 落在恢复出来的文字之后。
+ */
+export function caretAfterTextChange(before: string, after: string): number {
+  const limit = Math.min(before.length, after.length);
+  let prefix = 0;
+  while (prefix < limit && before[prefix] === after[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < limit - prefix && before[before.length - 1 - suffix] === after[after.length - 1 - suffix]) suffix += 1;
+  return after.length - suffix;
+}
+
+/** 两个 JSON 值是否相等:遇到第一处不同就返回,不像比较 JSON.stringify 那样整页序列化。 */
+export function jsonEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((item, index) => jsonEqual(item, b[index]));
+  }
+  const left = a as Record<string, unknown>;
+  const right = b as Record<string, unknown>;
+  const keys = Object.keys(left).filter((key) => left[key] !== undefined);
+  const otherKeys = Object.keys(right).filter((key) => right[key] !== undefined);
+  return keys.length === otherKeys.length && keys.every((key) => jsonEqual(left[key], right[key]));
+}

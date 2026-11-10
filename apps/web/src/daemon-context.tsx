@@ -75,6 +75,8 @@ interface DaemonValue extends DaemonSnapshot {
   error: string | null;
   streamError: string | null;
   detailRevision: number;
+  /** daemon 每完成一次有变化的 Notion 同步就加一;知识库页据此重读当前页和目录。 */
+  notionRevision: number;
   timeZone: string;
   t: (key: MessageKey, vars?: Record<string, string | number>) => string;
   reload: (scope?: "today" | "topics" | "status" | "all") => Promise<boolean>;
@@ -131,6 +133,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [detailRevision, setDetailRevision] = useState(0);
+  const [notionRevision, setNotionRevision] = useState(0);
   const alive = useRef(true);
 
   const setLanguage = useCallback((next: Language) => {
@@ -221,8 +224,11 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
         try {
           await client.events((event) => {
             if (event.kind === "ready" || event.kind === "portrait") return;
-            // 知识库页自己管理刷新;这里只处理会话域的变更。
-            if (event.kind === "notion") return;
+            // 知识库页自己管理刷新(见 notionRevision);这里只处理会话域的变更。
+            if (event.kind === "notion") {
+              setNotionRevision((value) => value + 1);
+              return;
+            }
             void reload(event.kind);
           }, { signal: controller.signal });
           setStreamError(null);
@@ -315,6 +321,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
       error,
       streamError,
       detailRevision,
+      notionRevision,
       timeZone,
       t,
       reload,
@@ -334,6 +341,7 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
       error,
       streamError,
       detailRevision,
+      notionRevision,
       timeZone,
       t,
       reload,

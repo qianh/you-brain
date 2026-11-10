@@ -59,6 +59,9 @@ export const ICON_NAMES = [
   "eye-off",
   "play",
   "terminal",
+  "grip",
+  "file",
+  "table",
 ] as const;
 
 export type CanonicalIcon = (typeof ICON_NAMES)[number];
@@ -130,6 +133,9 @@ const MARKUP: Record<CanonicalIcon, string> = {
   eye: `<path d="M1.8 8S4 4.4 8 4.4 14.2 8 14.2 8 12 11.6 8 11.6 1.8 8 1.8 8z"/><circle cx="8" cy="8" r="1.6"/>`,
   "eye-off": `<path d="M2.4 3.2 13.2 13"/><path d="M6.4 5.1A8 8 0 0 1 8 4.6c4 0 6.2 3.4 6.2 3.4a11 11 0 0 1-2.1 2.4"/><path d="M4.2 6.2C3 7.1 1.8 8 1.8 8S4 11.6 8 11.6a6 6 0 0 0 1.6-.2"/>`,
   play: `<path d="M5.2 3.6v8.8L12.6 8z"/>`,
+  grip: `<path d="M6 3.6h.01M10 3.6h.01M6 8h.01M10 8h.01M6 12.4h.01M10 12.4h.01" stroke-width="2.2"/>`,
+  file: `<path d="M4 2.4h5.2L12.4 5.6V13.6H4z"/><path d="M9.2 2.4v3.2h3.2"/>`,
+  table: `<rect x="2.4" y="3" width="11.2" height="10" rx="1.4"/><path d="M2.4 6.6h11.2M6.2 6.6V13"/>`,
   terminal: `<rect x="2.2" y="3" width="11.6" height="10" rx="1.4"/><path d="m4.6 6.2 2.2 1.8-2.2 1.8M8.4 10.2h3"/>`,
 };
 

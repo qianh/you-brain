@@ -63,6 +63,37 @@
   --swatch-7-ink: #15803d;
   --swatch-8: #52525b;
   --swatch-8-ink: #3f3f46;
+  /* 知识库:Notion 的 9 种文字色/背景色、代码高亮、浮层阴影。 */
+  --nb-c-brown: #a2593f;
+  --nb-c-orange: #d9730d;
+  --nb-c-yellow: #cb912f;
+  --nb-c-green: #448361;
+  --nb-c-blue: #337ea9;
+  --nb-c-purple: #9065b0;
+  --nb-c-pink: #c14c8a;
+  --nb-c-red: #d44c47;
+  --nb-bg-gray: rgba(127, 127, 135, 0.16);
+  --nb-bg-brown: rgba(162, 89, 63, 0.18);
+  --nb-bg-orange: rgba(217, 115, 13, 0.18);
+  --nb-bg-yellow: rgba(203, 145, 47, 0.2);
+  --nb-bg-green: rgba(68, 131, 97, 0.18);
+  --nb-bg-blue: rgba(51, 126, 169, 0.18);
+  --nb-bg-purple: rgba(144, 101, 176, 0.18);
+  --nb-bg-pink: rgba(193, 76, 138, 0.18);
+  --nb-bg-red: rgba(212, 76, 71, 0.18);
+  --hl-keyword: #cf222e;
+  --hl-function: #cf222e;
+  --hl-builtin: #cf222e;
+  --hl-string: #0a3069;
+  --hl-comment: #6e7781;
+  --hl-number: #0550ae;
+  --hl-type: #953800;
+  --hl-variable: #953800;
+  --hl-attr: #0550ae;
+  --hl-punct: #24292f;
+  --shadow-float: 0 6px 18px rgba(0, 0, 0, 0.16);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --media-bg: #000000;
 }
 
 [data-theme="dark"] {
@@ -126,6 +157,36 @@
   --swatch-7-ink: #4ade80;
   --swatch-8: #e4e4e7;
   --swatch-8-ink: #e4e4e7;
+  --nb-c-brown: #c58a76;
+  --nb-c-orange: #e0914a;
+  --nb-c-yellow: #d9a53d;
+  --nb-c-green: #5aa57b;
+  --nb-c-blue: #5b9ccf;
+  --nb-c-purple: #b08fd0;
+  --nb-c-pink: #d46fa4;
+  --nb-c-red: #e8645e;
+  --nb-bg-gray: rgba(160, 160, 170, 0.24);
+  --nb-bg-brown: rgba(197, 138, 118, 0.26);
+  --nb-bg-orange: rgba(224, 145, 74, 0.26);
+  --nb-bg-yellow: rgba(217, 165, 61, 0.26);
+  --nb-bg-green: rgba(90, 165, 123, 0.26);
+  --nb-bg-blue: rgba(91, 156, 207, 0.26);
+  --nb-bg-purple: rgba(176, 143, 208, 0.26);
+  --nb-bg-pink: rgba(212, 111, 164, 0.26);
+  --nb-bg-red: rgba(232, 100, 94, 0.26);
+  --hl-keyword: #ff7369;
+  --hl-function: #ff7369;
+  --hl-builtin: #ff7369;
+  --hl-string: #ffd382;
+  --hl-comment: #7f848e;
+  --hl-number: #d19a66;
+  --hl-type: #e5c07b;
+  --hl-variable: #e06c75;
+  --hl-attr: #7cc1e7;
+  --hl-punct: #abb2bf;
+  --shadow-float: 0 6px 18px rgba(0, 0, 0, 0.4);
+  --shadow-card: 0 0 0 transparent;
+  --media-bg: #000000;
 }
 
 :root {
