@@ -171,6 +171,7 @@ import {
 } from "../search/index.js";
 import { withSessionCounts } from "./topic-session-count.js";
 import { SqliteStore } from "../store/sqlite-store.js";
+import { zonedDayRange } from "../store/time.js";
 import { EventLog } from "../sync/event-log.js";
 import { readOutboxQueue, writeOutboxQueue } from "../sync/queue.js";
 import { ProtocolSync } from "../sync/service.js";
@@ -201,6 +202,7 @@ import {
   captureWorkerBinary,
   collectCaptureHits,
   sessionHash,
+  waitCaptureChild,
   type CaptureCursorInput,
   type CaptureHit,
   type CaptureMeta,
@@ -767,6 +769,9 @@ export class YouBrainDaemon {
   #resolveClosed: () => void = () => undefined;
   #onSignal: (() => void) | null = null;
   #lastFullScan: number | null = null;
+  /** Earliest time a scan may start after a worker failure. */
+  #scanNotBefore = 0;
+  #scanFailures = 0;
   #lastFlush: number | null = null;
   #lastHeartbeat: number | null = null;
   #lastPull: number | null = null;
@@ -1131,7 +1136,7 @@ export class YouBrainDaemon {
     }
   }
 
-  scan(extra?: { includeSubagents?: boolean }): Promise<void> {
+  scan(extra?: { includeSubagents?: boolean; force?: boolean }): Promise<void> {
     if (this.#stopped) return Promise.resolve();
     return this.#run(async () => {
       await this.#scanBody(extra);
@@ -1317,9 +1322,17 @@ export class YouBrainDaemon {
   async #runDue(): Promise<void> {
     if (this.#stopped) return;
     const now = this.#clock.nowMs();
-    if (intervalDue(this.#lastFullScan, now, INTERVALS.fullScanMs)) {
-      await this.#scanBody();
-      this.#lastFullScan = this.#clock.nowMs();
+    if (
+      intervalDue(this.#lastFullScan, now, INTERVALS.fullScanMs) &&
+      now >= this.#scanNotBefore
+    ) {
+      try {
+        await this.#scanBody();
+        this.#lastFullScan = this.#clock.nowMs();
+      } catch {
+        // A failed scan must not skip sync. Backoff is recorded in #scanBody.
+        if (this.#stopped) return;
+      }
     }
     this.#startUploadLoop();
     await this.#withSyncWindow(async () => {
@@ -1846,11 +1859,12 @@ export class YouBrainDaemon {
     await this.#refine(key, live, fileId);
   }
 
-  async #scanBody(extra?: { includeSubagents?: boolean }): Promise<void> {
+  async #scanBody(extra?: { includeSubagents?: boolean; force?: boolean }): Promise<void> {
     if (this.#stopped || this.#abort.signal.aborted) {
       this.#scannedOnce = true;
       return;
     }
+    if (!extra?.force && this.#clock.nowMs() < this.#scanNotBefore) return;
     const roots = this.#roots();
     const sources = SESSION_SOURCES.filter((id) => roots[id].length > 0);
     if (sources.length === 0) {
@@ -1895,6 +1909,7 @@ export class YouBrainDaemon {
         this.#scannedOnce = true;
         return;
       }
+      this.#noteScanFailure();
       throw error;
     }
     if (this.#stopped || this.#abort.signal.aborted) {
@@ -1960,7 +1975,20 @@ export class YouBrainDaemon {
     }
     this.#lastScanParsed = hits.filter((hit) => !hit.unchanged).length;
     this.#rememberCaptureFiles();
+    this.#scanFailures = 0;
+    this.#scanNotBefore = 0;
     this.#scannedOnce = true;
+  }
+
+  /** A wedged scan retries later. The wait grows so the tick can still sync. */
+  #noteScanFailure(): void {
+    this.#scanFailures += 1;
+    const exponent = Math.min(this.#scanFailures - 1, 6);
+    const wait = Math.min(
+      INTERVALS.captureRetryMinMs * 2 ** exponent,
+      INTERVALS.captureRetryMaxMs,
+    );
+    this.#scanNotBefore = this.#clock.nowMs() + wait;
   }
 
   /**
@@ -2030,14 +2058,13 @@ export class YouBrainDaemon {
         stderr: "pipe",
         signal: this.#abort.signal,
       });
-      const stderrStream = child.stderr;
-      const stderr =
-        stderrStream && typeof stderrStream !== "number"
-          ? await new Response(stderrStream).text()
-          : "";
-      const code = await child.exited;
-      if (code !== 0) {
-        throw new Error(stderr.trim() || `capture worker exited ${code}`);
+      const waited = await waitCaptureChild(child, {
+        timeoutMs: INTERVALS.captureWorkerMs,
+        stallMs: INTERVALS.captureStallMs,
+        pollMs: INTERVALS.captureStallPollMs,
+      });
+      if (waited.code !== 0) {
+        throw new Error(waited.stderr.trim() || `capture worker exited ${waited.code}`);
       }
       return JSON.parse(await Bun.file(resultPath).text()) as CaptureHit[];
     } finally {
@@ -3545,11 +3572,12 @@ export class YouBrainDaemon {
 
   async #uploadNow(input: UploadActionInput): Promise<UploadActionResult> {
     if (input.backfill && this.#store) this.#store.setCursor(BACKFILL_CURSOR, "pending");
-    await this.scan(
-      input.includeSubagents === undefined
-        ? undefined
-        : { includeSubagents: input.includeSubagents },
-    );
+    await this.scan({
+      force: true,
+      ...(input.includeSubagents === undefined
+        ? {}
+        : { includeSubagents: input.includeSubagents }),
+    });
     if (input.dryRun) {
       const scanned = [...this.#live.values()].filter((live) =>
         input.sources ? input.sources.includes(live.source) : true,
@@ -3884,6 +3912,17 @@ export class YouBrainDaemon {
       fileId,
       msgCount: live.turnCount,
     });
+    // The Today page reads this row. Status events do not reload it, so an open
+    // page stays on the empty snapshot until something publishes "today".
+    this.#publishTodaySession(live.updatedAt);
+  }
+
+  #publishTodaySession(updatedAt: string): void {
+    const ms = Date.parse(updatedAt);
+    if (!Number.isFinite(ms)) return;
+    const { startMs, endMs } = zonedDayRange(this.#clock.now(), this.#zone.timeZone);
+    if (ms < startMs || ms >= endMs) return;
+    this.changes.publish("today", this.#clock.now().toISOString());
   }
 
   #renderUpload(live: LiveSession, session: NormalizedSession) {
@@ -4048,7 +4087,7 @@ export class YouBrainDaemon {
     if (this.#watchTimer) clearTimeout(this.#watchTimer);
     this.#watchTimer = setTimeout(() => {
       this.#watchTimer = null;
-      void this.scan();
+      void this.scan().catch(() => undefined);
     }, INTERVALS.watchDebounceMs);
   }
 

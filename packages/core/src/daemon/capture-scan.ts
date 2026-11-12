@@ -195,6 +195,166 @@ export async function collectCaptureHits(
   return hits;
 }
 
+export class CaptureWorkerTimeoutError extends Error {
+  readonly reason: "stall" | "timeout";
+
+  constructor(reason: "stall" | "timeout") {
+    super(
+      reason === "stall"
+        ? "采集扫描没有进展，已结束卡住的扫描进程"
+        : "采集扫描超时，已结束扫描进程",
+    );
+    this.name = "CaptureWorkerTimeoutError";
+    this.reason = reason;
+  }
+}
+
+export interface CaptureChild {
+  readonly pid: number;
+  readonly exited: Promise<number>;
+  kill(signal?: number | NodeJS.Signals): void;
+  readonly stderr: ReadableStream<Uint8Array> | number | null | undefined;
+}
+
+/** `ps -o time=` formats: `mm:ss.ss`, `hh:mm:ss`, or `d-hh:mm:ss`. */
+export function parsePsTime(text: string): number | null {
+  const value = text.trim();
+  const clock = /^(\d+):(\d+):(\d+(?:\.\d+)?)$/u.exec(value);
+  if (clock) {
+    return Number(clock[1]) * 3600 + Number(clock[2]) * 60 + Number(clock[3]);
+  }
+  const days = /^(\d+)-(\d+):(\d+):(\d+(?:\.\d+)?)$/u.exec(value);
+  if (days) {
+    return (
+      Number(days[1]) * 86400 +
+      Number(days[2]) * 3600 +
+      Number(days[3]) * 60 +
+      Number(days[4])
+    );
+  }
+  const minutes = /^(\d+):(\d+(?:\.\d+)?)$/u.exec(value);
+  if (minutes) return Number(minutes[1]) * 60 + Number(minutes[2]);
+  return null;
+}
+
+export async function processCpuSeconds(pid: number): Promise<number | null> {
+  const proc = Bun.spawn(["ps", "-o", "time=", "-p", String(pid)], {
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const text = await new Response(proc.stdout).text();
+  const code = await proc.exited;
+  if (code !== 0) return null;
+  return parsePsTime(text);
+}
+
+async function readStderr(
+  stderr: CaptureChild["stderr"],
+): Promise<string> {
+  if (stderr === null || stderr === undefined || typeof stderr === "number") return "";
+  const text = await new Response(stderr).text();
+  return text.length > 8_192 ? text.slice(-8_192) : text;
+}
+
+async function stopCaptureChild(child: CaptureChild, graceMs: number): Promise<void> {
+  try {
+    child.kill("SIGTERM");
+  } catch {
+    // Already gone.
+  }
+  const exited = await Promise.race([
+    child.exited.then(() => true, () => true),
+    delay(graceMs).then(() => false),
+  ]);
+  if (exited) return;
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    // Already gone.
+  }
+  await child.exited.catch(() => undefined);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/**
+ * Wait until the capture worker exits. An idle worker never closes its stderr,
+ * and the parent used to wait on that pipe with no deadline, so one wedged scan
+ * froze the daemon. A stall (CPU time not moving) or an absolute deadline kills
+ * the worker and rejects.
+ */
+export async function waitCaptureChild(
+  child: CaptureChild,
+  options: {
+    timeoutMs: number;
+    stallMs: number;
+    pollMs?: number;
+    cpuSeconds?: (pid: number) => Promise<number | null>;
+    killGraceMs?: number;
+  },
+): Promise<{ code: number; stderr: string }> {
+  const stderrPromise = readStderr(child.stderr);
+  const pollMs = options.pollMs ?? 15_000;
+  const cpuSeconds = options.cpuSeconds ?? processCpuSeconds;
+  let settled = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let poll: ReturnType<typeof setInterval> | undefined;
+  let lastCpu: number | null = null;
+  let lastMove = Date.now();
+
+  const stop = (): void => {
+    if (timer !== undefined) clearTimeout(timer);
+    if (poll !== undefined) clearInterval(poll);
+    timer = undefined;
+    poll = undefined;
+  };
+
+  const outcome = new Promise<"exit" | "stall" | "timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), options.timeoutMs);
+    if (Number.isFinite(options.stallMs)) {
+      poll = setInterval(() => {
+        void cpuSeconds(child.pid)
+          .then((cpu) => {
+            if (settled || cpu === null) return;
+            if (lastCpu === null || cpu > lastCpu + 0.01) {
+              lastCpu = cpu;
+              lastMove = Date.now();
+              return;
+            }
+            if (Date.now() - lastMove >= options.stallMs) resolve("stall");
+          })
+          .catch(() => undefined);
+      }, pollMs);
+    }
+    void child.exited.then(
+      () => resolve("exit"),
+      () => resolve("exit"),
+    );
+  });
+
+  let kind: "exit" | "stall" | "timeout";
+  try {
+    kind = await outcome;
+  } finally {
+    settled = true;
+    stop();
+  }
+
+  if (kind !== "exit") {
+    await stopCaptureChild(child, options.killGraceMs ?? 1_000);
+    await stderrPromise.catch(() => "");
+    throw new CaptureWorkerTimeoutError(kind);
+  }
+  const code = await child.exited;
+  const stderr = await stderrPromise.catch(() => "");
+  return { code, stderr };
+}
+
 export async function runCaptureWorker(): Promise<void> {
   const requestPath = process.env.YOU_BRAIN_CAPTURE_REQUEST;
   const resultPath = process.env.YOU_BRAIN_CAPTURE_RESULT;

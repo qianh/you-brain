@@ -233,7 +233,10 @@ export async function readInboxSession(
         candidate.path.startsWith("inbox/") &&
         candidate.mimeType === "text/markdown" &&
         candidate.appProperties.source === input.source &&
-        candidate.appProperties.conversationId === input.conversationId,
+        // A conversation id longer than Drive's property limit is left out of
+        // appProperties. brainhubKey already identifies the session.
+        (candidate.appProperties.conversationId === undefined ||
+          candidate.appProperties.conversationId === input.conversationId),
     )
     .sort(
       (left, right) =>

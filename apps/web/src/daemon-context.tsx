@@ -306,6 +306,22 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
     };
   }, [reload, timeZone]);
 
+  // 上传写入会话表后会推 today。这里再兜一层：待上传还在时自己拉今日列表，
+  // 窗口一直停在前台、收不到焦点事件时也不会停在打开时的空快照。
+  const uploadQueued = (snapshot.status?.upload?.pending ?? 0) > 0;
+  useEffect(() => {
+    if (!uploadQueued) return;
+    const pull = (): void => {
+      void reload("today");
+    };
+    pull();
+    const timer = setInterval(pull, 4_000);
+    return () => {
+      clearInterval(timer);
+      pull();
+    };
+  }, [uploadQueued, reload]);
+
   const t = useCallback(
     (key: MessageKey, vars?: Record<string, string | number>) => translate(language, key, vars),
     [language],

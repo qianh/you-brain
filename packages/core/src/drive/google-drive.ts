@@ -32,6 +32,47 @@ const DEFAULT_REQUEST_DEADLINE_MS = 120_000;
 const fileFields =
   "id,name,mimeType,parents,size,createdTime,modifiedTime,md5Checksum,appProperties,version,trashed";
 
+/** Drive rejects the upload when one property's key and value together exceed this. */
+const DRIVE_APP_PROPERTY_BYTES = 124;
+
+/**
+ * Drops properties Drive would reject. The markdown still holds the full
+ * conversation id; `brainhubKey` is what lookups use.
+ */
+export function fitDriveAppProperties(properties: Record<string, string>): Record<string, string> {
+  const fitted: Record<string, string> = {};
+  for (const [key, value] of Object.entries(properties)) {
+    const bytes = Buffer.byteLength(key, "utf8") + Buffer.byteLength(value, "utf8");
+    if (bytes <= DRIVE_APP_PROPERTY_BYTES) fitted[key] = value;
+  }
+  return fitted;
+}
+
+/** Google's JSON error, reduced to reason and message. The raw body is dropped. */
+export function describeDriveUploadFailure(status: number, body: string): string {
+  const base = `Google Drive upload failed: ${status}`;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return base;
+  }
+  if (typeof parsed !== "object" || parsed === null || !("error" in parsed)) return base;
+  const error = (parsed as { error?: unknown }).error;
+  if (typeof error !== "object" || error === null) return base;
+  const record = error as { message?: unknown; errors?: unknown };
+  const first = Array.isArray(record.errors) ? record.errors[0] : undefined;
+  const reason =
+    typeof first === "object" && first !== null && "reason" in first
+      ? (first as { reason?: unknown }).reason
+      : undefined;
+  const why = typeof reason === "string" ? reason.trim() : "";
+  const message = typeof record.message === "string" ? record.message.trim() : "";
+  const detail = [why, message].filter((part) => part.length > 0).join(": ");
+  if (detail.length === 0) return base;
+  return `${base} (${detail.slice(0, 180)})`;
+}
+
 export class DriveRootConflictError extends YouBrainError {
   constructor(readonly candidates: string[]) {
     super(
@@ -772,10 +813,8 @@ export class GoogleDrive implements DrivePort {
     }
     if (response.status === 412) throw new ConflictError();
     if (!response.ok) {
-      throw new YouBrainError(
-        "UPLOAD_FAILED",
-        `Google Drive upload failed: ${response.status}`,
-      );
+      const body = await response.text().catch(() => "");
+      throw new YouBrainError("UPLOAD_FAILED", describeDriveUploadFailure(response.status, body));
     }
     const file = (await response.json()) as drive_v3.Schema$File;
     return { file, etag: response.headers.get("etag") ?? String(file.version ?? "") };
@@ -793,7 +832,7 @@ export class GoogleDrive implements DrivePort {
     const metadata = {
       name: posix.basename(path),
       parents: [parent],
-      ...(input.appProperties ? { appProperties: input.appProperties } : {}),
+      ...(input.appProperties ? { appProperties: fitDriveAppProperties(input.appProperties) } : {}),
     };
     const bytes = asBuffer(input.bytes);
     const uploaded = await this.#uploadBytes({
@@ -832,7 +871,9 @@ export class GoogleDrive implements DrivePort {
     }
     const mimeType =
       options?.mimeType ?? current.data.mimeType ?? "application/octet-stream";
-    const metadata = options?.appProperties ? { appProperties: options.appProperties } : {};
+    const metadata = options?.appProperties
+      ? { appProperties: fitDriveAppProperties(options.appProperties) }
+      : {};
     const uploaded = await this.#uploadBytes({
       method: "PATCH",
       fileId,

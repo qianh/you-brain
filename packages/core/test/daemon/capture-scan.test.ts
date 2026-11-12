@@ -5,9 +5,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 
 import {
+  CaptureWorkerTimeoutError,
   captureFileStamp,
   captureGeneration,
   collectCaptureHits,
+  parsePsTime,
+  waitCaptureChild,
   type CaptureScanRequest,
 } from "../../src/daemon/capture-scan.js";
 
@@ -15,6 +18,79 @@ const roots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+describe("capture worker deadline", () => {
+  it("parses ps cpu time", () => {
+    expect(parsePsTime("0:14.97")).toBeCloseTo(14.97);
+    expect(parsePsTime("  1:02:03 ")).toBe(3723);
+    expect(parsePsTime("2-01:00:00")).toBe(2 * 86400 + 3600);
+    expect(parsePsTime("nope")).toBeNull();
+  });
+
+  it("returns a worker that exits", async () => {
+    const child = Bun.spawn(["/bin/sh", "-c", "echo worker-ok >&2; exit 0"], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const result = await waitCaptureChild(child, {
+      timeoutMs: 5_000,
+      stallMs: 60_000,
+      cpuSeconds: async () => null,
+    });
+    expect(result.code).toBe(0);
+    expect(result.stderr).toContain("worker-ok");
+  });
+
+  it("kills a worker that never exits", async () => {
+    const child = Bun.spawn(["sleep", "30"], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const started = Date.now();
+    let caught: unknown;
+    try {
+      await waitCaptureChild(child, {
+        timeoutMs: 200,
+        stallMs: 60_000,
+        cpuSeconds: async () => null,
+        killGraceMs: 200,
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(CaptureWorkerTimeoutError);
+    expect(caught).toMatchObject({ reason: "timeout" });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(await child.exited).not.toBe(0);
+  });
+
+  it("kills a worker whose cpu time stops moving", async () => {
+    const child = Bun.spawn(["sleep", "30"], {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "pipe",
+    });
+    const started = Date.now();
+    let caught: unknown;
+    try {
+      await waitCaptureChild(child, {
+        timeoutMs: 30_000,
+        stallMs: 80,
+        pollMs: 20,
+        cpuSeconds: async () => 1,
+        killGraceMs: 200,
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(CaptureWorkerTimeoutError);
+    expect(caught).toMatchObject({ reason: "stall" });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(await child.exited).not.toBe(0);
+  });
 });
 
 describe("capture scan metadata", () => {

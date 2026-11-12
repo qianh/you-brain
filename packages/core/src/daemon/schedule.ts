@@ -11,6 +11,23 @@ export const INTERVALS = {
   pullMs: 60_000,
   fastPullMs: 5_000,
   fullScanMs: 10 * 60_000,
+  /**
+   * A capture worker that is still running after this long is killed. A healthy
+   * scan finishes well inside it; the cap only stops a scan from holding the
+   * daemon forever.
+   */
+  captureWorkerMs: 30 * 60_000,
+  /**
+   * Kill the worker when its CPU time stops moving for this long. The hang we
+   * have seen is an idle event loop, not a slow parse, so this fires first.
+   */
+  captureStallMs: 3 * 60_000,
+  /** How often the parent samples the worker's CPU time. */
+  captureStallPollMs: 15_000,
+  /** First wait after a failed scan. Doubles until {@link captureRetryMaxMs}. */
+  captureRetryMinMs: 60_000,
+  /** Longest wait before the next scan after repeated failures. */
+  captureRetryMaxMs: 10 * 60_000,
   reminderMs: 10 * 60_000,
   consolidationMs: 10 * 60_000,
   portraitMs: 24 * 60 * 60_000,
