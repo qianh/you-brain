@@ -124,9 +124,9 @@ await cachedTree({
       env: { PATH: `${nodeBin}:${process.env.PATH ?? ""}` },
     });
 
-    // u-brain-login / u-brain-brand 是 file: 依赖，npm 装成指向 ../plugins 的符号链接；打进 .app 时换成真实目录，
-    // 不依赖资源复制是否保留链接。
-    for (const plugin of ["u-brain-login", "u-brain-brand"]) {
+    // u-brain-login / u-brain-brand / u-brain-reference 是 file: 依赖，npm 装成指向 ../plugins 的符号链接；
+    // 打进 .app 时换成真实目录，不依赖资源复制是否保留链接。
+    for (const plugin of ["u-brain-login", "u-brain-brand", "u-brain-reference"]) {
       const link = join(modules, plugin);
       await rm(link, { recursive: true, force: true });
       await cp(join(sidecar, "plugins", plugin), link, { recursive: true });

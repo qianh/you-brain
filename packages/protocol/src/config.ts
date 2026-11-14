@@ -25,6 +25,7 @@ export const LLM_PROVIDERS = [
   "openai",
   "claude",
   "ollama",
+  "magpie",
   "custom",
   "grok-cli",
   "claude-cli",

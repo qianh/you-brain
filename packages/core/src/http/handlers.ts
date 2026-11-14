@@ -66,6 +66,9 @@ import {
   DeckBridgeRepliesBodySchema,
   DeckBridgeSendBodySchema,
   DeckDshLoginBodySchema,
+  DeckTty7DeleteBodySchema,
+  DeckTty7SendBodySchema,
+  DeckTty7StartBodySchema,
   type ActionResponse,
   type ApiErrorBody,
   type DaemonChangeKind,
@@ -88,6 +91,9 @@ const TEXT_LIMIT = 1_000;
 const SECTION_MESSAGE = "「哪一部分」需要 1 到 80 个字";
 const TEXT_MESSAGE = "「应该怎么改」需要 1 到 1000 个字";
 const VARIANT_MESSAGE = "无效的数字分身变体";
+
+/** 粘贴图片上限：截图一般几十到几百 KB，10MB 足够宽裕。 */
+const PASTE_IMAGE_LIMIT = 10 * 1024 * 1024;
 
 const SEARCH_LIMIT = z.coerce.number().int().min(1).max(50);
 const ZONE = z.enum(["active", "history"]);
@@ -183,6 +189,8 @@ export async function handleApi(
   }
   if (path === "/api/portrait") return method(request, "GET", () => portrait(url, context));
   if (path === "/api/search") return method(request, "GET", () => search(url, context));
+  if (path === "/api/session-content") return method(request, "GET", () => sessionContent(url, context));
+  if (path === "/api/llm-models") return method(request, "GET", () => llmModels(url, context));
   if (path === "/api/devices") return method(request, "GET", () => devices(context));
   if (path === "/api/devices/virtual") {
     return method(request, "POST", () => createVirtualDevice(request, context));
@@ -340,6 +348,46 @@ export async function handleApi(
     return method(request, "POST", async () => {
       const body = DeckBridgeRepliesBodySchema.parse(await readJson(request));
       return json(await deck(context).bridgeReplies(body));
+    });
+  }
+  if (path === "/api/deck/tty7/sessions") {
+    return method(request, "GET", async () => json(await deck(context).tty7Sessions()));
+  }
+  if (path === "/api/deck/tty7/delete") {
+    return method(request, "POST", async () => {
+      const body = DeckTty7DeleteBodySchema.parse(await readJson(request));
+      return json(await deck(context).tty7Delete(body.pane));
+    });
+  }
+  if (path === "/api/deck/tty7/screen") {
+    return method(request, "GET", async () => {
+      const pane = z.coerce.number().int().nonnegative().parse(url.searchParams.get("pane") ?? "");
+      const lines = url.searchParams.get("lines");
+      return json(
+        await deck(context).tty7Screen(pane, lines === null ? undefined : z.coerce.number().int().min(1).max(400).parse(lines)),
+      );
+    });
+  }
+  if (path === "/api/deck/tty7/send") {
+    return method(request, "POST", async () => {
+      const body = DeckTty7SendBodySchema.parse(await readJson(request));
+      return json(await deck(context).tty7Send(body));
+    });
+  }
+  if (path === "/api/deck/tty7/start") {
+    return method(request, "POST", async () => {
+      const body = DeckTty7StartBodySchema.parse(await readJson(request));
+      return json(await deck(context).tty7Start(body));
+    });
+  }
+  if (path === "/api/deck/tty7/paste-image") {
+    return method(request, "POST", async () => {
+      const contentType = (request.headers.get("content-type") ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
+      if (contentType === "") throw new HttpError(400, "INVALID_INPUT", "缺少图片类型");
+      const buffer = await request.arrayBuffer();
+      if (buffer.byteLength === 0) throw new HttpError(400, "INVALID_INPUT", "没有图片内容");
+      if (buffer.byteLength > PASTE_IMAGE_LIMIT) throw new HttpError(413, "INVALID_INPUT", "图片超过 10 MB");
+      return json(await deck(context).tty7PasteImage(new Uint8Array(buffer), contentType));
     });
   }
   if (path === "/api/deck/dsh/login") {
@@ -624,6 +672,8 @@ async function search(url: URL, context: ApiContext): Promise<Response> {
   if (from !== null && from !== "") request.from = from;
   const to = url.searchParams.get("to");
   if (to !== null && to !== "") request.to = to;
+  // remote=false：只查本地索引（自动补全这类要快的场景）。
+  if (url.searchParams.get("remote") === "false") request.remote = false;
   const sources = [
     ...url.searchParams.getAll("sources"),
     ...url.searchParams.getAll("source"),
@@ -636,8 +686,44 @@ async function devices(context: ApiContext): Promise<Response> {
   return json({ devices: await context.deps.devices() });
 }
 
+/** 会话原文（指挥台 @ 引用展开用）；Drive 未接或会话不存在如实报错。 */
+async function sessionContent(url: URL, context: ApiContext): Promise<Response> {
+  if (!context.deps.sessionContent) driveUnavailable();
+  const source = url.searchParams.get("source")?.trim() ?? "";
+  const conversationId = url.searchParams.get("conversationId")?.trim() ?? "";
+  const sessionKey = url.searchParams.get("sessionKey")?.trim() ?? "";
+  if (source === "" || (conversationId === "" && sessionKey === "")) {
+    throw new HttpError(400, "INVALID_INPUT", "缺少 source，以及 conversationId 或 sessionKey");
+  }
+  return json(
+    await context.deps.sessionContent({
+      source,
+      ...(conversationId !== "" ? { conversationId } : {}),
+      ...(sessionKey !== "" ? { sessionKey } : {}),
+    }),
+  );
+}
+
+/** 供应商的可用模型（设置页的下拉数据源）；网关不可达时由 deps 抛 503。 */
+async function llmModels(url: URL, context: ApiContext): Promise<Response> {
+  if (!context.deps.llmModels) unavailable("LLM_MODELS_UNAVAILABLE", "该供应商不支持拉取模型列表");
+  const provider = url.searchParams.get("provider")?.trim() ?? "";
+  const baseUrl = url.searchParams.get("baseUrl")?.trim() ?? "";
+  if (provider === "") throw new HttpError(400, "INVALID_INPUT", "缺少 provider");
+  return json(
+    await context.deps.llmModels({
+      provider,
+      ...(baseUrl !== "" ? { baseUrl } : {}),
+    }),
+  );
+}
+
 function driveUnavailable(): never {
   throw new HttpError(503, "DRIVE_UNAVAILABLE", "Drive 未就绪");
+}
+
+function unavailable(code: string, message: string): never {
+  throw new HttpError(503, code, message);
 }
 
 async function createVirtualDevice(request: Request, context: ApiContext): Promise<Response> {

@@ -6,12 +6,14 @@ import { fileURLToPath } from "node:url";
 import type { LlmProvider } from "@you-brain/protocol";
 
 import type { SearchProvider } from "../../auth/search-secrets.js";
+import { LLM_PRESETS } from "../../llm/presets.js";
 import { SEARCH_KEY_ENV, readSearchActive } from "./search-config.js";
 import { bundledDsh, type BundledDsh } from "./bundled.js";
 import { DSH_LOGIN_PROVIDERS, DshLogin, type DshLoginProviderId, type DshLoginView } from "./login.js";
 import { DshWeb, type DshWebState } from "./web.js";
 import { locateNode, type LocatedNode } from "./node.js";
 import { detectDshPlugins, renderDshPatch, type DshPluginStatus } from "./patch.js";
+import { fetchMagpieModels, magpieRoute } from "./magpie.js";
 
 /** 开发布局下 sidecar 在仓库根的 sidecars/dsh-host；打包后用环境变量或配置指定。 */
 export function defaultSidecarDir(): string {
@@ -23,6 +25,8 @@ export interface DshRuntimeOptions {
   homeDir: string;
   env?: NodeJS.ProcessEnv | undefined;
   getApiKey?: ((provider: LlmProvider) => string | null | undefined | Promise<string | null | undefined>) | undefined;
+  /** 设置里的 LLM 选择（provider + 地址）；选了 magpie 时指挥台照它挂网关路由。取的是活值，设置改了下次生成补丁就生效。 */
+  getLlmConfig?: (() => { provider: LlmProvider; baseUrl: string } | Promise<{ provider: LlmProvider; baseUrl: string }>) | undefined;
   /** 第三方搜索服务（Exa）的 Key；有 Key 才给 dsh 挂对应的搜索 MCP。 */
   getSearchKey?: ((provider: SearchProvider) => string | null | undefined | Promise<string | null | undefined>) | undefined;
   sidecarDir?: string | undefined;
@@ -52,6 +56,7 @@ const WEB_KEY_ENV: ReadonlyArray<readonly [LlmProvider, string]> = [
   ["deepseek", "DEEPSEEK_API_KEY"],
   ["claude", "ANTHROPIC_API_KEY"],
   ["openai", "OPENAI_API_KEY"],
+  ["magpie", "MAGPIE_API_KEY"],
 ];
 const STATUS_TTL_MS = 60_000;
 /** 启用的第三方搜索记在 `<数据目录>/deck/dsh/` 下这个文件里。 */
@@ -173,6 +178,12 @@ export class DshRuntime {
           const value = source[name];
           if (value !== undefined && value !== "") env[name] = value;
         }
+        // Node 24 的 fetch 会走 HTTP(S)_PROXY，但只认小写 no_proxy（大写不生效）；
+        // dsh 插件（u-brain-bridge/login/reference）都要 fetch 本机 daemon（127.0.0.1），
+        // 不排除环回的话，这些调用会被本机代理拖到秒级。只排除环回，公网代理行为不变。
+        env["no_proxy"] = [source["no_proxy"], source["NO_PROXY"], "127.0.0.1", "localhost", "::1"]
+          .filter((v) => v !== undefined && v !== "")
+          .join(",");
         // 设置里已有的供应商 Key 交给 dsh 做环境层凭据；订阅登录和其它设置在 dsh 界面里完成。
         for (const [provider, name] of WEB_KEY_ENV) {
           let key = "";
@@ -183,6 +194,12 @@ export class DshRuntime {
           }
           if (key !== "") env[name] = key;
         }
+        // pi-ai 客户端没有凭据就拒绝发请求（No API key for provider），而本机 Magpie 网关
+        // 不校验 Key：设置选了 magpie 但钥匙串里没存时，给个占位值让请求发得出去。
+        const llmConfig = await this.#options.getLlmConfig?.();
+        if (llmConfig?.provider === "magpie" && env["MAGPIE_API_KEY"] === undefined) {
+          env["MAGPIE_API_KEY"] = "local";
+        }
         // 启用的第三方搜索的 Key 只走环境变量，不写进补丁文件。
         const search = await this.#activeSearch();
         if (search !== null) env[SEARCH_KEY_ENV[search.provider]] = search.key;
@@ -192,6 +209,12 @@ export class DshRuntime {
         // 用订阅登录过的供应商（凭据库里有记录）都把路由挂进 dsh，界面里才选得到。
         const credentials = await readFile(join(dshHome, ".credentials.yaml"), "utf8").catch(() => "");
         const signedIn = DSH_LOGIN_PROVIDERS.filter((provider) => credentials.includes(`llm-pi-ai/${provider.id}:`));
+        const piAiProviders: Record<string, unknown> = Object.fromEntries(
+          signedIn.map((provider) => [provider.id, {}]),
+        );
+        // 设置里选了 Magpie：把网关的模型目录挂成一条 pi-ai 路由，选择器里列出全部模型。
+        const magpie = await this.#magpieRoute();
+        if (magpie !== null) piAiProviders["magpie"] = magpie;
         // 随 App 带的本地插件（GUI App 桥）。文件不在就不挂（比如精简过的开发环境）。
         const bridge = join(this.sidecarDir, "plugins", "u-brain-bridge.mjs");
         const searchPlugin = join(this.sidecarDir, "plugins", "u-brain-search.mjs");
@@ -199,7 +222,7 @@ export class DshRuntime {
           plugins: base.plugins,
           mcp: this.#mcpLaunch(),
           webSearchProvider: (await this.#activeSearch())?.provider,
-          piAiProviders: signedIn.length > 0 ? Object.fromEntries(signedIn.map((provider) => [provider.id, {}])) : null,
+          piAiProviders: Object.keys(piAiProviders).length > 0 ? piAiProviders : null,
           localPlugins: [
             ...(existsSync(bridge) ? [{ id: "u-brain-bridge", path: bridge }] : []),
             // Exa / Tavily 搜索后端：只注册，选不选由上面的 webSearchProvider 决定。
@@ -207,6 +230,10 @@ export class DshRuntime {
             // 设置页里的“订阅登录”区块（前端 + 宿主路由，是个带 dsh.client 声明的包，按包名加载）。
             ...(existsSync(join(this.sidecarDir, "node_modules", "u-brain-login", "package.json"))
               ? [{ id: "u-brain-login", path: "u-brain-login" }]
+              : []),
+            // @ 引用 U-Brain 的会话/话题/知识库（前端 @ 候选 + 宿主展开路由 + agent/pre-step 注入）。
+            ...(existsSync(join(this.sidecarDir, "node_modules", "u-brain-reference", "package.json"))
+              ? [{ id: "u-brain-reference", path: "u-brain-reference" }]
               : []),
           ],
           // 品牌换成 U-Brain：顶掉 web 档里的官方品牌包（行 id 是 dsh-web-app 的 ui-brand-official）。
@@ -241,9 +268,28 @@ export class DshRuntime {
     }
   }
 
-  /** 搜索设置变了：重启 dsh，让它按新补丁和环境选搜索后端。dsh 没在运行就什么都不做。 */
-  refreshSearch(): void {
+  /** 搜索或模型设置变了：重启 dsh，让它按新补丁和环境重载。dsh 没在运行就什么都不做。 */
+  refresh(): void {
     this.#web?.restart();
+  }
+
+  /**
+   * 设置选了 Magpie 时的 llm-pi-ai 路由：模型目录从网关现拉（本机调用，失败就不挂，
+   * 指挥台里只是看不到 magpie，不影响其他路由）；没选 magpie 或网关没开返回 null。
+   */
+  async #magpieRoute(): Promise<Record<string, unknown> | null> {
+    const llm = await this.#options.getLlmConfig?.();
+    if (llm === undefined || llm.provider !== "magpie") return null;
+    const baseUrl = (llm.baseUrl.trim() !== "" ? llm.baseUrl.trim() : LLM_PRESETS.magpie.baseUrl).replace(/\/+$/u, "");
+    let key = "";
+    try {
+      key = (await this.#options.getApiKey?.("magpie"))?.trim() ?? "";
+    } catch {
+      // 钥匙串读不到就当没有 Key，本机网关照样能用。
+    }
+    const models = await fetchMagpieModels({ baseUrl, ...(key !== "" ? { apiKey: key } : {}) }).catch(() => null);
+    if (models === null || models.length === 0) return null;
+    return magpieRoute({ baseUrl, models });
   }
 
   /** you-brain 自己的 MCP：显式配置优先；打包版用守护进程自身的 `mcp` 子命令。 */

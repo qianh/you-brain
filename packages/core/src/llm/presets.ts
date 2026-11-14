@@ -16,6 +16,8 @@ export interface LlmPreset {
   baseUrl: string;
   defaultModel: string;
   requiresApiKey: boolean;
+  /** Key 可选（requiresApiKey 为 false 时）：钥匙串里有就随请求带上，没有也能跑。 */
+  optionalApiKey?: boolean;
   jsonMode: LlmJsonMode;
 }
 
@@ -97,6 +99,22 @@ export const LLM_PRESETS = {
     baseUrl: "http://127.0.0.1:11434/v1",
     defaultModel: "llama3.2",
     requiresApiKey: false,
+    jsonMode: "json_object",
+  },
+  /**
+   * Magpie：本机模型网关（magpie.app / `magpie serve`），OpenAI 兼容。
+   * 模型 id 用网关里的任意模型（`magpie models` 可列，如 auto/glm-5.3-flash）；
+   * 本机网关默认不要求 Key，远程网关才需要在 magpie 里签发 gateway key。
+   */
+  magpie: {
+    provider: "magpie",
+    label: "Magpie",
+    kind: "openai-compatible",
+    baseUrl: "http://127.0.0.1:3425/v1",
+    defaultModel: "",
+    requiresApiKey: false,
+    /** 有存 Key 就带上（远程网关），没有也能跑（本机网关）。 */
+    optionalApiKey: true,
     jsonMode: "json_object",
   },
   custom: {

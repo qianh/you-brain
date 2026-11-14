@@ -61,10 +61,12 @@ describe("labels", () => {
     expect(weekdayName(1, "en")).toBe("Monday");
     expect(weekdayName(9, "en")).toBe("9");
     expect(providerNeedsKey("ollama")).toBe(false);
+    expect(providerNeedsKey("magpie")).toBe(false);
     expect(providerNeedsKey("deepseek")).toBe(true);
     expect(providerNeedsKey("grok-cli")).toBe(false);
     expect(providerNeedsKey("kimi")).toBe(true);
     expect(LLM_PROVIDER_IDS).toContain("kimi");
+    expect(LLM_PROVIDER_IDS).toContain("magpie");
     expect(LLM_PROVIDER_IDS.some((provider) => provider.includes("kimi") && provider !== "kimi")).toBe(
       false,
     );

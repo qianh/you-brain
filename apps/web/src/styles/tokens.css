@@ -46,6 +46,10 @@
   --scrim: rgba(20, 20, 28, 0.38);
   --shadow-pop: 0 10px 30px rgba(0, 0, 0, 0.12);
   --shadow-slider: 0 1px 2px rgba(0, 0, 0, 0.06);
+  /* 终端屏幕（tty7 弹框）固定深色，不随亮暗主题：终端就该是终端的样子。 */
+  --term-bg: #101014;
+  --term-fg: #d8d8df;
+  --term-border: #2c2c34;
   --on-accent: #ffffff;
   --scrollbar: rgba(127, 127, 135, 0.35);
   --scrollbar-hover: rgba(127, 127, 135, 0.55);

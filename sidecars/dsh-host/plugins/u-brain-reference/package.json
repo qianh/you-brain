@@ -1,0 +1,26 @@
+{
+  "name": "u-brain-reference",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DSH 插件：指挥台输入框里 @ 引用 U-Brain 的数字资产（会话原文、话题）与知识库（Notion 页面）。浏览器半边注册 @ 候选菜单，宿主半边提供同源候选/正文路由，并在 agent/pre-step 把引用展开成有界的背景上下文。",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-input-trigger"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5"
+  },
+  "files": ["lib/index.js", "lib/client.js"]
+}

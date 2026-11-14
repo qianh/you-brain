@@ -11,6 +11,9 @@ import {
 } from "@you-brain/protocol";
 import { describe, expect, it } from "bun:test";
 
+import { YouBrainError } from "../../src/domain/errors.js";
+import { HttpError } from "../../src/http/handlers.js";
+
 import { createDaemonClient } from "../../src/http/client.js";
 import type { HttpDeps } from "../../src/http/deps.js";
 import { startDaemonHttp, type DaemonHttpServer } from "../../src/http/server.js";
@@ -181,6 +184,24 @@ async function withServer(
         warnings: [],
       };
     },
+    sessionContent: async (input) => {
+      if (input.source === "codex" && input.conversationId === "conv-1") {
+        return { source: "codex", conversationId: "conv-1", content: "# 会话原文", updatedAt: "2026-07-20T00:00:00.000Z" };
+      }
+      if (input.source === "codex" && input.sessionKey === SESSION) {
+        return { source: "codex", conversationId: SESSION, content: "# 按 key 取的原文", updatedAt: "2026-07-20T00:00:00.000Z" };
+      }
+      throw new YouBrainError("SESSION_NOT_FOUND", "找不到会话");
+    },
+    llmModels: async (input) => {
+      if (input.provider !== "magpie") throw new HttpError(503, "LLM_MODELS_UNAVAILABLE", "该供应商不支持拉取模型列表");
+      return {
+        models: [
+          { id: "auto/glm-5.3-flash", name: "GLM-5.3-Flash · routing group" },
+          { id: "zhipu/glm-5.3" },
+        ],
+      };
+    },
     devices: async () => [device],
     readRoles: async () => roles.current,
     writeRoles: async (next) => {
@@ -333,6 +354,25 @@ describe("local HTTP API", () => {
       expect((await api(server, "/api/search?q=")).status).toBe(400);
       expect((await api(server, "/api/search?q=a&limit=0")).status).toBe(400);
       expect((await api(server, "/api/search?q=a&limit=51")).status).toBe(400);
+
+      const sessionBody = await readJson(
+        await api(server, "/api/session-content?source=codex&conversationId=conv-1"),
+      );
+      expect(sessionBody).toMatchObject({ source: "codex", conversationId: "conv-1", content: "# 会话原文" });
+      expect(
+        (await readJson(await api(server, "/api/session-content?source=codex&sessionKey=" + SESSION))).content,
+      ).toBe("# 按 key 取的原文");
+      expect((await api(server, "/api/session-content?source=codex")).status).toBe(400);
+      expect((await api(server, "/api/session-content?source=codex&conversationId=nope")).status).toBe(404);
+
+      const modelsBody = await readJson(await api(server, "/api/llm-models?provider=magpie"));
+      expect(modelsBody.models).toEqual([
+        { id: "auto/glm-5.3-flash", name: "GLM-5.3-Flash · routing group" },
+        { id: "zhipu/glm-5.3" },
+      ]);
+      expect((await api(server, "/api/llm-models")).status).toBe(400);
+      expect((await api(server, "/api/llm-models?provider=deepseek")).status).toBe(503);
+      expect((await api(server, "/api/llm-models?provider=magpie")).status).toBe(200);
 
       expect((await readJson(await api(server, "/api/devices"))).devices).toHaveLength(1);
       expect((await readJson(await api(server, "/api/status"))).deviceId).toEqual(

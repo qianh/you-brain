@@ -17,7 +17,11 @@ function apiPaths(file: string): string[] {
   return [...found].sort();
 }
 
-const daemonPaths = new Set(apiPaths("packages/core/src/http/handlers.ts"));
+const daemonPaths = new Set([
+  ...apiPaths("packages/core/src/http/handlers.ts"),
+  // WebSocket 升级由 server.ts 分派，路由常量在 terminal.ts。
+  ...apiPaths("packages/core/src/http/terminal.ts"),
+]);
 
 describe("route parity with the real daemon", () => {
   test("daemon routes are found", () => {

@@ -44,7 +44,7 @@
 
 > 状态：2026-11-03 起整页改用 **DeepSeek Harness（dsh）**，旧的自研指挥台（主控、对话页、周期任务、执行者目录）已删除。决定见 ADR-0003。
 
-指挥台标签页里就是 dsh 自己的 Web 界面（嵌入 U-Brain 窗口）。dsh 是“一切皆插件”的 agent 运行时，对话、模型选择、子代理、自动化任务（定时/周期）都由它承担；U-Brain 的 daemon 只做三件 dsh 做不了的事：
+指挥台标签页里主体是 dsh 自己的 Web 界面（嵌入 U-Brain 窗口），右侧另有 tty7 会话面板（2026-11-13，ADR-0004）。dsh 是“一切皆插件”的 agent 运行时，对话、模型选择、子代理、自动化任务（定时/周期）都由它承担；U-Brain 的 daemon 只做三件 dsh 做不了的事：
 
 - **托管 dsh 进程**：随 U-Brain 启动、崩溃自动拉起（dsh 的定时任务只在它运行时才触发）。运行时（Node 24 + 裁剪后的依赖）随 App 打包，用户机器上不需要 Node。
 - **订阅登录**：dsh 后端支持订阅（OAuth）登录但界面没有入口，由 daemon 驱动登录引擎，完成后重启 dsh 让它挂上新的模型路由。
@@ -57,7 +57,10 @@
 | 其他 CLI | dsh 子代理提供者：claude-code / codex 用官方原生包（打包版为控制体积不带原生载荷，不挂载），gemini（`--acp`）/ opencode（`acp`）走 ACP |
 | GUI App（Grok Bot、Muse） | dsh 插件 `u-brain-bridge`（工具 `gui_app_list` / `gui_app_ask` / `gui_app_replies`），回调 daemon 的 `/api/deck/bridge/*` |
 | U-Brain 自己的能力（搜索、话题、今日、分身、知识库） | `you-brain mcp`，打包版自动挂给 dsh |
+| 指挥台里 @ 引用 U-Brain 内容（会话原文、话题、知识库页面） | dsh 插件 `u-brain-reference`：浏览器半边往 @ 菜单注册候选，宿主半边经同源路由代理 daemon（同 u-brain-login 的安全模式），发送时在 `agent/pre-step` 把 mention 展开成有界的背景上下文（form: recall，不受信，单条 ≤48k 字符、最多 3 条） |
 | 更多插件 | 用户把 cordis 补丁放进 `<dataDir>/deck/dsh/user.patch.yml`，原样加载 |
+| Magpie 模型网关（magpie.app） | 设置选供应商 `magpie`（OpenAI 兼容，缺省 `http://127.0.0.1:3425/v1`，本机调用不需要 Key）：daemon 自己的 LLM 走网关任意模型；指挥台在补丁里挂 `llm-pi-ai` 的 magpie 路由，模型目录启动时从网关 `/v1/models` 现拉（网关没开就不挂），模型设置变更时重启 dsh 生效 |
+| tty7 里的终端会话（Claude Code、Codex 等 AI CLI） | **tty7 会话面板**（指挥台右侧，U-Brain 自己的界面，不经 dsh）：列出和新建会话仍调 CLI；交互视图用 xterm，经同源 WebSocket 直连原 pane 的真实终端流，逐键输入、实时输出、尺寸租约，不挤掉原窗口，关闭视图不结束会话。接口 `/api/deck/tty7/*`；见 ADR-0004 |
 | 会话进数字资产 | `dsh` 采集来源读 dsh 的会话文件（`<dsh home>/sessions/**/session.v4.jsonl.zstd`），与其他来源同一管线 |
 
 - 历史上的 `deck` 来源（旧指挥台直落的会话）保留在数字资产里，不再产生新的。

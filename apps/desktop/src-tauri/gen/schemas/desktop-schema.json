@@ -189,6 +189,12 @@
           "markdownDescription": "Lets the daemon-served Web UI open the full window."
         },
         {
+          "description": "Lets the Web UI remove obsolete loopback dsh login cookies before embedding a new session.",
+          "type": "string",
+          "const": "allow-prepare-dsh-cookies",
+          "markdownDescription": "Lets the Web UI remove obsolete loopback dsh login cookies before embedding a new session."
+        },
+        {
           "description": "Lets the daemon-served Web UI quit the shell.",
           "type": "string",
           "const": "allow-quit",

@@ -13,6 +13,7 @@
     "@deepseek-ai/dsh-subagent-claude-code": "0.2.1-rc.5",
     "@deepseek-ai/dsh-subagent-codex": "0.2.1-rc.5",
     "u-brain-brand": "file:plugins/u-brain-brand",
-    "u-brain-login": "file:plugins/u-brain-login"
+    "u-brain-login": "file:plugins/u-brain-login",
+    "u-brain-reference": "file:plugins/u-brain-reference"
   }
 }

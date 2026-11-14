@@ -17,3 +17,8 @@ commands.allow = ["quit_now"]
 identifier = "allow-open-local-path"
 description = "Lets the Web UI open a local file or folder referenced by a path in a knowledge page."
 commands.allow = ["open_local_path"]
+
+[[permission]]
+identifier = "allow-prepare-dsh-cookies"
+description = "Lets the Web UI remove obsolete loopback dsh login cookies before embedding a new session."
+commands.allow = ["prepare_dsh_cookies"]

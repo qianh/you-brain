@@ -98,7 +98,9 @@ export async function createLlmBackend(
   }
   const apiKey = target.preset.requiresApiKey
     ? await readApiKey(target.preset.provider, options.getApiKey)
-    : "";
+    : target.preset.optionalApiKey === true
+      ? ((await options.getApiKey(target.preset.provider))?.trim() ?? "")
+      : "";
   return createOpenAiCompatibleBackend({
     preset: target.preset,
     model: target.model,

@@ -211,7 +211,7 @@ export const LLM_PROVIDER_IDS = LLM_PROVIDERS;
 export type LlmProviderId = (typeof LLM_PROVIDERS)[number];
 
 export function providerNeedsKey(provider: string): boolean {
-  return provider !== "ollama" && !provider.endsWith("-cli");
+  return provider !== "ollama" && provider !== "magpie" && !provider.endsWith("-cli");
 }
 
 export function providerLabel(provider: string, language: Language): string {
@@ -223,6 +223,7 @@ export function providerLabel(provider: string, language: Language): string {
   if (provider === "qwen") return "Qwen";
   if (provider === "kimi") return "Kimi";
   if (provider === "ollama") return "Ollama";
+  if (provider === "magpie") return language === "zh" ? "Magpie（本机网关）" : "Magpie (local gateway)";
   if (provider === "grok-cli") return language === "zh" ? "Grok（本机订阅）" : "Grok (local subscription)";
   if (provider === "claude-cli") {
     return language === "zh" ? "Claude Code（本机订阅）" : "Claude Code (local subscription)";

@@ -1,6 +1,7 @@
 import type { DeviceRecord, Roles, SharedConfig } from "@you-brain/protocol";
 
 import type { EventSink } from "./types.js";
+import type { TerminalConnection, TerminalSize, Tty7TerminalEvents } from "../deck/tty7-terminal.js";
 import type {
   PortraitCorrectionView,
   PortraitResponse,
@@ -9,7 +10,9 @@ import type {
   RemindersResponse,
   SearchRequest,
   SearchResponse,
+  SessionContentView,
   StatusResponse,
+  LlmModelsView,
   ConsolidateActionResult,
   SyncActionResult,
   TodayResponse,
@@ -75,6 +78,12 @@ import type {
   DeckDshLoginBody,
   DeckDshLoginResponse,
   DeckDshWebResponse,
+  DeckTty7ScreenResponse,
+  DeckTty7PasteImageResponse,
+  DeckTty7SendBody,
+  DeckTty7SessionsResponse,
+  DeckTty7StartBody,
+  DeckTty7StartResponse,
   TopicReorganizeApplyBody,
   TopicReorganizeResult,
   TopicReorganizeStatus,
@@ -90,6 +99,10 @@ export interface HttpDeps {
   portraitSnapshots(): Promise<PortraitSnapshot[]>;
   portraitCorrections(variant?: string): Promise<PortraitCorrectionView[]>;
   search(query: SearchRequest): Promise<SearchResponse>;
+  /** 会话原文（Drive inbox，markdown）；Drive 未就绪时缺省。conversationId 与 sessionKey 任给一个。指挥台 @ 引用展开用。 */
+  sessionContent?(input: { source: string; conversationId?: string; sessionKey?: string }): Promise<SessionContentView>;
+  /** 供应商的可用模型（现在只有 magpie）；网关不可达时缺省或抛错，设置页退回手动填写。 */
+  llmModels?(input: { provider: string; baseUrl?: string }): Promise<LlmModelsView>;
   devices(): Promise<DeviceRecord[]>;
   /** Optional so older test doubles keep compiling. The daemon supplies it when Drive is open. */
   registerVirtualDevice?(record: DeviceRecord): Promise<DeviceRecord>;
@@ -181,4 +194,12 @@ export interface DeckHttpPort {
   bridgeApps(): Promise<DeckBridgeAppsResponse>;
   bridgeSend(body: DeckBridgeSendBody): Promise<DeckBridgeSendResponse>;
   bridgeReplies(body: DeckBridgeRepliesBody): Promise<DeckBridgeRepliesResponse>;
+  /** tty7 会话桥：列会话、看屏幕、发指令、新开会话；粘贴图片落盘换路径。 */
+  tty7Sessions(): Promise<DeckTty7SessionsResponse>;
+  tty7Delete(pane: number): Promise<{ ok: true }>;
+  tty7Screen(pane: number, lines?: number): Promise<DeckTty7ScreenResponse>;
+  tty7Send(body: DeckTty7SendBody): Promise<{ ok: true }>;
+  tty7Start(body: DeckTty7StartBody): Promise<DeckTty7StartResponse>;
+  tty7PasteImage(data: Uint8Array, contentType: string): Promise<DeckTty7PasteImageResponse>;
+  tty7Terminal?(pane: number, size: TerminalSize, events: Tty7TerminalEvents): TerminalConnection;
 }

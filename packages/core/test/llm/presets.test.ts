@@ -42,6 +42,13 @@ describe("llm presets", () => {
       requiresApiKey: false,
       jsonMode: "json_object",
     });
+    expect(LLM_PRESETS.magpie).toMatchObject({
+      baseUrl: "http://127.0.0.1:3425/v1",
+      defaultModel: "",
+      requiresApiKey: false,
+      optionalApiKey: true,
+      jsonMode: "json_object",
+    });
     expect(LLM_PRESETS.custom).toMatchObject({
       baseUrl: "",
       defaultModel: "",

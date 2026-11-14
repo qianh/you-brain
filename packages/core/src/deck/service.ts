@@ -4,6 +4,7 @@ import type { SearchProvider } from "../auth/search-secrets.js";
 import type { DshLoginProviderId, DshLoginView } from "./dsh/login.js";
 import { DshRuntime, type DshRuntimeOptions } from "./dsh/runtime.js";
 import type { DshWebState } from "./dsh/web.js";
+import { Tty7 } from "./tty7.js";
 import {
   GUI_APPS,
   accessibilityGranted,
@@ -25,6 +26,8 @@ export interface DeckServiceOptions {
   env?: NodeJS.ProcessEnv;
   /** 设置里的各供应商 Key 经这里交给 dsh 做环境层凭据（daemon 传钥匙串读取）。 */
   getApiKey?: (provider: LlmProvider) => string | null | undefined | Promise<string | null | undefined>;
+  /** 设置里的 LLM 选择（provider + 地址）；选了 magpie 时指挥台照它挂网关路由。 */
+  getLlmConfig?: () => { provider: LlmProvider; baseUrl: string } | Promise<{ provider: LlmProvider; baseUrl: string }>;
   /** 第三方搜索服务（Exa）的 Key，有才给 dsh 挂搜索 MCP。 */
   getSearchKey?: (provider: SearchProvider) => string | null | undefined | Promise<string | null | undefined>;
   /** false 时不在启动后预热 dsh（测试用）。 */
@@ -35,8 +38,10 @@ export interface DeckServiceOptions {
     dispatch(appId: string, prompt: string): Promise<{ sentAtMs: number }>;
     replies(appId: string, sinceMs: number): Promise<string[]>;
   };
+  /** tty7 会话桥的实现；测试注入。 */
+  tty7?: Tty7;
   dsh?: {
-    runtime?: Pick<DshRuntime, "close" | "webState" | "loginView" | "loginAction"> & Partial<Pick<DshRuntime, "refreshSearch">>;
+    runtime?: Pick<DshRuntime, "close" | "webState" | "loginView" | "loginAction"> & Partial<Pick<DshRuntime, "refresh">>;
     sidecarDir?: string;
     nodePath?: string;
     mcpLaunch?: DshRuntimeOptions["mcpLaunch"];
@@ -49,11 +54,14 @@ const DSH_WARM_DELAY_MS = 3_000;
 export class DeckService {
   readonly #options: DeckServiceOptions;
   readonly #dsh: Pick<DshRuntime, "close" | "webState" | "loginView" | "loginAction"> &
-    Partial<Pick<DshRuntime, "refreshSearch">>;
+    Partial<Pick<DshRuntime, "refresh">>;
   #stopped = false;
+  /** tty7 会话桥（ADR-0004）：与 dsh 无关，dsh 没起来也能用。 */
+  readonly tty7: Tty7;
 
   constructor(options: DeckServiceOptions) {
     this.#options = options;
+    this.tty7 = options.tty7 ?? new Tty7({ env: options.env });
     this.#dsh =
       options.dsh?.runtime ??
       new DshRuntime({
@@ -61,6 +69,7 @@ export class DeckService {
         homeDir: options.homeDir,
         env: options.env,
         getApiKey: options.getApiKey,
+        getLlmConfig: options.getLlmConfig,
         getSearchKey: options.getSearchKey,
         sidecarDir: options.dsh?.sidecarDir,
         nodePath: options.dsh?.nodePath ?? options.env?.YOU_BRAIN_NODE24,
@@ -91,9 +100,9 @@ export class DeckService {
     return this.#dsh.webState(retry);
   }
 
-  /** 搜索 Key 变了：让 dsh 重载补丁。 */
-  refreshSearch(): void {
-    this.#dsh.refreshSearch?.();
+  /** 搜索或模型设置变了：让 dsh 重载补丁。 */
+  refresh(): void {
+    this.#dsh.refresh?.();
   }
 
   async dshLogin(): Promise<DshLoginView[]> {

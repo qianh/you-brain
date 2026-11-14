@@ -335,6 +335,8 @@ export interface SearchRequest {
   from?: string;
   to?: string;
   sources?: string[];
+  /** 只查本地索引，不同 Drive 要远端补充；指挥台 @ 引用自动补全用，避免每次键入等远端竞速。 */
+  remote?: boolean;
 }
 
 export interface SearchHit {
@@ -355,6 +357,19 @@ export interface SearchResponse {
   searchMode: "semantic" | "keyword";
   results: SearchHit[];
   warnings: Array<{ code: string; message: string }>;
+}
+
+/** 一篇会话原文（Drive inbox 里的 markdown）。指挥台 @ 引用展开用。 */
+export interface SessionContentView {
+  source: string;
+  conversationId: string;
+  content: string;
+  updatedAt: string;
+}
+
+/** 供应商的可用模型列表。设置页把 magpie 的模型栏渲染成下拉用。 */
+export interface LlmModelsView {
+  models: Array<{ id: string; name?: string }>;
 }
 
 export const VirtualDeviceCreateBodySchema = z.object({
@@ -1138,6 +1153,37 @@ export const DeckDshLoginBodySchema = z.object({
 });
 
 export type DeckDshLoginBody = z.infer<typeof DeckDshLoginBodySchema>;
+
+// ---- tty7 会话桥（ADR-0004）：指挥台直接指挥 tty7 里的终端会话 ----
+
+export type DeckTty7SessionsResponse = import("../deck/tty7.js").Tty7SessionsView;
+export type DeckTty7ScreenResponse = import("../deck/tty7.js").Tty7ScreenView;
+export type DeckTty7StartResponse = import("../deck/tty7.js").Tty7StartResult;
+export type DeckTerminalSize = import("../deck/tty7-terminal.js").TerminalSize;
+/** 粘贴的图片落盘后的绝对路径；CLI 按路径读图。 */
+export type DeckTty7PasteImageResponse = { path: string };
+
+export const DeckTty7DeleteBodySchema = z.object({ pane: z.number().int().nonnegative() }).strict();
+
+export const DeckTty7SendBodySchema = z
+  .object({
+    pane: z.number().int().nonnegative(),
+    text: z.string().max(100_000).optional(),
+    enter: z.boolean().optional(),
+    keys: z.array(z.string().min(1).max(12)).max(16).optional(),
+  })
+  .strict();
+
+export const DeckTty7StartBodySchema = z
+  .object({
+    cwd: z.string().min(1).max(4_096),
+    harness: z.string().min(1).max(40),
+    workspace: z.string().min(1).max(80).optional(),
+  })
+  .strict();
+
+export type DeckTty7SendBody = z.infer<typeof DeckTty7SendBodySchema>;
+export type DeckTty7StartBody = z.infer<typeof DeckTty7StartBodySchema>;
 
 /** 订阅登录状态：各供应商是否已登录、是否在等浏览器授权。 */
 export interface DeckDshLoginResponse {

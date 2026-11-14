@@ -20,6 +20,7 @@ import {
 } from "./handlers.js";
 import { ChangeHub, formatSse } from "./hub.js";
 import type { DaemonEvent } from "./types.js";
+import { TERMINAL_PATH, terminalWebSocket, type TerminalSocketData } from "./terminal.js";
 
 export interface StartDaemonHttpOptions {
   dataDir: string;
@@ -58,11 +59,22 @@ export async function startDaemonHttp(
     hub,
     createId: options.createId ?? (() => ulid()),
   };
-  const server = Bun.serve({
+  const terminal = terminalWebSocket(token, options.deps);
+  const server = Bun.serve<TerminalSocketData>({
     hostname: "127.0.0.1",
     port,
     idleTimeout: 0,
-    fetch: (request) => dispatch(request, token, options.staticDir, context),
+    fetch(request, server) {
+      const url = new URL(request.url);
+      if (url.pathname === TERMINAL_PATH) {
+        // WebSocket 无法用 fetch 的 credentials:omit；严格检查 Origin，令牌在首帧验证。
+        if (request.headers.get("origin") !== url.origin) return apiError(403, "FORBIDDEN", "终端只接受同源连接");
+        if (server.upgrade(request, { data: { authenticated: false, inFlight: 0 } })) return;
+        return apiError(400, "BAD_REQUEST", "需要 WebSocket 连接");
+      }
+      return dispatch(request, token, options.staticDir, context);
+    },
+    websocket: terminal.handler,
   });
   const endpoint = {
     port: server.port ?? 0,
@@ -88,6 +100,7 @@ export async function startDaemonHttp(
     async stop() {
       if (stopped) return;
       stopped = true;
+      terminal.shutdown();
       hub.shutdown();
       server.stop(true);
       const current = await readDaemonEndpoint(options.dataDir).catch(() => null);

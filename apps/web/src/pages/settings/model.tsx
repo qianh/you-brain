@@ -64,10 +64,13 @@ export function ModelSection({
   const { t, language, client, status } = useDaemon();
   const provider = draft.llm.provider;
   const cli = isCliProvider(provider);
+  const magpie = provider === "magpie";
   const probe = cliProbe(provider, savedProvider, status?.warnings ?? []);
   const baseError = issues.includes("invalidBase") ? t("invalidBase") : undefined;
   const [testing, setTesting] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string; at: number } | null>(null);
+  /** magpie 网关的模型目录：null = 还在拉；[] = 没拉到（退回手动填写）。 */
+  const [gatewayModels, setGatewayModels] = useState<Array<{ id: string; name?: string }> | null>(null);
 
   useEffect(() => {
     if (!result) return;
@@ -75,6 +78,29 @@ export function ModelSection({
     const timer = window.setTimeout(() => setResult(null), Math.max(0, left));
     return () => window.clearTimeout(timer);
   }, [result]);
+
+  useEffect(() => {
+    if (!magpie) {
+      setGatewayModels(null);
+      return;
+    }
+    // 地址框每敲一个字都会变，稍作合并再拉网关。
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      client
+        .llmModels({ provider: "magpie", baseUrl: draft.llm.baseUrl })
+        .then((view) => {
+          if (!cancelled) setGatewayModels(view.models);
+        })
+        .catch(() => {
+          if (!cancelled) setGatewayModels([]);
+        });
+    }, 500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [magpie, draft.llm.baseUrl, client]);
 
   const groups = { local: t("settingsGroupLocal"), api: t("providerGroupApi") };
   const options = providerOptions(LLM_PROVIDER_IDS).map((option) => {
@@ -88,6 +114,12 @@ export function ModelSection({
   });
   const savedChip = showStoredKey(stored, replacingKey, apiKey);
   const keyHint = `${providerNeedsKey(provider) ? t("apiKeyHint") : t("leaveBlank")} ${t("settingsSecretLocal")}`;
+  const note = cli
+    ? t("settingsCliNote", { command: cliCommand(provider) })
+    : magpie
+      ? t("settingsMagpieNote")
+      : t("settingsApiNote");
+  const magpiePicked = magpie && gatewayModels !== null && gatewayModels.length > 0;
 
   return (
     <Card>
@@ -108,20 +140,39 @@ export function ModelSection({
         </span>
       </SettingRow>
       <div className="settings-note">
-        <p>{cli ? t("settingsCliNote", { command: cliCommand(provider) }) : t("settingsApiNote")}</p>
+        <p>{note}</p>
         {probe ? (
           <Chip tone={PROBE_TONE[probe]} dot>
             {t(PROBE_KEY[probe])}
           </Chip>
         ) : null}
       </div>
-      <SettingRow title={t("model")} {...(cli ? { hint: t("modelBlankHint") } : {})}>
-        <Input
-          label={t("model")}
-          value={draft.llm.model}
-          spellCheck={false}
-          onChange={(event) => onDraft({ ...draft, llm: { ...draft.llm, model: event.target.value } })}
-        />
+      <SettingRow
+        title={t("model")}
+        {...(cli ? { hint: t("modelBlankHint") } : magpie && !magpiePicked ? { hint: t("magpieModelHint") } : {})}
+      >
+        {magpiePicked ? (
+          <Select
+            label={t("model")}
+            value={draft.llm.model}
+            placeholder={t("magpieModelPlaceholder")}
+            options={[
+              // 手填过而网关列表里没有的 id 也要能继续选着。
+              ...(draft.llm.model.trim() !== "" && !gatewayModels.some((model) => model.id === draft.llm.model)
+                ? [{ value: draft.llm.model, label: draft.llm.model }]
+                : []),
+              ...gatewayModels.map((model) => ({ value: model.id, label: model.name ?? model.id })),
+            ]}
+            onChange={(value) => onDraft({ ...draft, llm: { ...draft.llm, model: value } })}
+          />
+        ) : (
+          <Input
+            label={t("model")}
+            value={draft.llm.model}
+            spellCheck={false}
+            onChange={(event) => onDraft({ ...draft, llm: { ...draft.llm, model: event.target.value } })}
+          />
+        )}
       </SettingRow>
       {cli ? null : (
         <>

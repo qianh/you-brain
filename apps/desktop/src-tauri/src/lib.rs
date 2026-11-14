@@ -1,5 +1,6 @@
 mod activity;
 mod client;
+mod cookies;
 mod daemon;
 mod geometry;
 mod reminders;
@@ -83,7 +84,13 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![open_main_window, quit, quit_now, open_local_path])
+        .invoke_handler(tauri::generate_handler![
+            open_main_window,
+            quit,
+            quit_now,
+            open_local_path,
+            cookies::prepare_dsh_cookies
+        ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
             // 常驻 Dock 图标:应用是用户的主入口,不再隐藏为纯菜单栏进程。
@@ -106,8 +113,20 @@ pub fn run() {
             let initial = shortcut::effective_shortcut(None, shell.shortcut.as_deref());
             register_shortcut(app.handle(), &initial);
 
+            // Load a local page first: an existing oversized cookie jar can reject
+            // even the first HTTP document, before the Web UI can repair anything.
+            let panel = build_panel(app.handle(), WebviewUrl::App("index.html".into()))?;
             let handle = app.handle().clone();
-            thread::spawn(move || supervise(handle));
+            thread::spawn(move || {
+                match cookies::prune(&panel, None) {
+                    Ok(removed) if removed > 0 => {
+                        eprintln!("you-brain: 已清理 {removed} 个旧 dsh 登录 Cookie");
+                    }
+                    Err(error) => eprintln!("you-brain: {error}"),
+                    _ => {}
+                }
+                supervise(handle);
+            });
             let activity = app.handle().clone();
             thread::spawn(move || report_activity(activity));
             Ok(())

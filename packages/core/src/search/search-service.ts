@@ -819,11 +819,13 @@ export class SearchService {
     sources?: string[];
     since?: string;
     until?: string;
+    /** 只查本地索引，不同 Drive 要远端补充（自动补全这类要快的场景用）；缺省照旧问远端。 */
+    remote?: boolean;
   }): Promise<SearchOutput> {
     const ready = this.status().ready;
     const warnings: SearchOutput["warnings"] = [];
     const local = await this.#rank(input, ready ? "fresh" : "stale", warnings);
-    return this.#withRemote(input, local);
+    return input.remote === false ? local : this.#withRemote(input, local);
   }
 
   async search(input: {

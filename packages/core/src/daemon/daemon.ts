@@ -59,6 +59,7 @@ import {
 } from "../domain/index.js";
 import type { DriveEntry, DrivePort } from "../drive/drive-port.js";
 import { isInboxSessionFile } from "../drive/inbox-file.js";
+import { readInboxSession } from "../mcp/local.js";
 import { HttpError } from "../http/handlers.js";
 import { ChangeHub } from "../http/hub.js";
 import {
@@ -197,6 +198,7 @@ import { NotionService } from "../notion/service.js";
 import { DeckService, type DeckServiceOptions } from "../deck/index.js";
 import { SEARCH_CONFIG_FILE } from "../deck/dsh/runtime.js";
 import { readSearchActive, writeSearchActive } from "../deck/dsh/search-config.js";
+import { fetchMagpieModels } from "../deck/dsh/magpie.js";
 import {
   captureGeneration,
   captureWorkerBinary,
@@ -2814,7 +2816,7 @@ export class YouBrainDaemon {
       if (key === null) throw new YouBrainError("INVALID_INPUT", `还没有 ${body.active} 的 API Key，先保存 Key 再启用。`);
     }
     await writeSearchActive(this.#searchConfigPath(), body.active);
-    this.#deck?.refreshSearch();
+    this.#deck?.refresh();
   }
 
   async #writeLlmKey(body: LlmKeyPutBody): Promise<void> {
@@ -2831,6 +2833,8 @@ export class YouBrainDaemon {
       this.#llm = await this.#createLlm();
       this.changes.publish("status", this.#clock.now().toISOString());
     }
+    // magpie 的 Key 有无决定指挥台路由要不要带凭据：让 dsh 重新生成补丁。
+    if (body.provider === "magpie" && this.#shared.llm.provider === "magpie") this.#deck?.refresh();
   }
 
   /**
@@ -3176,6 +3180,48 @@ export class YouBrainDaemon {
           variant,
         ),
       search: (query) => this.#searchLocal(query),
+      sessionContent: async (input) => {
+        const drive = this.#drive;
+        if (!drive) throw new HttpError(503, "DRIVE_UNAVAILABLE", "Drive 未就绪");
+        return readInboxSession(drive, {
+          source: input.source as SessionSource,
+          ...(input.conversationId !== undefined ? { conversationId: input.conversationId } : {}),
+          ...(input.sessionKey !== undefined ? { sessionKey: input.sessionKey } : {}),
+        });
+      },
+      llmModels: async (input) => {
+        if (input.provider !== "magpie") {
+          throw new HttpError(503, "LLM_MODELS_UNAVAILABLE", "该供应商不支持拉取模型列表");
+        }
+        const baseUrl = (
+          input.baseUrl?.trim() !== "" && input.baseUrl !== undefined
+            ? input.baseUrl.trim()
+            : this.#shared.llm.baseUrl.trim() !== ""
+              ? this.#shared.llm.baseUrl.trim()
+              : LLM_PRESETS.magpie.baseUrl
+        ).replace(/\/+$/u, "");
+        let key = "";
+        try {
+          key = (await getLlmApiKey("magpie", { platform: this.#platform, backend: this.#secretBackend }))?.trim() ?? "";
+        } catch {
+          // 钥匙串读不到就当没有 Key，本机网关照样能拉。
+        }
+        const models = await fetchMagpieModels({ baseUrl, ...(key !== "" ? { apiKey: key } : {}) }).catch(
+          (error: unknown) => {
+            throw new HttpError(
+              503,
+              "MAGPIE_UNREACHABLE",
+              error instanceof Error && error.message !== "" ? `Magpie 网关不可达：${error.message}` : "Magpie 网关不可达",
+            );
+          },
+        );
+        return {
+          models: models.map((model) => ({
+            id: model.id,
+            ...(model.name !== undefined ? { name: model.name } : {}),
+          })),
+        };
+      },
       devices: () => readers.devices(),
       registerVirtualDevice: async (record) => {
         const sync = this.#sync;
@@ -3210,7 +3256,7 @@ export class YouBrainDaemon {
           backend: this.#secretBackend,
         });
         // Key 换了：如果它正是启用中的那个，指挥台要按新 Key 重启。
-        this.#deck?.refreshSearch();
+        this.#deck?.refresh();
       },
       writeSearchActive: (body: SearchActivePutBody) => this.#writeSearchActive(body),
       writeNotionKey: async (body) => {
@@ -3401,6 +3447,7 @@ export class YouBrainDaemon {
       env: this.#env,
       getApiKey: (provider) =>
         getLlmApiKey(provider, { platform: this.#platform, backend: this.#secretBackend }),
+      getLlmConfig: () => ({ provider: this.#shared.llm.provider, baseUrl: this.#shared.llm.baseUrl }),
       getSearchKey: (provider) =>
         getSearchKey(provider, { platform: this.#platform, backend: this.#secretBackend }),
     };
@@ -3416,6 +3463,21 @@ export class YouBrainDaemon {
       bridgeApps: async () => ({ apps: await deck.bridgeApps() }),
       bridgeSend: (body) => deck.bridgeSend(body.app, body.prompt),
       bridgeReplies: async (body) => ({ replies: await deck.bridgeReplies(body.app, body.sinceMs) }),
+      tty7Sessions: () => deck.tty7.sessions(),
+      tty7Delete: async (pane) => {
+        await deck.tty7.delete(pane);
+        return { ok: true };
+      },
+      tty7Terminal: (pane, size, events) => deck.tty7.openTerminal(pane, size, events),
+      tty7Screen: (pane, lines) => deck.tty7.screen(pane, lines),
+      tty7Send: async (body) => {
+        await deck.tty7.send(body);
+        return { ok: true };
+      },
+      tty7Start: (body) => deck.tty7.start(body),
+      tty7PasteImage: async (data, contentType) => ({
+        path: await deck.tty7.saveImagePaste(data, contentType),
+      }),
     };
   }
 
@@ -3436,6 +3498,7 @@ export class YouBrainDaemon {
       ...(query.sources ? { sources: query.sources } : {}),
       ...(query.from ? { since: query.from } : {}),
       ...(query.to ? { until: query.to } : {}),
+      ...(query.remote === false ? { remote: false } : {}),
     });
   }
 
@@ -3455,6 +3518,7 @@ export class YouBrainDaemon {
   }
 
   async #writeConfig(config: SharedConfig): Promise<void> {
+    const previousLlm = this.#shared.llm;
     this.#shared = config;
     this.#clearCliStall();
     await writeJsonFile(join(this.#paths.dataDir, "shared.json"), config);
@@ -3465,6 +3529,8 @@ export class YouBrainDaemon {
       snapshotPattern: config.portrait.snapshotPattern,
     });
     if (this.#llmOverride === undefined) this.#llm = await this.#createLlm();
+    // 模型选择变了：指挥台的补丁和环境层凭据要跟着重新生成（如 magpie 网关路由）。
+    if (JSON.stringify(previousLlm) !== JSON.stringify(config.llm)) this.#deck?.refresh();
     await this.#rewatch();
     await this.#ensureCoding();
     await this.#mountSearch();

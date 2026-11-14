@@ -30,6 +30,14 @@
   flex: 1;
   min-height: 0;
   display: flex;
+  gap: var(--sp-3, 12px);
+}
+
+.dsh-deck-main {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
   flex-direction: column;
 }
 
@@ -54,3 +62,214 @@
 
 .dsh-deck-state .dsh-deck-hint { font-size: 12px; color: var(--text-3); }
 .dsh-deck-state .dsh-deck-error { max-width: 640px; color: var(--danger, #c33); word-break: break-word; }
+
+/* tty7 会话面板（ADR-0004）：指挥台右侧一栏，可收成一条竖边。 */
+.deck-tty7 {
+  flex: none;
+  width: 400px;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2, 8px);
+  padding: var(--sp-3, 12px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 10px);
+  background: var(--surface);
+  font-size: var(--fs-sm, 13px);
+}
+
+.deck-tty7-rail {
+  flex: none;
+  width: 28px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 10px);
+  background: var(--surface);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  writing-mode: vertical-rl;
+  cursor: pointer;
+}
+.deck-tty7-rail:hover { background: var(--hover); color: var(--text); }
+
+.deck-tty7-head { display: flex; align-items: center; gap: 6px; }
+.deck-tty7-count { flex: 1; color: var(--text-3); font-variant-numeric: tabular-nums; }
+
+.deck-tty7-new { display: flex; flex-direction: column; gap: var(--sp-2, 8px); padding-bottom: var(--sp-2, 8px); border-bottom: 1px solid var(--border); }
+
+.deck-tty7-filter { flex: none; }
+
+.deck-tty7-list {
+  flex: 1 1 0;
+  min-height: 96px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.deck-tty7-item { display: flex; align-items: center; gap: 2px; }
+.deck-tty7-item .deck-tty7-row { flex: 1; min-width: 0; }
+.deck-tty7-delete { flex: none; color: var(--text-3); }
+.deck-tty7-delete:hover:not(:disabled) { color: var(--danger-text); background: var(--danger-soft); }
+
+.deck-tty7-row {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.deck-tty7-row:hover { background: var(--hover); }
+.deck-tty7-row.is-selected { background: var(--accent-soft); }
+
+.deck-tty7-row-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.deck-tty7-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.deck-tty7-pane { flex: none; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.deck-tty7-row-cwd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; color: var(--text-3); font-size: 12px; }
+.deck-tty7-empty { padding: 12px 8px; color: var(--text-3); }
+
+/* 全屏弹框里的会话详情：弹框体撑满，终端屏幕占掉剩余高度。 */
+.deck-tty7-full .dialog-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2, 8px);
+}
+
+.deck-tty7-meta { display: flex; align-items: center; gap: 6px; }
+.deck-tty7-meta .btn { margin-left: auto; }
+
+.deck-tty7-terminal {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 120px;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--term-border);
+  border-radius: 6px;
+  background: var(--term-bg);
+  color: var(--term-fg);
+}
+.deck-tty7-terminal.is-focused {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.deck-tty7-xterm {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  background: #15171b;
+  cursor: text;
+}
+.deck-tty7-xterm .xterm { height: 100%; padding: 10px; }
+.deck-tty7-xterm .xterm-viewport { overscroll-behavior: contain; }
+
+.deck-tty7-connection-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.deck-tty7-hint { margin: 0; color: var(--text-3); font-size: 12px; }
+.deck-tty7-pasting { margin: 0; color: var(--text-3); font-size: 12px; }
+
+.deck-tty7-active {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 12px;
+  flex: none;
+}
+.deck-tty7-active .toggle { transform: scale(0.8); }
+
+/* 项目分组头：底色胶囊 + 箭头 + 会话数，和会话行拉开层次；点击展开/收起。
+   配了颜色的组用色点 + color-mix 底色，不同项目一眼区分。 */
+.deck-tty7-group {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.deck-tty7-list > li:first-child .deck-tty7-group { margin-top: 0; }
+.deck-tty7-group:hover { background: var(--surface-3); color: var(--text); }
+.deck-tty7-group.with-color {
+  background: color-mix(in srgb, var(--group-color) 14%, transparent);
+}
+.deck-tty7-group.with-color:hover { background: color-mix(in srgb, var(--group-color) 24%, transparent); }
+.deck-tty7-group-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: none;
+  cursor: pointer;
+}
+.deck-tty7-group.with-color .deck-tty7-group-dot {
+  border-color: color-mix(in srgb, var(--group-color) 55%, transparent);
+  background: var(--group-color);
+}
+.deck-tty7-group-arrow { flex: none; color: var(--text-3); font-size: 10px; }
+.deck-tty7-group-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.deck-tty7-group-count { flex: none; color: var(--text-3); font-size: 11px; font-weight: 400; font-variant-numeric: tabular-nums; }
+
+/* 组的颜色选择行：一排色块 + 清除。 */
+.deck-tty7-colors {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 8px 2px 10px;
+}
+.deck-tty7-swatch {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.deck-tty7-swatch:hover { transform: scale(1.15); }
+.deck-tty7-swatch.is-active { outline: 2px solid var(--accent); outline-offset: 1px; }
+.deck-tty7-swatch.is-clear {
+  display: grid;
+  place-items: center;
+  border-style: dashed;
+  border-color: var(--border-strong);
+  background: none;
+  color: var(--text-3);
+  font-size: 10px;
+}
+.deck-tty7-error { margin: 0; color: var(--danger-text, #b91c1c); word-break: break-word; }
+
+.deck-tty7-status { flex: none; padding: 1px 6px; border-radius: 999px; font-size: 11px; background: var(--surface-2); color: var(--text-3); }
+.deck-tty7-status.is-working { background: var(--accent-soft); color: var(--accent); }
+.deck-tty7-status.is-waiting { background: var(--danger-soft); color: var(--danger-text); font-weight: 600; }
+.deck-tty7-waiting { margin: 0; padding: 6px 8px; border-radius: 6px; background: var(--danger-soft); color: var(--danger-text); word-break: break-word; }

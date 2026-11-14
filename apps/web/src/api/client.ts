@@ -71,6 +71,14 @@ import type {
   OAuthClientPublic,
   OAuthClientPutBody,
   DeckDshWebResponse,
+  DeckTty7PasteImageResponse,
+  DeckTty7ScreenResponse,
+  DeckTty7SendBody,
+  DeckTty7SessionsResponse,
+  DeckTty7StartBody,
+  DeckTty7StartResponse,
+  DeckTerminalSize,
+  LlmModelsView,
 } from "@you-brain/core/http/types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 
@@ -116,6 +124,7 @@ export interface BrowserDaemon
   applyTopicReorganization(body: TopicReorganizeApplyBody): Promise<TopicReorganizeResult>;
   putLlmKey(provider: string, apiKey: string): Promise<void>;
   testLlm(body: { provider: string; model: string; baseUrl: string }): Promise<ActionMessage>;
+  llmModels(input: { provider: string; baseUrl?: string }): Promise<LlmModelsView>;
   googleLogin(): Promise<ActionMessage>;
   googleLogout(): Promise<ActionMessage>;
   googleSwitch(): Promise<ActionMessage>;
@@ -177,6 +186,14 @@ export interface BrowserDaemon
   notionAssetUrl(blockId: string): string;
   /** 指挥台。 */
   deckDsh(retry?: boolean): Promise<DeckDshWebResponse>;
+  /** tty7 会话桥：列会话、看屏幕、发指令、新开会话；粘贴图片落盘换路径。 */
+  deckTty7Sessions(): Promise<DeckTty7SessionsResponse>;
+  deckTty7Delete(pane: number): Promise<{ ok: true }>;
+  deckTty7Screen(pane: number): Promise<DeckTty7ScreenResponse>;
+  deckTty7Send(body: DeckTty7SendBody): Promise<{ ok: true }>;
+  deckTty7Start(body: DeckTty7StartBody): Promise<DeckTty7StartResponse>;
+  deckTty7PasteImage(data: Blob): Promise<DeckTty7PasteImageResponse>;
+  deckTty7Terminal(pane: number, size: DeckTerminalSize): WebSocket;
 }
 
 export function readDaemonToken(): string {
@@ -200,10 +217,17 @@ export function createBrowserDaemon(options?: {
     body?: unknown,
   ): Promise<T> {
     const headers = new Headers({ authorization: `Bearer ${token}` });
-    const init: RequestInit = { method, headers };
+    // Bearer auth is sufficient; dsh's cookies share this host across ports.
+    const init: RequestInit = { method, headers, credentials: "omit" };
     if (body !== undefined) {
-      headers.set("content-type", "application/json");
-      init.body = JSON.stringify(body);
+      if (body instanceof Blob) {
+        // 二进制（如粘贴的图片）原样发，类型随 Blob。
+        headers.set("content-type", body.type || "application/octet-stream");
+        init.body = body;
+      } else {
+        headers.set("content-type", "application/json");
+        init.body = JSON.stringify(body);
+      }
     }
     let response: Response;
     try {
@@ -284,6 +308,13 @@ export function createBrowserDaemon(options?: {
       await request("PUT", "/api/secrets/llm", { provider, apiKey });
     },
     testLlm: (body) => request<ActionMessage>("POST", "/api/actions/llm-test", body),
+    llmModels: (input) =>
+      request<LlmModelsView>(
+        "GET",
+        `/api/llm-models?provider=${encodeURIComponent(input.provider)}${
+          input.baseUrl !== undefined && input.baseUrl !== "" ? `&baseUrl=${encodeURIComponent(input.baseUrl)}` : ""
+        }`,
+      ),
     googleLogin: () => request<ActionMessage>("POST", "/api/actions/google-login"),
     googleLogout: () => request<ActionMessage>("POST", "/api/actions/google-logout"),
     googleSwitch: () => request<ActionMessage>("POST", "/api/actions/google-switch"),
@@ -308,6 +339,20 @@ export function createBrowserDaemon(options?: {
     notionTest: () => request<NotionTestResult>("POST", "/api/actions/notion-test"),
     deckDsh: (retry?: boolean) =>
       request<DeckDshWebResponse>("GET", retry === true ? "/api/deck/dsh?retry=1" : "/api/deck/dsh"),
+    deckTty7Sessions: () => request<DeckTty7SessionsResponse>("GET", "/api/deck/tty7/sessions"),
+    deckTty7Delete: (pane: number) => request<{ ok: true }>("POST", "/api/deck/tty7/delete", { pane }),
+    deckTty7Screen: (pane: number) => request<DeckTty7ScreenResponse>("GET", `/api/deck/tty7/screen?pane=${pane}`),
+    deckTty7Send: (body: DeckTty7SendBody) => request<{ ok: true }>("POST", "/api/deck/tty7/send", body),
+    deckTty7Start: (body: DeckTty7StartBody) => request<DeckTty7StartResponse>("POST", "/api/deck/tty7/start", body),
+    deckTty7PasteImage: (data: Blob) => request<DeckTty7PasteImageResponse>("POST", "/api/deck/tty7/paste-image", data),
+    deckTty7Terminal(pane, size) {
+      const url = new URL("/api/deck/tty7/terminal", baseUrl);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      const socket = new WebSocket(url);
+      socket.binaryType = "arraybuffer";
+      socket.addEventListener("open", () => socket.send(JSON.stringify({ type: "connect", token, pane, size })), { once: true });
+      return socket;
+    },
     putNotionKey: async (body: NotionKeyPutBody) => {
       await request("PUT", "/api/secrets/notion", body);
     },
@@ -425,6 +470,7 @@ async function readEvents(
   signal: AbortSignal | undefined,
 ): Promise<void> {
   const response = await fetchImpl(`/api/events?token=${encodeURIComponent(token)}`, {
+    credentials: "omit",
     headers: {
       authorization: `Bearer ${token}`,
       accept: "text/event-stream",

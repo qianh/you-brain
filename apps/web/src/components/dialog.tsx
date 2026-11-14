@@ -15,6 +15,7 @@ export function Dialog({
   size = "md",
   placement = "center",
   initialFocus = "first",
+  closeOnEscape = true,
   className = "",
 }: {
   open: boolean;
@@ -23,14 +24,27 @@ export function Dialog({
   description?: string;
   children?: ReactNode;
   footer?: ReactNode;
-  size?: "md" | "lg";
+  size?: "md" | "lg" | "full";
   placement?: "center" | "top";
   initialFocus?: "first" | "cancel";
+  /** 终端这类弹框里 Esc 是功能键，关掉直通 Esc。 */
+  closeOnEscape?: boolean;
   className?: string;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const titleId = useId();
   const descId = useId();
+  // 父组件常因轮询而重渲染，onClose（内联箭头函数）随之变成新引用；
+  // 焦点 effect 若依赖它就会反复重跑，把焦点从输入框拽走、打断输入法组词。
+  // 用 ref 存最新的 onClose，effect 只在 open 变化时跑一次。
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
+  const closeOnEscapeRef = useRef(closeOnEscape);
+  useEffect(() => {
+    closeOnEscapeRef.current = closeOnEscape;
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -43,9 +57,12 @@ export function Dialog({
     (initialFocus === "cancel" ? cancel ?? first : first)?.focus();
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === "Escape") {
+        // 输入法组词时 Esc 是撤销组词，不是关弹框。
+        if (event.isComposing) return;
+        if (!closeOnEscapeRef.current) return;
         event.preventDefault();
         event.stopPropagation();
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (event.key !== "Tab" || !root) return;
@@ -70,7 +87,7 @@ export function Dialog({
       document.removeEventListener("keydown", onKey);
       previous?.focus();
     };
-  }, [open, onClose, initialFocus]);
+  }, [open, initialFocus]);
 
   if (!open) return null;
   return createPortal(
@@ -82,7 +99,7 @@ export function Dialog({
     >
       <div
         ref={ref}
-        className={["dialog", size === "lg" ? "lg" : "", className].filter(Boolean).join(" ")}
+        className={["dialog", size !== "md" ? size : "", className].filter(Boolean).join(" ")}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}

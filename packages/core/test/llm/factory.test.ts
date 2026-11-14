@@ -94,6 +94,37 @@ describe("llm factory", () => {
     }
   });
 
+  it("uses the magpie gateway with no key and sends the stored one when present", async () => {
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (request) => {
+        const body = (await request.json()) as { model?: string };
+        return Response.json({
+          choices: [{ message: { content: `${request.headers.get("authorization") ?? "none"}:${body.model}` } }],
+        });
+      },
+    });
+    try {
+      const baseUrl = `http://127.0.0.1:${server.port}/v1`;
+      const noKey = await createLlmBackend({
+        config: { provider: "magpie", model: "auto/glm-5.3-flash", baseUrl },
+        getApiKey: () => null,
+      });
+      expect(noKey.descriptor).toMatchObject({ provider: "magpie", model: "auto/glm-5.3-flash", requiresApiKey: false });
+      expect(await noKey.complete({ system: "s", user: "u" })).toBe("none:auto/glm-5.3-flash");
+      await expect(noKey.test()).resolves.toBeUndefined();
+
+      const withKey = await createLlmBackend({
+        config: { provider: "magpie", model: "auto/glm-5.3", baseUrl },
+        getApiKey: () => "sk-magpie",
+      });
+      expect(await withKey.complete({ system: "s", user: "u" })).toBe("Bearer sk-magpie:auto/glm-5.3");
+    } finally {
+      await server.stop(true);
+    }
+  });
+
   it("accepts an empty model and base URL for a subscription CLI", () => {
     expect(resolveLlmTarget({ provider: "grok-cli", model: "", baseUrl: "" })).toMatchObject({
       model: "",

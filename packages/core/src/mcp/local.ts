@@ -220,9 +220,11 @@ function forwardUpdate(
 
 export async function readInboxSession(
   drive: DrivePort,
-  input: { source: SessionSource; conversationId: string },
+  input: { source: SessionSource; conversationId?: string; sessionKey?: string },
 ): Promise<SessionContent> {
-  const key = conversationKey(input.source, input.conversationId);
+  // conversationId 和 sessionKey（= brainhubKey 哈希）任给一个；今日/话题接口只露出 sessionKey，
+  // 搜索结果带原始 conversationId。指挥台 @ 引用两条路都要走。
+  const key = input.sessionKey ?? conversationKey(input.source, input.conversationId ?? "");
   const entries = await drive.list({
     prefix: "inbox/",
     appProperty: { key: "brainhubKey", value: key },
@@ -235,7 +237,8 @@ export async function readInboxSession(
         candidate.appProperties.source === input.source &&
         // A conversation id longer than Drive's property limit is left out of
         // appProperties. brainhubKey already identifies the session.
-        (candidate.appProperties.conversationId === undefined ||
+        (input.conversationId === undefined ||
+          candidate.appProperties.conversationId === undefined ||
           candidate.appProperties.conversationId === input.conversationId),
     )
     .sort(
@@ -247,13 +250,13 @@ export async function readInboxSession(
   if (!entry) {
     throw new YouBrainError(
       "SESSION_NOT_FOUND",
-      `找不到会话 ${input.source}/${input.conversationId}`,
+      `找不到会话 ${input.source}/${input.conversationId ?? input.sessionKey}`,
     );
   }
   const object = await drive.read(entry.id);
   return {
     source: input.source,
-    conversationId: input.conversationId,
+    conversationId: input.conversationId ?? input.sessionKey ?? "",
     content: object.bytes.toString("utf8"),
     updatedAt: entry.appProperties.updatedAt ?? entry.modifiedTime,
   };
