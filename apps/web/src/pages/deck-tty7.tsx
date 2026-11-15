@@ -105,6 +105,7 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
   const [selected, setSelected] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
+  const selectedSessionRef = useRef<HTMLButtonElement>(null);
   const loadSequence = useRef(0);
   const pendingOpen = useRef<TerminalReference | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -183,7 +184,26 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
     const rank = (items: Session[]): number => Math.min(...items.map((item) => STATUS_RANK[item.status ?? ""] ?? 2));
     return [...map.entries()].sort((a, b) => rank(a[1]) - rank(b[1]) || a[0].localeCompare(b[0]));
   }, [visible, t]);
+  // 项目运行状态不受搜索条件影响，收起分组后也保留提示。
+  const workingCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const session of sessions) {
+      if (session.status !== "working" || session.hibernated) continue;
+      const label = session.cwd === "" ? t("deckTty7GroupOther") : baseName(session.cwd);
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+    return counts;
+  }, [sessions, t]);
   const current = selected === null ? undefined : sessions.find((session) => session.pane === selected);
+  // 不受侧栏搜索、活跃筛选影响；完整路径避免把不同位置的同名项目混在一起。
+  const projectSessions = useMemo(() => {
+    if (current === undefined || current.cwd === "") return [];
+    const projectDir = current.cwd.replace(/\/+$/u, "") || "/";
+    return sessions.filter((session) => session.cwd !== "" && (session.cwd.replace(/\/+$/u, "") || "/") === projectDir);
+  }, [sessions, current]);
+  useEffect(() => {
+    selectedSessionRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [selected, projectSessions.length]);
   const knownDirs = useMemo(
     () => [...new Set(sessions.map((session) => session.cwd).filter((dir) => dir !== ""))].sort(),
     [sessions],
@@ -379,14 +399,18 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
               // 搜索时强制展开，免得目标会话被收起的组挡住。
               const isOpen = expanded.has(label) || filter.trim() !== "";
               const color = groupColors[label];
+              const workingCount = workingCounts.get(label) ?? 0;
+              const workingHint = workingCount > 0 ? t("deckTty7GroupWorking", { count: workingCount }) : undefined;
               return (
                 <Fragment key={label}>
                   <li>
                     <button
                       type="button"
-                      className={color === undefined ? "deck-tty7-group" : "deck-tty7-group with-color"}
+                      className={["deck-tty7-group", color === undefined ? "" : "with-color", workingCount > 0 ? "is-working" : ""].filter(Boolean).join(" ")}
                       style={color === undefined ? undefined : ({ "--group-color": color } as CSSProperties)}
                       aria-expanded={isOpen}
+                      aria-label={workingHint === undefined ? undefined : `${label} · ${items.length} · ${workingHint}`}
+                      title={workingHint}
                       onClick={() => toggleGroup(label)}
                     >
                       <span
@@ -449,6 +473,38 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
           // Esc 是终端的键（退出、清提示），直通模式下不拿来关弹框；关闭走按钮或点弹框外。
           closeOnEscape={false}
         >
+          {projectSessions.length > 1 && (
+            <nav className="deck-tty7-switcher" aria-label={t("deckTty7SwitchSession")}>
+              <span className="deck-tty7-switcher-label">
+                {t("deckTty7ProjectSessions", { count: projectSessions.length })}
+              </span>
+              <div className="deck-tty7-switcher-list">
+                {projectSessions.map((session) => (
+                  <button
+                    key={session.pane}
+                    ref={session.pane === selected ? selectedSessionRef : undefined}
+                    type="button"
+                    className={session.pane === selected ? "deck-tty7-switch is-selected" : "deck-tty7-switch"}
+                    aria-pressed={session.pane === selected}
+                    title={`${title(session)} · %${session.pane}`}
+                    onClick={() => {
+                      setSelected(session.pane);
+                      setActionError(null);
+                    }}
+                  >
+                    <span className="deck-tty7-pane">%{session.pane}</span>
+                    <span className="deck-tty7-row-name">{title(session)}</span>
+                    {session.status !== null && (
+                      <span className={`deck-tty7-status is-${session.status}`} title={session.statusMessage ?? undefined}>
+                        {t(STATUS_LABEL[session.status])}
+                      </span>
+                    )}
+                    {session.agent !== null && <span className="chip">{session.agent}</span>}
+                  </button>
+                ))}
+              </div>
+            </nav>
+          )}
           <div className="deck-tty7-meta">
             {current.status !== null && (
               <span className={`deck-tty7-status is-${current.status}`} title={current.statusMessage ?? undefined}>

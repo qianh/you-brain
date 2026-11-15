@@ -1,7 +1,8 @@
 .tooltip {
   position: fixed;
   z-index: 80;
-  max-width: 240px;
+  width: max-content;
+  max-width: min(240px, calc(100vw - 16px));
   padding: 4px 8px;
   border-radius: var(--r-chip);
   background: var(--surface-3);
@@ -14,6 +15,8 @@
   animation: fade-in var(--ease-exit) both;
 }
 
-.tooltip-row { display: inline-flex; align-items: center; gap: 6px; }
+.tooltip-row { display: flex; align-items: center; gap: 6px; }
+.tooltip-content { min-width: 0; overflow-wrap: anywhere; }
+.tooltip-row > .kbd { flex: none; }
 
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }

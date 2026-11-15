@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactElement, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import { Kbd } from "./kbd.js";
@@ -16,23 +16,18 @@ export function Tooltip({
   force?: boolean;
 }) {
   const ref = useRef<HTMLSpanElement>(null);
+  const tipRef = useRef<HTMLDivElement>(null);
   const timer = useRef<number | null>(null);
   const [open, setOpen] = useState(force);
-  const [pos, setPos] = useState({ top: 0, left: 0 });
+  const [pos, setPos] = useState<CSSProperties>({ visibility: "hidden" });
 
-  const place = (): void => {
-    const rect = ref.current?.getBoundingClientRect();
-    if (!rect) return;
-    setPos({ top: rect.top - 6, left: rect.left + rect.width / 2 });
-    setOpen(true);
-  };
   const show = (delay: number): void => {
     if (timer.current !== null) window.clearTimeout(timer.current);
     if (delay <= 0) {
-      place();
+      setOpen(true);
       return;
     }
-    timer.current = window.setTimeout(place, delay);
+    timer.current = window.setTimeout(() => setOpen(true), delay);
   };
   const hide = (): void => {
     if (force) return;
@@ -40,8 +35,32 @@ export function Tooltip({
     setOpen(false);
   };
   useLayoutEffect(() => {
-    if (force) place();
+    if (force) setOpen(true);
   }, [force]);
+  useLayoutEffect(() => {
+    if (!open) return;
+    const place = (): void => {
+      const anchor = ref.current?.getBoundingClientRect();
+      const tip = tipRef.current?.getBoundingClientRect();
+      if (!anchor || !tip) return;
+      const margin = 8;
+      const gap = 6;
+      const left = Math.max(margin, Math.min(anchor.left + (anchor.width - tip.width) / 2, window.innerWidth - margin - tip.width));
+      const above = anchor.top - gap - tip.height;
+      const top = above >= margin ? above : Math.max(margin, Math.min(anchor.bottom + gap, window.innerHeight - margin - tip.height));
+      setPos({ top, left, visibility: "visible" });
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open, content, shortcut]);
+  useEffect(() => () => {
+    if (timer.current !== null) window.clearTimeout(timer.current);
+  }, []);
 
   return (
     <span
@@ -56,15 +75,16 @@ export function Tooltip({
       {open
         ? createPortal(
             <div
+              ref={tipRef}
               className="tooltip"
               role="tooltip"
-              style={{ top: pos.top, left: pos.left, transform: "translate(-50%, -100%)" }}
+              style={pos}
               {...((ref.current?.closest("[data-theme]")?.getAttribute("data-theme") ?? "") !== ""
                 ? { "data-theme": ref.current?.closest("[data-theme]")?.getAttribute("data-theme") ?? "" }
                 : {})}
             >
               <span className="tooltip-row">
-                {content}
+                <span className="tooltip-content">{content}</span>
                 {shortcut ? <Kbd>{shortcut}</Kbd> : null}
               </span>
             </div>,

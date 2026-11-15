@@ -12,12 +12,6 @@ import { NotionSection } from "./notion.js";
 import { SearchKeySection } from "./search-key.js";
 import { WebhookSection } from "./webhook.js";
 
-const GROUPS = [
-  { key: "mcpClients", title: "mcp" },
-  { key: "codingPortraitClients", title: "codingPortrait" },
-  { key: "skillClients", title: "skills" },
-] as const;
-
 export function IntegrationsSection({
   draft,
   onDraft,
@@ -26,45 +20,38 @@ export function IntegrationsSection({
   onDraft: (next: SharedConfig) => void;
 }) {
   const { t } = useDaemon();
+  const selected = draft.integrations.codingPortraitClients;
 
   return (
     <div className="settings-stack">
       <Banner tone="info">{t("cursorHint")}</Banner>
-      {GROUPS.map((group) => {
-        const selected = draft.integrations[group.key];
-        return (
-          <Section key={group.key} title={t(group.title)}>
-            <Card>
-              {CAPTURE_SOURCE_IDS.map((source) => {
-                const on = selected.includes(source);
-                return (
-                  <Row
-                    key={source}
-                    icon={<SourceTile source={source} />}
-                    title={sourceLabel(source)}
-                    titleText={sourceLabel(source)}
-                    trailing={
-                      <Toggle
-                        checked={on}
-                        label={`${t(group.title)} ${sourceLabel(source)}`}
-                        onChange={(checked) =>
-                          onDraft({
-                            ...draft,
-                            integrations: {
-                              ...draft.integrations,
-                              [group.key]: toggleMember(selected, source, checked),
-                            },
-                          })
-                        }
-                      />
-                    }
-                  />
-                );
-              })}
-            </Card>
-          </Section>
-        );
-      })}
+      <Section title={t("codingPortrait")}>
+        <Card>
+          {CAPTURE_SOURCE_IDS.map((source) => (
+            <Row
+              key={source}
+              icon={<SourceTile source={source} />}
+              title={sourceLabel(source)}
+              titleText={sourceLabel(source)}
+              trailing={
+                <Toggle
+                  checked={selected.includes(source)}
+                  label={`${t("codingPortrait")} ${sourceLabel(source)}`}
+                  onChange={(checked) =>
+                    onDraft({
+                      ...draft,
+                      integrations: {
+                        ...draft.integrations,
+                        codingPortraitClients: toggleMember(selected, source, checked),
+                      },
+                    })
+                  }
+                />
+              }
+            />
+          ))}
+        </Card>
+      </Section>
       <WebhookSection />
       <NotionSection />
       <SearchKeySection />
