@@ -21,12 +21,17 @@ export interface PrefsPatch {
   remove?: string[];
 }
 
+export interface PushOptions {
+  keepalive?: boolean;
+}
+
 type LegacyStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 export interface CreatePrefsOptions {
   /** daemon 注入的偏好；为 null 表示没有注入（例如 vite 开发模式），整体退回 legacy。 */
   initial: Record<string, string> | null;
-  push(patch: PrefsPatch): Promise<unknown>;
+  /** `keepalive` 仅在页面关闭时的最后一次写入为 true；普通写入不带。 */
+  push(patch: PrefsPatch, options?: PushOptions): Promise<unknown>;
   /** 旧的浏览器存储，用于首次迁移和无注入时的回退；不可用时为 null。 */
   legacy: LegacyStorage | null;
   isPrefKey(key: string): boolean;
@@ -63,7 +68,7 @@ export function isPrefKey(key: string): boolean {
   return PREF_KEYS.has(key) || PREF_PREFIXES.some((prefix) => key.startsWith(prefix));
 }
 
-export function createPrefs(options: CreatePrefsOptions): PrefsStore & { flush(): Promise<void> } {
+export function createPrefs(options: CreatePrefsOptions): PrefsStore & { flush(options?: PushOptions): Promise<void> } {
   const delayMs = options.delayMs ?? 300;
   const { initial, legacy } = options;
 
@@ -112,7 +117,7 @@ export function createPrefs(options: CreatePrefsOptions): PrefsStore & { flush()
     }, delayMs);
   };
 
-  const flush = (): Promise<void> => {
+  const flush = (flushOptions?: PushOptions): Promise<void> => {
     if (timer !== null) {
       clearTimeout(timer);
       timer = null;
@@ -126,7 +131,7 @@ export function createPrefs(options: CreatePrefsOptions): PrefsStore & { flush()
     // 串行发送，保证先后顺序；失败只报告，不阻断后续写入。
     chain = chain.then(async () => {
       try {
-        await options.push(patch);
+        await options.push(patch, flushOptions);
       } catch (error) {
         options.onError(error);
       }
@@ -192,7 +197,10 @@ function browserLegacyKeys(): string[] {
 
 let warned = false;
 
-function createBrowserPrefs(): PrefsStore & { flush(): Promise<void> } {
+/** 浏览器对 keepalive 请求体的上限是 64 KB，超过会直接抛 TypeError；留出余量。 */
+const KEEPALIVE_MAX_BYTES = 60_000;
+
+function createBrowserPrefs(): PrefsStore & { flush(options?: PushOptions): Promise<void> } {
   const bootstrap = typeof window === "undefined" ? undefined : window.__YOU_BRAIN__;
   const initial = bootstrap?.prefs !== undefined && typeof bootstrap.prefs === "object" ? bootstrap.prefs : null;
   const store = createPrefs({
@@ -201,16 +209,19 @@ function createBrowserPrefs(): PrefsStore & { flush(): Promise<void> } {
     isPrefKey,
     legacyKeys: browserLegacyKeys,
     delayMs: 300,
-    push: async (patch) => {
+    push: async (patch, pushOptions) => {
+      const body = JSON.stringify(patch);
+      // 只有 pagehide 的最后一次写入才需要 keepalive；体积超限时退回普通请求（尽力发送，
+      // 页面若已卸载可能被取消），也不能带 keepalive 否则 fetch 会直接拒绝。
+      const keepalive = pushOptions?.keepalive === true && new TextEncoder().encode(body).length <= KEEPALIVE_MAX_BYTES;
       const response = await fetch("/api/ui-prefs", {
         method: "PUT",
         headers: {
           "content-type": "application/json",
           authorization: `Bearer ${bootstrap?.token ?? ""}`,
         },
-        body: JSON.stringify(patch),
-        // 页面关闭时的最后一次写入也要能发出去。
-        keepalive: true,
+        body,
+        ...(keepalive ? { keepalive: true } : {}),
       });
       if (!response.ok) throw new Error(`保存偏好失败：HTTP ${response.status}`);
     },
@@ -223,7 +234,7 @@ function createBrowserPrefs(): PrefsStore & { flush(): Promise<void> } {
   });
   if (typeof window !== "undefined" && initial !== null) {
     window.addEventListener("pagehide", () => {
-      void store.flush();
+      void store.flush({ keepalive: true });
     });
   }
   return store;

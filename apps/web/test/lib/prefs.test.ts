@@ -97,6 +97,25 @@ describe("prefs", () => {
     expect(pushed).toEqual([]);
   });
 
+  test("普通 flush 不带 keepalive，pagehide 路径才请求 keepalive", async () => {
+    const calls: Array<{ keepalive?: boolean } | undefined> = [];
+    const p = createPrefs({
+      initial: {},
+      legacy: null,
+      isPrefKey,
+      legacyKeys: () => [],
+      delayMs: 10_000,
+      push: async (_patch, options) => void calls.push(options),
+      onError: () => {},
+    });
+    p.setItem("knowledge-wide", "1");
+    await p.flush();
+    p.setItem("knowledge-wide", "0");
+    await p.flush({ keepalive: true });
+    expect(calls[0]?.keepalive).toBeUndefined();
+    expect(calls[1]?.keepalive).toBe(true);
+  });
+
   test("isPrefKey 认得精确键和三个前缀，不认两个缓存键", () => {
     expect(isPrefKey("you-brain-theme")).toBe(true);
     expect(isPrefKey("knowledge-sidebar-w")).toBe(true);
