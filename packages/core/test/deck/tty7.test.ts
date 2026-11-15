@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { readFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -11,7 +11,7 @@ interface Call {
 }
 
 /** 假的 tty7：按命令前缀返回预置的 JSON，并记下每次调用。 */
-function fake(replies: Record<string, unknown | (() => unknown)>) {
+function fake(replies: Record<string, unknown | (() => unknown)>, configDir?: string) {
   const calls: Call[] = [];
   const runner = async (args: string[], options?: Tty7RunOptions): Promise<string> => {
     calls.push({ args, ...(options?.stdin === undefined ? {} : { stdin: options.stdin }) });
@@ -22,7 +22,7 @@ function fake(replies: Record<string, unknown | (() => unknown)>) {
     const reply = replies[key];
     return JSON.stringify(typeof reply === "function" ? (reply as () => unknown)() : reply);
   };
-  const tty7 = new Tty7({ runner, sleep: async () => undefined, dirExists: async (path) => path !== "/missing" });
+  const tty7 = new Tty7({ runner, configDir: configDir ?? "/nonexistent-tty7-config", sleep: async () => undefined, dirExists: async (path) => path !== "/missing" });
   return { tty7, calls };
 }
 
@@ -211,5 +211,79 @@ describe("Tty7.saveImagePaste", () => {
     expect(file.endsWith(".jpg")).toBe(true);
     await expect(tty7.saveImagePaste(new Uint8Array([1]), "application/pdf")).rejects.toThrow("不支持的图片类型");
     await rm(dir, { recursive: true, force: true });
+  });
+});
+
+const RENAME_REPLIES = {
+  "ws ls": { workspaces: [{ id: "ws-a", name: "John", attached: null }] },
+  "pane ls": { panes: [{ pane: 7, workspace: "ws-a", tab: "@3", cwd: "/repo/a", live: true, hibernated: false }] },
+  "tab ls ws-a": { tabs: [{ id: "@3", name: null, label: "a", agent: null, panes: [7] }] },
+  "tab rename": {},
+};
+
+describe("Tty7.rename", () => {
+  it("rename 用 tab 地址改名，名字放在 -- 之后", async () => {
+    const { tty7, calls } = fake(RENAME_REPLIES);
+    await tty7.rename(7, '-rf 《账本》 "x" 🧠');
+    expect(calls.at(-1)?.args).toEqual(["tab", "rename", "@3", "--json", "--", '-rf 《账本》 "x" 🧠']);
+  });
+
+  it("rename 找不到 pane 时报错且不执行改名", async () => {
+    const { tty7, calls } = fake(RENAME_REPLIES);
+    await expect(tty7.rename(99, "x")).rejects.toThrow("%99");
+    expect(calls.some((call) => call.args[1] === "rename")).toBe(false);
+  });
+
+  it("rename 拒绝空名字且不调用 tty7", async () => {
+    const { tty7, calls } = fake(RENAME_REPLIES);
+    await expect(tty7.rename(7, "   ")).rejects.toThrow();
+    expect(calls).toEqual([]);
+  });
+});
+
+describe("Tty7 appearance", () => {
+  const SESSION_REPLIES = { "ws ls": { workspaces: [] }, "pane ls": { panes: [] } };
+
+  async function withConfig(content: string | null, run: (dir: string) => Promise<void>) {
+    const dir = await mkdtemp(join(tmpdir(), "yb-tty7-config-"));
+    try {
+      if (content !== null) await writeFile(join(dir, "config.json"), content);
+      await run(dir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("appearance 读取字体、字号、行高并限幅", async () => {
+    await withConfig(JSON.stringify({ font_family: "Hack", font_fallbacks: ["Menlo", "SF Mono"], font_size: 13.0, line_height: 1.4 }), async (dir) => {
+      const view = await fake(SESSION_REPLIES, dir).tty7.sessions();
+      expect(view.appearance).toEqual({ fontFamily: '"Hack", "Menlo", "SF Mono", monospace', fontSize: 13, lineHeight: 1.4 });
+    });
+    await withConfig(JSON.stringify({ font_family: "Hack", font_size: 40, line_height: 0.5 }), async (dir) => {
+      const view = await fake(SESSION_REPLIES, dir).tty7.sessions();
+      expect(view.appearance).toEqual({ fontFamily: '"Hack", monospace', fontSize: 24, lineHeight: 1 });
+    });
+    await withConfig(JSON.stringify({ font_family: "Hack", font_size: 2, line_height: 9 }), async (dir) => {
+      const view = await fake(SESSION_REPLIES, dir).tty7.sessions();
+      expect(view.appearance).toMatchObject({ fontSize: 9, lineHeight: 2 });
+    });
+  });
+
+  it("环境变量 TTY7_CONFIG_DIR 指定配置目录", async () => {
+    await withConfig(JSON.stringify({ font_family: "Hack", font_size: 12, line_height: 1.2 }), async (dir) => {
+      const tty7 = new Tty7({ runner: async () => JSON.stringify({ workspaces: [], panes: [] }), env: { TTY7_CONFIG_DIR: dir } });
+      expect((await tty7.sessions()).appearance?.fontSize).toBe(12);
+    });
+  });
+
+  it("appearance 配置缺失或损坏时为 null", async () => {
+    await withConfig(null, async (dir) => {
+      expect((await fake(SESSION_REPLIES, dir).tty7.sessions()).appearance).toBeNull();
+    });
+    for (const bad of ["not json", "[]", JSON.stringify({ font_family: "Hack" }), JSON.stringify({ font_family: 3, font_size: 13, line_height: 1.4 })]) {
+      await withConfig(bad, async (dir) => {
+        expect((await fake(SESSION_REPLIES, dir).tty7.sessions()).appearance).toBeNull();
+      });
+    }
   });
 });

@@ -1168,6 +1168,10 @@ export type DeckTty7PasteImageResponse = { path: string };
 
 export const DeckTty7DeleteBodySchema = z.object({ pane: z.number().int().nonnegative() }).strict();
 
+export const DeckTty7RenameBodySchema = z
+  .object({ pane: z.number().int().nonnegative(), name: z.string().trim().min(1).max(80) })
+  .strict();
+
 export const DeckTty7SendBodySchema = z
   .object({
     pane: z.number().int().nonnegative(),
@@ -1185,6 +1189,7 @@ export const DeckTty7StartBodySchema = z
   })
   .strict();
 
+export type DeckTty7RenameBody = z.infer<typeof DeckTty7RenameBodySchema>;
 export type DeckTty7SendBody = z.infer<typeof DeckTty7SendBodySchema>;
 export type DeckTty7StartBody = z.infer<typeof DeckTty7StartBodySchema>;
 

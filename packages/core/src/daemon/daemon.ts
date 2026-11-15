@@ -3471,6 +3471,10 @@ export class YouBrainDaemon {
         await deck.tty7.delete(pane);
         return { ok: true };
       },
+      tty7Rename: async (body) => {
+        await deck.tty7.rename(body.pane, body.name);
+        return { ok: true };
+      },
       tty7Terminal: (pane, size, events) => deck.tty7.openTerminal(pane, size, events),
       tty7Screen: (pane, lines) => deck.tty7.screen(pane, lines),
       tty7Send: async (body) => {

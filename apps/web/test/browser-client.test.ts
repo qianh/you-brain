@@ -57,6 +57,23 @@ describe("daemon requests with a crowded loopback cookie jar", () => {
     expect(new Headers(captured?.headers).get("authorization")).toBe("Bearer synthetic-test-token");
   });
 
+  test("session rename posts the pane and name to the daemon", async () => {
+    let capturedUrl: string | undefined;
+    let captured: RequestInit | undefined;
+    const client = createBrowserDaemon({
+      token: "synthetic-test-token",
+      fetch: (async (input, init) => {
+        capturedUrl = String(input);
+        captured = init;
+        return Response.json({ ok: true });
+      }) as typeof fetch,
+    });
+    expect(await client.deckTty7Rename(7, "账本")).toEqual({ ok: true });
+    expect(capturedUrl).toEndWith("/api/deck/tty7/rename");
+    expect(captured?.method).toBe("POST");
+    expect(captured?.body).toBe(JSON.stringify({ pane: 7, name: "账本" }));
+  });
+
   test("API calls omit cookies while retaining Bearer auth and request bodies", async () => {
     const calls: RequestInit[] = [];
     const client = createBrowserDaemon({

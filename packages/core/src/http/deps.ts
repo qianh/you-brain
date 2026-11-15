@@ -79,6 +79,7 @@ import type {
   DeckDshLoginBody,
   DeckDshLoginResponse,
   DeckDshWebResponse,
+  DeckTty7RenameBody,
   DeckTty7ScreenResponse,
   DeckTty7PasteImageResponse,
   DeckTty7SendBody,
@@ -203,6 +204,7 @@ export interface DeckHttpPort {
   /** tty7 会话桥：列会话、看屏幕、发指令、新开会话；粘贴图片落盘换路径。 */
   tty7Sessions(): Promise<DeckTty7SessionsResponse>;
   tty7Delete(pane: number): Promise<{ ok: true }>;
+  tty7Rename(body: DeckTty7RenameBody): Promise<{ ok: true }>;
   tty7Screen(pane: number, lines?: number): Promise<DeckTty7ScreenResponse>;
   tty7Send(body: DeckTty7SendBody): Promise<{ ok: true }>;
   tty7Start(body: DeckTty7StartBody): Promise<DeckTty7StartResponse>;

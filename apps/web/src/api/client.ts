@@ -191,6 +191,7 @@ export interface BrowserDaemon
   /** tty7 会话桥：列会话、看屏幕、发指令、新开会话；粘贴图片落盘换路径。 */
   deckTty7Sessions(): Promise<DeckTty7SessionsResponse>;
   deckTty7Delete(pane: number): Promise<{ ok: true }>;
+  deckTty7Rename(pane: number, name: string): Promise<{ ok: true }>;
   deckTty7Screen(pane: number): Promise<DeckTty7ScreenResponse>;
   deckTty7Send(body: DeckTty7SendBody): Promise<{ ok: true }>;
   deckTty7Start(body: DeckTty7StartBody): Promise<DeckTty7StartResponse>;
@@ -346,6 +347,7 @@ export function createBrowserDaemon(options?: {
     deckT3: (url: string) => request<DeckT3WebResponse>("GET", `/api/deck/t3?url=${encodeURIComponent(url)}`),
     deckTty7Sessions: () => request<DeckTty7SessionsResponse>("GET", "/api/deck/tty7/sessions"),
     deckTty7Delete: (pane: number) => request<{ ok: true }>("POST", "/api/deck/tty7/delete", { pane }),
+    deckTty7Rename: (pane: number, name: string) => request<{ ok: true }>("POST", "/api/deck/tty7/rename", { pane, name }),
     deckTty7Screen: (pane: number) => request<DeckTty7ScreenResponse>("GET", `/api/deck/tty7/screen?pane=${pane}`),
     deckTty7Send: (body: DeckTty7SendBody) => request<{ ok: true }>("POST", "/api/deck/tty7/send", body),
     deckTty7Start: (body: DeckTty7StartBody) => request<DeckTty7StartResponse>("POST", "/api/deck/tty7/start", body),

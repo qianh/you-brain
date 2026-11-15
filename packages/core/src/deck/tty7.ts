@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, mkdir, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { openTty7Terminal, type TerminalSize, type Tty7TerminalEvents, type TerminalConnection } from "./tty7-terminal.js";
 
@@ -63,6 +63,16 @@ export interface Tty7Session {
 export type Tty7AgentStatus = "idle" | "working" | "waiting" | "done";
 const AGENT_STATUSES: readonly string[] = ["idle", "working", "waiting", "done"];
 
+/** tty7 自己的终端字体设置；内嵌终端默认与它保持一致。 */
+export interface Tty7Appearance {
+  /** 带引号、逗号分隔的 CSS 字体列表，末尾固定补 monospace。 */
+  fontFamily: string;
+  /** 限制在 9～24。 */
+  fontSize: number;
+  /** 限制在 1～2。 */
+  lineHeight: number;
+}
+
 export interface Tty7SessionsView {
   available: boolean;
   /** 不可用时的原因（没装、服务没起）。 */
@@ -70,6 +80,8 @@ export interface Tty7SessionsView {
   workspaces: Tty7Workspace[];
   sessions: Tty7Session[];
   harnesses: Array<Pick<Tty7Harness, "id" | "label">>;
+  /** 读自 tty7 的 config.json；读不到或格式不对为 null。 */
+  appearance: Tty7Appearance | null;
 }
 
 export interface Tty7ScreenView {
@@ -116,6 +128,8 @@ export interface Tty7Options {
   /** 测试用：跳过目录存在性检查和等待。 */
   dirExists?: (path: string) => Promise<boolean>;
   sleep?: (ms: number) => Promise<void>;
+  /** tty7 配置目录；缺省取环境变量 TTY7_CONFIG_DIR，再缺省 ~/.config/tty7。测试注入临时目录。 */
+  configDir?: string | undefined;
 }
 
 const RUN_TIMEOUT_MS = 8_000;
@@ -196,6 +210,43 @@ function assertPane(pane: number): string {
   return `%${pane}`;
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+/** 字体名放进 CSS 引号串前去掉引号和反斜杠，避免破坏字体列表。 */
+function quoteFont(name: string): string {
+  return `"${name.replace(/["\\]/g, "").trim()}"`;
+}
+
+/** 解析 tty7 的 config.json 文本；任何字段缺失或类型不对都返回 null，不猜默认值。 */
+export function parseTty7Appearance(text: string): Tty7Appearance | null {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "object" || raw === null) return null;
+  const config = raw as Record<string, unknown>;
+  const family = config.font_family;
+  const size = config.font_size;
+  const line = config.line_height;
+  if (typeof family !== "string" || family.trim() === "") return null;
+  if (typeof size !== "number" || !Number.isFinite(size)) return null;
+  if (typeof line !== "number" || !Number.isFinite(line)) return null;
+  const fallbacks = config.font_fallbacks;
+  if (fallbacks !== undefined && !(Array.isArray(fallbacks) && fallbacks.every((item) => typeof item === "string"))) return null;
+  const names = [family, ...((fallbacks as string[] | undefined) ?? [])]
+    .map((name) => name.replace(/["\\]/g, "").trim())
+    .filter((name) => name !== "");
+  return {
+    fontFamily: [...names.map(quoteFont), "monospace"].join(", "),
+    fontSize: clamp(size, 9, 24),
+    lineHeight: clamp(line, 1, 2),
+  };
+}
+
 interface RawWorkspace { id: string; name: string | null; attached: string | null }
 interface RawPane { pane: number; workspace: string; tab: string; cwd: string | null; live: boolean; hibernated: boolean }
 interface RawAgent {
@@ -240,6 +291,7 @@ export class Tty7 {
   /** 全部会话。tty7 没装或服务没起时 available=false，不抛错（面板要能显示原因）。 */
   async sessions(): Promise<Tty7SessionsView> {
     const harnesses = TTY7_HARNESSES.map(({ id, label }) => ({ id, label }));
+    const appearance = await this.#appearance();
     try {
       const workspaces = await this.#workspaces();
       const [panes, agentList, tabLists] = await Promise.all([
@@ -280,12 +332,36 @@ export class Tty7 {
             model: agent?.state?.readout?.model ?? null,
           };
         });
-      return { available: true, detail: "", workspaces, sessions, harnesses };
+      return { available: true, detail: "", workspaces, sessions, harnesses, appearance };
     } catch (error) {
       const detail =
         error instanceof Tty7MissingError ? "没有找到 tty7 命令" : error instanceof Error ? error.message : String(error);
-      return { available: false, detail, workspaces: [], sessions: [], harnesses };
+      return { available: false, detail, workspaces: [], sessions: [], harnesses, appearance };
     }
+  }
+
+  async #appearance(): Promise<Tty7Appearance | null> {
+    const env = this.#options.env ?? process.env;
+    const dir = this.#options.configDir ?? (env.TTY7_CONFIG_DIR ? env.TTY7_CONFIG_DIR : join(homedir(), ".config", "tty7"));
+    try {
+      return parseTty7Appearance(await readFile(join(dir, "config.json"), "utf8"));
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * 改 pane 所在 tab 的名字（tty7 里的名字是 tab 级的）。
+   * 名字放在 `--` 之后，以 - 开头也不会被当成选项。
+   */
+  async rename(pane: number, name: string): Promise<void> {
+    assertPane(pane);
+    if (name.trim() === "") throw new Error("名字不能为空");
+    const view = await this.sessions();
+    if (!view.available) throw new Error(view.detail);
+    const session = view.sessions.find((item) => item.pane === pane);
+    if (!session) throw new Error(`找不到会话 %${pane}`);
+    await this.#run(["tab", "rename", session.tabId, "--json", "--", name]);
   }
 
   /** 会话当前屏幕的纯文本（最后 lines 行）。capture 是 tty7 里最贵的命令（~300ms），只跑一次。 */

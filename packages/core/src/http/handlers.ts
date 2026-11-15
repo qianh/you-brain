@@ -70,6 +70,7 @@ import {
   DeckDshLoginBodySchema,
   DeckTty7DeleteBodySchema,
   UiPrefsPatchBodySchema,
+  DeckTty7RenameBodySchema,
   DeckTty7SendBodySchema,
   DeckTty7StartBodySchema,
   type ActionResponse,
@@ -377,6 +378,12 @@ export async function handleApi(
     return method(request, "POST", async () => {
       const body = DeckTty7DeleteBodySchema.parse(await readJson(request));
       return json(await deck(context).tty7Delete(body.pane));
+    });
+  }
+  if (path === "/api/deck/tty7/rename") {
+    return method(request, "POST", async () => {
+      const body = DeckTty7RenameBodySchema.parse(await readJson(request));
+      return json(await deck(context).tty7Rename(body));
     });
   }
   if (path === "/api/deck/tty7/screen") {
