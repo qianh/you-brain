@@ -110,6 +110,8 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
   const pendingOpen = useRef<TerminalReference | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [creationProject, setCreationProject] = useState<{ label: string; dirs: string[] } | null>(null);
+  const newFormRef = useRef<HTMLFormElement>(null);
   const [cwd, setCwd] = useState("");
   const [harness, setHarness] = useState(() => readStored(HARNESS_KEY) ?? "claude");
   const [workspace, setWorkspace] = useState("");
@@ -208,6 +210,36 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
     () => [...new Set(sessions.map((session) => session.cwd).filter((dir) => dir !== ""))].sort(),
     [sessions],
   );
+
+  useEffect(() => {
+    if (!creating) return;
+    const form = newFormRef.current;
+    form?.scrollIntoView({ block: "nearest" });
+    const field = creationProject?.dirs.length === 1 ? "harness" : "cwd";
+    (form?.elements.namedItem(field) as HTMLElement | null)?.focus();
+  }, [creating, creationProject]);
+
+  const projectWorkspace = (dir: string): string => {
+    const ids = new Set(sessions
+      .filter((session) => session.cwd !== "" && (session.cwd.replace(/\/+$/u, "") || "/") === dir)
+      .map((session) => session.workspaceId));
+    return ids.size === 1 ? [...ids][0]! : "";
+  };
+
+  const createInProject = (label: string): void => {
+    // 用完整会话列表定位目录，搜索不能替同名项目选定目标路径。
+    const dirs = [...new Set(sessions
+      .filter((session) => session.cwd !== "" && baseName(session.cwd) === label)
+      .map((session) => session.cwd.replace(/\/+$/u, "") || "/"))].sort();
+    if (dirs.length === 0) return;
+    const dir = dirs.length === 1 ? dirs[0]! : "";
+    setCreationProject({ label, dirs });
+    setCwd(dir);
+    setWorkspace(projectWorkspace(dir));
+    setActionError(null);
+    setColorPickerFor(null);
+    setCreating(true);
+  };
 
   const start = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
@@ -313,7 +345,17 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
       <header className="deck-tty7-head">
         <strong>{t("deckTty7Title")}</strong>
         <span className="deck-tty7-count">{view?.available === true ? sessions.length : ""}</span>
-        <button type="button" className="btn small quiet" onClick={() => setCreating((value) => !value)}>
+        <button type="button" className="btn small quiet" disabled={busy} onClick={() => {
+          if (creating) {
+            setCreating(false);
+            return;
+          }
+          setCreationProject(null);
+          setCwd("");
+          setWorkspace("");
+          setActionError(null);
+          setCreating(true);
+        }}>
           {creating ? t("deckTty7Cancel") : t("deckTty7New")}
         </button>
         <button type="button" className="btn small quiet" onClick={onClose} aria-label={t("deckTty7Hide")}>
@@ -327,18 +369,32 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
       )}
 
       {creating && view?.available === true && (
-        <form className="deck-tty7-new" onSubmit={(event) => void start(event)}>
+        <form ref={newFormRef} className="deck-tty7-new" onSubmit={(event) => void start(event)}>
+          {creationProject !== null && <strong>{t("deckTty7NewInProject", { name: creationProject.label })}</strong>}
           <label className="field">
             <span className="field-label">{t("deckTty7Path")}</span>
-            <input
+            {creationProject !== null && creationProject.dirs.length > 1 ? (
+              <select
+                name="cwd"
+                className="field-control"
+                value={cwd}
+                onChange={(event) => {
+                  setCwd(event.target.value);
+                  setWorkspace(projectWorkspace(event.target.value));
+                }}
+              >
+                <option value="">{t("deckTty7ChooseProjectPath")}</option>
+                {creationProject.dirs.map((dir) => <option key={dir} value={dir}>{dir}</option>)}
+              </select>
+            ) : <input
+              name="cwd"
               className="field-control"
               list="deck-tty7-dirs"
               value={cwd}
               onChange={(event) => setCwd(event.target.value)}
               placeholder="/Users/…/project"
               spellCheck={false}
-              autoFocus
-            />
+            />}
             <datalist id="deck-tty7-dirs">
               {knownDirs.map((dir) => (
                 <option key={dir} value={dir} />
@@ -347,7 +403,7 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
           </label>
           <label className="field">
             <span className="field-label">{t("deckTty7Harness")}</span>
-            <select className="field-control" value={harness} onChange={(event) => setHarness(event.target.value)}>
+            <select name="harness" className="field-control" value={harness} onChange={(event) => setHarness(event.target.value)}>
               {view.harnesses.map((item) => (
                 <option key={item.id} value={item.id}>
                   {item.label}
@@ -403,7 +459,7 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
               const workingHint = workingCount > 0 ? t("deckTty7GroupWorking", { count: workingCount }) : undefined;
               return (
                 <Fragment key={label}>
-                  <li>
+                  <li className="deck-tty7-group-head">
                     <button
                       type="button"
                       className={["deck-tty7-group", color === undefined ? "" : "with-color", workingCount > 0 ? "is-working" : ""].filter(Boolean).join(" ")}
@@ -430,6 +486,16 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
                       <span className="deck-tty7-group-name">{label}</span>
                       <span className="deck-tty7-group-count">{items.length}</span>
                     </button>
+                    {items.some((session) => session.cwd !== "") && (
+                      <IconButton
+                        className="deck-tty7-group-new"
+                        label={t("deckTty7NewInProject", { name: label })}
+                        disabled={busy}
+                        onClick={() => createInProject(label)}
+                      >
+                        <Icon name="plus" />
+                      </IconButton>
+                    )}
                   </li>
                   {colorPickerFor === label && (
                     <li className="deck-tty7-colors">

@@ -240,12 +240,16 @@
 
 /* 项目分组头：底色胶囊 + 箭头 + 会话数，和会话行拉开层次；点击展开/收起。
    配了颜色的组用色点 + color-mix 底色，不同项目一眼区分。 */
+.deck-tty7-group-head { display: flex; align-items: center; gap: 4px; margin-top: 8px; }
+.deck-tty7-list > .deck-tty7-group-head:first-child { margin-top: 0; }
+.deck-tty7-group-new { color: var(--text-3); }
+.deck-tty7-group-new:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
 .deck-tty7-group {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 8px;
   padding: 5px 8px;
   border: 0;
   border-radius: 6px;
@@ -257,7 +261,6 @@
   text-align: left;
   cursor: pointer;
 }
-.deck-tty7-list > li:first-child .deck-tty7-group { margin-top: 0; }
 .deck-tty7-group:hover { background: var(--surface-3); color: var(--text); }
 .deck-tty7-group.with-color {
   background: color-mix(in srgb, var(--group-color) 14%, transparent);
