@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { DeckTty7SessionsResponse } from "@you-brain/core/http/types.js";
 
 import { useDaemon } from "../daemon-context.js";
+import type { TerminalReference } from "../lib/terminal-reference.js";
 
 export type Session = DeckTty7SessionsResponse["sessions"][number];
 
@@ -28,6 +29,21 @@ export function initialDeckView(stored: string | null): "dsh" | "t3" {
   return stored === "dsh" ? "dsh" : "t3";
 }
 
+/**
+ * 处理「打开某个会话」的请求：必须等请求到达之后重新加载的列表，不能用内存里可能过期的旧列表。
+ * 加载失败（reload 返回 null）不算缺失：错误由列表的错误提示显示，请求照样视为已处理。
+ */
+export async function resolveOpenRequest(
+  request: TerminalReference,
+  reload: () => Promise<DeckTty7SessionsResponse | null>,
+): Promise<{ pane: number | null; missing: boolean }> {
+  const fresh = await reload();
+  if (fresh === null) return { pane: null, missing: false };
+  const target = fresh.sessions.find((session) => session.pane === request.pane &&
+    session.workspaceId === request.workspaceId && session.tabId === request.tabId);
+  return target ? { pane: target.pane, missing: false } : { pane: null, missing: true };
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -40,22 +56,27 @@ function errorText(error: unknown): string {
 export function useTty7Sessions(): {
   view: DeckTty7SessionsResponse | null;
   error: string | null;
-  reload(): Promise<void>;
+  /** 返回这次重新加载得到的列表；失败返回 null。 */
+  reload(): Promise<DeckTty7SessionsResponse | null>;
 } {
   const { client } = useDaemon();
   const [view, setView] = useState<DeckTty7SessionsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const sequence = useRef(0);
 
-  const reload = useCallback(async (): Promise<void> => {
+  const reload = useCallback(async (): Promise<DeckTty7SessionsResponse | null> => {
     const mine = ++sequence.current;
     try {
       const next = await client.deckTty7Sessions();
-      if (mine !== sequence.current) return;
-      setView(next);
-      setError(null);
+      // 即使被更新的请求取代，这份数据仍是请求之后加载的，可以返回给调用方。
+      if (mine === sequence.current) {
+        setView(next);
+        setError(null);
+      }
+      return next;
     } catch (failure) {
       if (mine === sequence.current) setError(errorText(failure));
+      return null;
     }
   }, [client]);
 

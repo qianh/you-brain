@@ -176,13 +176,13 @@ export function DshDeckPage() {
               ) : null}
               <IconButton
                 className="deck-tty7-toggle"
-                label={t("deckTty7Show")}
+                label={!tty7Open && waiting > 0 ? `${t("deckTty7Show")} · ${t("deckTty7WaitingBadge", { count: waiting })}` : t("deckTty7Show")}
                 aria-pressed={tty7Open}
                 onClick={() => toggleTty7(!tty7Open)}
               >
                 <Icon name="terminal" />
                 {!tty7Open && waiting > 0 ? (
-                  <span className="deck-tty7-badge" aria-label={t("deckTty7WaitingBadge", { count: waiting })}>{waiting > 9 ? "9+" : waiting}</span>
+                  <span className="deck-tty7-badge" aria-hidden="true">{waiting > 9 ? "9+" : waiting}</span>
                 ) : null}
               </IconButton>
             </div>

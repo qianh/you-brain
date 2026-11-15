@@ -17,7 +17,7 @@ import { useToast } from "../components/toast.js";
 import { Toggle } from "../components/toggle.js";
 import type { TerminalReference } from "../lib/terminal-reference.js";
 import { DeckTty7Terminal } from "./deck-tty7-terminal.js";
-import { baseName, sessionTitle, type Session, type useTty7Sessions } from "./deck-tty7-sessions.js";
+import { baseName, resolveOpenRequest, sessionTitle, type Session, type useTty7Sessions } from "./deck-tty7-sessions.js";
 
 const HARNESS_KEY = "you-brain.deck.tty7-harness";
 const ACTIVE_ONLY_KEY = "you-brain.deck.tty7-active-only";
@@ -99,7 +99,6 @@ export function DeckTty7Panel({ sessions: shared, onClose, openRequest, onOpenRe
   const [busy, setBusy] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
   const selectedSessionRef = useRef<HTMLButtonElement>(null);
-  const pendingOpen = useRef<TerminalReference | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [creationProject, setCreationProject] = useState<{ label: string; dirs: string[] } | null>(null);
@@ -113,23 +112,18 @@ export function DeckTty7Panel({ sessions: shared, onClose, openRequest, onOpenRe
   const [groupColors, setGroupColors] = useState<Record<string, string>>(() => readStoredColors(COLORS_KEY));
   /** 正在挑颜色的组名。 */
   const [colorPickerFor, setColorPickerFor] = useState<string | null>(null);
-  // 外部请求打开某个会话：先刷新一次，新数据到达后在下面的 effect 里定位。
+  // 外部请求打开某个会话：重新加载一次，只用新加载的列表定位（面板刚挂载时内存里的列表可能是旧的）。
   useEffect(() => {
     if (!openRequest) return;
-    pendingOpen.current = openRequest;
-    void loadSessions();
-  }, [openRequest, loadSessions]);
-
-  useEffect(() => {
-    const request = pendingOpen.current;
-    if (request === null || view === null) return;
-    pendingOpen.current = null;
-    const target = view.sessions.find((session) => session.pane === request.pane &&
-      session.workspaceId === request.workspaceId && session.tabId === request.tabId);
-    setSelected(target?.pane ?? null);
-    setActionError(target ? null : t("deckTty7ReferenceMissing"));
-    onOpenRequestHandled?.(request);
-  }, [view, t, onOpenRequestHandled]);
+    let cancelled = false;
+    void resolveOpenRequest(openRequest, loadSessions).then((result) => {
+      if (cancelled) return;
+      setSelected(result.pane);
+      setActionError(result.missing ? t("deckTty7ReferenceMissing") : null);
+      onOpenRequestHandled?.(openRequest);
+    });
+    return () => { cancelled = true; };
+  }, [openRequest, loadSessions, t, onOpenRequestHandled]);
 
   const sessions = view?.sessions ?? [];
   const visible = useMemo(() => {
