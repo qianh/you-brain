@@ -7,6 +7,7 @@ import { Button } from "../components/button.js";
 import { Card } from "../components/card.js";
 import { EmptyState } from "../components/empty.js";
 import { Page, PageHeader } from "../components/page.js";
+import { MemoryTabs } from "./memory-tabs.js";
 import { Segmented } from "../components/segmented.js";
 import { SkeletonRow, SkeletonStat } from "../components/skeleton.js";
 import { StatBlock, StatGrid } from "../components/stat.js";
@@ -82,6 +83,7 @@ export function TodayPage() {
   return (
     <div className="today-page">
       <Page>
+        <MemoryTabs current="today" />
         <PageHeader
           title={t("today")}
           description={today ? formatTodayHeading(today.date, language) : t("todayHint")}

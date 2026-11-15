@@ -13,8 +13,9 @@ import { Tooltip } from "./components/tooltip.js";
 import { useDaemon } from "./daemon-context.js";
 import { devOverlayAllowed } from "./lib/dev-overlay.js";
 import { capsuleFromStatus, capsuleWarningCount, type CapsuleKind, type CapsuleStatus } from "./lib/health.js";
+import { prefs } from "./lib/prefs.js";
 import { routeFadeAnimationEnded, useRouteEnter } from "./lib/route-fade.js";
-import { isPrimaryNavActive, readQuery, settingsHref } from "./lib/route.js";
+import { MEMORY_NAV, MEMORY_TAB_KEY, isPrimaryNavActive, memoryHref, readQuery, settingsHref } from "./lib/route.js";
 import { modLabel, shortcutMod } from "./lib/shortcuts.js";
 import { isUnreachableError } from "./pages/status/logic.js";
 import { useRoute } from "./router.js";
@@ -22,10 +23,14 @@ import type { MessageKey } from "./i18n/messages.js";
 
 const TABS: ReadonlyArray<{ key: MessageKey; href: string; icon: IconName }> = [
   { key: "navDeck", href: "/deck", icon: "command" },
-  { key: "navToday", href: "/today", icon: "calendar" },
-  { key: "topicsBook", href: "/topics", icon: "book" },
+  { key: "navMemory", href: MEMORY_NAV, icon: "book" },
   { key: "navKnowledge", href: "/knowledge", icon: "book-open" },
 ];
+
+/** 顶部菜单某项实际要去的地址；「记忆」去上次停留的分段。 */
+function tabTarget(href: string): string {
+  return href === MEMORY_NAV ? memoryHref(prefs.getItem(MEMORY_TAB_KEY)) : href;
+}
 
 function RouteFade({ pathname, children }: { pathname: string; children: ReactNode }) {
   const { entering, clear } = useRouteEnter(pathname);
@@ -128,7 +133,7 @@ export function Shell({ children }: { children: ReactNode }) {
       onPalette: () => setPalette(true),
       onNav: (index: number) => {
         const tab = TABS[index - 1];
-        if (tab) navigate(tab.href);
+        if (tab) navigate(tabTarget(tab.href));
       },
       onSettings: () => navigate(settingsHref("account")),
       onRefresh: () => {
@@ -171,7 +176,7 @@ export function Shell({ children }: { children: ReactNode }) {
               className="nav-tabs"
               label={t("brand")}
               value={current}
-              onChange={navigate}
+              onChange={(value) => navigate(tabTarget(value))}
               options={TABS.map((tab) => ({
                 value: tab.href,
                 label: t(tab.key),

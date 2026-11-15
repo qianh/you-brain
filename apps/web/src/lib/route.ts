@@ -75,8 +75,24 @@ export function isNavActive(pathname: string, href: string): boolean {
   return pathname === href;
 }
 
-/** The shelf tab covers both the active and history routes. */
+/** 「记忆」入口里记住上次停留的分段（今日 / 话题册）的偏好键。 */
+export const MEMORY_TAB_KEY = "you-brain.memory.tab";
+/** 顶部菜单里「记忆」这一项的标识；它不是页面地址，点击时按 `memoryHref` 决定去哪。 */
+export const MEMORY_NAV = "/memory";
+
+/** 记忆入口点开后去哪：记着话题册就去话题册，其余（含没记过）去今日。 */
+export function memoryHref(stored: string | null): "/today" | "/topics" {
+  return stored === "topics" ? "/topics" : "/today";
+}
+
+/** 记忆入口下的三个页面地址。 */
+export function isMemoryPath(pathname: string): boolean {
+  return pathname === "/today" || pathname === "/topics" || pathname === "/topics/history";
+}
+
+/** 顶部菜单某一项是否高亮；「记忆」在今日、话题册、历史三个地址下都高亮。 */
 export function isPrimaryNavActive(pathname: string, href: string): boolean {
+  if (href === MEMORY_NAV) return isMemoryPath(pathname);
   if (href === "/topics") return pathname === "/topics" || pathname === "/topics/history";
   return isNavActive(pathname, href);
 }

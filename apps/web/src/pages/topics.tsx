@@ -7,6 +7,7 @@ import { Card } from "../components/card.js";
 import { EmptyState } from "../components/empty.js";
 import { Icon } from "../components/icons.js";
 import { PageHeader } from "../components/page.js";
+import { MemoryTabs } from "./memory-tabs.js";
 import { Segmented } from "../components/segmented.js";
 import { Skeleton, SkeletonRow } from "../components/skeleton.js";
 import { useDelayed } from "../components/use-delayed.js";
@@ -204,25 +205,28 @@ export function TopicsPage({ zone }: { zone: "active" | "history" }) {
   }, [navigate]);
 
   const header = (
-    <PageHeader
-      title={t("topicsBook")}
-      actions={
-        <>
-          <Button size="sm" onClick={() => setReorganizing(true)}>
-            {t("reorganize")}
-          </Button>
-          <Segmented
-            label={t("topicsBook")}
-            value={zone}
-            options={[
-              { value: "active", label: t("zoneActive") },
-              { value: "history", label: t("zoneHistory") },
-            ]}
-            onChange={(value) => navigate(value === "history" ? "/topics/history" : "/topics")}
-          />
-        </>
-      }
-    />
+    <>
+      <MemoryTabs current="topics" />
+      <PageHeader
+        title={t("topicsBook")}
+        actions={
+          <>
+            <Button size="sm" onClick={() => setReorganizing(true)}>
+              {t("reorganize")}
+            </Button>
+            <Segmented
+              label={t("topicsBook")}
+              value={zone}
+              options={[
+                { value: "active", label: t("zoneActive") },
+                { value: "history", label: t("zoneHistory") },
+              ]}
+              onChange={(value) => navigate(value === "history" ? "/topics/history" : "/topics")}
+            />
+          </>
+        }
+      />
+    </>
   );
 
   const zoneBlank = inZone.length === 0

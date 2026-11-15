@@ -54,14 +54,14 @@ function Frame() {
         : location.pathname === "/deck"
           ? t("navDeck")
           : location.pathname === "/topics" || location.pathname === "/topics/history"
-            ? t("topicsBook")
+            ? t("navMemory")
               : location.pathname === "/knowledge"
                 ? t("navKnowledge")
                 : location.pathname === "/search"
                   ? t("navSearch")
                   : location.pathname === "/settings"
                     ? t("navSettings")
-                    : t("navToday");
+                    : t("navMemory");
     document.title = `${page} · U-Brain`;
   }, [location.pathname, t]);
 

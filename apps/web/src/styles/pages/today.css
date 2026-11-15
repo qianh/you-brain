@@ -407,3 +407,6 @@
   background: var(--hover);
   color: var(--text);
 }
+
+/* 「记忆」入口下今日 / 话题册两页共用的分段 */
+.memory-tabs { display: flex; margin-bottom: var(--sp-3); }

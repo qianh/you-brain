@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  MEMORY_NAV,
+  isMemoryPath,
   isNavActive,
   isPrimaryNavActive,
+  memoryHref,
   parseAppLocation,
   readQuery,
   searchHref,
@@ -117,5 +120,29 @@ describe("openFullWindow", () => {
       pageUrl: "http://127.0.0.1:4731/panel",
     });
     expect(mode).toBe("blocked");
+  });
+});
+
+describe("memory entry", () => {
+  test("memoryHref defaults to today and remembers the topics book", () => {
+    expect(memoryHref(null)).toBe("/today");
+    expect(memoryHref("topics")).toBe("/topics");
+    expect(memoryHref("x")).toBe("/today");
+  });
+
+  test("isMemoryPath covers the three addresses only", () => {
+    expect(isMemoryPath("/today")).toBe(true);
+    expect(isMemoryPath("/topics")).toBe(true);
+    expect(isMemoryPath("/topics/history")).toBe(true);
+    expect(isMemoryPath("/deck")).toBe(false);
+    expect(isMemoryPath("/knowledge")).toBe(false);
+    expect(isMemoryPath("/topics/other")).toBe(false);
+  });
+
+  test("the memory tab is highlighted on all three addresses, not on deck or knowledge", () => {
+    for (const path of ["/today", "/topics", "/topics/history"]) expect(isPrimaryNavActive(path, MEMORY_NAV)).toBe(true);
+    for (const path of ["/deck", "/knowledge", "/settings", "/search"]) expect(isPrimaryNavActive(path, MEMORY_NAV)).toBe(false);
+    expect(isPrimaryNavActive("/today", "/deck")).toBe(false);
+    expect(isPrimaryNavActive("/deck", "/deck")).toBe(true);
   });
 });
