@@ -8,3 +8,4 @@ apps/desktop/src-tauri/target/
 .env
 .env.local
 .env.*.local
+.superpowers/
