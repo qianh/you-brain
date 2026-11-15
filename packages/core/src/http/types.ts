@@ -1086,7 +1086,7 @@ export type { WebhookEventKind };
 
 export const DaemonEventSchema = z.object({
   id: z.number().int().nonnegative(),
-  kind: z.enum(["ready", "topics", "today", "status", "portrait", "devices", "notion"]),
+  kind: z.enum(["ready", "topics", "today", "status", "portrait", "devices", "notion", "deck"]),
   at: z.string().min(1),
 });
 
@@ -1172,6 +1172,9 @@ export const DeckTty7RenameBodySchema = z
   .object({ pane: z.number().int().nonnegative(), name: z.string().trim().min(1).max(80) })
   .strict();
 
+/** 网页正在整屏看哪个会话；null 表示没在看。 */
+export const DeckTty7ViewingBodySchema = z.object({ pane: z.number().int().nonnegative().nullable() }).strict();
+
 export const DeckTty7SendBodySchema = z
   .object({
     pane: z.number().int().nonnegative(),
@@ -1190,6 +1193,9 @@ export const DeckTty7StartBodySchema = z
   .strict();
 
 export type DeckTty7RenameBody = z.infer<typeof DeckTty7RenameBodySchema>;
+export type DeckTty7ViewingBody = z.infer<typeof DeckTty7ViewingBodySchema>;
+/** 终端会话提醒列表；桌面壳按 epoch + seq 取新条目。 */
+export type DeckNoticesResponse = import("../deck/session-notices.js").SessionNoticeList;
 export type DeckTty7SendBody = z.infer<typeof DeckTty7SendBodySchema>;
 export type DeckTty7StartBody = z.infer<typeof DeckTty7StartBodySchema>;
 

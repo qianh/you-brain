@@ -12,6 +12,7 @@ import { DeckTty7NewForm, DeckTty7SessionList, readGroupColors } from "./deck-tt
 import { baseName, sessionTitle, useSessionRename, type Session, type useTty7Sessions } from "./deck-tty7-sessions.js";
 import { DeckTty7Terminal } from "./deck-tty7-terminal.js";
 import { closeTab, cycleTab, hideScreen, openTab, terminalShortcut, type TerminalTabs } from "./deck-terminal-tabs.js";
+import { VIEWING_REPORT_MS, viewingTarget } from "./deck-terminal-viewing.js";
 
 /**
  * 整屏终端：盖住整个窗口，顶部一行是返回、本次打开过的会话标签、全部会话下拉。
@@ -25,7 +26,7 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
   /** 返回：收起整屏终端，标签保留。 */
   onClose: () => void;
 }) {
-  const { t } = useDaemon();
+  const { t, client } = useDaemon();
   const { view, reload } = shared;
   const { rename, reportError } = useSessionRename(reload);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -82,6 +83,37 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
   }, [mod, tabs, onTabsChange, fontSize]);
+
+  // 告诉 daemon 正在看哪个会话，这个会话完成时不弹通知。窗口失焦、页面隐藏或离开时报 null。
+  // 失败一律静默：上报不能影响终端使用。
+  useEffect(() => {
+    let last: number | null = null;
+    const send = (pane: number | null): void => {
+      void client.deckTty7Viewing(pane).catch(() => undefined);
+    };
+    const sync = (): void => {
+      const target = viewingTarget(tabs.active, document.hasFocus(), document.visibilityState === "visible");
+      if (target !== null) {
+        send(target);
+        last = target;
+      } else if (last !== null) {
+        send(null);
+        last = null;
+      }
+    };
+    sync();
+    const timer = window.setInterval(sync, VIEWING_REPORT_MS);
+    window.addEventListener("focus", sync);
+    window.addEventListener("blur", sync);
+    document.addEventListener("visibilitychange", sync);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", sync);
+      window.removeEventListener("blur", sync);
+      document.removeEventListener("visibilitychange", sync);
+      if (last !== null) send(null);
+    };
+  }, [client, tabs.active]);
 
   useEffect(() => {
     activeTabRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });

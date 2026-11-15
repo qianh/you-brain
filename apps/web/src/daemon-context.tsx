@@ -223,7 +223,8 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
       while (alive.current && !controller.signal.aborted) {
         try {
           await client.events((event) => {
-            if (event.kind === "ready" || event.kind === "portrait") return;
+            // deck（终端会话提醒）只给桌面壳用，网页不处理。
+            if (event.kind === "ready" || event.kind === "portrait" || event.kind === "deck") return;
             // 知识库页自己管理刷新(见 notionRevision);这里只处理会话域的变更。
             if (event.kind === "notion") {
               setNotionRevision((value) => value + 1);

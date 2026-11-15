@@ -71,6 +71,7 @@ import {
   DeckTty7DeleteBodySchema,
   UiPrefsPatchBodySchema,
   DeckTty7RenameBodySchema,
+  DeckTty7ViewingBodySchema,
   DeckTty7SendBodySchema,
   DeckTty7StartBodySchema,
   type ActionResponse,
@@ -385,6 +386,15 @@ export async function handleApi(
       const body = DeckTty7RenameBodySchema.parse(await readJson(request));
       return json(await deck(context).tty7Rename(body));
     });
+  }
+  if (path === "/api/deck/tty7/viewing") {
+    return method(request, "POST", async () => {
+      const body = DeckTty7ViewingBodySchema.parse(await readJson(request));
+      return json(await deck(context).tty7Viewing(body));
+    });
+  }
+  if (path === "/api/deck/notices") {
+    return method(request, "GET", async () => json(await deck(context).notices()));
   }
   if (path === "/api/deck/tty7/screen") {
     return method(request, "GET", async () => {

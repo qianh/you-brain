@@ -79,7 +79,9 @@ import type {
   DeckDshLoginBody,
   DeckDshLoginResponse,
   DeckDshWebResponse,
+  DeckNoticesResponse,
   DeckTty7RenameBody,
+  DeckTty7ViewingBody,
   DeckTty7ScreenResponse,
   DeckTty7PasteImageResponse,
   DeckTty7SendBody,
@@ -205,6 +207,10 @@ export interface DeckHttpPort {
   tty7Sessions(): Promise<DeckTty7SessionsResponse>;
   tty7Delete(pane: number): Promise<{ ok: true }>;
   tty7Rename(body: DeckTty7RenameBody): Promise<{ ok: true }>;
+  /** 网页上报正在整屏看的会话，这个会话的完成/等待提醒会被跳过。 */
+  tty7Viewing(body: DeckTty7ViewingBody): Promise<{ ok: true }>;
+  /** 终端会话提醒（工作中 → 等你回复/已完成）。 */
+  notices(): Promise<DeckNoticesResponse>;
   tty7Screen(pane: number, lines?: number): Promise<DeckTty7ScreenResponse>;
   tty7Send(body: DeckTty7SendBody): Promise<{ ok: true }>;
   tty7Start(body: DeckTty7StartBody): Promise<DeckTty7StartResponse>;

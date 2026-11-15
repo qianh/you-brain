@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { access, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -130,9 +130,17 @@ export interface Tty7Options {
   sleep?: (ms: number) => Promise<void>;
   /** tty7 配置目录；缺省取环境变量 TTY7_CONFIG_DIR，再缺省 ~/.config/tty7。测试注入临时目录。 */
   configDir?: string | undefined;
+  /** 测试用：替代 `locateTty7` 找 tty7 可执行文件。 */
+  locate?: () => Promise<string | null>;
+  /** 测试用：替代 `child_process.spawn` 启动事件流进程。 */
+  spawnEvents?: (binary: string, args: string[], env: NodeJS.ProcessEnv) => ChildProcess;
+  /** 事件流进程退出后隔多久重启；缺省 5 秒。 */
+  eventsRestartMs?: number;
 }
 
 const RUN_TIMEOUT_MS = 8_000;
+/** `tty7 events` 进程退出后等这么久再拉起。 */
+const EVENTS_RESTART_MS = 5_000;
 /** 粘贴之后隔一下再回车：TUI（Claude Code 等）紧跟着粘贴的回车会被当成粘贴内容的一部分。 */
 const ENTER_AFTER_PASTE_MS = 200;
 /** 新开的 shell 要等到提示符出来再敲命令，最多等这么久。 */
@@ -267,6 +275,80 @@ export class Tty7 {
 
   openTerminal(pane: number, size: TerminalSize, events: Tty7TerminalEvents): TerminalConnection {
     return openTty7Terminal({ pane, size, events, env: this.#options.env });
+  }
+
+  /**
+   * 订阅 tty7 的事件流（`tty7 events --json`）：每来一行调用一次 `onLine`，不解析内容，
+   * 只当作「有变化了，去重读一次会话」的触发。进程退出后隔几秒重启；找不到 tty7 就不启动、不重试。
+   * 返回停止函数：不再重启，并杀掉进程。
+   */
+  events(onLine: () => void): () => void {
+    const env = this.#options.env ?? process.env;
+    const restartMs = this.#options.eventsRestartMs ?? EVENTS_RESTART_MS;
+    let stopped = false;
+    let child: ChildProcess | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const schedule = (): void => {
+      if (stopped) return;
+      timer = setTimeout(() => void launch(), restartMs);
+      timer.unref?.();
+    };
+
+    const launch = async (): Promise<void> => {
+      timer = null;
+      if (stopped) return;
+      let binary: string | null;
+      try {
+        binary = await (this.#options.locate ?? (() => locateTty7(env)))();
+      } catch {
+        binary = null;
+      }
+      if (binary === null || stopped) return;
+      let current: ChildProcess;
+      try {
+        current = (this.#options.spawnEvents ?? ((bin, args, spawnEnv) => spawn(bin, args, { env: spawnEnv, stdio: ["ignore", "pipe", "ignore"] })))(
+          binary,
+          ["events", "--json"],
+          env,
+        );
+      } catch {
+        schedule();
+        return;
+      }
+      child = current;
+      current.unref?.();
+      let buffer = "";
+      current.stdout?.setEncoding?.("utf8");
+      current.stdout?.on("data", (chunk: string | Buffer) => {
+        buffer += chunk.toString();
+        let newline = buffer.indexOf("\n");
+        while (newline !== -1) {
+          const line = buffer.slice(0, newline).trim();
+          buffer = buffer.slice(newline + 1);
+          if (line !== "") onLine();
+          newline = buffer.indexOf("\n");
+        }
+      });
+      let ended = false;
+      const onEnd = (): void => {
+        if (ended) return;
+        ended = true;
+        if (child === current) child = null;
+        schedule();
+      };
+      current.on("error", onEnd);
+      current.on("close", onEnd);
+    };
+
+    void launch();
+    return () => {
+      stopped = true;
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      child?.kill("SIGTERM");
+      child = null;
+    };
   }
 
   async #run(args: string[], options?: Tty7RunOptions): Promise<string> {

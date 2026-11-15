@@ -192,6 +192,8 @@ export interface BrowserDaemon
   deckTty7Sessions(): Promise<DeckTty7SessionsResponse>;
   deckTty7Delete(pane: number): Promise<{ ok: true }>;
   deckTty7Rename(pane: number, name: string): Promise<{ ok: true }>;
+  /** 告诉 daemon 正在整屏看哪个会话（null 表示没在看），这个会话的完成提醒会被跳过。 */
+  deckTty7Viewing(pane: number | null): Promise<{ ok: true }>;
   deckTty7Screen(pane: number): Promise<DeckTty7ScreenResponse>;
   deckTty7Send(body: DeckTty7SendBody): Promise<{ ok: true }>;
   deckTty7Start(body: DeckTty7StartBody): Promise<DeckTty7StartResponse>;
@@ -348,6 +350,7 @@ export function createBrowserDaemon(options?: {
     deckTty7Sessions: () => request<DeckTty7SessionsResponse>("GET", "/api/deck/tty7/sessions"),
     deckTty7Delete: (pane: number) => request<{ ok: true }>("POST", "/api/deck/tty7/delete", { pane }),
     deckTty7Rename: (pane: number, name: string) => request<{ ok: true }>("POST", "/api/deck/tty7/rename", { pane, name }),
+    deckTty7Viewing: (pane: number | null) => request<{ ok: true }>("POST", "/api/deck/tty7/viewing", { pane }),
     deckTty7Screen: (pane: number) => request<DeckTty7ScreenResponse>("GET", `/api/deck/tty7/screen?pane=${pane}`),
     deckTty7Send: (body: DeckTty7SendBody) => request<{ ok: true }>("POST", "/api/deck/tty7/send", body),
     deckTty7Start: (body: DeckTty7StartBody) => request<DeckTty7StartResponse>("POST", "/api/deck/tty7/start", body),

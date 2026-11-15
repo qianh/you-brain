@@ -4,6 +4,7 @@ import type { SearchProvider } from "../auth/search-secrets.js";
 import type { DshLoginProviderId, DshLoginView } from "./dsh/login.js";
 import { DshRuntime, type DshRuntimeOptions } from "./dsh/runtime.js";
 import type { DshWebState } from "./dsh/web.js";
+import { SessionNoticeWatcher, type SessionNoticeList } from "./session-notices.js";
 import { Tty7 } from "./tty7.js";
 import {
   GUI_APPS,
@@ -40,6 +41,10 @@ export interface DeckServiceOptions {
   };
   /** tty7 会话桥的实现；测试注入。 */
   tty7?: Tty7;
+  /** 终端会话提醒的总开关（读偏好）；缺省视为开。 */
+  noticesEnabled?: () => Promise<boolean>;
+  /** 产生了新的会话提醒（daemon 借此通知订阅者）。 */
+  onNotices?: () => void;
   dsh?: {
     runtime?: Pick<DshRuntime, "close" | "webState" | "loginView" | "loginAction"> & Partial<Pick<DshRuntime, "refresh">>;
     sidecarDir?: string;
@@ -58,10 +63,18 @@ export class DeckService {
   #stopped = false;
   /** tty7 会话桥（ADR-0004）：与 dsh 无关，dsh 没起来也能用。 */
   readonly tty7: Tty7;
+  /** 终端会话提醒：盯着 tty7 会话状态，工作中 → 等你回复/已完成时记一条。 */
+  readonly notices: SessionNoticeWatcher;
 
   constructor(options: DeckServiceOptions) {
     this.#options = options;
     this.tty7 = options.tty7 ?? new Tty7({ env: options.env });
+    this.notices = new SessionNoticeWatcher({
+      sessions: () => this.tty7.sessions(),
+      subscribe: (onLine) => this.tty7.events(onLine),
+      enabled: options.noticesEnabled ?? (async () => true),
+      onNotice: () => options.onNotices?.(),
+    });
     this.#dsh =
       options.dsh?.runtime ??
       new DshRuntime({
@@ -79,6 +92,7 @@ export class DeckService {
 
   stop(): void {
     this.#stopped = true;
+    this.notices.stop();
     void this.#dsh.close().catch(() => undefined);
   }
 
@@ -93,6 +107,20 @@ export class DeckService {
       void this.#dsh.webState().catch(() => undefined);
     }, DSH_WARM_DELAY_MS);
     timer.unref?.();
+  }
+
+  /** 开始监视终端会话状态（daemon 启动后调用一次；tty7 没装时什么也不做）。 */
+  startNotices(): void {
+    this.notices.start();
+  }
+
+  noticeList(): SessionNoticeList {
+    return this.notices.list();
+  }
+
+  /** 网页上报正在整屏看的会话（null 表示没在看），这个会话的提醒会被跳过。 */
+  setViewing(pane: number | null): void {
+    this.notices.setViewing(pane);
   }
 
   /** 嵌入指挥台页面的 dsh Web 界面：启动（若未运行）并返回状态；retry 才会重启出错的进程。 */

@@ -197,6 +197,7 @@ import { UploadService } from "../upload/upload-service.js";
 import type { UploadIndex } from "../upload/types.js";
 import { NotionService } from "../notion/service.js";
 import { DeckService, type DeckServiceOptions } from "../deck/index.js";
+import { TERMINAL_NOTIFY_PREF_KEY } from "../deck/session-notices.js";
 import { SEARCH_CONFIG_FILE } from "../deck/dsh/runtime.js";
 import { readSearchActive, writeSearchActive } from "../deck/dsh/search-config.js";
 import { fetchMagpieModels } from "../deck/dsh/magpie.js";
@@ -3161,6 +3162,7 @@ export class YouBrainDaemon {
       this.#deck = new DeckService(this.#deckOptions());
       // 本机 CLI/应用的探测在后台预热,指挥台与其他功能打开时直接读缓存。
       this.#deck.warmDsh();
+      this.#deck.startNotices();
     }
     return {
       today: () => readers.today(),
@@ -3356,7 +3358,7 @@ export class YouBrainDaemon {
         return { roots: result.roots };
       },
       ...(this.#deck === null ? {} : { deck: this.#deckPort() as DeckHttpPort }),
-      uiPrefs: (this.#uiPrefs ??= new UiPrefsStore(join(this.#paths.dataDir, "ui-prefs.json"))),
+      uiPrefs: this.#uiPrefsStore(),
       status: () => {
         // 聚合一次要跑全量会话/采集/Drive 检查(秒级);短缓存让启动和
         // SSE 风暴里的并发调用共享同一份结果,而不是各自重算。
@@ -3453,7 +3455,15 @@ export class YouBrainDaemon {
       getLlmConfig: () => ({ provider: this.#shared.llm.provider, baseUrl: this.#shared.llm.baseUrl }),
       getSearchKey: (provider) =>
         getSearchKey(provider, { platform: this.#platform, backend: this.#secretBackend }),
+      noticesEnabled: async () => (await this.#uiPrefsStore().read())[TERMINAL_NOTIFY_PREF_KEY] !== "0",
+      onNotices: () => this.changes.publish("deck", this.#clock.now().toISOString()),
     };
+  }
+
+  #uiPrefsStore(): UiPrefsStore {
+    const paths = this.#paths;
+    if (!paths) throw new YouBrainError("INVALID_INPUT", "paths is not open");
+    return (this.#uiPrefs ??= new UiPrefsStore(join(paths.dataDir, "ui-prefs.json")));
   }
 
   #deckPort(): DeckHttpPort | undefined {
@@ -3475,6 +3485,11 @@ export class YouBrainDaemon {
         await deck.tty7.rename(body.pane, body.name);
         return { ok: true };
       },
+      tty7Viewing: async (body) => {
+        deck.setViewing(body.pane);
+        return { ok: true };
+      },
+      notices: async () => deck.noticeList(),
       tty7Terminal: (pane, size, events) => deck.tty7.openTerminal(pane, size, events),
       tty7Screen: (pane, lines) => deck.tty7.screen(pane, lines),
       tty7Send: async (body) => {
