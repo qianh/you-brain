@@ -169,6 +169,12 @@ export function createPrefs(options: CreatePrefsOptions): PrefsStore & { flush(o
       cache.delete(key);
       pendingSet.delete(key);
       pendingRemove.add(key);
+      // legacy 里的旧副本也要清掉，否则下次启动会被「首次迁移」当成 daemon 缺的值又写回来。
+      try {
+        legacy?.removeItem(key);
+      } catch {
+        // legacy 不可用就算了。
+      }
       schedule();
     },
     flush,

@@ -97,6 +97,25 @@ describe("prefs", () => {
     expect(pushed).toEqual([]);
   });
 
+  test("删除后下次启动不会被 legacy 里的旧值迁移回来", async () => {
+    const { p, pushed, legacy } = setup({ initial: { "you-brain.deck.terminal-font-size": "15" },
+      legacy: { "you-brain.deck.terminal-font-size": "15" } });
+    p.removeItem("you-brain.deck.terminal-font-size");
+    await p.flush();
+    expect(pushed).toEqual([{ remove: ["you-brain.deck.terminal-font-size"] }]);
+    // 模拟重启：daemon 里已没有该键，legacy 沿用同一份。
+    const restarted = createPrefs({
+      initial: {},
+      legacy,
+      isPrefKey,
+      legacyKeys: () => [...legacy.store.keys()],
+      delayMs: 10_000,
+      push: async () => {},
+      onError: () => {},
+    });
+    expect(restarted.getItem("you-brain.deck.terminal-font-size")).toBeNull();
+  });
+
   test("普通 flush 不带 keepalive，pagehide 路径才请求 keepalive", async () => {
     const calls: Array<{ keepalive?: boolean } | undefined> = [];
     const p = createPrefs({

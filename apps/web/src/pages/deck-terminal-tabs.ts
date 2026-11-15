@@ -48,10 +48,11 @@ export function cycleTab(state: TerminalTabs, step: 1 | -1): TerminalTabs {
   return target === undefined ? state : { open: state.open, active: target };
 }
 
-export type TerminalShortcut = "back" | "next" | "previous";
+export type TerminalShortcut = "back" | "next" | "previous" | "fontUp" | "fontDown" | "fontReset";
 
 /**
- * 整屏终端只拦三个按键：⌘⇧D（非 macOS 为 Ctrl+Shift+D）返回，Ctrl+Tab / Ctrl+Shift+Tab 切标签。
+ * 整屏终端只拦这几个按键：⌘⇧D（非 macOS 为 Ctrl+Shift+D）返回，Ctrl+Tab / Ctrl+Shift+Tab 切标签，
+ * ⌘= 或 ⌘+ 放大、⌘- 缩小、⌘0 恢复默认字号（非 macOS 用 Ctrl）。
  * 其余按键（包括 Esc）一律返回 null，原样交给 xterm。
  */
 export function terminalShortcut(
@@ -61,6 +62,12 @@ export function terminalShortcut(
   if (event.alt) return null;
   if (event.key === "Tab" && event.ctrl && !event.meta) return event.shift ? "previous" : "next";
   const modDown = mod === "meta" ? event.meta && !event.ctrl : event.ctrl && !event.meta;
-  if (modDown && event.shift && event.key.toLowerCase() === "d") return "back";
+  if (!modDown) return null;
+  if (event.shift && event.key.toLowerCase() === "d") return "back";
+  // 「+」在有的键盘布局上不用 Shift，所以放大不看 Shift；缩小和恢复则不能带 Shift（那是 _ 和 )）。
+  if (event.key === "=" || event.key === "+") return "fontUp";
+  if (event.shift) return null;
+  if (event.key === "-") return "fontDown";
+  if (event.key === "0") return "fontReset";
   return null;
 }

@@ -177,10 +177,10 @@
   min-height: 0;
   min-width: 0;
   overflow: hidden;
-  background: #15171b;
+  background: var(--term-bg);
   cursor: text;
 }
-.deck-tty7-xterm .xterm { height: 100%; padding: 10px; }
+.deck-tty7-xterm .xterm { height: 100%; padding: 4px 6px; }
 .deck-tty7-xterm .xterm-viewport { overscroll-behavior: contain; }
 
 .deck-tty7-float {
@@ -310,7 +310,23 @@
   opacity: 0.7;
 }
 .deck-term-tab-close:hover { opacity: 1; background: color-mix(in srgb, var(--term-fg) 16%, transparent); }
-.deck-term-font-slot { flex: none; margin-left: auto; display: flex; align-items: center; gap: 4px; }
+.deck-term-font-slot { flex: none; margin-left: auto; display: flex; align-items: center; gap: 2px; }
+.deck-term-font-btn {
+  height: 26px;
+  min-width: 26px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: var(--r-ctl, 8px);
+  background: transparent;
+  color: var(--term-fg);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.deck-term-font-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--term-fg) 10%, transparent); }
+.deck-term-font-btn:disabled { opacity: 0.4; cursor: default; }
+.deck-term-font-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.deck-term-font-size { font-variant-numeric: tabular-nums; }
 .deck-term-body { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
 
 .deck-term-menu { display: flex; flex-direction: column; gap: var(--sp-2, 8px); padding: var(--sp-2, 8px); font-size: var(--fs-sm, 13px); }

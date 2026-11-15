@@ -5,7 +5,9 @@ import { Icon } from "../components/icons.js";
 import { InlineRename } from "../components/inline-rename.js";
 import { Popover } from "../components/popover.js";
 import { useDaemon } from "../daemon-context.js";
+import { prefs } from "../lib/prefs.js";
 import { modLabel, shortcutMod } from "../lib/shortcuts.js";
+import { FONT_MAX, FONT_MIN, FONT_SIZE_KEY, resolveAppearance, stepFontSize } from "./deck-terminal-font.js";
 import { DeckTty7NewForm, DeckTty7SessionList, readGroupColors } from "./deck-tty7-list.js";
 import { baseName, sessionTitle, useSessionRename, type Session, type useTty7Sessions } from "./deck-tty7-sessions.js";
 import { DeckTty7Terminal } from "./deck-tty7-terminal.js";
@@ -31,6 +33,8 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
   /** 下拉里的新建表单：null 为收起；label 为 null 表示不限项目。 */
   const [creating, setCreating] = useState<{ label: string | null } | null>(null);
   const activeTabRef = useRef<HTMLDivElement>(null);
+  // 用户调过的字号；null 表示没调过，跟随 tty7。偏好只在改动时写，不在这里反复读。
+  const [storedSize, setStoredSize] = useState<string | null>(() => prefs.getItem(FONT_SIZE_KEY));
   // 与 shell.tsx 的 overlayTitlebar 同一个判断：macOS 桌面壳里窗口灯压在左上角。
   const overlayTitlebar = typeof window !== "undefined" && window.__TAURI__ !== undefined && /Mac/.test(navigator.platform);
   const mod = shortcutMod(typeof navigator === "undefined" ? "" : navigator.platform);
@@ -38,13 +42,28 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
   const sessions = view?.sessions ?? [];
   const byPane = useMemo(() => new Map(sessions.map((session) => [session.pane, session])), [sessions]);
   const colors = readGroupColors();
+  const tty7Appearance = view?.appearance ?? null;
+  const appearance = useMemo(
+    () => resolveAppearance(storedSize, tty7Appearance),
+    [storedSize, tty7Appearance?.fontFamily, tty7Appearance?.fontSize, tty7Appearance?.lineHeight],
+  );
+  const fontSize = appearance.fontSize;
+
+  const setFontSize = (size: number): void => {
+    prefs.setItem(FONT_SIZE_KEY, String(size));
+    setStoredSize(String(size));
+  };
+  const resetFontSize = (): void => {
+    prefs.removeItem(FONT_SIZE_KEY);
+    setStoredSize(null);
+  };
 
   const closeMenu = (): void => {
     setMenuOpen(false);
     setCreating(null);
   };
 
-  // 在捕获阶段处理，只认 terminalShortcut 里的三个组合；其余按键（含 Esc）原样交给 xterm。
+  // 在捕获阶段处理，只认 terminalShortcut 里的组合；其余按键（含 Esc）原样交给 xterm。
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       const action = terminalShortcut(
@@ -55,11 +74,14 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
       event.preventDefault();
       event.stopPropagation();
       if (action === "back") onTabsChange(hideScreen(tabs));
+      else if (action === "fontUp") setFontSize(stepFontSize(fontSize, 1));
+      else if (action === "fontDown") setFontSize(stepFontSize(fontSize, -1));
+      else if (action === "fontReset") resetFontSize();
       else onTabsChange(cycleTab(tabs, action === "next" ? 1 : -1));
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [mod, tabs, onTabsChange]);
+  }, [mod, tabs, onTabsChange, fontSize]);
 
   useEffect(() => {
     activeTabRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -203,11 +225,38 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
         >
           {menu}
         </Popover>
-        {/* 字号控件的位置，下一步在这里放进去。 */}
-        <div className="deck-term-font-slot" data-slot="font-size" />
+        {/* 按下时不抢焦点（preventDefault），点完仍可直接在终端里打字。 */}
+        <div className="deck-term-font-slot" role="group" aria-label={t("deckTerminalFontSize")}>
+          <button
+            type="button"
+            className="deck-term-font-btn"
+            aria-label={t("deckTerminalFontSmaller")}
+            title={`${t("deckTerminalFontSmaller")} (${modLabel(mod)}-)`}
+            disabled={fontSize <= FONT_MIN}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => setFontSize(stepFontSize(fontSize, -1))}
+          >A−</button>
+          <button
+            type="button"
+            className="deck-term-font-btn deck-term-font-size"
+            aria-label={t("deckTerminalFontReset", { size: fontSize })}
+            title={`${t("deckTerminalFontReset", { size: fontSize })} (${modLabel(mod)}0)`}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={resetFontSize}
+          >{fontSize}</button>
+          <button
+            type="button"
+            className="deck-term-font-btn"
+            aria-label={t("deckTerminalFontLarger")}
+            title={`${t("deckTerminalFontLarger")} (${modLabel(mod)}=)`}
+            disabled={fontSize >= FONT_MAX}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => setFontSize(stepFontSize(fontSize, 1))}
+          >A+</button>
+        </div>
       </div>
       <div className="deck-term-body">
-        {tabs.active !== null && <DeckTty7Terminal key={tabs.active} pane={tabs.active} />}
+        {tabs.active !== null && <DeckTty7Terminal key={tabs.active} pane={tabs.active} appearance={appearance} />}
       </div>
     </div>
   );

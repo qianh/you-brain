@@ -112,4 +112,32 @@ describe("terminalShortcut", () => {
     expect(terminalShortcut(key("c", { ctrl: true }), "meta")).toBeNull();
     expect(terminalShortcut(key("d", { meta: true, shift: true, alt: true }), "meta")).toBeNull();
   });
+
+  test("⌘= 和 ⌘+（带 Shift）放大，⌘- 缩小，⌘0 恢复默认", () => {
+    expect(terminalShortcut(key("=", { meta: true }), "meta")).toBe("fontUp");
+    expect(terminalShortcut(key("+", { meta: true, shift: true }), "meta")).toBe("fontUp");
+    expect(terminalShortcut(key("-", { meta: true }), "meta")).toBe("fontDown");
+    expect(terminalShortcut(key("0", { meta: true }), "meta")).toBe("fontReset");
+    // 有的键盘布局上 + 不用 Shift。
+    expect(terminalShortcut(key("+", { meta: true }), "meta")).toBe("fontUp");
+  });
+
+  test("非 macOS 用 Ctrl，⌘ 不触发", () => {
+    expect(terminalShortcut(key("=", { ctrl: true }), "ctrl")).toBe("fontUp");
+    expect(terminalShortcut(key("-", { ctrl: true }), "ctrl")).toBe("fontDown");
+    expect(terminalShortcut(key("0", { ctrl: true }), "ctrl")).toBe("fontReset");
+    expect(terminalShortcut(key("=", { meta: true }), "ctrl")).toBeNull();
+  });
+
+  test("字号快捷键不吞别的组合：裸 =、-、0，macOS 上的 Ctrl+-，带 Alt、同时按两个修饰键", () => {
+    expect(terminalShortcut(key("="), "meta")).toBeNull();
+    expect(terminalShortcut(key("-"), "meta")).toBeNull();
+    expect(terminalShortcut(key("0"), "meta")).toBeNull();
+    expect(terminalShortcut(key("-", { ctrl: true }), "meta")).toBeNull();
+    expect(terminalShortcut(key("=", { ctrl: true }), "meta")).toBeNull();
+    expect(terminalShortcut(key("=", { meta: true, alt: true }), "meta")).toBeNull();
+    expect(terminalShortcut(key("=", { meta: true, ctrl: true }), "meta")).toBeNull();
+    expect(terminalShortcut(key("_", { meta: true, shift: true }), "meta")).toBeNull();
+    expect(terminalShortcut(key(")", { meta: true, shift: true }), "meta")).toBeNull();
+  });
 });
