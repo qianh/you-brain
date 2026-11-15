@@ -4,17 +4,12 @@ import { IconButton } from "../components/button.js";
 import { Icon } from "../components/icons.js";
 import { InlineRename } from "../components/inline-rename.js";
 import { Popover } from "../components/popover.js";
-import { useToast } from "../components/toast.js";
 import { useDaemon } from "../daemon-context.js";
 import { modLabel, shortcutMod } from "../lib/shortcuts.js";
 import { DeckTty7NewForm, DeckTty7SessionList, readGroupColors } from "./deck-tty7-list.js";
-import { baseName, sessionTitle, type Session, type useTty7Sessions } from "./deck-tty7-sessions.js";
+import { baseName, sessionTitle, useSessionRename, type Session, type useTty7Sessions } from "./deck-tty7-sessions.js";
 import { DeckTty7Terminal } from "./deck-tty7-terminal.js";
 import { closeTab, cycleTab, hideScreen, openTab, terminalShortcut, type TerminalTabs } from "./deck-terminal-tabs.js";
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 /**
  * 整屏终端：盖住整个窗口，顶部一行是返回、本次打开过的会话标签、全部会话下拉。
@@ -28,9 +23,9 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
   /** 返回：收起整屏终端，标签保留。 */
   onClose: () => void;
 }) {
-  const { client, t } = useDaemon();
-  const { push } = useToast();
+  const { t } = useDaemon();
   const { view, reload } = shared;
+  const { rename, reportError } = useSessionRename(reload);
   const [menuOpen, setMenuOpen] = useState(false);
   const [filter, setFilter] = useState("");
   /** 下拉里的新建表单：null 为收起；label 为 null 表示不限项目。 */
@@ -70,12 +65,6 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
     activeTabRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [tabs.active]);
 
-  const rename = async (pane: number, name: string): Promise<void> => {
-    await client.deckTty7Rename(pane, name);
-    // tty7 改的是整个 tab 的名字，同 tab 的其他会话也跟着变，所以整体重新加载。
-    await reload();
-  };
-
   const tabLabel = (session: Session | undefined, pane: number): string =>
     session === undefined ? `%${pane}` : sessionTitle(session);
 
@@ -113,7 +102,7 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
           value={name}
           label={t("deckTerminalRename", { name })}
           onSubmit={(next) => rename(pane, next)}
-          onError={(error) => push({ message: t("deckTty7RenameFailed", { detail: message(error) }), tone: "danger" })}
+          onError={reportError}
         />
         <button
           type="button"
@@ -167,6 +156,8 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
               closeMenu();
               onTabsChange(openTab(tabs, pane));
             }}
+            onRename={rename}
+            onRenameError={reportError}
             onStart={(label) => setCreating({ label })}
             activePane={tabs.active}
           />

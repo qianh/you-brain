@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DeckTty7SessionsResponse } from "@you-brain/core/http/types.js";
 
+import { useToast } from "../components/toast.js";
 import { useDaemon } from "../daemon-context.js";
 import type { TerminalReference } from "../lib/terminal-reference.js";
 
@@ -89,4 +90,25 @@ export function useTty7Sessions(): {
   }, [reload]);
 
   return { view, error, reload };
+}
+
+/**
+ * 改名：面板、下拉和标签共用同一份。
+ * tty7 改的是整个 tab 的名字，同 tab 的其他会话也会变，所以成功后整体重新加载。
+ * 失败时 rename 抛错，由 InlineRename 恢复原值，再用 reportError 弹提示。
+ */
+export function useSessionRename(reload: () => Promise<DeckTty7SessionsResponse | null>): {
+  rename: (pane: number, name: string) => Promise<void>;
+  reportError: (error: unknown) => void;
+} {
+  const { client, t } = useDaemon();
+  const { push } = useToast();
+  const rename = useCallback(async (pane: number, name: string): Promise<void> => {
+    await client.deckTty7Rename(pane, name);
+    await reload();
+  }, [client, reload]);
+  const reportError = useCallback((error: unknown): void => {
+    push({ message: t("deckTty7RenameFailed", { detail: errorText(error) }), tone: "danger" });
+  }, [push, t]);
+  return { rename, reportError };
 }

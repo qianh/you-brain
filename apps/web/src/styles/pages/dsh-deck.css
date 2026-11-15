@@ -125,6 +125,10 @@
 
 .deck-tty7-item { display: flex; align-items: center; gap: 2px; }
 .deck-tty7-item .deck-tty7-row { flex: 1; min-width: 0; }
+.deck-tty7-rename { flex: none; color: var(--text-3); }
+.deck-tty7-rename:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
+.deck-tty7-row .inline-rename-input { width: 100%; background: var(--surface); color: var(--text); }
+.deck-tty7-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .deck-tty7-delete { flex: none; color: var(--text-3); }
 .deck-tty7-delete:hover:not(:disabled) { color: var(--danger-text); background: var(--danger-soft); }
 

@@ -3,6 +3,7 @@ import type { DeckTty7SessionsResponse } from "@you-brain/core/http/types.js";
 
 import { IconButton } from "../components/button.js";
 import { Icon } from "../components/icons.js";
+import { InlineRename, type InlineRenameHandle } from "../components/inline-rename.js";
 import { Toggle } from "../components/toggle.js";
 import { useDaemon } from "../daemon-context.js";
 import { prefs } from "../lib/prefs.js";
@@ -77,11 +78,14 @@ export function readGroupColors(): Record<string, string> {
  * 会话列表：按项目分组，组可收起、可选色，支持筛选和「只看活跃」。
  * 右侧面板和整屏终端的下拉共用；compact 用于下拉（不带删除，更紧凑）。
  */
-export function DeckTty7SessionList({ sessions, filter, onFilterChange, onOpen, onDelete, onStart, compact = false, activePane = null, busy = false }: {
+export function DeckTty7SessionList({ sessions, filter, onFilterChange, onOpen, onRename, onRenameError, onDelete, onStart, compact = false, activePane = null, busy = false }: {
   sessions: readonly Session[];
   filter: string;
   onFilterChange: (value: string) => void;
   onOpen: (pane: number) => void;
+  /** 改名（点行上的铅笔按钮进入编辑）；不传则不显示铅笔。 */
+  onRename?: (pane: number, name: string) => Promise<void>;
+  onRenameError?: (error: unknown) => void;
   onDelete?: (session: Session) => void;
   /** 在某个项目下新建会话（传项目名）；不传项目名表示不限项目。 */
   onStart?: (projectLabel: string) => void;
@@ -97,6 +101,8 @@ export function DeckTty7SessionList({ sessions, filter, onFilterChange, onOpen, 
   const [groupColors, setGroupColors] = useState<Record<string, string>>(() => readGroupColors());
   /** 正在挑颜色的组名。 */
   const [colorPickerFor, setColorPickerFor] = useState<string | null>(null);
+  /** 各行的改名句柄：铅笔按钮用它让该行进入编辑，不触发打开。 */
+  const renamers = useRef(new Map<number, InlineRenameHandle>());
 
   const visible = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -159,37 +165,72 @@ export function DeckTty7SessionList({ sessions, filter, onFilterChange, onOpen, 
     });
   };
 
-  const row = (session: Session) => (
-    <li key={session.pane} className="deck-tty7-item">
-      <button
-        type="button"
-        className={session.pane === activePane ? "deck-tty7-row is-selected" : "deck-tty7-row"}
-        onClick={() => onOpen(session.pane)}
-      >
-        <span className="deck-tty7-row-title">
-          <span className="deck-tty7-row-name">{sessionTitle(session)}</span>
-          {session.status !== null && (
-            <span className={`deck-tty7-status is-${session.status}`} title={session.statusMessage ?? undefined}>
-              {t(STATUS_LABEL[session.status])}
-            </span>
-          )}
-          {session.agent !== null && <span className="chip">{session.agent}</span>}
-          <span className="deck-tty7-pane">%{session.pane}</span>
-        </span>
-        <span className="deck-tty7-row-cwd">{session.cwd}</span>
-      </button>
-      {onDelete !== undefined && (
-        <IconButton
-          className="deck-tty7-delete"
-          label={t("deckTty7DeleteSession", { name: sessionTitle(session), pane: session.pane })}
-          disabled={busy}
-          onClick={() => onDelete(session)}
+  const row = (session: Session) => {
+    const title = sessionTitle(session);
+    const open = (): void => onOpen(session.pane);
+    return (
+      <li key={session.pane} className="deck-tty7-item">
+        {/* 用 div 而不是 button：行内要放改名输入框，button 里不能放输入框。 */}
+        <div
+          role="button"
+          tabIndex={0}
+          className={session.pane === activePane ? "deck-tty7-row is-selected" : "deck-tty7-row"}
+          onClick={open}
+          onKeyDown={(event) => {
+            if (event.target !== event.currentTarget) return;
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              open();
+            }
+          }}
         >
-          <Icon name="trash" />
-        </IconButton>
-      )}
-    </li>
-  );
+          <span className="deck-tty7-row-title">
+            <span className="deck-tty7-row-name">
+              {onRename === undefined ? title : (
+                <InlineRename
+                  value={title}
+                  label={t("deckTerminalRename", { name: title })}
+                  controlRef={(handle) => {
+                    if (handle === null) renamers.current.delete(session.pane);
+                    else renamers.current.set(session.pane, handle);
+                  }}
+                  onSubmit={(next) => onRename(session.pane, next)}
+                  {...(onRenameError === undefined ? {} : { onError: onRenameError })}
+                />
+              )}
+            </span>
+            {session.status !== null && (
+              <span className={`deck-tty7-status is-${session.status}`} title={session.statusMessage ?? undefined}>
+                {t(STATUS_LABEL[session.status])}
+              </span>
+            )}
+            {session.agent !== null && <span className="chip">{session.agent}</span>}
+            <span className="deck-tty7-pane">%{session.pane}</span>
+          </span>
+          <span className="deck-tty7-row-cwd">{session.cwd}</span>
+        </div>
+        {onRename !== undefined && (
+          <IconButton
+            className="deck-tty7-rename"
+            label={t("deckTty7RenameSession", { name: title, pane: session.pane })}
+            onClick={() => renamers.current.get(session.pane)?.startEditing()}
+          >
+            <Icon name="pencil" />
+          </IconButton>
+        )}
+        {onDelete !== undefined && (
+          <IconButton
+            className="deck-tty7-delete"
+            label={t("deckTty7DeleteSession", { name: title, pane: session.pane })}
+            disabled={busy}
+            onClick={() => onDelete(session)}
+          >
+            <Icon name="trash" />
+          </IconButton>
+        )}
+      </li>
+    );
+  };
 
   return (
     <div className={compact ? "deck-tty7-listbox is-compact" : "deck-tty7-listbox"}>

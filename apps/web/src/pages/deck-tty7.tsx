@@ -5,7 +5,7 @@ import { ConfirmDialog } from "../components/dialog.js";
 import { useToast } from "../components/toast.js";
 import type { TerminalReference } from "../lib/terminal-reference.js";
 import { DeckTty7NewForm, DeckTty7SessionList } from "./deck-tty7-list.js";
-import { resolveOpenRequest, sessionTitle, type Session, type useTty7Sessions } from "./deck-tty7-sessions.js";
+import { resolveOpenRequest, sessionTitle, useSessionRename, type Session, type useTty7Sessions } from "./deck-tty7-sessions.js";
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -29,6 +29,7 @@ export function DeckTty7Panel({ sessions: shared, onClose, onOpen, activePane, o
   const { client, t } = useDaemon();
   const { push } = useToast();
   const { view, error: loadError, reload: loadSessions } = shared;
+  const { rename, reportError } = useSessionRename(loadSessions);
   const [filter, setFilter] = useState("");
   const [busy, setBusy] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
@@ -112,6 +113,8 @@ export function DeckTty7Panel({ sessions: shared, onClose, onOpen, activePane, o
             setActionError(null);
             onOpen(pane);
           }}
+          onRename={rename}
+          onRenameError={reportError}
           onDelete={setPendingDelete}
           onStart={(label) => {
             setActionError(null);
