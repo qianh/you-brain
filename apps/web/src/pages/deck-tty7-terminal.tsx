@@ -177,22 +177,25 @@ export function DeckTty7Terminal({ pane }: { pane: number }) {
     };
   }, [client, pane, revision]);
 
+  const connectionText = status === "ready" ? null
+    : t(status === "connecting" ? "deckTty7Connecting" : status === "exited" ? "deckTty7Exited" : "deckTty7Disconnected");
+  const hasFloat = connectionText !== null || pasting || error !== null || warning !== null;
   return (
-    <>
-      <div className={`deck-tty7-terminal${focused ? " is-focused" : ""}`}>
-        <div ref={hostRef} className="deck-tty7-xterm" aria-label={t("deckTty7ScreenLabel")}
-          // xterm 已编码这些按键；不要让 Dialog 的焦点循环和应用快捷键再处理。
-          onKeyDown={(event) => event.stopPropagation()} />
-      </div>
-      {status !== "ready" && <p className="deck-tty7-connection-status" role="status">
-        {t(status === "connecting" ? "deckTty7Connecting" : status === "exited" ? "deckTty7Exited" : "deckTty7Disconnected")}
-        {status === "disconnected" && <button type="button" className="btn small quiet"
-          onClick={() => setRevision((value) => value + 1)}>{t("deckTty7Reconnect")}</button>}
-      </p>}
-      {pasting && <p className="deck-tty7-hint" role="status">{t("deckTty7Pasting")}</p>}
-      {error !== null && <p className="deck-tty7-error" role="alert">{error}</p>}
-      {warning !== null && <p className="deck-tty7-hint" role="status">{warning}</p>}
-      <p className="deck-tty7-hint">{t("deckTty7DirectHint")}</p>
-    </>
+    <div className={`deck-tty7-terminal${focused ? " is-focused" : ""}`}>
+      <div ref={hostRef} className="deck-tty7-xterm" aria-label={t("deckTty7ScreenLabel")}
+        // xterm 已编码这些按键；不要让应用快捷键再处理。
+        onKeyDown={(event) => event.stopPropagation()} />
+      {/* 状态悬浮在终端右下角，只在有内容时出现，不占终端的行列。 */}
+      {hasFloat && <div className="deck-tty7-float">
+        {connectionText !== null && <p className="deck-tty7-float-item" role="status">
+          {connectionText}
+          {status === "disconnected" && <button type="button" className="btn small quiet"
+            onClick={() => setRevision((value) => value + 1)}>{t("deckTty7Reconnect")}</button>}
+        </p>}
+        {pasting && <p className="deck-tty7-float-item" role="status">{t("deckTty7Pasting")}</p>}
+        {error !== null && <p className="deck-tty7-float-item is-error" role="alert">{error}</p>}
+        {warning !== null && <p className="deck-tty7-float-item" role="status">{warning}</p>}
+      </div>}
+    </div>
   );
 }

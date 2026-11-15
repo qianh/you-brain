@@ -151,64 +151,21 @@
 .deck-tty7-row-cwd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; color: var(--text-3); font-size: 12px; }
 .deck-tty7-empty { padding: 12px 8px; color: var(--text-3); }
 
-/* 全屏弹框里的会话详情：弹框体撑满，终端屏幕占掉剩余高度。 */
-.deck-tty7-full .dialog-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2, 8px);
-}
+/* 会话列表（面板和整屏终端的下拉共用）：筛选框、只看活跃、分组列表纵向排开。 */
+.deck-tty7-listbox { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; gap: var(--sp-2, 8px); }
+.deck-tty7-listbox.is-compact { flex: none; width: 360px; max-width: 100%; max-height: min(480px, 70vh); }
 
-.deck-tty7-switcher { flex: none; min-width: 0; }
-.deck-tty7-switcher-label { display: block; margin-bottom: 6px; color: var(--text-2); font-size: 12px; }
-.deck-tty7-switcher-list {
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-  padding: 2px 2px 6px;
-}
-.deck-tty7-switch {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  max-width: min(360px, 85%);
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-ctl, 8px);
-  background: var(--surface-2);
-  color: var(--text-2);
-  font: inherit;
-  font-size: 12px;
-  text-align: left;
-  white-space: nowrap;
-  cursor: pointer;
-}
-.deck-tty7-switch:hover { background: var(--hover); color: var(--text); }
-.deck-tty7-switch.is-selected { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
-.deck-tty7-switch.is-selected > .deck-tty7-pane { color: inherit; }
-.deck-tty7-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-
-.deck-tty7-meta { display: flex; align-items: center; gap: 6px; }
-.deck-tty7-meta .btn { margin-left: auto; }
-
+/* 终端屏幕：撑满所在容器，无边框、无圆角；状态条悬浮在右下角。 */
 .deck-tty7-terminal {
+  position: relative;
   flex: 1;
   display: flex;
   flex-direction: column;
-  min-height: 120px;
+  min-height: 0;
   min-width: 0;
   overflow: hidden;
-  border: 1px solid var(--term-border);
-  border-radius: 6px;
   background: var(--term-bg);
   color: var(--term-fg);
-}
-.deck-tty7-terminal.is-focused {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 .deck-tty7-xterm {
@@ -222,17 +179,138 @@
 .deck-tty7-xterm .xterm { height: 100%; padding: 10px; }
 .deck-tty7-xterm .xterm-viewport { overscroll-behavior: contain; }
 
-.deck-tty7-connection-status {
+.deck-tty7-float {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  max-width: min(420px, calc(100% - 24px));
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  pointer-events: none;
+}
+.deck-tty7-float-item {
   display: flex;
   align-items: center;
   gap: 6px;
   margin: 0;
-  color: var(--text-3);
+  padding: 4px 10px;
+  border: 1px solid var(--term-border);
+  border-radius: var(--r-ctl, 8px);
+  background: var(--term-bg);
+  color: var(--term-fg);
   font-size: 12px;
+  word-break: break-word;
+  pointer-events: auto;
 }
+.deck-tty7-float-item.is-error { color: var(--danger); }
 
-.deck-tty7-hint { margin: 0; color: var(--text-3); font-size: 12px; }
-.deck-tty7-pasting { margin: 0; color: var(--text-3); font-size: 12px; }
+/* 整屏终端：盖住整个窗口（含应用顶栏 z-index 30），低于弹出层 50、对话框 60、提示 70。 */
+.deck-term-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  background: var(--term-bg);
+  color: var(--term-fg);
+}
+.deck-term-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 36px;
+  padding: 0 8px;
+  box-sizing: border-box;
+  border-bottom: 1px solid var(--term-border);
+}
+/* macOS 桌面壳：窗口灯压在左上角，留白值与应用顶栏一致（shell.css .shell-overlay .topbar）。 */
+.shell-overlay .deck-term-bar { padding-left: 100px; }
+.deck-term-bar .icon-btn { color: var(--term-fg); }
+.deck-term-back {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 26px;
+  padding: 0 8px 0 4px;
+  border: 0;
+  border-radius: var(--r-ctl, 8px);
+  background: transparent;
+  color: var(--term-fg);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.deck-term-back:hover { background: color-mix(in srgb, var(--term-fg) 10%, transparent); }
+.deck-term-tabs {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  height: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+.deck-term-tabs::-webkit-scrollbar { display: none; }
+.deck-term-tab {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 0 6px 0 12px;
+  color: color-mix(in srgb, var(--term-fg) 60%, transparent);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.deck-term-tab:hover { background: color-mix(in srgb, var(--term-fg) 8%, transparent); color: var(--term-fg); }
+.deck-term-tab.is-active { background: color-mix(in srgb, var(--term-fg) 14%, transparent); color: var(--term-fg); }
+.deck-term-tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* 项目色条：贴在标签左缘。没有选色的项目用透明色条，保持对齐。 */
+.deck-term-tab-bar { position: absolute; left: 0; top: 6px; bottom: 6px; width: 3px; border-radius: 2px; background: transparent; }
+.deck-term-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: color-mix(in srgb, var(--term-fg) 50%, transparent); }
+.deck-term-dot.is-working { background: var(--accent); }
+.deck-term-dot.is-waiting { background: var(--warn); }
+.deck-term-dot.is-done { background: var(--success); }
+.deck-term-tab .inline-rename { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.inline-rename-input {
+  width: 140px;
+  min-width: 0;
+  padding: 1px 4px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--term-bg);
+  color: var(--term-fg);
+  font: inherit;
+}
+.deck-term-tab-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  opacity: 0.7;
+}
+.deck-term-tab-close:hover { opacity: 1; background: color-mix(in srgb, var(--term-fg) 16%, transparent); }
+.deck-term-font-slot { flex: none; margin-left: auto; display: flex; align-items: center; gap: 4px; }
+.deck-term-body { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+
+.deck-term-menu { display: flex; flex-direction: column; gap: var(--sp-2, 8px); padding: var(--sp-2, 8px); font-size: var(--fs-sm, 13px); }
+.deck-term-menu-new, .deck-term-menu-back { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; }
 
 .deck-tty7-active {
   display: flex;
@@ -333,4 +411,3 @@
 .deck-tty7-status { flex: none; padding: 1px 6px; border-radius: 999px; font-size: 11px; background: var(--surface-2); color: var(--text-3); }
 .deck-tty7-status.is-working { background: var(--accent-soft); color: var(--accent); }
 .deck-tty7-status.is-waiting { background: var(--danger-soft); color: var(--danger-text); font-weight: 600; }
-.deck-tty7-waiting { margin: 0; padding: 6px 8px; border-radius: 6px; background: var(--danger-soft); color: var(--danger-text); word-break: break-word; }

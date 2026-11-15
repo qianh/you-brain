@@ -9,6 +9,8 @@ import { Spinner } from "../components/spinner.js";
 import { useDaemon } from "../daemon-context.js";
 import { createDshCookiePreparer } from "../lib/dsh-cookies.js";
 import { terminalReferenceMessage, type TerminalReference } from "../lib/terminal-reference.js";
+import { DeckTerminalScreen } from "./deck-terminal-screen.js";
+import { EMPTY_TABS, hideScreen, openTab, pruneTabs, type TerminalTabs } from "./deck-terminal-tabs.js";
 import { DeckTty7Panel } from "./deck-tty7.js";
 import { initialDeckView, useTty7Sessions, waitingCount } from "./deck-tty7-sessions.js";
 import { DeckT3Panel } from "./deck-t3.js";
@@ -34,12 +36,23 @@ export function DshDeckPage() {
   });
   const sessions = useTty7Sessions();
   const waiting = waitingCount(sessions.view?.sessions ?? []);
+  // 整屏终端的标签只在本次运行内有效，不写偏好。
+  const [tabs, setTabs] = useState<TerminalTabs>(EMPTY_TABS);
+  const openPane = useCallback((pane: number) => setTabs((current) => openTab(current, pane)), []);
   const [t3Visited, setT3Visited] = useState(activePage === "t3");
   const [t3SettingsOpen, setT3SettingsOpen] = useState(false);
   const [t3ReloadVersion, setT3ReloadVersion] = useState(0);
   const [view, setView] = useState<DshWebView>({ state: "starting" });
   const [attempt, setAttempt] = useState(0);
   const frame = useRef<HTMLIFrameElement>(null);
+  // 每次拿到新的会话列表，就去掉 tty7 里已经不存在的会话标签。
+  // 列表不可用（tty7 没起、读取失败）时不动标签，免得一次故障把标签全清掉。
+  const sessionView = sessions.view;
+  useEffect(() => {
+    if (sessionView === null || !sessionView.available) return;
+    const live = new Set(sessionView.sessions.map((session) => session.pane));
+    setTabs((current) => pruneTabs(current, live));
+  }, [sessionView]);
   const [terminalRequest, setTerminalRequest] = useState<TerminalReference | null>(null);
   const terminalRequestHandled = useCallback((request: TerminalReference) => {
     setTerminalRequest((current) => current === request ? null : current);
@@ -193,9 +206,12 @@ export function DshDeckPage() {
           </div>
         </div>
         {tty7Open ? (
-          <DeckTty7Panel sessions={sessions} onClose={() => toggleTty7(false)} openRequest={terminalRequest} onOpenRequestHandled={terminalRequestHandled} />
+          <DeckTty7Panel sessions={sessions} onClose={() => toggleTty7(false)} onOpen={openPane} activePane={tabs.active} openRequest={terminalRequest} onOpenRequestHandled={terminalRequestHandled} />
         ) : null}
       </div>
+      {tabs.active !== null ? (
+        <DeckTerminalScreen tabs={tabs} sessions={sessions} onTabsChange={setTabs} onClose={() => setTabs(hideScreen)} />
+      ) : null}
     </Page>
   );
 }
