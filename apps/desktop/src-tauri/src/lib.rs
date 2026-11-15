@@ -3,6 +3,7 @@ mod client;
 mod cookies;
 mod daemon;
 mod geometry;
+mod notices;
 mod reminders;
 mod shortcut;
 mod sse;
@@ -51,6 +52,8 @@ struct ShellState {
     launching: Mutex<Option<u32>>,
     /// `None` until the first reminder poll loads `shell-notified.json`.
     notified: Mutex<Option<Vec<String>>>,
+    /// 终端会话提醒取到哪了；`None` 表示还没取过（壳刚启动，不补弹之前的）。
+    notice_cursor: Mutex<Option<notices::NoticeCursor>>,
 }
 
 static BLUR_GUARD_UNTIL: AtomicU64 = AtomicU64::new(0);
@@ -105,6 +108,7 @@ pub fn run() {
                 launch_attempt: Mutex::new(0),
                 launching: Mutex::new(None),
                 notified: Mutex::new(None),
+                notice_cursor: Mutex::new(None),
             });
             install_tray(app)?;
             let data_dir = current_data_dir();
@@ -476,6 +480,7 @@ fn refresh_status(app: &tauri::AppHandle, data_dir: &std::path::Path) {
     if let Some(snapshot) = snapshot.as_ref() {
         notify_due_reminders(app, data_dir, snapshot);
     }
+    notify_session_notices(app, &client);
     if let Ok(shared) = client.shared_shortcut() {
         let local = read_shell(data_dir).shortcut;
         let next = shortcut::effective_shortcut(shared.as_deref(), local.as_deref());
@@ -491,6 +496,26 @@ fn refresh_status(app: &tauri::AppHandle, data_dir: &std::path::Path) {
                 .clone()
                 .run_on_main_thread(move || register_shortcut(&app, &next));
         }
+    }
+}
+
+/// 终端会话等你回复或已完成时弹系统通知。请求失败时不动位置、不弹，下次刷新再取。
+fn notify_session_notices(app: &tauri::AppHandle, client: &LoopbackClient) {
+    let Ok(response) = client.deck_notices() else {
+        return;
+    };
+    let selected = {
+        let state = app.state::<ShellState>();
+        let mut cursor = state
+            .notice_cursor
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let (selected, next) = notices::select_notices(cursor.as_ref(), &response);
+        *cursor = Some(next);
+        selected
+    };
+    for item in selected {
+        notify(app, &item.title, &item.body);
     }
 }
 

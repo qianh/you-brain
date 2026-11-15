@@ -2,6 +2,7 @@ use std::io::Read;
 use std::time::Duration;
 
 use crate::daemon::shared_shortcut;
+use crate::notices::{parse_deck_notices, DeckNotices};
 use crate::reminders::{parse_reminders_response, RemindersSnapshot};
 use crate::status_view::{parse_status_json, StatusSnapshot};
 
@@ -62,6 +63,11 @@ impl LoopbackClient {
     pub fn reminders(&self) -> Result<RemindersSnapshot, ClientError> {
         parse_reminders_response(&self.get_text("/api/reminders")?)
             .map_err(|_| ClientError::BadBody)
+    }
+
+    /// 终端会话提醒（`GET /api/deck/notices`）。
+    pub fn deck_notices(&self) -> Result<DeckNotices, ClientError> {
+        parse_deck_notices(&self.get_text("/api/deck/notices")?).map_err(|_| ClientError::BadBody)
     }
 
     /// `POST /api/activity` with `{}`. The daemon stamps the time.
