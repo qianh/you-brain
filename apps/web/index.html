@@ -11,11 +11,13 @@
         var key = "you-brain-theme";
         var query = new URLSearchParams(location.search).get("theme");
         var choice = query === "light" || query === "dark" || query === "system" ? query : null;
+        // daemon 注入的偏好优先；没有注入（开发模式）或没有该键时再读 localStorage。
+        var injected = window.__YOU_BRAIN__ && window.__YOU_BRAIN__.prefs;
         try {
           if (choice) localStorage.setItem(key, choice);
-          else choice = localStorage.getItem(key);
+          else choice = (injected && injected[key]) || localStorage.getItem(key);
         } catch (error) {
-          choice = choice || "system";
+          choice = choice || (injected && injected[key]) || "system";
         }
         if (choice !== "light" && choice !== "dark" && choice !== "system") choice = "system";
         var dark =

@@ -1,3 +1,4 @@
+import { prefs } from "../lib/prefs.js";
 import { useEffect, useState } from "react";
 import { DEFAULT_T3_URL, normalizeT3Url, type T3WebState } from "@you-brain/core/deck/t3/index.js";
 
@@ -13,7 +14,7 @@ type T3View = T3WebState | { state: "checking" } | { state: "check-error" };
 
 function savedUrl(): string {
   try {
-    return normalizeT3Url(localStorage.getItem(T3_URL_KEY) ?? "") ?? DEFAULT_T3_URL;
+    return normalizeT3Url(prefs.getItem(T3_URL_KEY) ?? "") ?? DEFAULT_T3_URL;
   } catch {
     return DEFAULT_T3_URL;
   }
@@ -60,7 +61,7 @@ export function DeckT3Panel({
       return;
     }
     setUrl(next);
-    try { localStorage.setItem(T3_URL_KEY, next); } catch { /* 本次连接仍可用。 */ }
+    try { prefs.setItem(T3_URL_KEY, next); } catch { /* 本次连接仍可用。 */ }
     onSettingsChange(false);
     onReload();
   };

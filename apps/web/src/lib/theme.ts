@@ -1,3 +1,5 @@
+import { prefs } from "./prefs.js";
+
 export const THEME_STORAGE_KEY = "you-brain-theme";
 
 export type ThemeChoice = "system" | "light" | "dark";
@@ -44,8 +46,8 @@ export function storeThemeChoice(choice: ThemeChoice, env: ThemeEnv): ResolvedTh
 
 export function browserThemeEnv(): ThemeEnv {
   return {
-    getItem: (key) => localStorage.getItem(key),
-    setItem: (key, value) => localStorage.setItem(key, value),
+    getItem: (key) => prefs.getItem(key),
+    setItem: (key, value) => prefs.setItem(key, value),
     matchesDark: window.matchMedia("(prefers-color-scheme: dark)").matches,
     search: window.location.search,
     apply: (theme) => {

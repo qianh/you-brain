@@ -1,3 +1,4 @@
+import { prefs } from "./lib/prefs.js";
 import {
   createContext,
   useCallback,
@@ -42,7 +43,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const sync = (): void => {
-      const stored = parseThemeChoice(localStorage.getItem(THEME_STORAGE_KEY)) ?? "system";
+      const stored = parseThemeChoice(prefs.getItem(THEME_STORAGE_KEY)) ?? "system";
       if (stored !== "system") return;
       setResolved(applyTheme("system", browserThemeEnv()));
     };

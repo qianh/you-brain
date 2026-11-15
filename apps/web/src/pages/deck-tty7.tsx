@@ -1,3 +1,4 @@
+import { prefs } from "../lib/prefs.js";
 import {
   Fragment,
   useCallback,
@@ -52,7 +53,7 @@ function baseName(path: string): string {
 
 function readStored(key: string): string | null {
   try {
-    return localStorage.getItem(key);
+    return prefs.getItem(key);
   } catch {
     return null;
   }
@@ -60,7 +61,7 @@ function readStored(key: string): string | null {
 
 function writeStored(key: string, value: string): void {
   try {
-    localStorage.setItem(key, value);
+    prefs.setItem(key, value);
   } catch {
     // 存不了就不记，不影响使用。
   }
@@ -68,7 +69,7 @@ function writeStored(key: string, value: string): void {
 
 function readStoredSet(key: string): Set<string> {
   try {
-    const raw = localStorage.getItem(key);
+    const raw = prefs.getItem(key);
     if (raw === null) return new Set();
     const parsed: unknown = JSON.parse(raw);
     return Array.isArray(parsed) ? new Set(parsed.filter((item): item is string => typeof item === "string")) : new Set();
@@ -79,7 +80,7 @@ function readStoredSet(key: string): Set<string> {
 
 function readStoredColors(key: string): Record<string, string> {
   try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(key) ?? "{}");
+    const parsed: unknown = JSON.parse(prefs.getItem(key) ?? "{}");
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const out: Record<string, string> = {};
     for (const [name, color] of Object.entries(parsed)) {

@@ -1,3 +1,4 @@
+import { prefs } from "../lib/prefs.js";
 import { useEffect, useRef, useState } from "react";
 
 import { useDaemon } from "../daemon-context.js";
@@ -18,7 +19,7 @@ import { ReminderList } from "./reminders/list.js";
 import { isUnreachableError } from "./status/logic.js";
 import { TodayGroups } from "./today/groups.js";
 import { StartGuide } from "./today/guide.js";
-import { countBySource, filterSessions } from "./today/model.js";
+import { countBySource, filterSessions, type ModeStorage } from "./today/model.js";
 import {
   arrivedKeys,
   emptyCaptureView,
@@ -289,9 +290,9 @@ function driveHint(
   return t("driveChecking");
 }
 
-function storage(): Storage | null {
+function storage(): ModeStorage | null {
   try {
-    return localStorage;
+    return prefs;
   } catch {
     return null;
   }

@@ -13,6 +13,7 @@ interface TauriNamespace {
 
 interface YouBrainBootstrap {
   token?: string;
+  prefs?: Record<string, string>;
 }
 
 declare global {

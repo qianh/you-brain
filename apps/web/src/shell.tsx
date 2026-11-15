@@ -93,6 +93,13 @@ export function Shell({ children }: { children: ReactNode }) {
   }, [push, reload, t]);
 
   useEffect(() => {
+    // 偏好写回 daemon 失败时只提示一次；本次的值在内存里仍然有效。
+    const onPrefsError = (): void => { push({ message: t("prefsSaveFailed"), tone: "danger" }); };
+    window.addEventListener("you-brain:prefs-error", onPrefsError);
+    return () => window.removeEventListener("you-brain:prefs-error", onPrefsError);
+  }, [push, t]);
+
+  useEffect(() => {
     const onScroll = (): void => setScrolled(forceScrolled || window.scrollY > 4);
     onScroll();
     window.addEventListener("scroll", onScroll, { passive: true });

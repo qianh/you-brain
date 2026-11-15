@@ -1,3 +1,4 @@
+import { prefs } from "../lib/prefs.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button, IconButton } from "../components/button.js";
@@ -28,7 +29,7 @@ const DECK_VIEWS = [{ value: "dsh", label: "DSH" }, { value: "t3", label: "T3" }
 export function DshDeckPage() {
   const { client, t } = useDaemon();
   const [activePage, setActivePage] = useState(() => {
-    try { return localStorage.getItem(DECK_VIEW_KEY) === "t3" ? "t3" : "dsh"; } catch { return "dsh"; }
+    try { return prefs.getItem(DECK_VIEW_KEY) === "t3" ? "t3" : "dsh"; } catch { return "dsh"; }
   });
   const [t3Visited, setT3Visited] = useState(activePage === "t3");
   const [t3SettingsOpen, setT3SettingsOpen] = useState(false);
@@ -45,7 +46,7 @@ export function DshDeckPage() {
   ), []);
   const [tty7Open, setTty7Open] = useState(() => {
     try {
-      return localStorage.getItem(TTY7_OPEN_KEY) !== "0";
+      return prefs.getItem(TTY7_OPEN_KEY) !== "0";
     } catch {
       return true;
     }
@@ -113,7 +114,7 @@ export function DshDeckPage() {
   const toggleTty7 = (open: boolean): void => {
     setTty7Open(open);
     try {
-      localStorage.setItem(TTY7_OPEN_KEY, open ? "1" : "0");
+      prefs.setItem(TTY7_OPEN_KEY, open ? "1" : "0");
     } catch {
       // 存不了就不记。
     }
@@ -123,7 +124,7 @@ export function DshDeckPage() {
     if (next !== "dsh" && next !== "t3") return;
     setActivePage(next);
     if (next === "t3") setT3Visited(true);
-    try { localStorage.setItem(DECK_VIEW_KEY, next); } catch { /* 本次切换仍可用。 */ }
+    try { prefs.setItem(DECK_VIEW_KEY, next); } catch { /* 本次切换仍可用。 */ }
   };
 
   let main;

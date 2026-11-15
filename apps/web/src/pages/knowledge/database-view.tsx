@@ -1,3 +1,4 @@
+import { prefs } from "../../lib/prefs.js";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
 import type { NotionDatabaseView } from "@you-brain/core/http/types.js";
@@ -25,7 +26,7 @@ interface ViewState {
 
 function readView(databaseId: string): ViewState {
   try {
-    const parsed = JSON.parse(localStorage.getItem(`you-brain:knowledge:db-view:${databaseId}`) ?? "null") as Partial<ViewState> | null;
+    const parsed = JSON.parse(prefs.getItem(`you-brain:knowledge:db-view:${databaseId}`) ?? "null") as Partial<ViewState> | null;
     if (parsed) return { kind: parsed.kind ?? "table", sort: parsed.sort ?? null, groupBy: parsed.groupBy ?? null, search: "" };
   } catch {
     // 读不到就用默认视图。
@@ -35,7 +36,7 @@ function readView(databaseId: string): ViewState {
 
 function writeView(databaseId: string, view: ViewState): void {
   try {
-    localStorage.setItem(`you-brain:knowledge:db-view:${databaseId}`, JSON.stringify({ ...view, search: "" }));
+    prefs.setItem(`you-brain:knowledge:db-view:${databaseId}`, JSON.stringify({ ...view, search: "" }));
   } catch {
     // 只影响下次打开的默认视图。
   }

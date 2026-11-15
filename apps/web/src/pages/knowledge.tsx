@@ -1,3 +1,4 @@
+import { prefs } from "../lib/prefs.js";
 import {
   useCallback,
   useEffect,
@@ -144,7 +145,7 @@ const COLLAPSED_KEY = "you-brain:knowledge:collapsed:v1";
 
 function readCollapsed(): ReadonlySet<string> {
   try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "[]");
+    const parsed: unknown = JSON.parse(prefs.getItem(COLLAPSED_KEY) ?? "[]");
     return new Set(Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : []);
   } catch {
     return new Set();
@@ -156,7 +157,7 @@ const OPEN_TOGGLES_KEY = "you-brain:knowledge:open-toggles:v1";
 /** 展开过的折叠块(Notion 记住每个折叠块的开合)。 */
 function readOpenToggles(): ReadonlySet<string> {
   try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(OPEN_TOGGLES_KEY) ?? "[]");
+    const parsed: unknown = JSON.parse(prefs.getItem(OPEN_TOGGLES_KEY) ?? "[]");
     return new Set(Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string").slice(-2000) : []);
   } catch {
     return new Set();
@@ -165,7 +166,7 @@ function readOpenToggles(): ReadonlySet<string> {
 
 function writeOpenToggles(ids: ReadonlySet<string>): void {
   try {
-    localStorage.setItem(OPEN_TOGGLES_KEY, JSON.stringify([...ids].slice(-2000)));
+    prefs.setItem(OPEN_TOGGLES_KEY, JSON.stringify([...ids].slice(-2000)));
   } catch {
     // 写不进就只在本次会话内有效。
   }
@@ -181,7 +182,7 @@ const MEDIA_KINDS = new Set(["image", "video", "audio", "file", "pdf"]);
 
 function writeCollapsed(ids: ReadonlySet<string>): void {
   try {
-    localStorage.setItem(COLLAPSED_KEY, JSON.stringify([...ids]));
+    prefs.setItem(COLLAPSED_KEY, JSON.stringify([...ids]));
   } catch {
     // 写不进就只在本次会话内有效。
   }
@@ -253,7 +254,7 @@ export function KnowledgePage() {
   const [rename, setRename] = useState<{ id: string; current: string } | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [sidebarWidth, setSidebarWidth] = useState(() => {
-    const raw = Number(localStorage.getItem("knowledge-sidebar-w"));
+    const raw = Number(prefs.getItem("knowledge-sidebar-w"));
     return Number.isFinite(raw) && raw >= 200 && raw <= 520 ? raw : 264;
   });
   const [resizing, setResizing] = useState(false);
@@ -261,7 +262,7 @@ export function KnowledgePage() {
   // 正文版心:默认居中约 720px(易读),可切全宽;只是本机的显示偏好。
   const [wide, setWide] = useState(() => {
     try {
-      return localStorage.getItem("knowledge-wide") === "1";
+      return prefs.getItem("knowledge-wide") === "1";
     } catch {
       return false;
     }
@@ -269,7 +270,7 @@ export function KnowledgePage() {
   const toggleWide = (): void => {
     setWide((value) => {
       try {
-        localStorage.setItem("knowledge-wide", value ? "0" : "1");
+        prefs.setItem("knowledge-wide", value ? "0" : "1");
       } catch {
         // 写不进只影响下次的显示偏好。
       }
@@ -292,7 +293,7 @@ export function KnowledgePage() {
       setSidebarWidth(finalWidth);
       setResizing(false);
       try {
-        localStorage.setItem("knowledge-sidebar-w", String(finalWidth));
+        prefs.setItem("knowledge-sidebar-w", String(finalWidth));
       } catch {
         // 写不进只影响下次的宽度。
       }
