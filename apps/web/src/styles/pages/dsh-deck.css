@@ -1,4 +1,4 @@
-/* 指挥台 = 嵌入的 DeepSeek Harness 界面：整页一个 iframe。 */
+/* 指挥台 = DSH / T3 页面切换 + 共用的终端面板。 */
 
 /* main-deck / app-deck 由 shell 在 /deck 路由挂上：
    高度链 .app(100dvh) → .main(overflow hidden) → .page-frame → .deck
@@ -39,7 +39,16 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: var(--sp-2, 8px);
 }
+
+.dsh-deck-toolbar { flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2, 8px); min-height: 32px; }
+.dsh-deck-toolbar .segmented { flex: none; }
+.dsh-deck-actions { display: flex; align-items: center; gap: var(--sp-2, 8px); }
+.dsh-deck-view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.dsh-deck-view[hidden] { display: none; }
+.dsh-deck-settings { display: flex; flex-direction: column; gap: var(--sp-2, 8px); }
+.dsh-deck-address { max-width: 100%; color: var(--text-3); font-size: 12px; overflow-wrap: anywhere; }
 
 .dsh-frame {
   flex: 1;

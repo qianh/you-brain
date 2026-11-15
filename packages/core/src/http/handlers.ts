@@ -16,6 +16,7 @@ import {
   consolidationRejectMessage,
 } from "../consolidate/execute.js";
 import { YouBrainError } from "../domain/errors.js";
+import { probeT3Web } from "../deck/t3/probe.js";
 import { acceptActivityAt } from "../reminders/activity.js";
 import { planReminderAction } from "../reminders/action.js";
 import { ChangeHub } from "./hub.js";
@@ -400,6 +401,9 @@ export async function handleApi(
   }
   if (path === "/api/deck/dsh") {
     return method(request, "GET", async () => json(await deck(context).dshWeb(url.searchParams.get("retry") === "1")));
+  }
+  if (path === "/api/deck/t3") {
+    return method(request, "GET", async () => json(await probeT3Web(url.searchParams.get("url") ?? "")));
   }
   if (path === "/api/status") return method(request, "GET", () => status(context));
   if (path === "/api/reminders") return method(request, "GET", () => reminders(url, context));

@@ -1116,10 +1116,13 @@ export interface EventSink {
   ): void | Promise<void>;
 }
 
-// ---- 指挥台（deck）：界面、主控、任务都由 DSH 承担，daemon 只提供下面这些 ----
+// ---- 指挥台（deck）：嵌入 DSH / T3，daemon 提供本机桥接 ----
 
 /** 指挥台标签页嵌入的 DSH Web 界面的状态；ready 时 url 带一次性访问令牌，仅限本机。 */
 export type DeckDshWebResponse = import("../deck/dsh/web.js").DshWebState;
+
+/** T3 独立服务的公开页面连通性；不代表账号已登录或会话已连接。 */
+export type DeckT3WebResponse = import("../deck/t3/index.js").T3WebState;
 
 export const DeckBridgeSendBodySchema = z.object({
   app: z.string().min(1).max(60),

@@ -1,10 +1,15 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { Button, IconButton } from "../components/button.js";
+import { Icon } from "../components/icons.js";
 import { Page } from "../components/page.js";
+import { Segmented } from "../components/segmented.js";
 import { Spinner } from "../components/spinner.js";
 import { useDaemon } from "../daemon-context.js";
 import { createDshCookiePreparer } from "../lib/dsh-cookies.js";
+import { terminalReferenceMessage, type TerminalReference } from "../lib/terminal-reference.js";
 import { DeckTty7Panel } from "./deck-tty7.js";
+import { DeckT3Panel } from "./deck-t3.js";
 
 type DshWebView =
   | { state: "stopped" }
@@ -14,15 +19,27 @@ type DshWebView =
 
 const POLL_MS = 1_000;
 const TTY7_OPEN_KEY = "you-brain.deck.tty7-open";
+const DECK_VIEW_KEY = "you-brain.deck.view";
+const DECK_VIEWS = [{ value: "dsh", label: "DSH" }, { value: "t3", label: "T3" }];
 
 /**
- * 指挥台：左边嵌入 DeepSeek Harness 的 Web 界面（进程由 daemon 启动和托管），
- * 右边是可收起的 tty7 会话面板（ADR-0004）。
+ * 指挥台：左边切换 DSH / T3，右边共用可收起的 tty7 会话面板（ADR-0004）。
  */
 export function DshDeckPage() {
   const { client, t } = useDaemon();
+  const [activePage, setActivePage] = useState(() => {
+    try { return localStorage.getItem(DECK_VIEW_KEY) === "t3" ? "t3" : "dsh"; } catch { return "dsh"; }
+  });
+  const [t3Visited, setT3Visited] = useState(activePage === "t3");
+  const [t3SettingsOpen, setT3SettingsOpen] = useState(false);
+  const [t3ReloadVersion, setT3ReloadVersion] = useState(0);
   const [view, setView] = useState<DshWebView>({ state: "starting" });
   const [attempt, setAttempt] = useState(0);
+  const frame = useRef<HTMLIFrameElement>(null);
+  const [terminalRequest, setTerminalRequest] = useState<TerminalReference | null>(null);
+  const terminalRequestHandled = useCallback((request: TerminalReference) => {
+    setTerminalRequest((current) => current === request ? null : current);
+  }, []);
   const prepareCookies = useMemo(() => createDshCookiePreparer(
     typeof window === "undefined" ? undefined : window.__TAURI__?.core?.invoke,
   ), []);
@@ -66,6 +83,22 @@ export function DshDeckPage() {
   // 都会换新的端口和令牌，旧地址的 iframe 会失效，要跟着换。
   const readyUrl = view.state === "ready" ? view.url : null;
   useEffect(() => {
+    if (readyUrl === null) return;
+    const receive = (event: MessageEvent): void => {
+      const message = terminalReferenceMessage(event, frame.current?.contentWindow, readyUrl);
+      if (message === null) return;
+      if (message.type === "ready") {
+        frame.current?.contentWindow?.postMessage({ type: "u-brain:terminal-reference:host" }, new URL(readyUrl).origin);
+      } else {
+        setTty7Open(true);
+        setTerminalRequest(message);
+      }
+    };
+    window.addEventListener("message", receive);
+    return () => window.removeEventListener("message", receive);
+  }, [readyUrl]);
+
+  useEffect(() => {
     if (readyUrl === null) return undefined;
     const timer = setInterval(() => {
       void load(false).then((next) => {
@@ -86,10 +119,18 @@ export function DshDeckPage() {
     }
   };
 
+  const switchPage = (next: string): void => {
+    if (next !== "dsh" && next !== "t3") return;
+    setActivePage(next);
+    if (next === "t3") setT3Visited(true);
+    try { localStorage.setItem(DECK_VIEW_KEY, next); } catch { /* 本次切换仍可用。 */ }
+  };
+
   let main;
   if (view.state === "ready") {
     main = (
       <iframe
+        ref={frame}
         className="dsh-frame"
         src={view.url}
         title={t("dshDeckFrameTitle")}
@@ -115,13 +156,27 @@ export function DshDeckPage() {
     );
   }
 
-  // tty7 会话面板与 DSH 无关：DSH 在启动或出错时也照常可用。
+  // 两个页面保留挂载，切换只隐藏；tty7 面板独立于页面和连接状态。
   return (
     <Page>
       <div className="dsh-deck">
-        <div className="dsh-deck-main">{main}</div>
+        <div className="dsh-deck-main">
+          <div className="dsh-deck-toolbar">
+            <Segmented label={t("dshDeckPageSwitch")} value={activePage} options={DECK_VIEWS} onChange={switchPage} labelledBy="radiogroup" />
+            {activePage === "t3" ? (
+              <div className="dsh-deck-actions">
+                <Button size="sm" variant="ghost" icon={<Icon name="settings" />} onClick={() => setT3SettingsOpen(true)}>{t("dshDeckT3Settings")}</Button>
+                <IconButton label={t("dshDeckT3Refresh")} onClick={() => setT3ReloadVersion((value) => value + 1)}><Icon name="refresh" /></IconButton>
+              </div>
+            ) : null}
+          </div>
+          <div className="dsh-deck-view" role="region" aria-label={t("dshDeckFrameTitle")} hidden={activePage !== "dsh"}>{main}</div>
+          <div className="dsh-deck-view" role="region" aria-label={t("dshDeckT3FrameTitle")} hidden={activePage !== "t3"}>
+            {t3Visited ? <DeckT3Panel reloadVersion={t3ReloadVersion} settingsOpen={t3SettingsOpen} onSettingsChange={setT3SettingsOpen} onReload={() => setT3ReloadVersion((value) => value + 1)} /> : null}
+          </div>
+        </div>
         {tty7Open ? (
-          <DeckTty7Panel onClose={() => toggleTty7(false)} />
+          <DeckTty7Panel onClose={() => toggleTty7(false)} openRequest={terminalRequest} onOpenRequestHandled={terminalRequestHandled} />
         ) : (
           <button type="button" className="deck-tty7-rail" onClick={() => toggleTty7(true)}>
             {t("deckTty7Show")}

@@ -71,6 +71,7 @@ import type {
   OAuthClientPublic,
   OAuthClientPutBody,
   DeckDshWebResponse,
+  DeckT3WebResponse,
   DeckTty7PasteImageResponse,
   DeckTty7ScreenResponse,
   DeckTty7SendBody,
@@ -186,6 +187,7 @@ export interface BrowserDaemon
   notionAssetUrl(blockId: string): string;
   /** 指挥台。 */
   deckDsh(retry?: boolean): Promise<DeckDshWebResponse>;
+  deckT3(url: string): Promise<DeckT3WebResponse>;
   /** tty7 会话桥：列会话、看屏幕、发指令、新开会话；粘贴图片落盘换路径。 */
   deckTty7Sessions(): Promise<DeckTty7SessionsResponse>;
   deckTty7Delete(pane: number): Promise<{ ok: true }>;
@@ -339,6 +341,7 @@ export function createBrowserDaemon(options?: {
     notionTest: () => request<NotionTestResult>("POST", "/api/actions/notion-test"),
     deckDsh: (retry?: boolean) =>
       request<DeckDshWebResponse>("GET", retry === true ? "/api/deck/dsh?retry=1" : "/api/deck/dsh"),
+    deckT3: (url: string) => request<DeckT3WebResponse>("GET", `/api/deck/t3?url=${encodeURIComponent(url)}`),
     deckTty7Sessions: () => request<DeckTty7SessionsResponse>("GET", "/api/deck/tty7/sessions"),
     deckTty7Delete: (pane: number) => request<{ ok: true }>("POST", "/api/deck/tty7/delete", { pane }),
     deckTty7Screen: (pane: number) => request<DeckTty7ScreenResponse>("GET", `/api/deck/tty7/screen?pane=${pane}`),

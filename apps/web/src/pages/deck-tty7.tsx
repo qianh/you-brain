@@ -16,6 +16,7 @@ import { Icon } from "../components/icons.js";
 import { IconButton } from "../components/button.js";
 import { useToast } from "../components/toast.js";
 import { Toggle } from "../components/toggle.js";
+import type { TerminalReference } from "../lib/terminal-reference.js";
 import { DeckTty7Terminal } from "./deck-tty7-terminal.js";
 
 type Session = DeckTty7SessionsResponse["sessions"][number];
@@ -91,7 +92,11 @@ function readStoredColors(key: string): Record<string, string> {
 }
 
 /** 指挥台右侧的 tty7 会话面板：列会话、打开真实终端、在某个目录新开会话。 */
-export function DeckTty7Panel({ onClose }: { onClose: () => void }) {
+export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
+  onClose: () => void;
+  openRequest?: TerminalReference | null;
+  onOpenRequestHandled?: (request: TerminalReference) => void;
+}) {
   const { client, t } = useDaemon();
   const { push } = useToast();
   const [view, setView] = useState<DeckTty7SessionsResponse | null>(null);
@@ -101,6 +106,7 @@ export function DeckTty7Panel({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
   const loadSequence = useRef(0);
+  const pendingOpen = useRef<TerminalReference | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [cwd, setCwd] = useState("");
@@ -119,10 +125,25 @@ export function DeckTty7Panel({ onClose }: { onClose: () => void }) {
       if (sequence !== loadSequence.current) return;
       setView(next);
       setLoadError(null);
+      const request = pendingOpen.current;
+      if (request !== null) {
+        pendingOpen.current = null;
+        const target = next.sessions.find((session) => session.pane === request.pane &&
+          session.workspaceId === request.workspaceId && session.tabId === request.tabId);
+        setSelected(target?.pane ?? null);
+        setActionError(target ? null : t("deckTty7ReferenceMissing"));
+        onOpenRequestHandled?.(request);
+      }
     } catch (error) {
       if (sequence === loadSequence.current) setLoadError(message(error));
     }
-  }, [client]);
+  }, [client, t, onOpenRequestHandled]);
+
+  useEffect(() => {
+    if (!openRequest) return;
+    pendingOpen.current = openRequest;
+    void loadSessions();
+  }, [openRequest, loadSessions]);
 
   useEffect(() => {
     void loadSessions();

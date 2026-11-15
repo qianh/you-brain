@@ -17,6 +17,27 @@ afterEach(() => {
 });
 
 describe("daemon requests with a crowded loopback cookie jar", () => {
+  test("checks T3 through the authenticated daemon with an encoded server address", async () => {
+    let capturedUrl: string | undefined;
+    let captured: RequestInit | undefined;
+    const url = "http://[::1]:3773/";
+    const client = createBrowserDaemon({
+      token: "synthetic-test-token",
+      fetch: (async (input, init) => {
+        capturedUrl = String(input);
+        captured = init;
+        return Response.json({ state: "ready", url });
+      }) as typeof fetch,
+    });
+    expect(await client.deckT3(url)).toEqual({ state: "ready", url });
+    const target = new URL(capturedUrl!, "http://127.0.0.1:4802");
+    expect(target.pathname).toBe("/api/deck/t3");
+    expect(target.searchParams.get("url")).toBe(url);
+    expect(captured?.method).toBe("GET");
+    expect(captured?.credentials).toBe("omit");
+    expect(new Headers(captured?.headers).get("authorization")).toBe("Bearer synthetic-test-token");
+  });
+
   test("session deletion sends only the selected pane to the authenticated daemon", async () => {
     let capturedUrl: string | undefined;
     let captured: RequestInit | undefined;
