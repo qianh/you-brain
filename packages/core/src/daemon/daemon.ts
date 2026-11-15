@@ -68,6 +68,7 @@ import {
 } from "../http/portrait-files.js";
 import { createStoreReaders } from "../http/queries.js";
 import { portraitCorrectionViews } from "../portrait/corrections.js";
+import { UiPrefsStore } from "../ui-prefs/store.js";
 import { startDaemonHttp, type DaemonHttpServer } from "../http/server.js";
 import type {
   HttpDeps,
@@ -716,6 +717,7 @@ export class YouBrainDaemon {
   #embedderClose: (() => Promise<void>) | null = null;
   #notion: NotionService | null = null;
   #deck: DeckService | null = null;
+  #uiPrefs: UiPrefsStore | null = null;
   #uploader: UploadService | null = null;
   #portrait: PortraitService | null = null;
   #coding: CodingInjection | null = null;
@@ -3354,6 +3356,7 @@ export class YouBrainDaemon {
         return { roots: result.roots };
       },
       ...(this.#deck === null ? {} : { deck: this.#deckPort() as DeckHttpPort }),
+      uiPrefs: (this.#uiPrefs ??= new UiPrefsStore(join(this.#paths.dataDir, "ui-prefs.json"))),
       status: () => {
         // 聚合一次要跑全量会话/采集/Drive 检查(秒级);短缓存让启动和
         // SSE 风暴里的并发调用共享同一份结果,而不是各自重算。

@@ -138,7 +138,7 @@ async function dispatch(
       }
       return await handleApi(request, url, context);
     }
-    if (staticDir) return await serveStatic(staticDir, url.pathname, token);
+    if (staticDir) return await serveStatic(staticDir, url.pathname, token, context.deps);
     if (request.method === "GET" && (url.pathname === "/" || url.pathname === "")) {
       return new Response(missingWebHtml(), {
         headers: { "content-type": "text/html; charset=utf-8" },
@@ -218,6 +218,7 @@ async function serveStatic(
   staticDir: string,
   pathname: string,
   token: string,
+  deps: HttpDeps,
 ): Promise<Response> {
   let root: string;
   try {
@@ -226,12 +227,12 @@ async function serveStatic(
     return apiError(404, "NOT_FOUND", "找不到页面");
   }
   const relative = pathname.replace(/^\/+/u, "");
-  if (relative === "" || relative.endsWith("/")) return serveIndex(root, token);
+  if (relative === "" || relative.endsWith("/")) return serveIndex(root, token, deps);
   const target = resolve(root, relative);
   if (!isInside(root, target)) return apiError(404, "NOT_FOUND", "找不到页面");
   const linked = await lstat(target).catch(() => null);
   if (!linked) {
-    if (extname(relative) === "") return serveIndex(root, token);
+    if (extname(relative) === "") return serveIndex(root, token, deps);
     return apiError(404, "NOT_FOUND", "找不到页面");
   }
   if (linked.isSymbolicLink()) {
@@ -240,20 +241,25 @@ async function serveStatic(
   }
   const info = await stat(target).catch(() => null);
   if (info?.isFile()) return new Response(Bun.file(target));
-  if (extname(relative) === "") return serveIndex(root, token);
+  if (extname(relative) === "") return serveIndex(root, token, deps);
   return apiError(404, "NOT_FOUND", "找不到页面");
 }
 
-async function serveIndex(root: string, token: string): Promise<Response> {
+async function serveIndex(root: string, token: string, deps: HttpDeps): Promise<Response> {
   const index = resolve(root, "index.html");
   const info = await stat(index).catch(() => null);
   if (!info?.isFile()) return apiError(404, "NOT_FOUND", "找不到页面");
   const html = await Bun.file(index).text();
-  const script = `<script>window.__YOU_BRAIN__=${JSON.stringify({ token })}</script>`;
-  const body = html.includes("</head>")
-    ? html.replace("</head>", `${script}</head>`)
-    : `${script}${html}`;
-  return new Response(body, {
+  // 读偏好失败时仍要让首页能打开，只是这一次拿不到已保存的偏好。
+  const prefs = await Promise.resolve()
+    .then(() => deps.uiPrefs.read())
+    .catch(() => ({}));
+  // JSON 里的 "<" 写成 \u003c，防止偏好值里的 "</script>" 提前结束脚本。
+  const payload = JSON.stringify({ token, prefs }).replaceAll("<", "\\u003c");
+  const script = `<script>window.__YOU_BRAIN__=${payload}</script>`;
+  // 放在 <head> 刚打开的位置，早于页面自带的内联脚本（如主题脚本），它们才读得到偏好。
+  const body = html.replace(/<head(?:\s[^>]*)?>/iu, (tag) => `${tag}${script}`);
+  return new Response(body === html ? `${script}${html}` : body, {
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-cache",

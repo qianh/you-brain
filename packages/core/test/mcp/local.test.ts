@@ -156,6 +156,7 @@ describe("local MCP services", () => {
       return fetch(input, init);
     }) as typeof fetch;
     const deps: HttpDeps = {
+      uiPrefs: { read: async () => ({}), patch: async () => ({}) },
       today: async () => ({ date: "2026-07-20", timeZone: "UTC", sessions: [] }),
       topics: async () => ({ topics: [] }),
       topic: async (id) =>

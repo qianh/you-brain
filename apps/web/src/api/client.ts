@@ -322,6 +322,8 @@ export function createBrowserDaemon(options?: {
     googleSwitch: () => request<ActionMessage>("POST", "/api/actions/google-switch"),
     oauthClient: () => request<OAuthClientPublic>("GET", "/api/oauth-client"),
     putOAuthClient: (body) => request<OAuthClientPublic>("PUT", "/api/oauth-client", body),
+    uiPrefs: () => request<{ prefs: Record<string, string> }>("GET", "/api/ui-prefs"),
+    patchUiPrefs: (patch) => request<{ prefs: Record<string, string> }>("PUT", "/api/ui-prefs", patch),
     webhook: () => request<WebhookPublic>("GET", "/api/webhook"),
     updateWebhook: (body) => request<WebhookPublic>("PUT", "/api/webhook", body),
     testWebhook: () => request<WebhookTestResult>("POST", "/api/actions/webhook-test"),

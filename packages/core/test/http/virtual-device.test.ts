@@ -42,6 +42,7 @@ function deps(input: {
     throw new Error("unused");
   };
   return {
+    uiPrefs: { read: async () => ({}), patch: async () => ({}) },
     today: unused,
     topics: unused,
     topic: async () => null,

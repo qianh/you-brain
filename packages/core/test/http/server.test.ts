@@ -150,6 +150,7 @@ async function withServer(
     lastActiveAt: "2026-07-20T00:00:00.000Z",
   };
   const deps: HttpDeps = {
+    uiPrefs: { read: async () => ({}), patch: async () => ({}) },
     today: async () => today,
     topics: async (query) => {
       calls.topics.push(query);

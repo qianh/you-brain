@@ -76,6 +76,7 @@ import {
   type NotionUpdateBlockBody,
 } from "./types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
+import type { UiPrefs, UiPrefsPatch } from "../ui-prefs/store.js";
 
 export class DaemonClientError extends Error {
   constructor(
@@ -107,6 +108,8 @@ export interface DaemonClient {
   config(): Promise<SharedConfig>;
   updateConfig(patch: unknown): Promise<SharedConfig>;
   status(): Promise<StatusResponse>;
+  uiPrefs(): Promise<{ prefs: UiPrefs }>;
+  patchUiPrefs(patch: UiPrefsPatch): Promise<{ prefs: UiPrefs }>;
   webhook(): Promise<WebhookPublic>;
   updateWebhook(body: WebhookPutBody): Promise<WebhookPublic>;
   testWebhook(): Promise<WebhookTestResult>;
@@ -241,6 +244,8 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     config: () => request("GET", "/api/config"),
     updateConfig: (patch) => request("PUT", "/api/config", patch),
     status: () => request("GET", "/api/status"),
+    uiPrefs: () => request("GET", "/api/ui-prefs"),
+    patchUiPrefs: (patch) => request("PUT", "/api/ui-prefs", patch),
     webhook: () => request("GET", "/api/webhook"),
     updateWebhook: (body) => request("PUT", "/api/webhook", body),
     testWebhook: () => request("POST", "/api/actions/webhook-test"),

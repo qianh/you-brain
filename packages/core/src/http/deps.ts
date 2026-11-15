@@ -1,6 +1,7 @@
 import type { DeviceRecord, Roles, SharedConfig } from "@you-brain/protocol";
 
 import type { EventSink } from "./types.js";
+import type { UiPrefs, UiPrefsPatch } from "../ui-prefs/store.js";
 import type { TerminalConnection, TerminalSize, Tty7TerminalEvents } from "../deck/tty7-terminal.js";
 import type {
   PortraitCorrectionView,
@@ -181,6 +182,11 @@ export interface HttpDeps {
   notionMovePage?(body: NotionMovePageBody): Promise<NotionArchivePageResult>;
   /** 指挥台（deck）。The daemon always supplies it. */
   deck?: DeckHttpPort;
+  /** 界面偏好（只认键和值）。页面来自随机端口，偏好存在 daemon 这边才能跨重启保留。 */
+  uiPrefs: {
+    read(): Promise<UiPrefs>;
+    patch(input: UiPrefsPatch): Promise<UiPrefs>;
+  };
   events: EventSink;
 }
 

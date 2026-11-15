@@ -16,6 +16,7 @@ import {
   consolidationRejectMessage,
 } from "../consolidate/execute.js";
 import { YouBrainError } from "../domain/errors.js";
+import { UiPrefsLimitError, type UiPrefsPatch } from "../ui-prefs/store.js";
 import { probeT3Web } from "../deck/t3/probe.js";
 import { acceptActivityAt } from "../reminders/activity.js";
 import { planReminderAction } from "../reminders/action.js";
@@ -68,6 +69,7 @@ import {
   DeckBridgeSendBodySchema,
   DeckDshLoginBodySchema,
   DeckTty7DeleteBodySchema,
+  UiPrefsPatchBodySchema,
   DeckTty7SendBodySchema,
   DeckTty7StartBodySchema,
   type ActionResponse,
@@ -177,6 +179,23 @@ export async function handleApi(
   const path = url.pathname;
   if (path === "/api/events") {
     return apiError(404, "NOT_FOUND", "找不到接口");
+  }
+  if (path === "/api/ui-prefs") {
+    if (request.method === "GET") return json({ prefs: await context.deps.uiPrefs.read() });
+    if (request.method === "PUT") {
+      const body = UiPrefsPatchBodySchema.parse(await readJson(request));
+      try {
+        const patch: UiPrefsPatch = {
+          ...(body.set === undefined ? {} : { set: body.set }),
+          ...(body.remove === undefined ? {} : { remove: body.remove }),
+        };
+        return json({ prefs: await context.deps.uiPrefs.patch(patch) });
+      } catch (error) {
+        if (error instanceof UiPrefsLimitError) throw new HttpError(413, "PAYLOAD_TOO_LARGE", error.message);
+        throw error;
+      }
+    }
+    return methodNotAllowed("GET, PUT");
   }
   if (path === "/api/today") return method(request, "GET", () => today(context));
   if (path === "/api/topics") return method(request, "GET", () => topics(url, context));

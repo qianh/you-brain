@@ -1193,3 +1193,11 @@ export interface DeckDshLoginResponse {
   providers: import("../deck/dsh/login.js").DshLoginView[];
 }
 
+
+/** PUT /api/ui-prefs 的请求体。长度限制由存储层判断，超限返回 413 而不是 400。 */
+export const UiPrefsPatchBodySchema = z
+  .object({
+    set: z.record(z.string(), z.string()).optional(),
+    remove: z.array(z.string()).optional(),
+  })
+  .strict();

@@ -99,6 +99,7 @@ async function withHttp(
     now: () => new Date(now.value),
   });
   const deps: HttpDeps = {
+    uiPrefs: { read: async () => ({}), patch: async () => ({}) },
     today: () => readers.today(),
     topics: (query) => readers.topics(query),
     topic: (id) => readers.topic(id),

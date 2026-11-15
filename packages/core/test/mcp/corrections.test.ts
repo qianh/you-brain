@@ -132,6 +132,7 @@ describe("portrait correction MCP", () => {
       now: () => new Date(NOW),
     });
     const deps: HttpDeps = {
+      uiPrefs: { read: async () => ({}), patch: async () => ({}) },
       today: () => readers.today(),
       topics: (query) => readers.topics(query),
       topic: (id) => readers.topic(id),
