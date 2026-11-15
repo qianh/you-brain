@@ -10,6 +10,7 @@ import { useDaemon } from "../daemon-context.js";
 import { createDshCookiePreparer } from "../lib/dsh-cookies.js";
 import { terminalReferenceMessage, type TerminalReference } from "../lib/terminal-reference.js";
 import { DeckTty7Panel } from "./deck-tty7.js";
+import { initialDeckView, useTty7Sessions, waitingCount } from "./deck-tty7-sessions.js";
 import { DeckT3Panel } from "./deck-t3.js";
 
 type DshWebView =
@@ -21,16 +22,18 @@ type DshWebView =
 const POLL_MS = 1_000;
 const TTY7_OPEN_KEY = "you-brain.deck.tty7-open";
 const DECK_VIEW_KEY = "you-brain.deck.view";
-const DECK_VIEWS = [{ value: "dsh", label: "DSH" }, { value: "t3", label: "T3" }];
+const DECK_VIEWS = [{ value: "t3", label: "T3" }, { value: "dsh", label: "DSH" }];
 
 /**
  * 指挥台：左边切换 DSH / T3，右边共用可收起的 tty7 会话面板（ADR-0004）。
  */
 export function DshDeckPage() {
   const { client, t } = useDaemon();
-  const [activePage, setActivePage] = useState(() => {
-    try { return prefs.getItem(DECK_VIEW_KEY) === "t3" ? "t3" : "dsh"; } catch { return "dsh"; }
+  const [activePage, setActivePage] = useState<"dsh" | "t3">(() => {
+    try { return initialDeckView(prefs.getItem(DECK_VIEW_KEY)); } catch { return initialDeckView(null); }
   });
+  const sessions = useTty7Sessions();
+  const waiting = waitingCount(sessions.view?.sessions ?? []);
   const [t3Visited, setT3Visited] = useState(activePage === "t3");
   const [t3SettingsOpen, setT3SettingsOpen] = useState(false);
   const [t3ReloadVersion, setT3ReloadVersion] = useState(0);
@@ -164,12 +167,25 @@ export function DshDeckPage() {
         <div className="dsh-deck-main">
           <div className="dsh-deck-toolbar">
             <Segmented label={t("dshDeckPageSwitch")} value={activePage} options={DECK_VIEWS} onChange={switchPage} labelledBy="radiogroup" />
-            {activePage === "t3" ? (
-              <div className="dsh-deck-actions">
-                <Button size="sm" variant="ghost" icon={<Icon name="settings" />} onClick={() => setT3SettingsOpen(true)}>{t("dshDeckT3Settings")}</Button>
-                <IconButton label={t("dshDeckT3Refresh")} onClick={() => setT3ReloadVersion((value) => value + 1)}><Icon name="refresh" /></IconButton>
-              </div>
-            ) : null}
+            <div className="dsh-deck-actions">
+              {activePage === "t3" ? (
+                <>
+                  <Button size="sm" variant="ghost" icon={<Icon name="settings" />} onClick={() => setT3SettingsOpen(true)}>{t("dshDeckT3Settings")}</Button>
+                  <IconButton label={t("dshDeckT3Refresh")} onClick={() => setT3ReloadVersion((value) => value + 1)}><Icon name="refresh" /></IconButton>
+                </>
+              ) : null}
+              <IconButton
+                className="deck-tty7-toggle"
+                label={t("deckTty7Show")}
+                aria-pressed={tty7Open}
+                onClick={() => toggleTty7(!tty7Open)}
+              >
+                <Icon name="terminal" />
+                {!tty7Open && waiting > 0 ? (
+                  <span className="deck-tty7-badge" aria-label={t("deckTty7WaitingBadge", { count: waiting })}>{waiting > 9 ? "9+" : waiting}</span>
+                ) : null}
+              </IconButton>
+            </div>
           </div>
           <div className="dsh-deck-view" role="region" aria-label={t("dshDeckFrameTitle")} hidden={activePage !== "dsh"}>{main}</div>
           <div className="dsh-deck-view" role="region" aria-label={t("dshDeckT3FrameTitle")} hidden={activePage !== "t3"}>
@@ -177,12 +193,8 @@ export function DshDeckPage() {
           </div>
         </div>
         {tty7Open ? (
-          <DeckTty7Panel onClose={() => toggleTty7(false)} openRequest={terminalRequest} onOpenRequestHandled={terminalRequestHandled} />
-        ) : (
-          <button type="button" className="deck-tty7-rail" onClick={() => toggleTty7(true)}>
-            {t("deckTty7Show")}
-          </button>
-        )}
+          <DeckTty7Panel sessions={sessions} onClose={() => toggleTty7(false)} openRequest={terminalRequest} onOpenRequestHandled={terminalRequestHandled} />
+        ) : null}
       </div>
     </Page>
   );

@@ -72,7 +72,7 @@
 .dsh-deck-state .dsh-deck-hint { font-size: 12px; color: var(--text-3); }
 .dsh-deck-state .dsh-deck-error { max-width: 640px; color: var(--danger, #c33); word-break: break-word; }
 
-/* tty7 会话面板（ADR-0004）：指挥台右侧一栏，可收成一条竖边。 */
+/* tty7 会话面板（ADR-0004）：指挥台右侧一栏，可收起。 */
 .deck-tty7 {
   flex: none;
   width: 400px;
@@ -87,19 +87,25 @@
   font-size: var(--fs-sm, 13px);
 }
 
-.deck-tty7-rail {
-  flex: none;
-  width: 28px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md, 10px);
-  background: var(--surface);
-  color: var(--text-2);
-  font: inherit;
-  font-size: 12px;
-  writing-mode: vertical-rl;
-  cursor: pointer;
+/* 面板收起时没有竖边，入口在工具栏右上角的终端按钮上。 */
+.deck-tty7-toggle { position: relative; }
+.deck-tty7-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  background: var(--warn);
+  color: var(--on-accent);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
-.deck-tty7-rail:hover { background: var(--hover); color: var(--text); }
 
 .deck-tty7-head { display: flex; align-items: center; gap: 6px; }
 .deck-tty7-count { flex: 1; color: var(--text-3); font-variant-numeric: tabular-nums; }

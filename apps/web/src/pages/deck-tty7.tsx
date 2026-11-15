@@ -1,7 +1,6 @@
 import { prefs } from "../lib/prefs.js";
 import {
   Fragment,
-  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -9,7 +8,6 @@ import {
   type CSSProperties,
   type FormEvent,
 } from "react";
-import type { DeckTty7SessionsResponse } from "@you-brain/core/http/types.js";
 
 import { useDaemon } from "../daemon-context.js";
 import { ConfirmDialog, Dialog } from "../components/dialog.js";
@@ -19,10 +17,8 @@ import { useToast } from "../components/toast.js";
 import { Toggle } from "../components/toggle.js";
 import type { TerminalReference } from "../lib/terminal-reference.js";
 import { DeckTty7Terminal } from "./deck-tty7-terminal.js";
+import { baseName, sessionTitle, type Session, type useTty7Sessions } from "./deck-tty7-sessions.js";
 
-type Session = DeckTty7SessionsResponse["sessions"][number];
-
-const SESSIONS_POLL_MS = 5_000;
 const HARNESS_KEY = "you-brain.deck.tty7-harness";
 const ACTIVE_ONLY_KEY = "you-brain.deck.tty7-active-only";
 /** 展开的组（白名单）：默认全部收起，用户展开过的才展开。 */
@@ -44,11 +40,6 @@ const STATUS_RANK: Record<string, number> = { waiting: 0, done: 1 };
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function baseName(path: string): string {
-  const parts = path.split("/").filter((part) => part !== "");
-  return parts[parts.length - 1] ?? path;
 }
 
 function readStored(key: string): string | null {
@@ -93,21 +84,21 @@ function readStoredColors(key: string): Record<string, string> {
 }
 
 /** 指挥台右侧的 tty7 会话面板：列会话、打开真实终端、在某个目录新开会话。 */
-export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
+export function DeckTty7Panel({ sessions: shared, onClose, openRequest, onOpenRequestHandled }: {
+  /** 指挥台共享的会话数据（由 DshDeckPage 调用一次 useTty7Sessions 后传入）。 */
+  sessions: ReturnType<typeof useTty7Sessions>;
   onClose: () => void;
   openRequest?: TerminalReference | null;
   onOpenRequestHandled?: (request: TerminalReference) => void;
 }) {
   const { client, t } = useDaemon();
   const { push } = useToast();
-  const [view, setView] = useState<DeckTty7SessionsResponse | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const { view, error: loadError, reload: loadSessions } = shared;
   const [filter, setFilter] = useState("");
   const [selected, setSelected] = useState<number | null>(null);
   const [busy, setBusy] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<Session | null>(null);
   const selectedSessionRef = useRef<HTMLButtonElement>(null);
-  const loadSequence = useRef(0);
   const pendingOpen = useRef<TerminalReference | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -122,27 +113,7 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
   const [groupColors, setGroupColors] = useState<Record<string, string>>(() => readStoredColors(COLORS_KEY));
   /** 正在挑颜色的组名。 */
   const [colorPickerFor, setColorPickerFor] = useState<string | null>(null);
-  const loadSessions = useCallback(async () => {
-    const sequence = ++loadSequence.current;
-    try {
-      const next = await client.deckTty7Sessions();
-      if (sequence !== loadSequence.current) return;
-      setView(next);
-      setLoadError(null);
-      const request = pendingOpen.current;
-      if (request !== null) {
-        pendingOpen.current = null;
-        const target = next.sessions.find((session) => session.pane === request.pane &&
-          session.workspaceId === request.workspaceId && session.tabId === request.tabId);
-        setSelected(target?.pane ?? null);
-        setActionError(target ? null : t("deckTty7ReferenceMissing"));
-        onOpenRequestHandled?.(request);
-      }
-    } catch (error) {
-      if (sequence === loadSequence.current) setLoadError(message(error));
-    }
-  }, [client, t, onOpenRequestHandled]);
-
+  // 外部请求打开某个会话：先刷新一次，新数据到达后在下面的 effect 里定位。
   useEffect(() => {
     if (!openRequest) return;
     pendingOpen.current = openRequest;
@@ -150,12 +121,15 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
   }, [openRequest, loadSessions]);
 
   useEffect(() => {
-    void loadSessions();
-    const timer = setInterval(() => {
-      if (document.visibilityState === "visible") void loadSessions();
-    }, SESSIONS_POLL_MS);
-    return () => clearInterval(timer);
-  }, [loadSessions]);
+    const request = pendingOpen.current;
+    if (request === null || view === null) return;
+    pendingOpen.current = null;
+    const target = view.sessions.find((session) => session.pane === request.pane &&
+      session.workspaceId === request.workspaceId && session.tabId === request.tabId);
+    setSelected(target?.pane ?? null);
+    setActionError(target ? null : t("deckTty7ReferenceMissing"));
+    onOpenRequestHandled?.(request);
+  }, [view, t, onOpenRequestHandled]);
 
   const sessions = view?.sessions ?? [];
   const visible = useMemo(() => {
@@ -286,8 +260,6 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
     });
   };
 
-  const title = (session: Session): string =>
-    session.tabLabel ?? (session.cwd === "" ? `%${session.pane}` : baseName(session.cwd));
 
   const deleteSession = async (): Promise<void> => {
     if (busy || pendingDelete === null) return;
@@ -295,9 +267,6 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
     setBusy(true);
     try {
       await client.deckTty7Delete(pane);
-      // 已发出的旧轮询不能把删除成功的会话重新放回列表。
-      ++loadSequence.current;
-      setView((before) => before === null ? null : { ...before, sessions: before.sessions.filter((session) => session.pane !== pane) });
       setSelected((before) => before === pane ? null : before);
       setPendingDelete(null);
       await loadSessions();
@@ -319,7 +288,7 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
         }}
       >
         <span className="deck-tty7-row-title">
-          <span className="deck-tty7-row-name">{title(session)}</span>
+          <span className="deck-tty7-row-name">{sessionTitle(session)}</span>
           {session.status !== null && (
             <span className={`deck-tty7-status is-${session.status}`} title={session.statusMessage ?? undefined}>
               {t(STATUS_LABEL[session.status])}
@@ -332,7 +301,7 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
       </button>
       <IconButton
         className="deck-tty7-delete"
-        label={t("deckTty7DeleteSession", { name: title(session), pane: session.pane })}
+        label={t("deckTty7DeleteSession", { name: sessionTitle(session), pane: session.pane })}
         disabled={busy}
         onClick={() => setPendingDelete(session)}
       >
@@ -534,7 +503,7 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
         <Dialog
           open
           onClose={() => setSelected(null)}
-          title={title(current)}
+          title={sessionTitle(current)}
           size="full"
           className="deck-tty7-full"
           // Esc 是终端的键（退出、清提示），直通模式下不拿来关弹框；关闭走按钮或点弹框外。
@@ -553,14 +522,14 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
                     type="button"
                     className={session.pane === selected ? "deck-tty7-switch is-selected" : "deck-tty7-switch"}
                     aria-pressed={session.pane === selected}
-                    title={`${title(session)} · %${session.pane}`}
+                    title={`${sessionTitle(session)} · %${session.pane}`}
                     onClick={() => {
                       setSelected(session.pane);
                       setActionError(null);
                     }}
                   >
                     <span className="deck-tty7-pane">%{session.pane}</span>
-                    <span className="deck-tty7-row-name">{title(session)}</span>
+                    <span className="deck-tty7-row-name">{sessionTitle(session)}</span>
                     {session.status !== null && (
                       <span className={`deck-tty7-status is-${session.status}`} title={session.statusMessage ?? undefined}>
                         {t(STATUS_LABEL[session.status])}
@@ -595,7 +564,7 @@ export function DeckTty7Panel({ onClose, openRequest, onOpenRequestHandled }: {
         open={pendingDelete !== null}
         tone="danger"
         title={t("deckTty7Delete")}
-        description={pendingDelete === null ? "" : t("deckTty7DeleteConfirm", { name: title(pendingDelete), pane: pendingDelete.pane })}
+        description={pendingDelete === null ? "" : t("deckTty7DeleteConfirm", { name: sessionTitle(pendingDelete), pane: pendingDelete.pane })}
         confirmLabel={t("deckTty7Delete")}
         cancelLabel={t("deckTty7Cancel")}
         loading={busy}
