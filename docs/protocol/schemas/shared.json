@@ -510,6 +510,7 @@
             "openai",
             "claude",
             "ollama",
+            "magpie",
             "custom",
             "grok-cli",
             "claude-cli",

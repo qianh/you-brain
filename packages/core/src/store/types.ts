@@ -147,6 +147,8 @@ export interface ReminderRecord {
   reminderId: string;
   kind: string;
   topicId: string | null;
+  /** Session the reminder was drawn from; null when it has no single source. */
+  sessionKey: string | null;
   text: string;
   status: string;
   until: string | null;

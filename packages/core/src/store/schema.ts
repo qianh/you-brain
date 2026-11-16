@@ -127,10 +127,16 @@ const MIGRATION_3 = `
 ALTER TABLE topics ADD COLUMN last_content_at TEXT;
 `;
 
+/** Where a reminder came from, so it can open that session. Rows refill from events on the next fold. */
+const MIGRATION_4 = `
+ALTER TABLE reminders ADD COLUMN session_key TEXT;
+`;
+
 export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   { version: 1, sql: MIGRATION_1 },
   { version: 2, sql: MIGRATION_2 },
   { version: 3, sql: MIGRATION_3 },
+  { version: 4, sql: MIGRATION_4 },
 ];
 
 const latest = SCHEMA_MIGRATIONS[SCHEMA_MIGRATIONS.length - 1];

@@ -882,6 +882,10 @@
               "minLength": 1,
               "type": "string"
             },
+            "sessionKey": {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
             "text": {
               "minLength": 1,
               "type": "string"

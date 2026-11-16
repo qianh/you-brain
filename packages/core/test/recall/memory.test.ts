@@ -1,12 +1,15 @@
 import { describe, expect, it } from "bun:test";
 
 import { buildRecallMemory } from "../../src/recall/index.js";
+import { RECALL_RECENT_MS } from "../../src/recall/types.js";
+import { sessionKey } from "../topics/helpers.js";
 import { CURRENT, OLD, TZ, event, recallBook } from "./fixture.js";
 
 const updated = { [OLD]: "2026-11-13T02:00:00.000Z", [CURRENT]: "2026-11-16T02:00:00.000Z" };
+const NOW = Date.parse("2026-11-16T02:05:00.000Z");
 
-function build(book = recallBook(), topicId = "topic-a") {
-  return buildRecallMemory({ book, topicId, sessionKey: CURRENT, sessionUpdatedAt: updated, timeZone: TZ });
+function build(book = recallBook(), topicId = "topic-a", sessionUpdatedAt: Record<string, string> = updated) {
+  return buildRecallMemory({ book, topicId, sessionKey: CURRENT, sessionUpdatedAt, timeZone: TZ, nowMs: NOW });
 }
 
 describe("buildRecallMemory", () => {
@@ -33,6 +36,31 @@ describe("buildRecallMemory", () => {
     const ids = build(book)?.items.map((item) => item.id) ?? [];
     expect(ids).not.toContain("todo:todo-now");
     expect(ids).not.toContain("conclusion:con-now");
+  });
+
+  it("近 12 小时内写过的其他会话也剔除（同一对话被采集成两份），更早的保留", () => {
+    const TWIN = sessionKey(7);
+    const book = recallBook([
+      event("todo.added", { todoId: "todo-twin", topicId: "topic-a", text: "副本里的待办", sessionKey: TWIN, confidence: 0.9 }, "2026-11-16T01:00:00.000Z"),
+      event("conclusion.added", { conclusionId: "con-twin", topicId: "topic-a", text: "副本里的结论", sessionKey: TWIN }, "2026-11-16T01:01:00.000Z"),
+    ]);
+    const recent = new Date(NOW - RECALL_RECENT_MS + 60_000).toISOString();
+    const ids = build(book, "topic-a", { ...updated, [TWIN]: recent })?.items.map((item) => item.id) ?? [];
+    expect(ids).not.toContain("todo:todo-twin");
+    expect(ids).not.toContain("conclusion:con-twin");
+    expect(ids).toContain("todo:todo-1");
+
+    const old = new Date(NOW - RECALL_RECENT_MS).toISOString();
+    const kept = build(book, "topic-a", { ...updated, [TWIN]: old })?.items.map((item) => item.id) ?? [];
+    expect(kept).toContain("todo:todo-twin");
+    expect(kept).toContain("conclusion:con-twin");
+  });
+
+  it("每条待办和结论带上写它的会话，下一步没有", () => {
+    const byId = new Map(build()?.items.map((item) => [item.id, item]));
+    expect(byId.get("next")?.sessionKey).toBeNull();
+    expect(byId.get("todo:todo-1")?.sessionKey).toBe(OLD);
+    expect(byId.get("conclusion:con-1")?.sessionKey).toBe(OLD);
   });
 
   it("已关闭的待办不取，只取最近 10 条结论", () => {

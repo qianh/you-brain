@@ -18,6 +18,8 @@ export interface AppLocation {
   id: string | null;
   section: SettingsSection;
   q: string | null;
+  /** 话题页里要定位的会话。 */
+  session: string | null;
 }
 
 export function parseSettingsSection(search: string): SettingsSection {
@@ -47,11 +49,13 @@ export function parseAppLocation(input: string): AppLocation {
   let pathname = url.pathname;
   if (pathname.length > 1 && pathname.endsWith("/")) pathname = pathname.slice(0, -1);
   const id = url.searchParams.get("id");
+  const session = url.searchParams.get("session");
   return {
     pathname,
     id: id !== null && id !== "" ? id : null,
     section: parseSettingsSection(url.search),
     q: parseSearchQuery(url.search),
+    session: session !== null && session !== "" ? session : null,
   };
 }
 
@@ -63,10 +67,12 @@ export function searchHref(q: string): string {
   return `/search?q=${encodeURIComponent(q)}`;
 }
 
-export function topicHref(zone: "active" | "history", id?: string): string {
+/** 话题页地址;带 `session` 时话题详情会滚到并标出那段会话。 */
+export function topicHref(zone: "active" | "history", id?: string, session?: string | null): string {
   const path = zone === "history" ? "/topics/history" : "/topics";
   if (id === undefined || id === "") return path;
-  return `${path}?id=${encodeURIComponent(id)}`;
+  const base = `${path}?id=${encodeURIComponent(id)}`;
+  return session ? `${base}&session=${encodeURIComponent(session)}` : base;
 }
 
 export function isNavActive(pathname: string, href: string): boolean {

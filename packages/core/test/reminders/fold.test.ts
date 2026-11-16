@@ -67,6 +67,7 @@ describe("foldReminders", () => {
         reminderId: "stale:topic:2026-01-01",
         kind: "stale",
         topicId: "topic",
+        sessionKey: null,
         text: "该跟进了",
         status: "snoozed",
         until: "2026-01-18T00:00:00.000Z",

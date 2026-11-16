@@ -475,6 +475,8 @@ export interface ReminderView {
   kind: string;
   topicId: string | null;
   topicName?: string | null;
+  /** Session the reminder was drawn from, when it has one. */
+  sessionKey?: string | null;
   text: string;
   status: string;
   until: string | null;

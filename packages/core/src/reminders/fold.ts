@@ -9,6 +9,7 @@ interface Draft {
   reminderId: string;
   kind: string;
   topicId: string | null;
+  sessionKey: string | null;
   text: string;
   status: ReminderStatus;
   until: string | null;
@@ -56,6 +57,7 @@ function applyIssued(rows: Map<string, Draft>, event: Extract<Event, { type: "re
   const row = ensure(rows, event.data.reminderId, event.ts);
   row.kind = event.data.kind;
   row.topicId = event.data.topicId;
+  row.sessionKey = event.data.sessionKey ?? null;
   row.text = event.data.text;
   row.issuedAt = event.ts;
   row.updatedAt = event.ts;
@@ -82,6 +84,7 @@ function ensure(rows: Map<string, Draft>, reminderId: string, ts: string): Draft
     reminderId,
     kind: "",
     topicId: null,
+    sessionKey: null,
     text: "",
     status: "open",
     until: null,
@@ -99,6 +102,7 @@ function toRecord(row: Draft): ReminderRecord {
     reminderId: row.reminderId,
     kind: row.kind,
     topicId: row.topicId,
+    sessionKey: row.sessionKey,
     text: row.text,
     status: row.status,
     until: row.until,

@@ -206,7 +206,7 @@ export function TodayPage() {
                     timeZone={timeZone}
                     t={t}
                     onAction={reminderAction}
-                    onOpenTopic={(topicId) => navigate(topicHref(topicZone(topics, topicId), topicId))}
+                    onOpenTopic={(topicId, session) => navigate(topicHref(topicZone(topics, topicId), topicId, session))}
                     loadDetail={(reminderId) => client.reminderDetail(reminderId).then((result) => result.detail)}
                   />
                 </div>

@@ -53,7 +53,7 @@ describe("sqlite store", () => {
     withStore((store) => {
       expect(store.journalMode()).toBe("wal");
       expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
-      expect(store.schemaVersion()).toBe(3);
+      expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
       expect(store.migrationCount()).toBe(SCHEMA_MIGRATIONS.length);
       const objects = store.schemaObjects();
       for (const table of TOPIC_TABLES) expect(objects).toContain(table);
@@ -73,7 +73,7 @@ describe("sqlite store", () => {
     store.close();
     const again = new SqliteStore(path);
     try {
-      expect(again.schemaVersion()).toBe(3);
+      expect(again.schemaVersion()).toBe(SCHEMA_VERSION);
       expect(again.getSession(key(1))?.title).toBe("kept");
     } finally {
       again.close();
@@ -106,8 +106,8 @@ describe("sqlite store", () => {
 
     const store = new SqliteStore(path);
     try {
-      expect(store.schemaVersion()).toBe(3);
-      expect(store.migrationCount()).toBe(3);
+      expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
+      expect(store.migrationCount()).toBe(SCHEMA_MIGRATIONS.length);
       expect(store.schemaObjects()).toContain("events_type");
       expect(store.getSession(key(7))?.title).toBe("legacy");
       expect(store.getSession(key(7))?.msgCount).toBe(2);
@@ -335,6 +335,7 @@ describe("sqlite store", () => {
         reminderId: "r1",
         kind: "follow_up",
         topicId: "topic-1",
+        sessionKey: null,
         text: "ping",
         status: "open",
         until: "2026-07-21T00:00:00.000Z",
@@ -345,6 +346,7 @@ describe("sqlite store", () => {
         reminderId: "r1",
         kind: "follow_up",
         topicId: null,
+        sessionKey: null,
         text: "ping",
         status: "done",
         until: null,
@@ -356,6 +358,7 @@ describe("sqlite store", () => {
           reminderId: "r1",
           kind: "follow_up",
           topicId: null,
+          sessionKey: null,
           text: "ping",
           status: "done",
           until: null,

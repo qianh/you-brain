@@ -13,8 +13,8 @@ const memory: RecallMemory = {
   summary: "预测海运运价",
   lastActiveDay: "2026-11-13",
   items: [
-    { id: "next", kind: "next_step", text: "等数据到齐", day: null },
-    { id: "todo:todo-1", kind: "todo", text: "接入 10 月运价数据后重训", day: "2026-11-13" },
+    { id: "next", kind: "next_step", text: "等数据到齐", day: null, sessionKey: null },
+    { id: "todo:todo-1", kind: "todo", text: "接入 10 月运价数据后重训", day: "2026-11-13", sessionKey: "s".repeat(64) },
   ],
 };
 

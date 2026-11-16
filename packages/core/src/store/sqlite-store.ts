@@ -122,6 +122,7 @@ interface ReminderRow {
   reminder_id: string;
   kind: string;
   topic_id: string | null;
+  session_key: string | null;
   text: string;
   status: string;
   until_at: string | null;
@@ -237,6 +238,7 @@ function mapReminder(row: ReminderRow): ReminderRecord {
     reminderId: row.reminder_id,
     kind: row.kind,
     topicId: row.topic_id,
+    sessionKey: row.session_key,
     text: row.text,
     status: row.status,
     until: row.until_at,
@@ -863,11 +865,12 @@ export class SqliteStore {
       .query(
         `
         INSERT INTO reminders (
-          reminder_id, kind, topic_id, text, status, until_at, issued_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          reminder_id, kind, topic_id, session_key, text, status, until_at, issued_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(reminder_id) DO UPDATE SET
           kind = excluded.kind,
           topic_id = excluded.topic_id,
+          session_key = excluded.session_key,
           text = excluded.text,
           status = excluded.status,
           until_at = excluded.until_at,
@@ -879,6 +882,7 @@ export class SqliteStore {
         record.reminderId,
         record.kind,
         record.topicId,
+        record.sessionKey,
         record.text,
         record.status,
         record.until,
