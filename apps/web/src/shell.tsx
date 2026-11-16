@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { Banner } from "./components/banner.js";
 import { Button } from "./components/button.js";
@@ -38,8 +38,8 @@ function tabTarget(href: string): string {
 function RouteFade({ pathname, children }: { pathname: string; children: ReactNode }) {
   const { entering, clear } = useRouteEnter(pathname);
   return (
+    // 没有 key：主导航页面常驻挂载（App 的 KeepAlive），重挂载会把状态丢掉。
     <div
-      key={pathname}
       className={entering ? "route-fade is-entering" : "route-fade"}
       onAnimationEnd={(event) => {
         if (routeFadeAnimationEnded(event.target, event.currentTarget)) clear();
@@ -122,8 +122,14 @@ export function Shell({ children }: { children: ReactNode }) {
     return () => document.documentElement.classList.remove("shell-overlay");
   }, [overlayTitlebar]);
 
+  // 常驻页面各自记住滚动位置：切回时回到原来的位置，第一次到某页才回顶部。
+  const scrollMemory = useRef(new Map<string, number>());
+  const previousPathname = useRef(location.pathname);
   useEffect(() => {
-    window.scrollTo(0, 0);
+    if (previousPathname.current === location.pathname) return;
+    scrollMemory.current.set(previousPathname.current, window.scrollY);
+    window.scrollTo(0, scrollMemory.current.get(location.pathname) ?? 0);
+    previousPathname.current = location.pathname;
   }, [location.pathname]);
 
   useEffect(() => {

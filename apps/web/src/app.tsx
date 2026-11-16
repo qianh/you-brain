@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { BrandMark } from "./components/icons.js";
 import { ToastProvider } from "./components/toast.js";
@@ -79,16 +79,57 @@ function Frame() {
   if (panel) return <PanelPage />;
 
   let page = <Missing />;
-  if (location.pathname === "/" || location.pathname === "/deck") page = <DshDeckPage />;
-  else if (location.pathname === "/today") page = <TodayPage />;
-  else if (location.pathname === "/topics") page = <TopicsPage zone="active" />;
-  else if (location.pathname === "/topics/history") page = <TopicsPage zone="history" />;
-  else if (location.pathname === "/knowledge") page = <KnowledgePage />;
-  else if (location.pathname === "/todos") page = <TasksPage />;
+  if (location.pathname === "/" || location.pathname === "/deck") page = <KeepAlive active="/deck" />;
+  else if (location.pathname === "/today") page = <KeepAlive active="/today" />;
+  else if (location.pathname === "/topics") page = <KeepAlive active="/topics" />;
+  else if (location.pathname === "/topics/history") page = <KeepAlive active="/topics/history" />;
+  else if (location.pathname === "/knowledge") page = <KeepAlive active="/knowledge" />;
+  else if (location.pathname === "/todos") page = <KeepAlive active="/todos" />;
   else if (location.pathname === "/search") page = <SearchPage />;
   else if (location.pathname === "/settings") page = <SettingsPage />;
   else if (location.pathname === "/_design") page = <DesignPage />;
   return <Shell>{page}</Shell>;
+}
+
+/**
+ * 主导航页面常驻挂载，切走只隐藏不卸载：回到原来的菜单时滚动位置、
+ * 展开的条目和指挥台的会话状态都还在。数据本身来自 DaemonProvider，
+ * 由 daemon 变更事件保持最新，常驻不会看过期内容。
+ */
+function KeepAlive({ active }: { active: string }) {
+  const [mounted, setMounted] = useState([active]);
+  useEffect(() => {
+    setMounted((previous) => (previous.includes(active) ? previous : [...previous, active]));
+  }, [active]);
+  return (
+    <>
+      {mounted.map((pathname) => (
+        <div key={pathname} className="keep-page" hidden={pathname !== active}>
+          {renderKeepPage(pathname)}
+        </div>
+      ))}
+    </>
+  );
+}
+
+function renderKeepPage(pathname: string): ReactNode {
+  switch (pathname) {
+    case "/":
+    case "/deck":
+      return <DshDeckPage />;
+    case "/today":
+      return <TodayPage />;
+    case "/topics":
+      return <TopicsPage zone="active" />;
+    case "/topics/history":
+      return <TopicsPage zone="history" />;
+    case "/knowledge":
+      return <KnowledgePage />;
+    case "/todos":
+      return <TasksPage />;
+    default:
+      return null;
+  }
 }
 
 function Missing() {
