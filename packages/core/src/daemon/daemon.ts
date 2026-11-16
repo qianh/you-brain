@@ -127,7 +127,10 @@ import {
   type ConsolidationState,
 } from "../consolidate/index.js";
 import { reminderDetail } from "../reminders/detail.js";
-import { dueRemindersForDevice } from "../reminders/run.js";
+import { topicIsMuted } from "../reminders/due.js";
+import { foldReminders } from "../reminders/fold.js";
+import { dueRemindersForDevice, reminderActions } from "../reminders/run.js";
+import { RECALL_FRESH_MS, RecallService, createRecallLog, type RecallLogEntry } from "../recall/index.js";
 import { timeZoneOffsetMinutes } from "../reminders/time.js";
 import {
   WEBHOOK_STATE_CURSOR,
@@ -849,6 +852,13 @@ export class YouBrainDaemon {
   #webJob: Promise<void> | null = null;
   #backfillJob: Promise<void> | null = null;
   #notionJob: Promise<void> | null = null;
+  #recallJob: Promise<void> | null = null;
+  /** Sessions whose user messages are being read for recall, one at a time. */
+  #recallScan: Promise<void> = Promise.resolve();
+  /** Turn count last read for a session, so a rewrite with no new turn costs no parse. */
+  readonly #recallSeen = new Map<string, number>();
+  #recallLogWriter: ((entry: RecallLogEntry) => void) | null = null;
+  readonly #recall: RecallService = this.#createRecall();
   /**
    * Uploading runs on its own loop, not inside the tick.
    *
@@ -1155,7 +1165,14 @@ export class YouBrainDaemon {
     // know that nothing is still writing. A pass can be started by the tick it overlaps,
     // so keep draining until none is left.
     for (let round = 0; round < 8; round += 1) {
-      const jobs = [this.#webJob, this.#backfillJob, this.#uploadJob, this.#notionJob].filter(
+      await this.#recallScan;
+      const jobs = [
+        this.#webJob,
+        this.#backfillJob,
+        this.#uploadJob,
+        this.#notionJob,
+        this.#recallJob,
+      ].filter(
         (job): job is Promise<void> => job !== null,
       );
       if (jobs.length === 0) break;
@@ -1385,6 +1402,16 @@ export class YouBrainDaemon {
         })
         .finally(() => {
           this.#webJob = null;
+        });
+    }
+    if (this.#recallEnabled()) {
+      this.#recallJob ??= this.#recall
+        .tick()
+        .catch(() => {
+          // A reminder failure must not stop the loop.
+        })
+        .finally(() => {
+          this.#recallJob = null;
         });
     }
     if (intervalDue(this.#lastRefineBackfill, now, INTERVALS.refineBackfillMs)) {
@@ -1940,6 +1967,7 @@ export class YouBrainDaemon {
           left.meta.updatedAt.localeCompare(right.meta.updatedAt) || left.index - right.index,
       );
     let sessionActivity: string | null = null;
+    const recallKeys: string[] = [];
     for (const hit of ordered) {
       seen.add(hit.key);
       const previous = this.#live.get(hit.key);
@@ -1948,6 +1976,7 @@ export class YouBrainDaemon {
         continue;
       }
       const updatedAt = hit.meta.updatedAt;
+      if (updatedAt && this.#recentEnough(updatedAt, now)) recallKeys.push(hit.key);
       if (
         updatedAt &&
         (sessionActivity === null || Date.parse(updatedAt) > Date.parse(sessionActivity))
@@ -1963,6 +1992,7 @@ export class YouBrainDaemon {
     for (const key of this.#live.keys()) {
       if (!seen.has(key)) this.#live.delete(key);
     }
+    this.#considerLocalSessions(recallKeys);
     const visited = new Set(hits.map((hit) => hit.path));
     for (const hit of hits) {
       // An unchanged hit carries no metadata. Keep what the file earned on an earlier
@@ -1983,6 +2013,82 @@ export class YouBrainDaemon {
     this.#scanFailures = 0;
     this.#scanNotBefore = 0;
     this.#scannedOnce = true;
+  }
+
+  #recallEnabled(): boolean {
+    return this.#shared.reminders.notifications && this.#store !== null && !this.#stopped;
+  }
+
+  #recentEnough(updatedAt: string, nowMs: number): boolean {
+    const at = Date.parse(updatedAt);
+    return !Number.isNaN(at) && nowMs - at <= RECALL_FRESH_MS;
+  }
+
+  /**
+   * Reads the user's messages of sessions that just changed and hands them to recall.
+   * Runs detached and one session at a time: a reminder must never slow capture down.
+   */
+  #considerLocalSessions(keys: readonly string[]): void {
+    if (!this.#recallEnabled() || keys.length === 0) return;
+    for (const key of keys) {
+      const live = this.#live.get(key);
+      if (!live || this.#recallSeen.get(key) === live.turnCount) continue;
+      this.#recallSeen.set(key, live.turnCount);
+      this.#recallScan = this.#recallScan
+        .then(async () => {
+          if (!this.#recallEnabled()) return;
+          const session = await this.#materialize(live);
+          if (!session) return;
+          const userTurns = session.turns
+            .filter((turn) => turn.role === "user")
+            .map((turn) => turn.text.trim())
+            .filter((text) => text !== "");
+          this.#recall.consider({ sessionKey: key, userTurns });
+        })
+        .catch(() => {
+          // Reading for recall is optional; capture carries on.
+        });
+    }
+  }
+
+  #createRecall(): RecallService {
+    return new RecallService({
+      llm: () => (this.#cliPaused() ? null : this.#llm),
+      book: () => foldEvents(this.#store?.listEvents() ?? []),
+      candidateTopics: () => this.#candidateTopics(),
+      sessionUpdatedAt: () => this.#sessionUpdatedAt(),
+      reminders: () => foldReminders(this.#store?.listEvents() ?? []),
+      topicMuted: (topicId) => {
+        const events = this.#store?.listEvents() ?? [];
+        return topicIsMuted(topicId, {
+          book: foldEvents(events),
+          sessionUpdatedAt: this.#sessionUpdatedAt(),
+          actions: reminderActions(events),
+        });
+      },
+      emit: async (data) => {
+        if (this.#stopped) throw new Error("daemon 已停止");
+        await this.#emitUser("reminder.issued", data);
+      },
+      cursors: {
+        get: (key) => this.#store?.getCursor(key) ?? null,
+        set: (key, value) => this.#store?.setCursor(key, value),
+      },
+      log: (entry) => {
+        this.#recallLogWriter ??= createRecallLog(join(this.#paths.dataDir, "recall-log.jsonl"));
+        this.#recallLogWriter(entry);
+      },
+      nowMs: () => this.#clock.nowMs(),
+      timeZone: () => this.#roles.timezone,
+    });
+  }
+
+  #sessionUpdatedAt(): Record<string, string> {
+    const updated: Record<string, string> = {};
+    for (const session of this.#store?.listSessions() ?? []) {
+      if (session.updatedAt !== null) updated[session.sessionKey] = session.updatedAt;
+    }
+    return updated;
   }
 
   /** A wedged scan retries later. The wait grows so the tick can still sync. */
@@ -2264,6 +2370,18 @@ export class YouBrainDaemon {
         after !== null &&
         (before.msgCount !== after.msgCount || before.updatedAt !== after.updatedAt);
       if (identityChanged || bytesChanged) this.#retry.succeed(sessionKey);
+      if (
+        (before === null || bytesChanged) &&
+        this.#recallEnabled() &&
+        this.#canProcessWebSessions() &&
+        this.#recentEnough(updatedAt, this.#clock.nowMs())
+      ) {
+        const userTurns = (parseWebSession(text)?.turns ?? [])
+          .filter((turn) => turn.role === "user")
+          .map((turn) => turn.text.trim())
+          .filter((turnText) => turnText !== "");
+        this.#recall.consider({ sessionKey, userTurns });
+      }
     } catch {
       // Skip a malformed inbox file and keep pulling.
     }

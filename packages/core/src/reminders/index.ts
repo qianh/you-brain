@@ -13,6 +13,7 @@ export {
   REMINDER_KIND,
   STALE_MS,
   computeDueReminders,
+  topicIsMuted,
   type ComputeDueInput,
   type ReminderActionFact,
   type ReminderIssuedData,

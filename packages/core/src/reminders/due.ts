@@ -2,7 +2,7 @@ import type { ReminderAction } from "@you-brain/protocol";
 
 import { YouBrainError } from "../domain/errors.js";
 import type { ReminderRecord } from "../store/types.js";
-import { partitionTopics } from "../topics/zones.js";
+import { deriveLastActive, partitionTopics } from "../topics/zones.js";
 import type { TopicBook, ZonedTopic } from "../topics/types.js";
 import { digestText, historyText, staleText, weeklyText } from "./text.js";
 import {
@@ -159,10 +159,24 @@ function snoozeActive(
   });
 }
 
+/**
+ * Whether the user muted this topic and has not touched it since.
+ * The same rule the generated reminders follow; recall reminders defer to it too.
+ */
+export function topicIsMuted(
+  topicId: string,
+  input: Pick<ComputeDueInput, "book" | "sessionUpdatedAt" | "actions">,
+): boolean {
+  const lastActive = deriveLastActive(input.book, input.sessionUpdatedAt, {
+    countReminderActions: true,
+  }).get(topicId);
+  return topicControl(topicId, lastActive ?? null, input).muted;
+}
+
 function topicControl(
   topicId: string,
   lastActive: string | null,
-  input: ComputeDueInput,
+  input: Pick<ComputeDueInput, "book" | "sessionUpdatedAt" | "actions">,
 ): { muted: boolean; ignored: boolean } {
   const marks: Array<{ ts: string; kind: "session" | "reset" | "mute" | "ignore" }> = [];
   for (const action of input.actions) {

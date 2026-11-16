@@ -38,3 +38,9 @@ export interface RecallMemory {
 export type RecallDecision =
   | { say: false }
   | { say: true; grade: RecallGrade; text: string; basisId: string };
+
+/**
+ * A session last written longer ago than this is history being rescanned (a restart, a
+ * full re-index), not a conversation going on: it is never considered.
+ */
+export const RECALL_FRESH_MS = 10 * 60_000;
