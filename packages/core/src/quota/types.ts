@@ -10,11 +10,17 @@ export interface QuotaWindow {
 
 /** One signed-in subscription. The account's email never leaves the parser. */
 export interface QuotaAccount {
+  /** Stable per account across reads: a short hash of agent and sign-in, never the email itself. */
+  id: string;
   /** magpie's agent id: claude, codex, grok, zcode … */
   agent: string;
   plan: string | null;
   active: boolean;
   windows: QuotaWindow[];
+  /** When these windows were read. Older than the view's `readAt` when the account is `stale`. */
+  readAt: string;
+  /** The latest read had no numbers for this account, so these are kept from an earlier one. */
+  stale: boolean;
 }
 
 export interface QuotaView {

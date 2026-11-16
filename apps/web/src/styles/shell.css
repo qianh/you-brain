@@ -64,6 +64,7 @@
   cursor: default;
 }
 .quota-strip-name { color: var(--text-2); font-weight: 500; }
+.quota-strip-item.is-stale { opacity: 0.6; }
 .quota-strip-window { color: var(--text); }
 .quota-strip-window[data-tone="warn"] { color: var(--warn); }
 .quota-strip-window[data-tone="danger"] { color: var(--danger); }

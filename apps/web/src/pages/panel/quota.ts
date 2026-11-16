@@ -32,6 +32,14 @@ export interface QuotaCardView {
   label: string;
   plan: string | null;
   windows: QuotaWindowView[];
+  /** magpie could not read this one last time; the numbers are from `readAt`. */
+  stale: boolean;
+  readAt: string;
+}
+
+/** Whole minutes since `readAt`, at least 1. */
+export function minutesAgo(readAt: string, nowMs: number): number {
+  return Math.max(1, Math.round((nowMs - Date.parse(readAt)) / 60_000));
 }
 
 export function quotaTone(used: number): QuotaTone {
@@ -94,6 +102,8 @@ export function quotaCards(
       agent,
       label,
       plan: account.plan,
+      stale: account.stale,
+      readAt: account.readAt,
       windows: account.windows.map((window) => ({
         name: window.name,
         label: windowLabel(window.name, language),

@@ -1397,16 +1397,19 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
       stale: false,
       accounts: [
         {
+          id: "mock-claude",
           agent: "claude",
           plan: "pro",
           active: true,
+          readAt: new Date().toISOString(),
+          stale: false,
           windows: [
             { name: "5 hours", used: 31, resetsAt: reset(4) },
             { name: "7 days", used: 54, resetsAt: reset(20) },
             { name: "7 days · Fable", used: 86, resetsAt: reset(20) },
           ],
         },
-        { agent: "codex", plan: "free", active: true, windows: [{ name: "30 days", used: 97, resetsAt: reset(30) }] },
+        { id: "mock-codex", agent: "codex", plan: "free", active: true, readAt: new Date(Date.now() - 7 * 60_000).toISOString(), stale: true, windows: [{ name: "30 days", used: 97, resetsAt: reset(30) }] },
       ],
     });
   }

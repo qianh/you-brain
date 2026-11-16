@@ -73,12 +73,13 @@ describe("GET /api/quota", () => {
     const first = await quota(daemon);
     expect(first).toEqual({ accounts: [], readAt: null, stale: false });
     const view = await untilRead(daemon);
-    expect(view.accounts).toEqual([
+    expect(view.accounts.map(({ id: _id, readAt: _readAt, ...rest }) => rest)).toEqual([
       {
         agent: "claude",
         plan: "pro",
         active: true,
         windows: [{ name: "5 hours", used: 31, resetsAt: "2026-11-17T00:10:00+08:00" }],
+        stale: false,
       },
     ]);
     expect(JSON.stringify(view)).not.toContain("example.com");

@@ -1,13 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import type { QuotaAccount } from "@you-brain/core/http/types.js";
 
-import { quotaCards, quotaTone, resetIn, shortWindowLabel, windowLabel } from "../../src/pages/panel/quota.js";
+import { minutesAgo, quotaCards, quotaTone, resetIn, shortWindowLabel, windowLabel } from "../../src/pages/panel/quota.js";
 
 const NOW = Date.parse("2026-11-16T12:00:00Z");
 const DAY = 24 * 60 * 60_000;
 const recent = (ms: number): string => new Date(NOW - ms).toISOString();
 
+const READ = "2026-11-16T11:59:00Z";
 const claude: QuotaAccount = {
+  id: "c1",
+  readAt: READ,
+  stale: false,
   agent: "claude",
   plan: "pro",
   active: true,
@@ -16,7 +20,7 @@ const claude: QuotaAccount = {
     { name: "7 days", used: 54, resetsAt: null },
   ],
 };
-const grok: QuotaAccount = { agent: "grok", plan: null, active: true, windows: [{ name: "7 days", used: 2, resetsAt: null }] };
+const grok: QuotaAccount = { id: "g1", readAt: READ, stale: false, agent: "grok", plan: null, active: true, windows: [{ name: "7 days", used: 2, resetsAt: null }] };
 
 describe("quotaCards", () => {
   test("shows only agents whose source captured something in the last 7 days", () => {
@@ -51,15 +55,22 @@ describe("quotaCards", () => {
   });
 
   test("ignores agents it has no source for", () => {
-    const kiro: QuotaAccount = { agent: "kiro", plan: null, active: true, windows: [{ name: "x", used: 1, resetsAt: null }] };
+    const kiro: QuotaAccount = { id: "k1", readAt: READ, stale: false, agent: "kiro", plan: null, active: true, windows: [{ name: "x", used: 1, resetsAt: null }] };
     expect(quotaCards([kiro], [{ source: "kiro", lastCaptureAt: recent(0) }], NOW, "zh")).toEqual([]);
   });
 
   test("with several accounts for one agent it uses the active one", () => {
-    const other: QuotaAccount = { ...claude, plan: "max", active: false };
+    const other: QuotaAccount = { ...claude, id: "c2", plan: "max", active: false };
     const cards = quotaCards([other, claude], [{ source: "claude-code", lastCaptureAt: recent(0) }], NOW, "zh");
     expect(cards[0]?.plan).toBe("pro");
     expect(quotaCards([other], [{ source: "claude-code", lastCaptureAt: recent(0) }], NOW, "zh")).toEqual([]);
+  });
+
+  test("carries an account's stale mark and read time onto its card", () => {
+    const old: QuotaAccount = { ...claude, stale: true, readAt: "2026-11-16T11:52:00Z" };
+    const cards = quotaCards([old], [{ source: "claude-code", lastCaptureAt: recent(0) }], NOW, "zh");
+    expect(cards[0]?.stale).toBe(true);
+    expect(minutesAgo(cards[0]?.readAt ?? "", NOW)).toBe(8);
   });
 
   test("keeps a fixed order, not magpie's", () => {
