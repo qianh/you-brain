@@ -23,7 +23,7 @@ const SAMPLE = JSON.stringify([
 describe("parseMagpieAccounts", () => {
   it("skips the plugin log line before the JSON and never keeps the email", () => {
     const parsed = parseMagpieAccounts(`2026/11/16 20:06:04 plugin: host starts with HTTPS_PROXY=x\n${SAMPLE}`);
-    expect(parsed).toEqual([
+    expect(parsed?.map(({ id: _id, ...rest }) => rest)).toEqual([
       {
         agent: "claude",
         plan: "pro",
@@ -33,13 +33,24 @@ describe("parseMagpieAccounts", () => {
           { name: "7 days · Fable", used: 49, resetsAt: "2026-11-17T16:00:00+08:00" },
         ],
       },
+      { agent: "copilot", plan: null, active: true, windows: [] },
       { agent: "grok", plan: null, active: false, windows: [{ name: "7 days", used: 2, resetsAt: null }] },
     ]);
     expect(JSON.stringify(parsed)).not.toContain("example.com");
   });
 
-  it("drops accounts with no readable window (signed out)", () => {
-    expect(parseMagpieAccounts(JSON.stringify([{ agent: "kiro", active: true, windows: [{ name: 3 }] }]))).toEqual([]);
+  it("gives each account an id that is stable across reads and differs per sign-in", () => {
+    const one = (user: string) =>
+      parseMagpieAccounts(JSON.stringify([{ agent: "claude", user, active: true, windows: [] }]))?.[0]?.id;
+    expect(one("a@x.com")).toBe(one("a@x.com"));
+    expect(one("a@x.com")).not.toBe(one("b@x.com"));
+    expect(one("a@x.com")).toMatch(/^[a-f0-9]{12}$/u);
+  });
+
+  it("keeps an account whose windows are unreadable, with no windows", () => {
+    expect(
+      parseMagpieAccounts(JSON.stringify([{ agent: "kiro", active: true, windows: [{ name: 3 }] }]))?.[0]?.windows,
+    ).toEqual([]);
   });
 
   it("clamps the percentage into 0–100", () => {
@@ -140,6 +151,43 @@ describe("QuotaService", () => {
     clock.now += 2_000;
     service.refreshIfOlder(120_000);
     expect(calls()).toBe(2);
+  });
+
+  it("keeps an account's last numbers, marked stale, when one read comes back without them", async () => {
+    const without = JSON.stringify([
+      { agent: "claude", user: "someone@example.com", plan: "pro", active: true, windows: [] },
+      { agent: "grok", user: "y", active: false, windows: [{ name: "7 days", used: 3 }] },
+    ]);
+    const { service, clock } = harness([async () => SAMPLE, async () => without]);
+    await service.refresh();
+    clock.now += 60_000;
+    await service.refresh();
+    const view = service.snapshot();
+    expect(view.stale).toBe(false);
+    expect(view.readAt).toBe("2026-11-16T12:01:00.000Z");
+    const claude = view.accounts.find((account) => account.agent === "claude");
+    expect(claude?.stale).toBe(true);
+    expect(claude?.readAt).toBe("2026-11-16T12:00:00.000Z");
+    expect(claude?.windows[0]?.used).toBe(31);
+    const grok = view.accounts.find((account) => account.agent === "grok");
+    expect(grok?.stale).toBe(false);
+    expect(grok?.windows[0]?.used).toBe(3);
+  });
+
+  it("drops kept numbers once they are an hour old, and a later good read clears stale", async () => {
+    const without = JSON.stringify([{ agent: "claude", user: "someone@example.com", active: true, windows: [] }]);
+    const { service, clock } = harness([async () => SAMPLE, async () => without, async () => without, async () => SAMPLE]);
+    await service.refresh();
+    clock.now += 59 * 60_000;
+    await service.refresh();
+    expect(service.snapshot().accounts.some((account) => account.agent === "claude")).toBe(true);
+    clock.now += 60_000;
+    await service.refresh();
+    expect(service.snapshot().accounts.some((account) => account.agent === "claude")).toBe(false);
+    clock.now += 60_000;
+    await service.refresh();
+    const claude = service.snapshot().accounts.find((account) => account.agent === "claude");
+    expect(claude?.stale).toBe(false);
   });
 
   it("snapshot is a copy: changing it does not change the cache", async () => {

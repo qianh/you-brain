@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { Tooltip } from "./tooltip.js";
 import type { Language } from "../lib/format.js";
-import { resetIn, shortWindowLabel, type QuotaCardView } from "../pages/panel/quota.js";
+import { minutesAgo, resetIn, shortWindowLabel, type QuotaCardView } from "../pages/panel/quota.js";
 
 /** How long each model stays in the top bar before the next one. */
 export const QUOTA_ROTATE_MS = 5_000;
@@ -47,6 +47,9 @@ export function QuotaStrip({
         <Tooltip
           content={
             <span className="quota-strip-tip">
+              {card.stale ? (
+                <span>{language === "zh" ? `${minutesAgo(card.readAt, nowMs)} 分钟前的数据` : `From ${minutesAgo(card.readAt, nowMs)} min ago`}</span>
+              ) : null}
               {card.windows.map((window) => {
                 const reset = resetIn(window.resetsAt, nowMs, language);
                 return (
@@ -58,7 +61,7 @@ export function QuotaStrip({
             </span>
           }
         >
-          <span key={card.agent} className="quota-strip-item" tabIndex={0}>
+          <span key={card.agent} className={card.stale ? "quota-strip-item is-stale" : "quota-strip-item"} tabIndex={0}>
             <span className="quota-strip-name">{card.label}</span>
             {card.windows.map((window) => (
               <span key={window.name} className="quota-strip-window" data-tone={window.tone}>

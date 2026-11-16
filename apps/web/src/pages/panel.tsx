@@ -19,7 +19,7 @@ import type { MessageKey } from "../i18n/messages.js";
 import { StartGuide } from "./today/guide.js";
 import { emptyCaptureView, guideSteps } from "./today/model.js";
 import { panelShortcut } from "./panel/model.js";
-import { resetIn, type QuotaCardView } from "./panel/quota.js";
+import { minutesAgo, resetIn, type QuotaCardView } from "./panel/quota.js";
 import { useQuota } from "./panel/use-quota.js";
 import { openAppPath } from "./panel/open.js";
 import { ReminderList } from "./reminders/list.js";
@@ -250,6 +250,9 @@ function QuotaCard({
           <div className="quota-head">
             <span className="quota-name">{card.label}</span>
             {card.plan ? <span className="quota-plan">{card.plan}</span> : null}
+            {card.stale && !stale ? (
+              <span className="quota-plan quota-card-stale">{t("panelQuotaStale", { minutes: minutesAgo(card.readAt, nowMs) })}</span>
+            ) : null}
           </div>
           {card.windows.map((window) => {
             const reset = resetIn(window.resetsAt, nowMs, language);

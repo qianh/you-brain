@@ -373,9 +373,11 @@ const DRIVE_PROBE_MS = 5_000;
 const DRIVE_PROBE_GAP_MS = 15_000;
 /** Stop proceeds even if Drive or the model probe is still hanging. */
 const BACKGROUND_STOP_MS = 3_000;
-/** How often the subscription allowances are re-read, and how old they may be when the panel opens. */
-const QUOTA_REFRESH_MS = 5 * 60_000;
-const QUOTA_OPEN_REFRESH_MS = 2 * 60_000;
+/**
+ * How often the subscription allowances are re-read. A busy agent burns through a lot in
+ * minutes, so once a minute; a read takes about ten seconds and never overlaps another.
+ */
+const QUOTA_REFRESH_MS = 60_000;
 
 export interface DaemonOptions {
   homeDir?: string;
@@ -3559,7 +3561,7 @@ export class YouBrainDaemon {
           return { merged };
         }),
       quota: () => {
-        if (!this.#stopped) this.#quota.refreshIfOlder(QUOTA_OPEN_REFRESH_MS);
+        if (!this.#stopped) this.#quota.refreshIfOlder(QUOTA_REFRESH_MS);
         return this.#quota.snapshot();
       },
       reminders: async (all) => {
