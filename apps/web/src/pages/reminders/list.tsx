@@ -264,7 +264,7 @@ export function ReminderCard({
   }
 
   return (
-    <Banner tone="info" className="reminder-banner" action={action}>
+    <Banner tone="info" className="reminder-banner" action={action} actionBelow={layout === "panel" && open}>
       {copy}
     </Banner>
   );

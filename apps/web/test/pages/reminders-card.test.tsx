@@ -91,6 +91,10 @@ describe("ReminderCard", () => {
     }
   });
 
+  test("a collapsed panel reminder keeps the compact single row (actions beside the text)", () => {
+    expect(card(topic, "panel")).not.toContain("actions-below");
+  });
+
   test("a reminder that records its source session offers 查看出处; an old one keeps 查看话题", () => {
     const sourced: ReminderView = { ...topic, kind: "recall", sessionKey: "a".repeat(64) };
     expect(card(sourced, "today")).toContain("查看出处");
