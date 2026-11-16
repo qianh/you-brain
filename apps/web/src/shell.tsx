@@ -165,6 +165,7 @@ export function Shell({ children }: { children: ReactNode }) {
         {t("skip")}
       </a>
       <header className={scrolled ? "topbar is-scrolled" : "topbar"} {...(overlayTitlebar ? { "data-tauri-drag-region": "" } : {})}>
+        <div className="top-left" {...(overlayTitlebar ? { "data-tauri-drag-region": "" } : {})}>
         <a
           className="brand"
           href="/today"
@@ -177,6 +178,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <span>{t("brand")}</span>
         </a>
         <QuotaStrip cards={quotaCards} nowMs={quotaNow} language={language} />
+        </div>
         <div className="top-nav" {...(overlayTitlebar ? { "data-tauri-drag-region": "" } : {})}>
           <div className="nav-fade">
             <Segmented

@@ -123,3 +123,12 @@ describe("shortWindowLabel", () => {
     expect(shortWindowLabel("MCP Month")).toBe("MCP Month");
   });
 });
+
+describe("nextQuotaIndex", () => {
+  test("steps through the models and wraps round", async () => {
+    const { nextQuotaIndex } = await import("../../src/components/quota-strip.js");
+    expect([0, 1, 2].map((index) => nextQuotaIndex(index, 3))).toEqual([1, 2, 0]);
+    expect(nextQuotaIndex(0, 1)).toBe(0);
+    expect(nextQuotaIndex(4, 0)).toBe(0);
+  });
+});
