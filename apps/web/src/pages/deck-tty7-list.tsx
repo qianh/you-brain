@@ -209,7 +209,6 @@ export function DeckTty7SessionList({ sessions, filter, onFilterChange, onOpen, 
               </span>
             )}
             {session.agent !== null && <span className="chip">{session.agent}</span>}
-            <span className="deck-tty7-pane">%{session.pane}</span>
           </span>
           <span className="deck-tty7-row-cwd">{session.cwd}</span>
         </div>
