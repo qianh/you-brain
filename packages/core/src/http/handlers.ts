@@ -17,6 +17,8 @@ import {
 } from "../consolidate/execute.js";
 import { YouBrainError } from "../domain/errors.js";
 import { UiPrefsLimitError, type UiPrefsPatch } from "../ui-prefs/store.js";
+import { TaskError } from "../tasks/service.js";
+import { TaskActionSchema, TaskCreateSchema, TaskUpdateSchema } from "../tasks/schema.js";
 import { probeT3Web } from "../deck/t3/probe.js";
 import { acceptActivityAt } from "../reminders/activity.js";
 import { planReminderAction } from "../reminders/action.js";
@@ -136,6 +138,7 @@ export class HttpError extends Error {
 }
 
 export function errorResponse(error: unknown): Response {
+  if (error instanceof TaskError) return apiError(error.status, "TASK_REJECTED", error.message);
   if (error instanceof HttpError) return apiError(error.status, error.code, error.message);
   if (error instanceof z.ZodError) {
     return apiError(400, "INVALID_INPUT", error.message);
@@ -179,6 +182,28 @@ export async function handleApi(
   context: ApiContext,
 ): Promise<Response> {
   const path = url.pathname;
+  if (path === "/api/tasks") {
+    if (!context.deps.tasks) notSupported();
+    const tasks = context.deps.tasks;
+    if (request.method === "GET") return json(await tasks.board());
+    if (request.method === "POST") return json(await tasks.create(TaskCreateSchema.parse(await readJson(request))));
+    if (request.method === "PUT") return json(await tasks.update(TaskUpdateSchema.parse(await readJson(request))));
+    return methodNotAllowed("GET, POST, PUT");
+  }
+  if (path === "/api/tasks/action") {
+    return method(request, "POST", async () => {
+      if (!context.deps.tasks) notSupported();
+      return json(await context.deps.tasks.action(TaskActionSchema.parse(await readJson(request))));
+    });
+  }
+  if (path === "/api/tasks/review") {
+    return method(request, "GET", async () => {
+      if (!context.deps.tasks) notSupported();
+      const id = url.searchParams.get("id");
+      if (!id || id.length > 200) throw new HttpError(400, "INVALID_INPUT", "缺少有效的 TODO 编号");
+      return json(await context.deps.tasks.review(id));
+    });
+  }
   if (path === "/api/events") {
     return apiError(404, "NOT_FOUND", "找不到接口");
   }

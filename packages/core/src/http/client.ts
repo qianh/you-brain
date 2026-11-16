@@ -77,6 +77,7 @@ import {
 } from "./types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 import type { UiPrefs, UiPrefsPatch } from "../ui-prefs/store.js";
+import type { TaskActionInput, TaskBoard, TaskCreateInput, TaskReview, TaskUpdateInput } from "../tasks/types.js";
 
 export class DaemonClientError extends Error {
   constructor(
@@ -91,6 +92,11 @@ export class DaemonClientError extends Error {
 
 export interface DaemonClient {
   readonly baseUrl: string;
+  taskBoard?(): Promise<TaskBoard>;
+  createTask?(input: TaskCreateInput): Promise<TaskBoard>;
+  updateTask?(input: TaskUpdateInput): Promise<TaskBoard>;
+  taskAction?(input: TaskActionInput): Promise<TaskBoard>;
+  taskReview?(id: string): Promise<TaskReview>;
   today(): Promise<TodayResponse>;
   topics(query?: TopicsQuery): Promise<TopicsResponse>;
   topic(id: string): Promise<TopicDetail>;
@@ -213,6 +219,11 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 
   return {
     baseUrl,
+    taskBoard: () => request("GET", "/api/tasks"),
+    createTask: (input) => request("POST", "/api/tasks", input),
+    updateTask: (input) => request("PUT", "/api/tasks", input),
+    taskAction: (input) => request("POST", "/api/tasks/action", input),
+    taskReview: (id) => request("GET", `/api/tasks/review?id=${encodeURIComponent(id)}`),
     today: () => request("GET", "/api/today"),
     topics: (query) => request("GET", `/api/topics${queryString(query)}`),
     topic: (id) => request("GET", `/api/topics/${encodeURIComponent(id)}`),

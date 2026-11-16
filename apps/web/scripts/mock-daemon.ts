@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { DevelopmentTask, TaskBoard, TaskCreateInput, TaskActionInput, TaskUpdateInput } from "@you-brain/core/tasks/types.js";
 
 const token = process.env.MOCK_TOKEN || "you-brain-mock-token";
 const port = Number(process.env.MOCK_PORT || 4731);
@@ -42,6 +43,32 @@ const KEY = {
 const MORNING = ago(6 * HOUR);
 const NOON = ago(3 * HOUR);
 const AFTERNOON = ago(25 * MINUTE);
+
+// 仅供界面验收的合成任务；本脚本不连接 T3、不创建 Git 分支。
+const mockTaskBoard: TaskBoard = {
+  projects: scenario === "fresh" ? [] : [
+    { id: "demo-u-brain", name: "演示 · U-Brain", cwd: "/demo/u-brain", enabled: true },
+    { id: "demo-notes", name: "演示 · Notes", cwd: "/demo/notes", enabled: false },
+  ],
+  connectionError: null,
+  tasks: scenario === "fresh" ? [] : [
+    { id: "demo-review", title: "[演示] 优化搜索结果空状态", description: "无匹配结果时展示筛选建议，并保留当前搜索词。", projectId: "demo-u-brain", priority: 1, status: "review", createdAt: ago(4 * HOUR), updatedAt: ago(10 * MINUTE), run: { projectCwd: "/demo/u-brain", branch: "task/demo-review", worktreePath: "/demo/worktrees/demo-review", baseSha: "b".repeat(40), threadId: "demo-thread", threadUrl: null, reviewSha: "a".repeat(40), summary: "[演示数据] 已补充空状态建议，并验证搜索词保持不变。此结果仅用于界面验收。", error: null } },
+    { id: "demo-urgent", title: "[演示] 修复重连后的任务状态刷新", description: "网络恢复后重新获取队列，避免覆盖正在编辑的表单。", projectId: "demo-u-brain", priority: 0, status: "queued", createdAt: ago(2 * HOUR), updatedAt: ago(2 * HOUR), run: null },
+    { id: "demo-normal", title: "[演示] 为项目增加快捷筛选", description: "支持按关联项目与执行状态查看任务。", projectId: "demo-notes", priority: 2, status: "queued", createdAt: ago(HOUR), updatedAt: ago(HOUR), run: null },
+    { id: "demo-unassigned", title: "[演示] 整理下周的改进想法", description: "先记录任务，确定所属项目后再开始处理。", projectId: null, priority: 3, status: "queued", createdAt: ago(20 * MINUTE), updatedAt: ago(20 * MINUTE), run: null },
+  ],
+};
+
+function simulateNextTask(projectId: string): void {
+  if (!mockTaskBoard.projects.find((project) => project.id === projectId)?.enabled) return;
+  if (mockTaskBoard.tasks.some((task) => task.projectId === projectId && task.status !== "queued" && task.status !== "done")) return;
+  const next = mockTaskBoard.tasks.filter((task) => task.projectId === projectId && task.status === "queued").sort((a, b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt))[0];
+  if (!next) return;
+  next.status = "running";
+  next.updatedAt = new Date().toISOString();
+  next.run = { projectCwd: mockTaskBoard.projects.find((project) => project.id === projectId)!.cwd, branch: `task/${next.id}`, worktreePath: `/demo/worktrees/${next.id}`, baseSha: "b".repeat(40), threadId: `demo-${next.id}`, threadUrl: null, reviewSha: null, summary: "[演示数据] 这是模拟执行结果，不会操作 T3 或 Git。", error: null };
+  setTimeout(() => { next.status = "review"; next.run!.reviewSha = "a".repeat(40); next.updatedAt = new Date().toISOString(); }, 1_500);
+}
 
 interface SessionRow {
   sessionKey: string;
@@ -1157,6 +1184,55 @@ async function addCorrection(request: Request): Promise<Response> {
 
 async function handleApi(request: Request, url: URL): Promise<Response> {
   const path = url.pathname;
+  if (path === "/api/tasks") {
+    if (request.method === "GET") return json(mockTaskBoard);
+    if (request.method === "POST") {
+      const input = await request.json() as TaskCreateInput;
+      const task: DevelopmentTask = { id: `demo-${crypto.randomUUID()}`, title: input.title, description: input.description ?? "", projectId: input.projectId ?? null, priority: input.priority ?? 2, status: "queued", run: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      mockTaskBoard.tasks.push(task);
+      if (task.projectId) simulateNextTask(task.projectId);
+      return json(mockTaskBoard);
+    }
+    if (request.method === "PUT") {
+      const input = await request.json() as TaskUpdateInput;
+      const task = mockTaskBoard.tasks.find((task) => task.id === input.id);
+      if (!task) return fail(404, "NOT_FOUND", "演示任务不存在");
+      if (task.status !== "queued") return fail(409, "INVALID_STATE", "只能编辑待处理任务");
+      Object.assign(task, input, { updatedAt: new Date().toISOString() });
+      return json(mockTaskBoard);
+    }
+    return fail(405, "METHOD_NOT_ALLOWED", "请求方法不支持");
+  }
+  if (path === "/api/tasks/review" && request.method === "GET") {
+    const task = mockTaskBoard.tasks.find((task) => task.id === url.searchParams.get("id"));
+    if (!task?.run || task.status !== "review") return fail(409, "INVALID_STATE", "任务尚未进入核对状态");
+    return json({ task, headSha: task.run.reviewSha, baseSha: task.run.baseSha, stat: "demo/search.tsx | 2 ++\n1 file changed, 2 insertions(+)", diff: "diff --git a/demo/search.tsx b/demo/search.tsx\n--- a/demo/search.tsx\n+++ b/demo/search.tsx\n@@ -1 +1,3 @@\n // Synthetic demo data\n+// Show helpful empty-state suggestions\n+// Keep the current search query\n", truncated: false });
+  }
+  if (path === "/api/tasks/action" && request.method === "POST") {
+    const input = await request.json() as TaskActionInput;
+    if (input.action === "project") {
+      const project = mockTaskBoard.projects.find((project) => project.id === input.projectId);
+      if (!project) return fail(404, "NOT_FOUND", "演示项目不存在");
+      project.enabled = input.enabled;
+      simulateNextTask(project.id);
+    } else {
+      const task = mockTaskBoard.tasks.find((task) => task.id === input.id);
+      if (!task) return fail(404, "NOT_FOUND", "演示任务不存在");
+      if (input.action === "approve") {
+        if (task.status !== "review" || input.reviewSha !== task.run?.reviewSha) return fail(409, "STALE_REVIEW", "提交已有变化，请重新核对");
+        task.status = "done";
+        if (task.projectId) simulateNextTask(task.projectId);
+      } else if (input.action === "reject") {
+        if (task.status !== "review" || !input.feedback.trim()) return fail(409, "INVALID_STATE", "请填写核对反馈");
+        task.status = "running";
+        setTimeout(() => { task.status = "review"; task.run!.summary = "[演示数据] 已根据反馈调整，请重新核对。"; }, 1_500);
+      } else {
+        task.status = task.run ? "review" : "queued";
+      }
+      task.updatedAt = new Date().toISOString();
+    }
+    return json(mockTaskBoard);
+  }
   if (path === "/api/events" && request.method === "GET") {
     let send: (frame: string) => void = () => undefined;
     const stream = new ReadableStream<Uint8Array>({

@@ -197,6 +197,10 @@ import { UploadService } from "../upload/upload-service.js";
 import type { UploadIndex } from "../upload/types.js";
 import { NotionService } from "../notion/service.js";
 import { DeckService, type DeckServiceOptions } from "../deck/index.js";
+import { DEFAULT_T3_URL, normalizeT3Url } from "../deck/t3/index.js";
+import { T3Automation } from "../deck/t3/automation.js";
+import { TaskGit } from "../tasks/git.js";
+import { TaskService } from "../tasks/service.js";
 import { TERMINAL_NOTIFY_PREF_KEY } from "../deck/session-notices.js";
 import { SEARCH_CONFIG_FILE } from "../deck/dsh/runtime.js";
 import { readSearchActive, writeSearchActive } from "../deck/dsh/search-config.js";
@@ -718,6 +722,8 @@ export class YouBrainDaemon {
   #embedderClose: (() => Promise<void>) | null = null;
   #notion: NotionService | null = null;
   #deck: DeckService | null = null;
+  #tasks: TaskService | null = null;
+  #taskAutomation: T3Automation | null = null;
   #uiPrefs: UiPrefsStore | null = null;
   #uploader: UploadService | null = null;
   #portrait: PortraitService | null = null;
@@ -1179,6 +1185,10 @@ export class YouBrainDaemon {
       await Promise.race([this.#revokeJob, delay(BACKGROUND_STOP_MS)]);
     }
     this.#deck?.stop();
+    await this.#tasks?.stop();
+    await this.#taskAutomation?.close();
+    this.#tasks = null;
+    this.#taskAutomation = null;
     this.#webhookTimer?.cancel();
     this.#webhookTimer = null;
     await this.#webhookChain.catch(() => undefined);
@@ -3164,6 +3174,21 @@ export class YouBrainDaemon {
       this.#deck.warmDsh();
       this.#deck.startNotices();
     }
+    if (this.#paths && this.#tasks === null) {
+      this.#taskAutomation = new T3Automation({
+        getUrl: async () => normalizeT3Url((await this.#uiPrefsStore().read())["you-brain.deck.t3-url"] ?? "") ?? DEFAULT_T3_URL,
+        env: this.#env,
+        homeDir: this.#homeDir,
+      });
+      this.#tasks = new TaskService({
+        dataDir: this.#paths.dataDir,
+        automation: this.#taskAutomation,
+        git: new TaskGit({ dataDir: this.#paths.dataDir, env: this.#env }),
+        now: () => this.#clock.now(),
+        onChange: () => this.changes.publish("deck", this.#clock.now().toISOString()),
+      });
+      this.#tasks.start();
+    }
     return {
       today: () => readers.today(),
       topics: async (query) => {
@@ -3358,6 +3383,7 @@ export class YouBrainDaemon {
         return { roots: result.roots };
       },
       ...(this.#deck === null ? {} : { deck: this.#deckPort() as DeckHttpPort }),
+      ...(this.#tasks === null ? {} : { tasks: this.#tasks }),
       uiPrefs: this.#uiPrefsStore(),
       status: () => {
         // 聚合一次要跑全量会话/采集/Drive 检查(秒级);短缓存让启动和

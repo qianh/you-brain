@@ -1,4 +1,5 @@
 import type { DaemonClient } from "@you-brain/core/http/client.js";
+import type { TaskActionInput, TaskBoard, TaskCreateInput, TaskReview, TaskUpdateInput } from "@you-brain/core/tasks/types.js";
 import type {
   ActionResponse,
   ApiErrorBody,
@@ -199,6 +200,11 @@ export interface BrowserDaemon
   deckTty7Start(body: DeckTty7StartBody): Promise<DeckTty7StartResponse>;
   deckTty7PasteImage(data: Blob): Promise<DeckTty7PasteImageResponse>;
   deckTty7Terminal(pane: number, size: DeckTerminalSize): WebSocket;
+  taskBoard(): Promise<TaskBoard>;
+  createTask(body: TaskCreateInput): Promise<TaskBoard>;
+  updateTask(body: TaskUpdateInput): Promise<TaskBoard>;
+  taskAction(body: TaskActionInput): Promise<TaskBoard>;
+  taskReview(id: string): Promise<TaskReview>;
 }
 
 export function readDaemonToken(): string {
@@ -256,6 +262,11 @@ export function createBrowserDaemon(options?: {
 
   return {
     baseUrl,
+    taskBoard: () => request<TaskBoard>("GET", "/api/tasks"),
+    createTask: (body) => request<TaskBoard>("POST", "/api/tasks", body),
+    updateTask: (body) => request<TaskBoard>("PUT", "/api/tasks", body),
+    taskAction: (body) => request<TaskBoard>("POST", "/api/tasks/action", body),
+    taskReview: (id) => request<TaskReview>("GET", `/api/tasks/review?id=${encodeURIComponent(id)}`),
     today: () => request<TodayResponse>("GET", "/api/today"),
     topics: (query) => request<TopicsResponse>("GET", `/api/topics${queryString(query)}`),
     topic: (id) => request<TopicDetail>("GET", `/api/topics/${encodeURIComponent(id)}`),
