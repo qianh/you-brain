@@ -28,6 +28,7 @@ export function Banner({
   onDismiss,
   dismissLabel = "关闭",
   className = "",
+  actionBelow = false,
 }: {
   tone: BannerTone;
   children: ReactNode;
@@ -35,10 +36,16 @@ export function Banner({
   onDismiss?: () => void;
   dismissLabel?: string;
   className?: string;
+  /** 按钮组换到正文下方整行右对齐;用于窄面板里展开的长提醒。 */
+  actionBelow?: boolean;
 }) {
   const mapped = TONE[tone];
+  const below = actionBelow && Boolean(action || onDismiss);
   return (
-    <div className={["banner", mapped, className].filter(Boolean).join(" ")} role={mapped === "danger" ? "alert" : "status"}>
+    <div
+      className={["banner", mapped, below ? "actions-below" : "", className].filter(Boolean).join(" ")}
+      role={mapped === "danger" ? "alert" : "status"}
+    >
       <span className="banner-icon">
         <Icon name={ICONS[mapped]} />
       </span>

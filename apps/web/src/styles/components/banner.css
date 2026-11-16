@@ -18,6 +18,22 @@
 .banner-actions { display: inline-flex; align-items: center; gap: var(--sp-1); flex: none; }
 
 /*
+ * 按钮组换到正文下方:窄面板里展开的长提醒,正文独占整行,按钮右对齐成第二行。
+ * 用 grid 显式分两行,flex-wrap 的逐项换行会把图标孤留在第一行。
+ */
+.banner.actions-below {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+}
+.banner.actions-below .banner-icon { grid-column: 1; grid-row: 1; }
+.banner.actions-below .banner-text { grid-column: 2; grid-row: 1; }
+.banner.actions-below .banner-actions {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  justify-content: flex-end;
+}
+
+/*
  * Top-aligned so long text can wrap, but the first text line, the icon and the button
  * row share one centre line: everything is padded to the height of the tallest control.
  */
