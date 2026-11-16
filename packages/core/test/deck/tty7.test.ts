@@ -287,3 +287,50 @@ describe("Tty7 appearance", () => {
     }
   });
 });
+
+describe("Tty7.procs 与终端活动状态", () => {
+  const replies = {
+    "ws ls": WORKSPACES,
+    "pane ls": {
+      panes: [
+        { pane: 7, workspace: "ws-a", tab: "t1", cwd: "/a", live: true, hibernated: false },
+        { pane: 8, workspace: "ws-a", tab: "t1", cwd: "/b", live: true, hibernated: false },
+        { pane: 9, workspace: "ws-a", tab: "t1", cwd: "/c", live: true, hibernated: true },
+      ],
+    },
+    agents: { agents: [{ pane_id: 7, agent: "Claude", state: { status: "idle" } }] },
+    "tab ls": { tabs: [{ id: "t1", name: null, label: null, agent: null, panes: [7, 8, 9] }] },
+    "procs %5": {
+      procs: [
+        { pid: 1, name: "zsh", depth: 0, foreground: false, rss: 1, cpu_ns: 5, started: 1 },
+        { pid: 2, name: "node", depth: 1, foreground: true, rss: 1, cpu_ns: 9000, started: 2 },
+      ],
+      ports: [],
+      probe: { state: "ok" },
+      context: { at_prompt: false },
+    },
+  };
+
+  it("procs 取出前台进程、累计 CPU 和是否在提示符", async () => {
+    const { tty7 } = fake(replies);
+    expect(await tty7.procs(5)).toEqual({
+      atPrompt: false,
+      procs: [
+        { pid: 1, depth: 0, foreground: false, cpuNs: 5 },
+        { pid: 2, depth: 1, foreground: true, cpuNs: 9000 },
+      ],
+    });
+  });
+
+  it("没有 hooks 状态的会话用活动状态补上，hooks 状态优先，休眠的不补", async () => {
+    const { tty7 } = fake(replies);
+    tty7.setActivity(() => "working");
+    const view = await tty7.sessions();
+    const status = (pane: number) => view.sessions.find((item) => item.pane === pane)?.status;
+    expect(status(7)).toBe("idle");
+    expect(status(8)).toBe("working");
+    expect(status(9)).toBeNull();
+    const raw = await tty7.sessions({ withActivity: false });
+    expect(raw.sessions.find((item) => item.pane === 8)?.status).toBeNull();
+  });
+});

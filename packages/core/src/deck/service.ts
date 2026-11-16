@@ -4,6 +4,7 @@ import type { SearchProvider } from "../auth/search-secrets.js";
 import type { DshLoginProviderId, DshLoginView } from "./dsh/login.js";
 import { DshRuntime, type DshRuntimeOptions } from "./dsh/runtime.js";
 import type { DshWebState } from "./dsh/web.js";
+import { ActivityMonitor } from "./activity.js";
 import { SessionNoticeWatcher, type SessionNoticeList } from "./session-notices.js";
 import { Tty7 } from "./tty7.js";
 import {
@@ -65,6 +66,8 @@ export class DeckService {
   readonly tty7: Tty7;
   /** 终端会话提醒：盯着 tty7 会话状态，工作中 → 等你回复/已完成时记一条。 */
   readonly notices: SessionNoticeWatcher;
+  /** 终端活动监视：没有 hooks 状态的会话（任意 AI CLI、普通脚本）按进程活动判断是否在执行。 */
+  readonly activity: ActivityMonitor;
 
   constructor(options: DeckServiceOptions) {
     this.#options = options;
@@ -74,6 +77,11 @@ export class DeckService {
       subscribe: (onLine) => this.tty7.events(onLine),
       enabled: options.noticesEnabled ?? (async () => true),
       onNotice: () => options.onNotices?.(),
+    });
+    this.activity = new ActivityMonitor({
+      sessions: () => this.tty7.sessions({ withActivity: false }),
+      procs: (pane) => this.tty7.procs(pane),
+      onChange: () => this.notices.poke(),
     });
     this.#dsh =
       options.dsh?.runtime ??
@@ -93,6 +101,7 @@ export class DeckService {
   stop(): void {
     this.#stopped = true;
     this.notices.stop();
+    this.activity.stop();
     void this.#dsh.close().catch(() => undefined);
   }
 
@@ -112,6 +121,8 @@ export class DeckService {
   /** 开始监视终端会话状态（daemon 启动后调用一次；tty7 没装时什么也不做）。 */
   startNotices(): void {
     this.notices.start();
+    this.tty7.setActivity((pane) => this.activity.status(pane));
+    this.activity.start();
   }
 
   noticeList(): SessionNoticeList {

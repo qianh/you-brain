@@ -125,6 +125,11 @@ export class SessionNoticeWatcher {
     this.#debounceTimer = null;
   }
 
+  /** 外部（终端活动监视）发现状态变了，尽快读一次。 */
+  poke(): void {
+    this.#schedule();
+  }
+
   /** 网页上报正在整屏看的会话；null 表示没在看。15 秒不更新自动失效。 */
   setViewing(pane: number | null): void {
     this.#viewing = pane === null ? null : { pane, at: this.#now() };

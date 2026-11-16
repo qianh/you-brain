@@ -264,9 +264,14 @@ interface RawAgent {
 }
 interface RawTab { id: string; name: string | null; label: string | null; agent: string | null; panes: number[] }
 
+/** `tty7 procs` 里一个进程（只取判断是否在执行用得到的字段）。 */
+interface RawProc { pid: number; depth: number; foreground: boolean; cpu_ns: number }
+
 export class Tty7 {
   readonly #options: Tty7Options;
   #runner: Tty7Runner | null;
+  /** 没有 hooks 状态的会话，状态改由终端活动判断（见 activity.ts）；daemon 启动监视时接上。 */
+  #activity: ((pane: number) => Tty7AgentStatus | null) | null = null;
 
   constructor(options: Tty7Options = {}) {
     this.#options = options;
@@ -370,8 +375,26 @@ export class Tty7 {
     return raw.workspaces.map((item) => ({ id: item.id, name: item.name ?? item.id.slice(0, 8), attached: item.attached !== null }));
   }
 
-  /** 全部会话。tty7 没装或服务没起时 available=false，不抛错（面板要能显示原因）。 */
-  async sessions(): Promise<Tty7SessionsView> {
+  setActivity(provider: ((pane: number) => Tty7AgentStatus | null) | null): void {
+    this.#activity = provider;
+  }
+
+  /** 一个会话的进程树，用来判断它是不是在执行。 */
+  async procs(pane: number): Promise<{ atPrompt: boolean; procs: Array<{ pid: number; depth: number; foreground: boolean; cpuNs: number }> }> {
+    const out = await this.#run(["procs", assertPane(pane), "--json"]);
+    const raw = parse<{ procs: RawProc[]; context?: { at_prompt?: boolean } | null }>(out);
+    return {
+      atPrompt: raw.context?.at_prompt === true,
+      procs: raw.procs.map((proc) => ({ pid: proc.pid, depth: proc.depth, foreground: proc.foreground, cpuNs: proc.cpu_ns })),
+    };
+  }
+
+  /**
+   * 全部会话。tty7 没装或服务没起时 available=false，不抛错（面板要能显示原因）。
+   * `withActivity: false` 只给 hooks 上报的状态（活动监视自己用，避免自己读自己）。
+   */
+  async sessions(options: { withActivity?: boolean } = {}): Promise<Tty7SessionsView> {
+    const activity = options.withActivity === false ? null : this.#activity;
     const harnesses = TTY7_HARNESSES.map(({ id, label }) => ({ id, label }));
     const appearance = await this.#appearance();
     try {
@@ -409,7 +432,12 @@ export class Tty7 {
             agent: agent?.agent ?? tab?.agent ?? null,
             cwd: pane.cwd ?? "",
             hibernated: pane.hibernated,
-            status: status !== undefined && AGENT_STATUSES.includes(status) ? (status as Tty7AgentStatus) : null,
+            status:
+              status !== undefined && AGENT_STATUSES.includes(status)
+                ? (status as Tty7AgentStatus)
+                : pane.hibernated
+                  ? null
+                  : (activity?.(pane.pane) ?? null),
             statusMessage: agent?.state?.message ?? null,
             model: agent?.state?.readout?.model ?? null,
           };
