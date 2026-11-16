@@ -231,7 +231,11 @@
   border-bottom: 1px solid var(--term-border);
 }
 /* macOS 桌面壳：窗口灯压在左上角，留白值与应用顶栏一致（shell.css .shell-overlay .topbar）。 */
-.shell-overlay .deck-term-bar { padding-left: 100px; }
+/* 红绿灯中心在顶栏高度的一半（lib.rs traffic_light_position），所以整条栏取应用顶栏同高，
+   标签收成 32px 的圆角块与按钮同在中线上，否则灯与文字会差约 10px。 */
+.shell-overlay .deck-term-bar { padding-left: 100px; height: var(--h-topbar); }
+.shell-overlay .deck-term-tabs { height: 32px; align-self: center; }
+.shell-overlay .deck-term-tab { border-radius: var(--r-ctl, 8px); }
 .deck-term-bar .icon-btn { color: var(--term-fg); }
 .deck-term-back {
   flex: none;
