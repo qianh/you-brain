@@ -151,7 +151,6 @@
 
 .deck-tty7-row-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .deck-tty7-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-.deck-tty7-pane { flex: none; color: var(--text-3); font-variant-numeric: tabular-nums; }
 .deck-tty7-row-cwd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; color: var(--text-3); font-size: 12px; }
 .deck-tty7-empty { padding: 12px 8px; color: var(--text-3); }
 
