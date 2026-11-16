@@ -174,7 +174,11 @@ export function DeckTty7SessionList({ sessions, filter, onFilterChange, onOpen, 
         <div
           role="button"
           tabIndex={0}
-          className={session.pane === activePane ? "deck-tty7-row is-selected" : "deck-tty7-row"}
+          className={[
+            "deck-tty7-row",
+            session.pane === activePane ? "is-selected" : "",
+            session.status === "working" && !session.hibernated ? "is-working" : "",
+          ].filter(Boolean).join(" ")}
           onClick={open}
           onKeyDown={(event) => {
             if (event.target !== event.currentTarget) return;

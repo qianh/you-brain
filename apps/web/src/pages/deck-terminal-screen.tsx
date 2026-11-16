@@ -135,7 +135,11 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
         role="tab"
         tabIndex={0}
         aria-selected={active}
-        className={active ? "deck-term-tab is-active" : "deck-term-tab"}
+        className={[
+          "deck-term-tab",
+          active ? "is-active" : "",
+          session?.status === "working" && !session.hibernated ? "is-working" : "",
+        ].filter(Boolean).join(" ")}
         title={waitingNote === null ? name : `${name} · ${waitingNote}`}
         onClick={() => onTabsChange(openTab(tabs, pane))}
         onKeyDown={(event) => {
