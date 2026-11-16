@@ -3,7 +3,8 @@
   top: 0;
   z-index: 30;
   display: grid;
-  grid-template-columns: auto minmax(0, max-content) minmax(0, 1fr) auto;
+  /* Equal side columns keep the tabs at the window's centre. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, max-content) minmax(0, 1fr);
   align-items: center;
   gap: var(--sp-3);
   height: var(--h-topbar);
@@ -31,7 +32,15 @@
 
 .brand-mark { display: block; color: var(--text); }
 
-/* Allowances between the brand and the tabs; hidden when the bar gets tight. */
+.top-left {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.top-left .brand { flex: none; }
+
+/* Allowances between the brand and the tabs, one model at a time; hidden when the bar gets tight. */
 .quota-strip {
   display: flex;
   align-items: center;
@@ -42,6 +51,7 @@
 }
 .quota-strip-item {
   display: inline-flex;
+  animation: quota-in 240ms ease-out;
   align-items: center;
   gap: 6px;
   height: var(--h-ctl-sm);
@@ -58,6 +68,13 @@
 .quota-strip-window[data-tone="warn"] { color: var(--warn); }
 .quota-strip-window[data-tone="danger"] { color: var(--danger); }
 .quota-strip-tip { display: flex; flex-direction: column; gap: 2px; }
+@keyframes quota-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .quota-strip-item { animation: none; }
+}
 @media (max-width: 1099px) {
   .quota-strip { visibility: hidden; width: 0; }
 }
