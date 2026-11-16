@@ -130,6 +130,7 @@ import { reminderDetail } from "../reminders/detail.js";
 import { topicIsMuted } from "../reminders/due.js";
 import { foldReminders } from "../reminders/fold.js";
 import { dueRemindersForDevice, reminderActions } from "../reminders/run.js";
+import { QuotaService, readMagpieAccounts } from "../quota/index.js";
 import { RECALL_FRESH_MS, RecallService, createRecallLog, type RecallLogEntry } from "../recall/index.js";
 import { timeZoneOffsetMinutes } from "../reminders/time.js";
 import {
@@ -372,6 +373,9 @@ const DRIVE_PROBE_MS = 5_000;
 const DRIVE_PROBE_GAP_MS = 15_000;
 /** Stop proceeds even if Drive or the model probe is still hanging. */
 const BACKGROUND_STOP_MS = 3_000;
+/** How often the subscription allowances are re-read, and how old they may be when the panel opens. */
+const QUOTA_REFRESH_MS = 5 * 60_000;
+const QUOTA_OPEN_REFRESH_MS = 2 * 60_000;
 
 export interface DaemonOptions {
   homeDir?: string;
@@ -865,6 +869,10 @@ export class YouBrainDaemon {
   readonly #recallSeen = new Map<string, number>();
   #recallLogWriter: ((entry: RecallLogEntry) => void) | null = null;
   readonly #recall: RecallService = this.#createRecall();
+  readonly #quota: QuotaService = new QuotaService({
+    read: () => readMagpieAccounts({ env: this.#env, homeDir: this.#homeDir, signal: this.#abort.signal }),
+    nowMs: () => this.#clock.nowMs(),
+  });
   /**
    * Uploading runs on its own loop, not inside the tick.
    *
@@ -1414,6 +1422,7 @@ export class YouBrainDaemon {
           this.#webJob = null;
         });
     }
+    this.#quota.refreshIfOlder(QUOTA_REFRESH_MS);
     if (this.#recallEnabled()) {
       this.#recallJob ??= this.#recall
         .tick()
@@ -3549,6 +3558,10 @@ export class YouBrainDaemon {
           this.#reorganizeJob.clear();
           return { merged };
         }),
+      quota: () => {
+        if (!this.#stopped) this.#quota.refreshIfOlder(QUOTA_OPEN_REFRESH_MS);
+        return this.#quota.snapshot();
+      },
       reminders: async (all) => {
         const body = await readers.reminders(all);
         return {

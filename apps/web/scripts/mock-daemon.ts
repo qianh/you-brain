@@ -1390,6 +1390,26 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
     return json({ ok: true, status: 204 });
   }
   if (path === "/api/status" && request.method === "GET") return json(statusBody());
+  if (path === "/api/quota" && request.method === "GET") {
+    const reset = (hours: number): string => new Date(Date.now() + hours * 3_600_000).toISOString();
+    return json({
+      readAt: new Date().toISOString(),
+      stale: false,
+      accounts: [
+        {
+          agent: "claude",
+          plan: "pro",
+          active: true,
+          windows: [
+            { name: "5 hours", used: 31, resetsAt: reset(4) },
+            { name: "7 days", used: 54, resetsAt: reset(20) },
+            { name: "7 days · Fable", used: 86, resetsAt: reset(20) },
+          ],
+        },
+        { agent: "codex", plan: "free", active: true, windows: [{ name: "30 days", used: 97, resetsAt: reset(30) }] },
+      ],
+    });
+  }
   if (path === "/api/reminders" && request.method === "GET") {
     return json({
       reminders: visibleReminders(reminders),

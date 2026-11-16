@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+import type { QuotaView } from "@you-brain/core/http/types.js";
+
 import { useDaemon } from "../daemon-context.js";
 import { Banner } from "../components/banner.js";
 import { Button, IconButton } from "../components/button.js";
@@ -10,18 +12,16 @@ import { SkeletonRow } from "../components/skeleton.js";
 import { StatusCapsule } from "../components/status-capsule.js";
 import { useToast } from "../components/toast.js";
 import { useDelayed } from "../components/use-delayed.js";
-import { SourceTile } from "../components/tile.js";
 import { capsuleFromStatus, capsuleWarningCount, type CapsuleKind, type CapsuleStatus } from "../lib/health.js";
-import { formatCount } from "./today/model.js";
-import { formatDateTime } from "../lib/format.js";
-import { sortSessionsByTime } from "../lib/group.js";
+import { formatDateTime, type Language } from "../lib/format.js";
 import { settingsHref, topicHref } from "../lib/route.js";
 import { isTextEntry, modLabel, shortcutMod } from "../lib/shortcuts.js";
 import { browserWindowBridge, quitShell } from "../lib/window.js";
 import type { MessageKey } from "../i18n/messages.js";
 import { StartGuide } from "./today/guide.js";
 import { emptyCaptureView, guideSteps } from "./today/model.js";
-import { clockTime, countSessionsByTopic, panelShortcut, panelTopicSlice, takeWithRest, topicDotClass } from "./panel/model.js";
+import { panelShortcut } from "./panel/model.js";
+import { quotaCards, resetIn, type QuotaCardView } from "./panel/quota.js";
 import { openAppPath } from "./panel/open.js";
 import { ReminderList } from "./reminders/list.js";
 import { isUnreachableError } from "./status/logic.js";
@@ -42,12 +42,13 @@ export function PanelPage() {
   const { push } = useToast();
   const [refreshing, setRefreshing] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [quota, setQuota] = useState<QuotaView | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
   const sessions = today?.sessions ?? [];
-  const ordered = useMemo(() => sortSessionsByTime(sessions), [sessions]);
-  const todaySlice = takeWithRest(ordered, 4);
-  const topicSlice = panelTopicSlice(topics);
-  const counts = countSessionsByTopic(sessions);
-  const warnings = takeWithRest(status?.warnings ?? [], 2);
+  const cards = useMemo(
+    () => quotaCards(quota?.accounts ?? [], status?.captures, nowMs, language),
+    [quota, status?.captures, nowMs, language],
+  );
   const firstLoad = loading && today === null && status === null;
   const showSkeleton = useDelayed(firstLoad, 150);
   const offline = !loading && today === null && status === null && isUnreachableError(error);
@@ -62,7 +63,21 @@ export function PanelPage() {
           sessionCount: sessions.length,
           lastSyncAt: status.sync.lastSyncAt,
         });
-  const setup = emptyCaptureView(steps) === "setup";
+  const loadQuota = useCallback(async (): Promise<void> => {
+    try {
+      setQuota(await client.quota());
+    } catch {
+      // The panel works without allowances; the next poll tries again.
+    }
+    setNowMs(Date.now());
+  }, [client]);
+  // The daemon's first read takes about ten seconds, so poll quickly until it lands.
+  const quotaLoaded = quota?.readAt != null;
+  useEffect(() => {
+    void loadQuota();
+    const timer = setInterval(() => void loadQuota(), quotaLoaded ? 30_000 : 4_000);
+    return () => clearInterval(timer);
+  }, [loadQuota, quotaLoaded]);
   const kind = panelCapsuleKind({ loading, error, status });
   const mod = shortcutMod(typeof navigator === "undefined" ? "" : navigator.platform);
   const chord = (key: string): string => `${modLabel(mod)}${mod === "meta" ? "" : "+"}${key}`;
@@ -81,9 +96,10 @@ export function PanelPage() {
   const refresh = useCallback(async () => {
     setRefreshing(true);
     const ok = await reload("all");
+    void loadQuota();
     setRefreshing(false);
     if (!ok) push({ message: t("refreshFailed"), tone: "danger" });
-  }, [push, reload, t]);
+  }, [loadQuota, push, reload, t]);
 
   const sync = useCallback(async () => {
     setSyncing(true);
@@ -167,87 +183,6 @@ export function PanelPage() {
         {!firstLoad && !failed && !offline ? (
           <>
             <StartGuide steps={steps} variant="mini" onOpen={(section) => openMain(settingsHref(section))} />
-            <Card>
-              <div className="panel-card-head">
-                <p className="panel-card-name">{t("panelTodayLine", { count: formatCount(sessions.length, language) })}</p>
-                <Button size="sm" variant="ghost" iconRight={<Icon name="chevron-right" />} onClick={() => openMain("/today")}>
-                  {t("panelOpenToday")}
-                </Button>
-              </div>
-              {sessions.length === 0 ? (
-                <div className="panel-empty">
-                  <span className="panel-empty-icon" aria-hidden="true">
-                    <Icon name="sparkles" size={16} />
-                  </span>
-                  <span className="panel-empty-text" title={`${t("todayEmptyTitle")}。${t(setup ? "panelEmptySetupBody" : "panelEmptyBody")}`}>
-                    {t("todayEmptyTitle")}
-                  </span>
-                  <Button size="sm" variant="ghost" onClick={() => openMain(settingsHref("integrations"))}>
-                    {t(setup ? "panelEmptyAction" : "panelEmptyConnectedAction")}
-                  </Button>
-                </div>
-              ) : (
-                todaySlice.visible.map((session) => (
-                  <div key={session.sessionKey} className="panel-session" title={session.title}>
-                    <SourceTile source={session.source} size="sm" />
-                    <span className="panel-session-title">{session.title || t("conversation")}</span>
-                    <time dateTime={session.updatedAt ?? undefined} title={formatDateTime(session.updatedAt, language, timeZone)}>
-                      {clockTime(session.updatedAt, timeZone)}
-                    </time>
-                  </div>
-                ))
-              )}
-              {todaySlice.rest > 0 ? <p className="panel-more">{t("panelMoreSessions", { count: todaySlice.rest })}</p> : null}
-            </Card>
-            {topicSlice.total > 0 ? (
-              <Card>
-                <div className="panel-card-head">
-                  <p className="panel-card-name">{t("panelTopicsLabel")}</p>
-                </div>
-                {topicSlice.visible.map((topic) => {
-                  const count = counts.get(topic.topicId) ?? 0;
-                  return (
-                    <button
-                      key={topic.topicId}
-                      type="button"
-                      className="panel-topic"
-                      title={topic.name}
-                      onClick={() => openMain(topicHref(topic.zone, topic.topicId))}
-                    >
-                      <i className={`dot ${topicDotClass(topic.status)}`} aria-hidden="true" />
-                      <span className="panel-topic-name">{topic.name}</span>
-                      <span className="panel-topic-meta">
-                        {count > 0 ? t("groupLabel", { count }) : clockTime(topic.lastActive, timeZone)}
-                      </span>
-                    </button>
-                  );
-                })}
-                {topicSlice.rest > 0 ? (
-                  <button type="button" className="panel-more panel-more-link" onClick={() => openMain("/topics")}>
-                    {t("panelAllTopics", { count: topicSlice.total })}
-                  </button>
-                ) : null}
-              </Card>
-            ) : null}
-            {warnings.visible.length > 0 ? (
-              <div className="panel-alerts">
-                {warnings.visible.map((warning) => (
-                  <button
-                    key={warning.code}
-                    type="button"
-                    className="banner warn"
-                    title={warning.message}
-                    onClick={() => openMain("/status")}
-                  >
-                    <span className="banner-icon">
-                      <Icon name="alert" />
-                    </span>
-                    <span className="banner-text">{warning.message}</span>
-                  </button>
-                ))}
-                {warnings.rest > 0 ? <p className="panel-more panel-more-flat">{t("panelMoreWarnings", { count: warnings.rest })}</p> : null}
-              </div>
-            ) : null}
             {reminders.length > 0 ? (
               <div className="panel-alerts">
                 <ReminderList
@@ -259,6 +194,25 @@ export function PanelPage() {
                   onOpenTopic={(topicId) => openMain(topicHref(topicZone(topics, topicId), topicId))}
                   loadDetail={(reminderId) => client.reminderDetail(reminderId).then((result) => result.detail)}
                 />
+              </div>
+            ) : null}
+            {cards.length > 0 ? (
+              <QuotaCard
+                cards={cards}
+                readAt={quota?.readAt ?? null}
+                stale={quota?.stale === true}
+                nowMs={nowMs}
+                language={language}
+                timeZone={timeZone}
+                t={t}
+              />
+            ) : null}
+            {reminders.length === 0 && cards.length === 0 ? (
+              <div className="panel-empty">
+                <span className="panel-empty-icon" aria-hidden="true">
+                  <Icon name="sparkles" size={16} />
+                </span>
+                <span className="panel-empty-text">{t("panelNothingNow")}</span>
               </div>
             ) : null}
           </>
@@ -284,6 +238,66 @@ export function PanelPage() {
         </div>
       </footer>
     </div>
+  );
+}
+
+function QuotaCard({
+  cards,
+  readAt,
+  stale,
+  nowMs,
+  language,
+  timeZone,
+  t,
+}: {
+  cards: readonly QuotaCardView[];
+  readAt: string | null;
+  stale: boolean;
+  nowMs: number;
+  language: Language;
+  timeZone: string;
+  t: (key: MessageKey, vars?: Record<string, string | number>) => string;
+}) {
+  const ageMinutes = readAt === null ? 0 : Math.max(1, Math.round((nowMs - Date.parse(readAt)) / 60_000));
+  return (
+    <Card>
+      <div className="panel-card-head">
+        <p className="panel-card-name">{t("panelQuotaTitle")}</p>
+        {stale ? <span className="quota-stale">{t("panelQuotaStale", { minutes: ageMinutes })}</span> : null}
+      </div>
+      {cards.map((card) => (
+        <div key={card.agent} className="quota-group">
+          <div className="quota-head">
+            <span className="quota-name">{card.label}</span>
+            {card.plan ? <span className="quota-plan">{card.plan}</span> : null}
+          </div>
+          {card.windows.map((window) => {
+            const reset = resetIn(window.resetsAt, nowMs, language);
+            return (
+              <div
+                key={window.name}
+                className="quota-row"
+                title={window.resetsAt ? formatDateTime(window.resetsAt, language, timeZone) : undefined}
+              >
+                <span className="quota-window">{window.label}</span>
+                <span
+                  className="quota-bar"
+                  role="progressbar"
+                  aria-label={`${card.label} ${window.label}`}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round(window.used)}
+                >
+                  <i data-tone={window.tone} style={{ width: `${window.used}%` }} />
+                </span>
+                <span className="quota-pct">{Math.round(window.used)}%</span>
+                <span className="quota-reset">{reset ?? ""}</span>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </Card>
   );
 }
 

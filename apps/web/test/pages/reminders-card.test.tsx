@@ -83,6 +83,14 @@ describe("ReminderCard", () => {
     expect(panel).not.toContain("重新激活");
   });
 
+  test("a collapsed panel reminder is one centred line; an expanded or today one keeps top alignment", () => {
+    const multi: ReminderView = { ...topic, text: "第一行\n第二行" };
+    expect(card(topic, "panel")).toContain("reminder-banner is-line");
+    expect(card(multi, "panel")).toContain("reminder-banner is-line");
+    expect(card(topic, "today")).not.toContain("is-line");
+    expect(card(multi, "today")).not.toContain("is-line");
+  });
+
   test("marks the in-flight action as busy", () => {
     const html = card(topic, "today", "reactivate");
     expect(html).toContain('aria-busy="true"');

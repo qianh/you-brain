@@ -1,3 +1,4 @@
+import type { QuotaView } from "../quota/types.js";
 import {
   DaemonEventSchema,
   type ActionResponse,
@@ -119,6 +120,7 @@ export interface DaemonClient {
   webhook(): Promise<WebhookPublic>;
   updateWebhook(body: WebhookPutBody): Promise<WebhookPublic>;
   testWebhook(): Promise<WebhookTestResult>;
+  quota(): Promise<QuotaView>;
   reminders(all?: boolean): Promise<RemindersResponse>;
   /** Optional so the web client can adopt the write call in a later task. */
   reminderAction?(body: ReminderActionBody): Promise<ReminderView>;
@@ -260,6 +262,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     webhook: () => request("GET", "/api/webhook"),
     updateWebhook: (body) => request("PUT", "/api/webhook", body),
     testWebhook: () => request("POST", "/api/actions/webhook-test"),
+    quota: () => request("GET", "/api/quota"),
     reminders: (all) => request("GET", all ? "/api/reminders?all=1" : "/api/reminders"),
     reminderAction: (body) => request("POST", "/api/actions/reminder", body),
     consolidate: (body) => request("POST", "/api/actions/consolidate", body ?? {}),

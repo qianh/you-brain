@@ -1212,3 +1212,5 @@ export const UiPrefsPatchBodySchema = z
     remove: z.array(z.string()).optional(),
   })
   .strict();
+
+export type { QuotaAccount, QuotaView, QuotaWindow } from "../quota/types.js";
