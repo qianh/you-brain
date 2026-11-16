@@ -37,6 +37,11 @@
   padding-top: 1px;
 }
 .reminder-copy { white-space: pre-line; overflow-wrap: anywhere; }
+.reminder-kind {
+  margin-right: 6px;
+  color: var(--accent);
+  font-size: var(--fs-sm);
+}
 .reminder-copy.is-clamped {
   display: block;
   max-width: 100%;

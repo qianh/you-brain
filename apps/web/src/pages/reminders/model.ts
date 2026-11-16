@@ -18,6 +18,11 @@ export function isDigestReminder(reminder: { kind: string; topicId: string | nul
   );
 }
 
+/** A reminder raised because the user was talking about its topic, loud or quiet. */
+export function isRecallReminder(reminder: { kind: string }): boolean {
+  return reminder.kind === "recall" || reminder.kind === "recall_quiet";
+}
+
 export function reminderFirstLine(text: string): { line: string; more: boolean } {
   const normalized = text.replaceAll("\r\n", "\n");
   const index = normalized.indexOf("\n");

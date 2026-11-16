@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   isDigestReminder,
+  isRecallReminder,
   reminderFailureMessage,
   reminderFirstLine,
   snoozeUntil,
@@ -48,5 +49,19 @@ describe("reminder text", () => {
     expect(reminderFailureMessage(new Error("这条提醒只能关闭"), "操作没有完成")).toBe("这条提醒只能关闭");
     expect(reminderFailureMessage(new Error("  "), "操作没有完成")).toBe("操作没有完成");
     expect(reminderFailureMessage("nope", "操作没有完成")).toBe("操作没有完成");
+  });
+});
+
+describe("recall reminders", () => {
+  test("both the loud and the quiet kind count as recall", () => {
+    expect(isRecallReminder({ kind: "recall" })).toBe(true);
+    expect(isRecallReminder({ kind: "recall_quiet" })).toBe(true);
+    expect(isRecallReminder({ kind: "stale" })).toBe(false);
+    expect(isRecallReminder({ kind: "morning_digest" })).toBe(false);
+  });
+
+  test("a recall reminder carries a topic, so it keeps the topic actions", () => {
+    expect(isDigestReminder({ kind: "recall", topicId: "topic-1" })).toBe(false);
+    expect(isDigestReminder({ kind: "recall_quiet", topicId: "topic-1" })).toBe(false);
   });
 });

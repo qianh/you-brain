@@ -10,6 +10,7 @@ import { useToast } from "../../components/toast.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import {
   isDigestReminder,
+  isRecallReminder,
   reminderFailureMessage,
   reminderFirstLine,
   snoozeChoiceUntil,
@@ -133,7 +134,10 @@ export function ReminderCard({
 
   const copy = (
     <>
-      <span className={panelClamp ? "reminder-copy is-clamped" : "reminder-copy"}>{shown}</span>
+      <span className={panelClamp ? "reminder-copy is-clamped" : "reminder-copy"}>
+        {isRecallReminder(reminder) ? <span className="reminder-kind">{t("reminderKindRecall")}</span> : null}
+        {shown}
+      </span>
       {layout === "panel" && preview.more ? (
         <button
           type="button"

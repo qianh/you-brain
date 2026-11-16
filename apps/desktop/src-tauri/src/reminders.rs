@@ -3,10 +3,14 @@ use std::path::Path;
 pub const NOTIFIED_CAP: usize = 200;
 pub const NOTIFY_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 pub const NOTIFICATION_LINE_MAX: usize = 80;
+/// A recall reminder that came too late to interrupt: it is listed like any other but never pops.
+pub const QUIET_KIND: &str = "recall_quiet";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReminderNotice {
     pub reminder_id: String,
+    /// Empty when the daemon sent none (older data), which notifies as usual.
+    pub kind: String,
     pub text: String,
     pub issued_at: String,
 }
@@ -45,6 +49,11 @@ pub fn parse_reminders_response(text: &str) -> Result<RemindersSnapshot, ()> {
         };
         reminders.push(ReminderNotice {
             reminder_id: id.to_string(),
+            kind: item
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string(),
             text: item
                 .get("text")
                 .and_then(serde_json::Value::as_str)
@@ -74,7 +83,7 @@ pub fn parse_reminders_response(text: &str) -> Result<RemindersSnapshot, ()> {
 }
 
 /// Reminders the shell should pop. Empty when `delivery` is missing or `notify` is false,
-/// so the caller must not mark those ids.
+/// so the caller must not mark those ids. Quiet recall reminders are never selected.
 pub fn select_reminders_to_notify(
     reminders: &[ReminderNotice],
     delivery: Option<&ReminderDelivery>,
@@ -87,6 +96,9 @@ pub fn select_reminders_to_notify(
     let mut ranked = Vec::new();
     let mut seen = Vec::new();
     for item in reminders {
+        if item.kind == QUIET_KIND {
+            continue;
+        }
         if item.reminder_id.is_empty() || seen.iter().any(|id: &String| id == &item.reminder_id) {
             continue;
         }
@@ -333,6 +345,7 @@ mod tests {
     fn notice(id: &str, text: &str, issued_at: &str) -> ReminderNotice {
         ReminderNotice {
             reminder_id: id.to_string(),
+            kind: String::new(),
             text: text.to_string(),
             issued_at: issued_at.to_string(),
         }
@@ -412,6 +425,29 @@ mod tests {
                 .map(|item| item.reminder_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn quiet_recall_is_listed_but_never_notified() {
+        let snapshot = parse_reminders_response(
+            r#"{"reminders":[
+                {"reminderId":"a","kind":"recall_quiet","text":"q","issuedAt":"2026-11-16T08:00:00.000Z"},
+                {"reminderId":"b","kind":"recall","text":"n","issuedAt":"2026-11-16T08:00:00.000Z"},
+                {"reminderId":"c","text":"旧数据没有 kind","issuedAt":"2026-11-16T08:00:00.000Z"}
+            ],"delivery":{"notify":true,"reason":"ok"}}"#,
+        )
+        .unwrap();
+        assert_eq!(snapshot.count, 3);
+        let now = parse_rfc3339_ms("2026-11-16T08:01:00.000Z").unwrap();
+        let selected =
+            select_reminders_to_notify(&snapshot.reminders, snapshot.delivery.as_ref(), &[], now);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|item| item.reminder_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "c"]
         );
     }
 
