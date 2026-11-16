@@ -49,6 +49,15 @@ export function windowLabel(name: string, language: Language): string {
   return `${match[1]} ${unit}${match[3] ?? ""}`;
 }
 
+/** "5 hours" → "5h", "7 days · Fable" → "7d Fable": the top bar has room for little else. */
+export function shortWindowLabel(name: string): string {
+  const match = /^(\d+)\s*(hours?|days?)(.*)$/iu.exec(name);
+  if (!match) return name;
+  const unit = match[2]?.toLowerCase().startsWith("h") ? "h" : "d";
+  const rest = (match[3] ?? "").replace(/^\s*·\s*/u, " ").trimEnd();
+  return `${match[1]}${unit}${rest}`;
+}
+
 /** "4 小时后" / "in 4h"; null when the time is missing or already past (the numbers are old). */
 export function resetIn(resetsAt: string | null, nowMs: number, language: Language): string | null {
   if (resetsAt === null) return null;

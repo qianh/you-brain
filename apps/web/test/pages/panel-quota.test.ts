@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { QuotaAccount } from "@you-brain/core/http/types.js";
 
-import { quotaCards, quotaTone, resetIn, windowLabel } from "../../src/pages/panel/quota.js";
+import { quotaCards, quotaTone, resetIn, shortWindowLabel, windowLabel } from "../../src/pages/panel/quota.js";
 
 const NOW = Date.parse("2026-11-16T12:00:00Z");
 const DAY = 24 * 60 * 60_000;
@@ -111,5 +111,15 @@ describe("resetIn", () => {
     expect(resetIn("soon", NOW, "zh")).toBeNull();
     expect(resetIn(at(-1000), NOW, "zh")).toBeNull();
     expect(resetIn(at(0), NOW, "zh")).toBeNull();
+  });
+});
+
+describe("shortWindowLabel", () => {
+  test("shortens hours and days for the top bar and keeps a model suffix", () => {
+    expect(shortWindowLabel("5 hours")).toBe("5h");
+    expect(shortWindowLabel("7 days")).toBe("7d");
+    expect(shortWindowLabel("1 day")).toBe("1d");
+    expect(shortWindowLabel("7 days · Fable")).toBe("7d Fable");
+    expect(shortWindowLabel("MCP Month")).toBe("MCP Month");
   });
 });

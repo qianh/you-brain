@@ -3,7 +3,7 @@
   top: 0;
   z-index: 30;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, max-content) minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--sp-3);
   height: var(--h-topbar);
@@ -30,6 +30,37 @@
 }
 
 .brand-mark { display: block; color: var(--text); }
+
+/* Allowances between the brand and the tabs; hidden when the bar gets tight. */
+.quota-strip {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.quota-strip-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--h-ctl-sm);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-ctl);
+  background: var(--surface-2);
+  font-size: var(--fs-sm);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+.quota-strip-name { color: var(--text-2); font-weight: 500; }
+.quota-strip-window { color: var(--text); }
+.quota-strip-window[data-tone="warn"] { color: var(--warn); }
+.quota-strip-window[data-tone="danger"] { color: var(--danger); }
+.quota-strip-tip { display: flex; flex-direction: column; gap: 2px; }
+@media (max-width: 1099px) {
+  .quota-strip { visibility: hidden; width: 0; }
+}
 
 .top-nav {
   display: flex;

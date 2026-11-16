@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import type { QuotaView } from "@you-brain/core/http/types.js";
-
 import { useDaemon } from "../daemon-context.js";
 import { Banner } from "../components/banner.js";
 import { Button, IconButton } from "../components/button.js";
@@ -21,7 +19,8 @@ import type { MessageKey } from "../i18n/messages.js";
 import { StartGuide } from "./today/guide.js";
 import { emptyCaptureView, guideSteps } from "./today/model.js";
 import { panelShortcut } from "./panel/model.js";
-import { quotaCards, resetIn, type QuotaCardView } from "./panel/quota.js";
+import { resetIn, type QuotaCardView } from "./panel/quota.js";
+import { useQuota } from "./panel/use-quota.js";
 import { openAppPath } from "./panel/open.js";
 import { ReminderList } from "./reminders/list.js";
 import { isUnreachableError } from "./status/logic.js";
@@ -42,13 +41,9 @@ export function PanelPage() {
   const { push } = useToast();
   const [refreshing, setRefreshing] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  const [quota, setQuota] = useState<QuotaView | null>(null);
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const { quota, cards, nowMs, reload: loadQuota } = useQuota();
   const sessions = today?.sessions ?? [];
-  const cards = useMemo(
-    () => quotaCards(quota?.accounts ?? [], status?.captures, nowMs, language),
-    [quota, status?.captures, nowMs, language],
-  );
+
   const firstLoad = loading && today === null && status === null;
   const showSkeleton = useDelayed(firstLoad, 150);
   const offline = !loading && today === null && status === null && isUnreachableError(error);
@@ -63,21 +58,6 @@ export function PanelPage() {
           sessionCount: sessions.length,
           lastSyncAt: status.sync.lastSyncAt,
         });
-  const loadQuota = useCallback(async (): Promise<void> => {
-    try {
-      setQuota(await client.quota());
-    } catch {
-      // The panel works without allowances; the next poll tries again.
-    }
-    setNowMs(Date.now());
-  }, [client]);
-  // The daemon's first read takes about ten seconds, so poll quickly until it lands.
-  const quotaLoaded = quota?.readAt != null;
-  useEffect(() => {
-    void loadQuota();
-    const timer = setInterval(() => void loadQuota(), quotaLoaded ? 30_000 : 4_000);
-    return () => clearInterval(timer);
-  }, [loadQuota, quotaLoaded]);
   const kind = panelCapsuleKind({ loading, error, status });
   const mod = shortcutMod(typeof navigator === "undefined" ? "" : navigator.platform);
   const chord = (key: string): string => `${modLabel(mod)}${mod === "meta" ? "" : "+"}${key}`;
