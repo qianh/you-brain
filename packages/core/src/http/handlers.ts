@@ -20,6 +20,7 @@ import { UiPrefsLimitError, type UiPrefsPatch } from "../ui-prefs/store.js";
 import { TaskError } from "../tasks/service.js";
 import { TaskActionSchema, TaskCreateSchema, TaskUpdateSchema } from "../tasks/schema.js";
 import { probeT3Web } from "../deck/t3/probe.js";
+import type { QuotaView } from "../quota/types.js";
 import { acceptActivityAt } from "../reminders/activity.js";
 import { planReminderAction } from "../reminders/action.js";
 import { ChangeHub } from "./hub.js";
@@ -93,6 +94,7 @@ import {
   type UserEvent,
 } from "./types.js";
 
+const EMPTY_QUOTA: QuotaView = { accounts: [], readAt: null, stale: false };
 const SECTION_LIMIT = 80;
 const TEXT_LIMIT = 1_000;
 const SECTION_MESSAGE = "「哪一部分」需要 1 到 80 个字";
@@ -467,6 +469,7 @@ export async function handleApi(
     return method(request, "GET", async () => json(await probeT3Web(url.searchParams.get("url") ?? "")));
   }
   if (path === "/api/status") return method(request, "GET", () => status(context));
+  if (path === "/api/quota") return method(request, "GET", () => json(context.deps.quota?.() ?? EMPTY_QUOTA));
   if (path === "/api/reminders") return method(request, "GET", () => reminders(url, context));
   if (path === "/api/reminder-detail") return method(request, "GET", () => reminderDetail(url, context));
   if (path === "/api/activity") return method(request, "POST", () => activity(request, context));

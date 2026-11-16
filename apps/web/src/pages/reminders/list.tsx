@@ -244,7 +244,7 @@ export function ReminderCard({
   }
 
   return (
-    <Banner tone="info" className="reminder-banner" action={action}>
+    <Banner tone="info" className={panelClamp ? "reminder-banner is-line" : "reminder-banner"} action={action}>
       {copy}
     </Banner>
   );

@@ -33,6 +33,8 @@ export async function makeDaemonDirs(prefix: string): Promise<DaemonDirs> {
       ...process.env,
       YOU_BRAIN_DATA_DIR: dataDir,
       YOU_BRAIN_HOME: homeDir,
+      // Tests never ask the real magpie for quota (it takes ten seconds and calls out).
+      YOU_BRAIN_MAGPIE_BIN: "/nonexistent/magpie",
     },
   };
 }

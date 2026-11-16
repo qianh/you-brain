@@ -42,6 +42,10 @@
   color: var(--accent);
   font-size: var(--fs-sm);
 }
+/* One line (collapsed): text, icon and buttons share the row's centre line. */
+.reminder-banner.is-line { align-items: center; }
+.reminder-banner.is-line .banner-icon { margin-top: 0; }
+.reminder-banner.is-line .banner-actions { padding-top: 0; }
 .reminder-copy.is-clamped {
   display: block;
   max-width: 100%;

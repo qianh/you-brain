@@ -1,5 +1,6 @@
 import type { DeviceRecord, Roles, SharedConfig } from "@you-brain/protocol";
 
+import type { QuotaView } from "../quota/types.js";
 import type { EventSink } from "./types.js";
 import type { TaskHttpPort } from "../tasks/types.js";
 import type { UiPrefs, UiPrefsPatch } from "../ui-prefs/store.js";
@@ -118,6 +119,8 @@ export interface HttpDeps {
   readConfig(): Promise<SharedConfig>;
   writeConfig(config: SharedConfig): Promise<void>;
   status(): Promise<StatusResponse>;
+  /** Last good read of the subscriptions' allowances; optional so older test doubles keep compiling. */
+  quota?(): QuotaView;
   reminders(all: boolean): Promise<RemindersResponse>;
   reminder(id: string): Promise<ReminderView | null>;
   /** 提醒被截短的原文(目前只有晨间摘要);没有更多内容为 null。 */

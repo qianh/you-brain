@@ -11,6 +11,7 @@ import type {
   PortraitResponse,
   PortraitSnapshotsResponse,
   ReminderView,
+  QuotaView,
   RemindersResponse,
   SearchRequest,
   SearchResponse,
@@ -298,6 +299,7 @@ export function createBrowserDaemon(options?: {
     config: () => request<SharedConfig>("GET", "/api/config"),
     updateConfig: (patch) => request<SharedConfig>("PUT", "/api/config", patch),
     status: () => request<StatusResponse>("GET", "/api/status"),
+    quota: () => request<QuotaView>("GET", "/api/quota"),
     reminders: () => request<RemindersResponse>("GET", "/api/reminders"),
     reminderDetail: (reminderId) =>
       request<{ detail: string | null }>("GET", `/api/reminder-detail?id=${encodeURIComponent(reminderId)}`),
