@@ -140,6 +140,7 @@ export function reminderRecord(
     reminderId: patch.reminderId,
     kind: patch.kind,
     topicId: patch.topicId,
+    sessionKey: patch.sessionKey ?? null,
     status: patch.status,
   };
 }

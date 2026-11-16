@@ -387,6 +387,12 @@
 }
 
 .topics-session + .topics-session { border-top: 1px solid var(--border); }
+/* 提醒「查看出处」指向的会话。 */
+.topics-session.is-focused {
+  border-radius: var(--r-chip);
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
 
 .topics-aliases {
   display: flex;

@@ -17,24 +17,30 @@
 .banner-text { flex: 1; min-width: 0; }
 .banner-actions { display: inline-flex; align-items: center; gap: var(--sp-1); flex: none; }
 
+/*
+ * Top-aligned so long text can wrap, but the first text line, the icon and the button
+ * row share one centre line: everything is padded to the height of the tallest control.
+ */
 .reminder-banner {
+  --reminder-row: var(--h-ctl);
   align-items: flex-start;
   height: auto;
   padding-top: var(--sp-2);
   padding-bottom: var(--sp-2);
 }
-.reminder-banner .banner-icon { margin-top: 2px; }
+.reminder-banner .banner-icon { margin-top: calc((var(--reminder-row) - 16px) / 2); }
 .reminder-banner .banner-text {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
+  padding-top: calc((var(--reminder-row) - var(--fs-base) * var(--lh-base)) / 2);
 }
 .reminder-banner .banner-actions {
   flex-wrap: wrap;
   justify-content: flex-end;
   max-width: 100%;
-  padding-top: 1px;
+  min-height: var(--reminder-row);
 }
 .reminder-copy { white-space: pre-line; overflow-wrap: anywhere; }
 .reminder-kind {
@@ -42,10 +48,6 @@
   color: var(--accent);
   font-size: var(--fs-sm);
 }
-/* One line (collapsed): text, icon and buttons share the row's centre line. */
-.reminder-banner.is-line { align-items: center; }
-.reminder-banner.is-line .banner-icon { margin-top: 0; }
-.reminder-banner.is-line .banner-actions { padding-top: 0; }
 .reminder-copy.is-clamped {
   display: block;
   max-width: 100%;

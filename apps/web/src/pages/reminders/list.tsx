@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { ReminderView } from "@you-brain/core/http/types.js";
 
 import { Banner } from "../../components/banner.js";
@@ -40,7 +40,8 @@ export function ReminderList({
   timeZone: string;
   t: Translate;
   onAction: (reminderId: string, action: ReminderActionName, until?: string) => Promise<void>;
-  onOpenTopic: (topicId: string) => void;
+  /** 打开话题;提醒记着出处会话时一并传入,由页面定位到那段会话。 */
+  onOpenTopic: (topicId: string, sessionKey: string | null) => void;
   /** 取提醒被截短的原文;不传就不显示「查看详情」。 */
   loadDetail?: ((reminderId: string) => Promise<string | null>) | undefined;
 }) {
@@ -97,7 +98,7 @@ export function ReminderCard({
   locked: boolean;
   t: Translate;
   onAction: (action: ReminderActionName, until?: string) => void;
-  onOpenTopic: (topicId: string) => void;
+  onOpenTopic: (topicId: string, sessionKey: string | null) => void;
   loadDetail?: ((reminderId: string) => Promise<string | null>) | undefined;
 }) {
   const [open, setOpen] = useState(false);
@@ -128,17 +129,31 @@ export function ReminderCard({
   const preview = reminderFirstLine(reminder.text);
   const panelClamp = layout === "panel" && !open;
   const shown = panelClamp && preview.more ? preview.line : reminder.text;
+  // 托盘里折成一行时,一行很长也会被省略号截掉;量一下是否真的放不下,放不下才给「展开」。
+  const copyRef = useRef<HTMLSpanElement>(null);
+  const [overflows, setOverflows] = useState(false);
+  useLayoutEffect(() => {
+    const node = copyRef.current;
+    if (!panelClamp || node === null) return;
+    const measure = (): void => setOverflows(node.scrollWidth > node.clientWidth + 1);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [panelClamp, shown]);
+  const canExpand = layout === "panel" && (preview.more || overflows);
   const snooze = (choice: SnoozeChoice): void => {
     onAction("snooze", snoozeChoiceUntil(new Date(), timeZone, choice));
   };
 
   const copy = (
     <>
-      <span className={panelClamp ? "reminder-copy is-clamped" : "reminder-copy"}>
+      <span ref={copyRef} className={panelClamp ? "reminder-copy is-clamped" : "reminder-copy"}>
         {isRecallReminder(reminder) ? <span className="reminder-kind">{t("reminderKindRecall")}</span> : null}
         {shown}
       </span>
-      {layout === "panel" && preview.more ? (
+      {canExpand ? (
         <button
           type="button"
           className="reminder-expand"
@@ -234,8 +249,13 @@ export function ReminderCard({
           {t("reminderMute")}
         </Button>
         {reminder.topicId ? (
-          <Button size="sm" variant="ghost" disabled={locked} onClick={() => onOpenTopic(reminder.topicId ?? "")}>
-            {t("todayViewTopic")}
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={locked}
+            onClick={() => onOpenTopic(reminder.topicId ?? "", reminder.sessionKey ?? null)}
+          >
+            {t(sourceLabel(reminder))}
           </Button>
         ) : null}
         {ignoreIcon}
@@ -244,10 +264,15 @@ export function ReminderCard({
   }
 
   return (
-    <Banner tone="info" className={panelClamp ? "reminder-banner is-line" : "reminder-banner"} action={action}>
+    <Banner tone="info" className="reminder-banner" action={action}>
       {copy}
     </Banner>
   );
+}
+
+/** 记着出处会话的提醒去那段会话;旧提醒和没有单一出处的,仍去话题。 */
+function sourceLabel(reminder: ReminderView): MessageKey {
+  return reminder.sessionKey ? "reminderViewSource" : "todayViewTopic";
 }
 
 function snoozeItems(t: Translate, snooze: (choice: SnoozeChoice) => void): MenuItem[] {
@@ -263,7 +288,7 @@ function panelItems(
   t: Translate,
   snooze: (choice: SnoozeChoice) => void,
   onAction: (action: ReminderActionName, until?: string) => void,
-  onOpenTopic: (topicId: string) => void,
+  onOpenTopic: (topicId: string, sessionKey: string | null) => void,
 ): MenuItem[] {
   const items: MenuItem[] = [
     { id: "done", label: t("reminderDone"), onSelect: () => onAction("done") },
@@ -272,7 +297,8 @@ function panelItems(
   ];
   if (reminder.topicId) {
     const topicId = reminder.topicId;
-    items.push({ id: "topic", label: t("todayViewTopic"), onSelect: () => onOpenTopic(topicId) });
+    const sessionKey = reminder.sessionKey ?? null;
+    items.push({ id: "topic", label: t(sourceLabel(reminder)), onSelect: () => onOpenTopic(topicId, sessionKey) });
   }
   return items;
 }

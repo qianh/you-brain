@@ -3,6 +3,7 @@ import type { TopicBook } from "../topics/types.js";
 import { resolveMergedTopic } from "../topics/zones.js";
 import {
   RECALL_CONCLUSIONS,
+  RECALL_RECENT_MS,
   RECALL_TODOS,
   type RecallMemory,
   type RecallMemoryItem,
@@ -18,8 +19,10 @@ function newestFirst<T extends { ts: string }>(items: readonly T[]): T[] {
 }
 
 /**
- * What the topic remembers, minus anything the current session itself produced:
- * a reminder must never hand the user back what they just said.
+ * What the topic remembers, minus anything still current: the session itself and every
+ * session written within `RECALL_RECENT_MS`. A reminder must never hand the user back
+ * what they just said, and the same conversation is sometimes captured twice (a host app
+ * and the CLI under it), so excluding only the triggering session is not enough.
  * Topics merged into this one count as this one. Null when there is nothing to recall.
  */
 export function buildRecallMemory(input: {
@@ -28,8 +31,16 @@ export function buildRecallMemory(input: {
   sessionKey: string;
   sessionUpdatedAt: Readonly<Record<string, string>>;
   timeZone: string;
+  nowMs: number;
 }): RecallMemory | null {
   const { book, sessionKey, timeZone } = input;
+  const isOld = (key: string): boolean => {
+    if (key === sessionKey) return false;
+    const updated = input.sessionUpdatedAt[key];
+    if (updated === undefined) return true;
+    const ms = Date.parse(updated);
+    return Number.isNaN(ms) || input.nowMs - ms >= RECALL_RECENT_MS;
+  };
   const topicId = resolveMergedTopic(book, input.topicId);
   const topic = book.topics.find((item) => item.topicId === topicId);
   if (!topic) return null;
@@ -37,18 +48,24 @@ export function buildRecallMemory(input: {
 
   const items: RecallMemoryItem[] = [];
   if (topic.nextStep.trim() !== "") {
-    items.push({ id: "next", kind: "next_step", text: topic.nextStep, day: null });
+    items.push({ id: "next", kind: "next_step", text: topic.nextStep, day: null, sessionKey: null });
   }
   const todos = newestFirst(
     book.todos.filter(
-      (todo) => todo.status === "open" && todo.sessionKey !== sessionKey && inTopic(todo.topicId),
+      (todo) => todo.status === "open" && isOld(todo.sessionKey) && inTopic(todo.topicId),
     ),
   ).slice(0, RECALL_TODOS);
   for (const todo of todos) {
-    items.push({ id: `todo:${todo.todoId}`, kind: "todo", text: todo.text, day: dayOf(todo.ts, timeZone) });
+    items.push({
+      id: `todo:${todo.todoId}`,
+      kind: "todo",
+      text: todo.text,
+      day: dayOf(todo.ts, timeZone),
+      sessionKey: todo.sessionKey,
+    });
   }
   const conclusions = newestFirst(
-    book.conclusions.filter((item) => item.sessionKey !== sessionKey && inTopic(item.topicId)),
+    book.conclusions.filter((item) => isOld(item.sessionKey) && inTopic(item.topicId)),
   ).slice(0, RECALL_CONCLUSIONS);
   for (const conclusion of conclusions) {
     items.push({
@@ -56,13 +73,14 @@ export function buildRecallMemory(input: {
       kind: "conclusion",
       text: conclusion.text,
       day: dayOf(conclusion.ts, timeZone),
+      sessionKey: conclusion.sessionKey,
     });
   }
   if (items.length === 0) return null;
 
   let last: string | null = null;
   for (const session of book.sessions) {
-    if (session.sessionKey === sessionKey || session.topicId === null || !inTopic(session.topicId)) continue;
+    if (!isOld(session.sessionKey) || session.topicId === null || !inTopic(session.topicId)) continue;
     const updated = input.sessionUpdatedAt[session.sessionKey];
     if (updated !== undefined && (last === null || updated > last)) last = updated;
   }

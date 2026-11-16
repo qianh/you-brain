@@ -512,6 +512,7 @@ interface MockReminder {
   reminderId: string;
   kind: string;
   topicId: string | null;
+  sessionKey?: string | null;
   text: string;
   status: string;
   until: string | null;
@@ -521,6 +522,16 @@ interface MockReminder {
 const reminders: MockReminder[] =
   scenario === "rich"
     ? [
+        {
+          reminderId: "rem-recall",
+          kind: "recall",
+          topicId: "topic-ui",
+          sessionKey: "f".repeat(64),
+          text: "11-14 你定过浅色模式要沿用同一套层级：背景、表面、浮层，空状态居中，窄窗口和深色主路径要一起验收，别只看一种。",
+          status: "open",
+          until: null,
+          issuedAt: ago(10 * MINUTE),
+        },
         {
           reminderId: "rem-stale",
           kind: "stale",

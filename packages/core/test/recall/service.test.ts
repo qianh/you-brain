@@ -12,7 +12,7 @@ import {
 } from "../../src/recall/index.js";
 import type { CandidateTopic } from "../../src/refine/types.js";
 import type { ReminderRecord } from "../../src/store/types.js";
-import { recallBook } from "./fixture.js";
+import { OLD, recallBook } from "./fixture.js";
 
 const START = Date.parse("2026-11-16T08:00:00.000Z");
 const MIN = 60_000;
@@ -32,7 +32,7 @@ type Reply = string | Error;
 function setup(replies: Reply[], options: { muted?: boolean; llmMissing?: boolean; emitFails?: boolean } = {}) {
   let now = START;
   const requests: { at: number; request: LlmCompleteRequest }[] = [];
-  const emitted: { reminderId: string; kind: string; topicId: string; text: string }[] = [];
+  const emitted: { reminderId: string; kind: string; topicId: string; text: string; sessionKey?: string }[] = [];
   const logs: RecallLogEntry[] = [];
   const reminders: ReminderRecord[] = [];
   const cursor = new Map<string, string>();
@@ -58,7 +58,7 @@ function setup(replies: Reply[], options: { muted?: boolean; llmMissing?: boolea
     async emit(data) {
       if (options.emitFails) throw new Error("写事件失败");
       emitted.push(data);
-      reminders.push({ ...data, status: "active", until: null, issuedAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString() });
+      reminders.push({ ...data, sessionKey: data.sessionKey ?? null, status: "active", until: null, issuedAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString() });
     },
     cursors: { get: (key) => cursor.get(key) ?? null, set: (key, value) => void cursor.set(key, value) },
     log: (entry) => void logs.push(entry),
@@ -88,7 +88,13 @@ describe("RecallService", () => {
     expect(t.requests).toHaveLength(1);
     expect(t.requests[0]?.request.system).toBe(RECALL_SYSTEM_PROMPT);
     expect(t.emitted).toEqual([
-      { reminderId: recallReminderId(SESSION, TOPIC), kind: "recall", topicId: TOPIC, text: "11-13 你说等 10 月数据到了再重训，还开着。" },
+      {
+        reminderId: recallReminderId(SESSION, TOPIC),
+        kind: "recall",
+        topicId: TOPIC,
+        text: "11-13 你说等 10 月数据到了再重训，还开着。",
+        sessionKey: OLD,
+      },
     ]);
     expect(t.logs.at(-1)).toMatchObject({ outcome: "issued", grade: "normal", kind: "recall", topicId: TOPIC });
     expect(t.service.pending()).toBe(0);
@@ -166,6 +172,7 @@ describe("RecallService", () => {
       reminderId: recallReminderId(SESSION, TOPIC),
       kind: "recall",
       topicId: TOPIC,
+      sessionKey: null,
       text: "已有",
       status: "active",
       until: null,
@@ -225,6 +232,7 @@ describe("RecallService", () => {
       reminderId: "recall:other",
       kind: "recall",
       topicId: TOPIC,
+      sessionKey: null,
       text: "早先的",
       status: "dismissed",
       until: null,

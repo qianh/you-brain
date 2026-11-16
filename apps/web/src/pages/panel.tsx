@@ -171,7 +171,7 @@ export function PanelPage() {
                   timeZone={timeZone}
                   t={t}
                   onAction={reminderAction}
-                  onOpenTopic={(topicId) => openMain(topicHref(topicZone(topics, topicId), topicId))}
+                  onOpenTopic={(topicId, session) => openMain(topicHref(topicZone(topics, topicId), topicId, session))}
                   loadDetail={(reminderId) => client.reminderDetail(reminderId).then((result) => result.detail)}
                 />
               </div>

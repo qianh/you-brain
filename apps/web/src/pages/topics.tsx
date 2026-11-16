@@ -126,13 +126,13 @@ export function TopicsPage({ zone }: { zone: "active" | "history" }) {
   useEffect(() => {
     if (!selected) return;
     const listed = topics.find((topic) => topic.topicId === selected);
-    if (listed && listed.zone !== zone) navigate(topicHref(listed.zone, listed.topicId), "replace");
-  }, [navigate, selected, topics, zone]);
+    if (listed && listed.zone !== zone) navigate(topicHref(listed.zone, listed.topicId, location.session), "replace");
+  }, [navigate, selected, topics, zone, location.session]);
 
   useEffect(() => {
     if (!detail || detail.topicId !== selected) return;
-    if (detail.zone !== zone) navigate(topicHref(detail.zone, detail.topicId), "replace");
-  }, [detail, navigate, selected, zone]);
+    if (detail.zone !== zone) navigate(topicHref(detail.zone, detail.topicId, location.session), "replace");
+  }, [detail, navigate, selected, zone, location.session]);
 
   useEffect(() => {
     if (!selected) {

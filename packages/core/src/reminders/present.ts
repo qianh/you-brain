@@ -54,6 +54,7 @@ function toView(record: ReminderRecord, nowMs: number, topics: readonly Reminder
     kind: record.kind,
     topicId: record.topicId,
     topicName: lookupTopicName(topics, record.topicId),
+    sessionKey: record.sessionKey,
     text: record.text,
     status: effectiveStatus(record, nowMs),
     until: record.until,

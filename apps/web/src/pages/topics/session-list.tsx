@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import type { TopicSessionLink } from "@you-brain/core/http/types.js";
 
 import { IconButton } from "../../components/button.js";
@@ -8,6 +9,7 @@ import { Menu } from "../../components/menu.js";
 import { Row } from "../../components/row.js";
 import { SourceTile } from "../../components/tile.js";
 import { useDaemon } from "../../daemon-context.js";
+import { useRoute } from "../../router.js";
 import { deviceLabel, driveFileUrl, sourceLabel } from "../../lib/format.js";
 import { joinMeta } from "./logic.js";
 import { RelativeTime } from "./relative-time.js";
@@ -22,6 +24,14 @@ export function SessionList({
   onSplit: (session: TopicSessionLink, mode: "create" | "assign") => void;
 }) {
   const { t, devices } = useDaemon();
+  // 从提醒的「查看出处」进来时地址里带着会话:滚到它并标出来。
+  const focus = useRoute().location.session;
+  const focused = focus !== null && sessions.some((session) => session.sessionKey === focus) ? focus : null;
+  const focusRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (focused === null) return;
+    focusRef.current?.scrollIntoView({ block: "center" });
+  }, [focused]);
   return (
     <Section title={t("sessionList")} {...(sessions.length > 0 ? { hint: String(sessions.length) } : {})}>
       {sessions.length === 0 ? (
@@ -31,7 +41,12 @@ export function SessionList({
           {sessions.map((session) => {
             const title = session.title.trim() || t("conversation");
             return (
-              <div key={session.sessionKey} className="topics-session">
+              <div
+                key={session.sessionKey}
+                ref={session.sessionKey === focused ? focusRef : undefined}
+                className={session.sessionKey === focused ? "topics-session is-focused" : "topics-session"}
+                aria-current={session.sessionKey === focused ? "true" : undefined}
+              >
                 <Row
                   icon={<SourceTile source={session.source} size="sm" label={sourceLabel(session.source)} />}
                   title={title}

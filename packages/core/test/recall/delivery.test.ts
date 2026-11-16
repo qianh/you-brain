@@ -12,7 +12,7 @@ const NOW = Date.parse("2026-11-16T08:00:00.000Z");
 const TZ = "Asia/Shanghai";
 
 function sent(id: string, topicId: string, issuedAt: string, kind = "recall"): ReminderRecord {
-  return { reminderId: id, kind, topicId, text: "x", status: "dismissed", until: null, issuedAt, updatedAt: issuedAt };
+  return { reminderId: id, kind, topicId, sessionKey: null, text: "x", status: "dismissed", until: null, issuedAt, updatedAt: issuedAt };
 }
 
 function input(extra: Partial<RecallDeliveryInput> = {}): RecallDeliveryInput {

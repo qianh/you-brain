@@ -24,6 +24,8 @@ export interface RecallMemoryItem {
   text: string;
   /** Local date the item was written, `YYYY-MM-DD`. */
   day: string | null;
+  /** Session that wrote it; null for the topic's next step. */
+  sessionKey: string | null;
 }
 
 export interface RecallMemory {
@@ -44,3 +46,10 @@ export type RecallDecision =
  * full re-index), not a conversation going on: it is never considered.
  */
 export const RECALL_FRESH_MS = 10 * 60_000;
+
+/**
+ * Only old work is recalled. A session written within this window is still the present:
+ * the conversation itself, a second capture of it from another tool, or something just
+ * discussed elsewhere. None of its todos or conclusions are handed back as a reminder.
+ */
+export const RECALL_RECENT_MS = 12 * 60 * 60_000;

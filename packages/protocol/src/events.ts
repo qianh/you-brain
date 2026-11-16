@@ -100,6 +100,8 @@ export const ReminderIssuedDataSchema = z.object({
   kind: z.string().min(1),
   topicId: IdSchema.nullable(),
   text: z.string().min(1),
+  /** The session the reminder was drawn from. Older events and reminders with no single source leave it out. */
+  sessionKey: SessionKeySchema.optional(),
 });
 
 export const ReminderActionDataSchema = z.object({

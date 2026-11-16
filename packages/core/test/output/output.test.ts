@@ -374,6 +374,7 @@ function seed(store: SqliteStore): void {
     reminderId: "r1",
     kind: "stalled",
     topicId: "topic-you",
+    sessionKey: null,
     text: "这条不该出现",
     status: "open",
     until: null,

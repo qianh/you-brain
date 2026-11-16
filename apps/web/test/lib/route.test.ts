@@ -21,8 +21,10 @@ describe("routes", () => {
       id: "you-brain",
       section: "account",
       q: null,
+      session: null,
     });
-    expect(parseAppLocation("/panel")).toEqual({ pathname: "/panel", id: null, section: "account", q: null });
+    expect(parseAppLocation("/panel")).toEqual({ pathname: "/panel", id: null, section: "account", q: null, session: null });
+    expect(parseAppLocation(topicHref("history", "t1", "abc")).session).toBe("abc");
   });
 
   test("settings and search links keep unknown sections on account", () => {
@@ -43,6 +45,8 @@ describe("routes", () => {
   test("builds topic links and does not mark history as the active shelf", () => {
     expect(topicHref("active", "a b")).toBe("/topics?id=a%20b");
     expect(topicHref("history")).toBe("/topics/history");
+    expect(topicHref("active", "t1", "abc")).toBe("/topics?id=t1&session=abc");
+    expect(topicHref("active", "t1", null)).toBe("/topics?id=t1");
     expect(isNavActive("/topics/history", "/topics")).toBe(false);
     expect(isNavActive("/topics", "/topics")).toBe(true);
     expect(isNavActive("/status", "/status")).toBe(true);

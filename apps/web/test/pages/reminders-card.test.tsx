@@ -83,12 +83,20 @@ describe("ReminderCard", () => {
     expect(panel).not.toContain("重新激活");
   });
 
-  test("a collapsed panel reminder is one centred line; an expanded or today one keeps top alignment", () => {
+  test("today and panel share one reminder row style (alignment comes from the row height, not a one-line special case)", () => {
     const multi: ReminderView = { ...topic, text: "第一行\n第二行" };
-    expect(card(topic, "panel")).toContain("reminder-banner is-line");
-    expect(card(multi, "panel")).toContain("reminder-banner is-line");
-    expect(card(topic, "today")).not.toContain("is-line");
-    expect(card(multi, "today")).not.toContain("is-line");
+    for (const html of [card(topic, "panel"), card(multi, "panel"), card(topic, "today"), card(multi, "today")]) {
+      expect(html).toContain('class="banner info reminder-banner"');
+      expect(html).not.toContain("is-line");
+    }
+  });
+
+  test("a reminder that records its source session offers 查看出处; an old one keeps 查看话题", () => {
+    const sourced: ReminderView = { ...topic, kind: "recall", sessionKey: "a".repeat(64) };
+    expect(card(sourced, "today")).toContain("查看出处");
+    expect(card(sourced, "today")).not.toContain("查看话题");
+    expect(card(topic, "today")).toContain("查看话题");
+    expect(card({ ...topic, sessionKey: null }, "today")).toContain("查看话题");
   });
 
   test("marks the in-flight action as busy", () => {

@@ -24,7 +24,7 @@ export interface RecallPorts {
   sessionUpdatedAt(): Readonly<Record<string, string>>;
   reminders(): readonly ReminderRecord[];
   topicMuted(topicId: string): boolean;
-  emit(data: { reminderId: string; kind: string; topicId: string; text: string }): Promise<void>;
+  emit(data: { reminderId: string; kind: string; topicId: string; text: string; sessionKey?: string }): Promise<void>;
   cursors: { get(key: string): string | null; set(key: string, value: string): void };
   log(entry: RecallLogEntry): void;
   nowMs(): number;
@@ -124,6 +124,7 @@ export class RecallService {
       sessionKey,
       sessionUpdatedAt: this.#ports.sessionUpdatedAt(),
       timeZone: this.#ports.timeZone(),
+      nowMs: now,
     });
     if (memory === null) {
       this.#log({ sessionKey, topicId, outcome: "no-memory" });
@@ -144,6 +145,7 @@ export class RecallService {
         sessionKey,
         sessionUpdatedAt: this.#ports.sessionUpdatedAt(),
         timeZone: this.#ports.timeZone(),
+        nowMs: this.#ports.nowMs(),
       });
       if (memory === null) {
         this.#drop(task);
@@ -195,7 +197,14 @@ export class RecallService {
         });
         return;
       }
-      await this.#ports.emit({ reminderId, kind: delivery.kind, topicId, text: decision.text });
+      const source = memory.items.find((item) => item.id === decision.basisId)?.sessionKey ?? null;
+      await this.#ports.emit({
+        reminderId,
+        kind: delivery.kind,
+        topicId,
+        text: decision.text,
+        ...(source === null ? {} : { sessionKey: source }),
+      });
       this.#finish(task);
       this.#log({
         sessionKey,
