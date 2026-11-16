@@ -1,6 +1,7 @@
 import type { DeviceRecord, Roles, SharedConfig } from "@you-brain/protocol";
 
 import type { EventSink } from "./types.js";
+import type { TaskHttpPort } from "../tasks/types.js";
 import type { UiPrefs, UiPrefsPatch } from "../ui-prefs/store.js";
 import type { TerminalConnection, TerminalSize, Tty7TerminalEvents } from "../deck/tty7-terminal.js";
 import type {
@@ -95,6 +96,7 @@ import type {
 
 /** Read and write ports for the local API. The daemon supplies the implementations. */
 export interface HttpDeps {
+  tasks?: TaskHttpPort;
   today(): Promise<TodayResponse>;
   topics(query: TopicsQuery): Promise<TopicsResponse>;
   topic(id: string): Promise<TopicDetail | null>;

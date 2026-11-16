@@ -23,6 +23,7 @@ import type { MessageKey } from "./i18n/messages.js";
 
 const TABS: ReadonlyArray<{ key: MessageKey; href: string; icon: IconName }> = [
   { key: "navDeck", href: "/deck", icon: "command" },
+  { key: "navTasks", href: "/todos", icon: "check-circle" },
   { key: "navMemory", href: MEMORY_NAV, icon: "book" },
   { key: "navKnowledge", href: "/knowledge", icon: "book-open" },
 ];
@@ -85,6 +86,7 @@ export function Shell({ children }: { children: ReactNode }) {
     settings ||
     knowledge ||
     location.pathname === "/today" ||
+    location.pathname === "/todos" ||
     location.pathname === "/topics";
   const overlayTitlebar = typeof window !== "undefined" && window.__TAURI__ !== undefined && /Mac/.test(navigator.platform);
   const mod = shortcutMod(typeof navigator === "undefined" ? "" : navigator.platform);

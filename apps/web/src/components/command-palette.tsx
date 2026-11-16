@@ -129,6 +129,7 @@ export function CommandPalette({
       }
     }
     const jumps: Array<{ href: string; label: string; icon: IconName }> = [
+      { href: "/todos", label: t("navTasks"), icon: "check-circle" },
       { href: "/today", label: t("navToday"), icon: "calendar" },
       { href: "/topics", label: t("topicsBook"), icon: "book" },
       { href: "/settings?section=portrait", label: t("navPortrait"), icon: "user" },

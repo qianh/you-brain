@@ -10,6 +10,7 @@ import { en as statusEn, zh as statusZh } from "./pages/status.js";
 import { en as knowledgeEn, zh as knowledgeZh } from "./pages/knowledge.js";
 import { en as settingsEn, zh as settingsZh } from "./pages/settings.js";
 import { en as dshDeckEn, zh as dshDeckZh } from "./pages/dsh-deck.js";
+import { en as tasksEn, zh as tasksZh } from "./pages/tasks.js";
 
 export const messageCatalogs = [
   { name: "common", zh: commonZh, en: commonEn },
@@ -23,10 +24,11 @@ export const messageCatalogs = [
   { name: "knowledge", zh: knowledgeZh, en: knowledgeEn },
   { name: "settings", zh: settingsZh, en: settingsEn },
   { name: "dsh-deck", zh: dshDeckZh, en: dshDeckEn },
+  { name: "tasks", zh: tasksZh, en: tasksEn },
 ] as const;
 
-export const zh = { ...commonZh, ...todayZh, ...panelZh, ...topicsZh, ...searchZh, ...portraitZh, ...devicesZh, ...statusZh, ...knowledgeZh, ...settingsZh, ...dshDeckZh } as const;
-export const en: { [K in keyof typeof zh]: string } = { ...commonEn, ...todayEn, ...panelEn, ...topicsEn, ...searchEn, ...portraitEn, ...devicesEn, ...statusEn, ...knowledgeEn, ...settingsEn, ...dshDeckEn };
+export const zh = { ...commonZh, ...todayZh, ...panelZh, ...topicsZh, ...searchZh, ...portraitZh, ...devicesZh, ...statusZh, ...knowledgeZh, ...settingsZh, ...dshDeckZh, ...tasksZh } as const;
+export const en: { [K in keyof typeof zh]: string } = { ...commonEn, ...todayEn, ...panelEn, ...topicsEn, ...searchEn, ...portraitEn, ...devicesEn, ...statusEn, ...knowledgeEn, ...settingsEn, ...dshDeckEn, ...tasksEn };
 
 export type MessageKey = keyof typeof zh;
 

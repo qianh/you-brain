@@ -22,6 +22,7 @@
     "paths": {
       "@you-brain/core/http/client.js": ["../../packages/core/src/http/client.ts"],
       "@you-brain/core/http/types.js": ["../../packages/core/src/http/types.ts"],
+      "@you-brain/core/tasks/types.js": ["../../packages/core/src/tasks/types.ts"],
       "@you-brain/core/notion/markdown-text.js": ["../../packages/core/src/notion/markdown-text.ts"],
       "@you-brain/core/deck/index.js": ["../../packages/core/src/deck/index.ts"],
       "@you-brain/core/deck/t3/index.js": ["../../packages/core/src/deck/t3/index.ts"],

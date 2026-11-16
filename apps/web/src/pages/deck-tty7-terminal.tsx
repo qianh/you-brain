@@ -6,6 +6,7 @@ import type { DeckTerminalSize } from "@you-brain/core/http/types.js";
 import "@xterm/xterm/css/xterm.css";
 
 import { useDaemon } from "../daemon-context.js";
+import { preserveTerminalImeInput } from "./deck-terminal-input.js";
 import { createLatencyProbe } from "./deck-terminal-latency.js";
 import type { TerminalAppearance } from "./deck-terminal-font.js";
 
@@ -77,6 +78,7 @@ export function DeckTty7Terminal({ pane, appearance }: { pane: number; appearanc
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(host);
+    host.addEventListener("keydown", preserveTerminalImeInput, true);
     // GPU 渲染：构造或加载失败就继续用默认渲染；上下文丢失时释放扩展，退回默认渲染。
     let webgl: WebglAddon | undefined;
     if (!webglDisabledForDebug()) {
@@ -241,6 +243,7 @@ export function DeckTty7Terminal({ pane, appearance }: { pane: number; appearanc
       observer.disconnect();
       host.removeEventListener("focusin", onFocus);
       host.removeEventListener("focusout", onBlur);
+      host.removeEventListener("keydown", preserveTerminalImeInput, true);
       host.removeEventListener("paste", onPaste, true);
       socket.close();
       data.dispose();

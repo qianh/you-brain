@@ -11,6 +11,7 @@ import { TopicsPage } from "./pages/topics.js";
 import { SearchPage } from "./pages/search.js";
 import { KnowledgePage } from "./pages/knowledge.js";
 import { SettingsPage } from "./pages/settings.js";
+import { TasksPage } from "./pages/tasks.js";
 import { settingsHref } from "./lib/route.js";
 import { Router, useRoute } from "./router.js";
 import { Shell } from "./shell.js";
@@ -53,6 +54,8 @@ function Frame() {
         ? t("brand")
         : location.pathname === "/deck"
           ? t("navDeck")
+          : location.pathname === "/todos"
+            ? t("navTasks")
           : location.pathname === "/topics" || location.pathname === "/topics/history"
             ? t("navMemory")
               : location.pathname === "/knowledge"
@@ -81,6 +84,7 @@ function Frame() {
   else if (location.pathname === "/topics") page = <TopicsPage zone="active" />;
   else if (location.pathname === "/topics/history") page = <TopicsPage zone="history" />;
   else if (location.pathname === "/knowledge") page = <KnowledgePage />;
+  else if (location.pathname === "/todos") page = <TasksPage />;
   else if (location.pathname === "/search") page = <SearchPage />;
   else if (location.pathname === "/settings") page = <SettingsPage />;
   else if (location.pathname === "/_design") page = <DesignPage />;

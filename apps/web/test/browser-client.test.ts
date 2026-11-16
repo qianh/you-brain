@@ -17,6 +17,25 @@ afterEach(() => {
 });
 
 describe("daemon requests with a crowded loopback cookie jar", () => {
+  test("TODO review encodes the task id and approval submits the reviewed commit", async () => {
+    const calls: Array<{ input: string; init: RequestInit }> = [];
+    const client = createBrowserDaemon({
+      token: "synthetic-test-token",
+      fetch: (async (input, init) => {
+        calls.push({ input: String(input), init: init ?? {} });
+        return Response.json({ projects: [], tasks: [], connectionError: null });
+      }) as typeof fetch,
+    });
+    await client.taskReview("task /?&");
+    await client.taskAction({ action: "approve", id: "task /?&", reviewSha: "a".repeat(40) });
+    const review = new URL(calls[0]!.input, "http://127.0.0.1:4802");
+    expect(review.pathname).toBe("/api/tasks/review");
+    expect(review.searchParams.get("id")).toBe("task /?&");
+    expect(calls[1]?.input).toBe("/api/tasks/action");
+    expect(JSON.parse(calls[1]!.init.body as string)).toEqual({ action: "approve", id: "task /?&", reviewSha: "a".repeat(40) });
+    expect(new Headers(calls[1]?.init.headers).get("authorization")).toBe("Bearer synthetic-test-token");
+    expect(calls[1]?.init.credentials).toBe("omit");
+  });
   test("checks T3 through the authenticated daemon with an encoded server address", async () => {
     let capturedUrl: string | undefined;
     let captured: RequestInit | undefined;
