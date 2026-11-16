@@ -5,7 +5,6 @@ import type { ReminderRecord } from "../store/types.js";
 import {
   RECALL_DAILY_LIMIT,
   RECALL_KIND,
-  RECALL_LATE_MS,
   RECALL_TOPIC_COOLDOWN_MS,
   type RecallGrade,
   type RecallKind,
@@ -18,22 +17,19 @@ export function recallReminderId(sessionKey: string, topicId: string): string {
 
 export interface RecallDeliveryInput {
   grade: RecallGrade;
-  /** Time from the trigger to the model's answer. */
-  elapsedMs: number;
-  stillOnTopic: boolean;
   topicId: string;
   reminders: readonly ReminderRecord[];
   nowMs: number;
   timeZone: string;
 }
 
-export type RecallDeliveryReason = "ok" | "late" | "topic-cooldown" | "daily-limit";
+export type RecallDeliveryReason = "ok" | "topic-cooldown" | "daily-limit";
 
 /**
  * An important reminder is always delivered, whatever the clock or the counters say.
- * A normal one waits out the topic cooldown and the daily limit, and when the answer
- * came late for someone who has moved on it is listed without a notification.
- * A reminder the user dismissed still counts as one that was sent.
+ * A normal one waits out the topic cooldown and the daily limit, and is always
+ * listed with a system notification: a quiet reminder only sits in the list where
+ * nobody sees it. A reminder the user dismissed still counts as one that was sent.
  */
 export function decideRecallDelivery(input: RecallDeliveryInput): {
   kind: RecallKind | null;
@@ -55,8 +51,5 @@ export function decideRecallDelivery(input: RecallDeliveryInput): {
     return !Number.isNaN(issued) && localDayKey(new Date(issued), input.timeZone) === today;
   }).length;
   if (todayCount >= RECALL_DAILY_LIMIT) return { kind: null, reason: "daily-limit" };
-  if (input.elapsedMs > RECALL_LATE_MS && !input.stillOnTopic) {
-    return { kind: RECALL_KIND.quiet, reason: "late" };
-  }
   return { kind: RECALL_KIND.notify, reason: "ok" };
 }

@@ -11,5 +11,5 @@ export {
   parseRecallDecision,
 } from "./prompt.js";
 export * from "./types.js";
-export { RECALL_CONSIDERED_CURSOR, RECALL_STILL_ON_TOPIC_MS, RecallService } from "./service.js";
+export { RECALL_CONSIDERED_CURSOR, RecallService } from "./service.js";
 export type { RecallPorts } from "./service.js";

@@ -33,6 +33,7 @@ function setup(replies: Reply[], options: { muted?: boolean; llmMissing?: boolea
   let now = START;
   const requests: { at: number; request: LlmCompleteRequest }[] = [];
   const emitted: { reminderId: string; kind: string; topicId: string; text: string; sessionKey?: string }[] = [];
+  const resolved: { reminderId: string; topicId: string | null }[] = [];
   const logs: RecallLogEntry[] = [];
   const reminders: ReminderRecord[] = [];
   const cursor = new Map<string, string>();
@@ -60,6 +61,11 @@ function setup(replies: Reply[], options: { muted?: boolean; llmMissing?: boolea
       emitted.push(data);
       reminders.push({ ...data, sessionKey: data.sessionKey ?? null, status: "active", until: null, issuedAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString() });
     },
+    async resolve(data) {
+      resolved.push(data);
+      const target = reminders.find((item) => item.reminderId === data.reminderId);
+      if (target) target.status = "done";
+    },
     cursors: { get: (key) => cursor.get(key) ?? null, set: (key, value) => void cursor.set(key, value) },
     log: (entry) => void logs.push(entry),
     nowMs: () => now,
@@ -70,6 +76,7 @@ function setup(replies: Reply[], options: { muted?: boolean; llmMissing?: boolea
     service,
     requests,
     emitted,
+    resolved,
     logs,
     reminders,
     cursor,
@@ -198,25 +205,54 @@ describe("RecallService", () => {
     await t.service.tick();
   }
 
-  it("一般档晚于 5 分钟且会话已 10 分钟没有新发言 → 发 recall_quiet", async () => {
+  it("一般档晚于 5 分钟且会话没有新发言 → 照常发 recall 弹通知", async () => {
     const t = setup([new Error("超时"), new Error("超时"), new Error("超时"), SAY_NORMAL]);
     await runToFourthCall(t);
-    expect(t.emitted.map((item) => item.kind)).toEqual(["recall_quiet"]);
-    expect(t.logs.at(-1)).toMatchObject({ outcome: "issued", kind: "recall_quiet", reason: "late" });
-  });
-
-  it("晚到但会话 10 分钟内还有新发言 → 一般档照常发 recall", async () => {
-    const t = setup([new Error("超时"), new Error("超时"), new Error("超时"), SAY_NORMAL]);
-    await runToFourthCall(t, () =>
-      t.service.consider({ sessionKey: SESSION, userTurns: [...TURNS, "海运运价预测还要看港口"] }),
-    );
     expect(t.emitted.map((item) => item.kind)).toEqual(["recall"]);
+    expect(t.logs.at(-1)).toMatchObject({ outcome: "issued", kind: "recall", reason: "ok" });
   });
 
-  it("助手还在输出（没有新的用户发言）不算还在话题上 → 一般档仍发 recall_quiet", async () => {
-    const t = setup([new Error("超时"), new Error("超时"), new Error("超时"), SAY_NORMAL]);
-    await runToFourthCall(t, () => t.service.consider({ sessionKey: SESSION, userTurns: TURNS }));
-    expect(t.emitted.map((item) => item.kind)).toEqual(["recall_quiet"]);
+  it("发出新提醒时，同一话题还开着的旧提醒（早于冷却期）被自动关闭", async () => {
+    const t = setup([SAY_NORMAL]);
+    t.reminders.push({
+      reminderId: "recall:stale",
+      kind: "recall",
+      topicId: TOPIC,
+      sessionKey: null,
+      text: "Task 5 还没提交，先别打包安装。",
+      status: "open",
+      until: null,
+      issuedAt: new Date(START - 25 * 60 * MIN).toISOString(),
+      updatedAt: new Date(START - 2 * 60 * MIN).toISOString(),
+    });
+    t.service.consider({ sessionKey: SESSION, userTurns: TURNS });
+    await t.service.tick();
+    expect(t.resolved).toEqual([{ reminderId: "recall:stale", topicId: TOPIC }]);
+    expect(t.logs.at(-2)).toMatchObject({ outcome: "superseded" });
+  });
+
+  it("别的话题、已处理或非聊到时的提醒不被自动关闭", async () => {
+    const t = setup([SAY_NORMAL]);
+    for (const extra of [
+      { reminderId: "recall:other-topic", kind: "recall", topicId: "t-other", status: "open" },
+      { reminderId: "recall:done", kind: "recall", topicId: TOPIC, status: "done" },
+      { reminderId: "daily:1", kind: "daily", topicId: TOPIC, status: "open" },
+    ] as const) {
+      t.reminders.push({
+        reminderId: extra.reminderId,
+        kind: extra.kind,
+        topicId: extra.topicId,
+        sessionKey: null,
+        text: "x",
+        status: extra.status,
+        until: null,
+        issuedAt: new Date(START - 2 * 60 * MIN).toISOString(),
+        updatedAt: new Date(START - 2 * 60 * MIN).toISOString(),
+      });
+    }
+    t.service.consider({ sessionKey: SESSION, userTurns: TURNS });
+    await t.service.tick();
+    expect(t.resolved).toEqual([]);
   });
 
   it("重要档在同样情况下发 recall", async () => {
@@ -299,6 +335,7 @@ describe("RecallService", () => {
       reminders: () => { throw new Error("x"); },
       topicMuted: () => { throw new Error("x"); },
       emit: async () => { throw new Error("x"); },
+      resolve: async () => { throw new Error("x"); },
       cursors: { get: () => { throw new Error("x"); }, set: () => { throw new Error("x"); } },
       log: () => { throw new Error("x"); },
       nowMs: () => START,

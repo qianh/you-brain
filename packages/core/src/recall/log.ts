@@ -17,6 +17,7 @@ export interface RecallLogEntry {
     | "silent"
     | "issued"
     | "suppressed"
+    | "superseded"
     | "duplicate"
     | "failed"
     | "gave-up";

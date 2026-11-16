@@ -2091,6 +2091,10 @@ export class YouBrainDaemon {
         if (this.#stopped) throw new Error("daemon 已停止");
         await this.#emitUser("reminder.issued", data);
       },
+      resolve: async (data) => {
+        if (this.#stopped) throw new Error("daemon 已停止");
+        await this.#emitUser("reminder.action", { ...data, action: "done", until: null });
+      },
       cursors: {
         get: (key) => this.#store?.getCursor(key) ?? null,
         set: (key, value) => this.#store?.setCursor(key, value),

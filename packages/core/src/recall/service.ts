@@ -8,11 +8,9 @@ import type { RecallLogEntry } from "./log.js";
 import { matchRecallTopic } from "./match.js";
 import { buildRecallMemory } from "./memory.js";
 import { RECALL_JSON_SCHEMA, buildRecallPrompt, parseRecallDecision } from "./prompt.js";
-import { RECALL_RETRY_DELAYS_MS, RECALL_USER_CHARS } from "./types.js";
+import { RECALL_KIND, RECALL_RETRY_DELAYS_MS, RECALL_USER_CHARS } from "./types.js";
 
 export const RECALL_CONSIDERED_CURSOR = "recall.considered";
-/** A session that produced a new user message this recently counts as "still on the topic". */
-export const RECALL_STILL_ON_TOPIC_MS = 10 * 60_000;
 const CONSIDERED_KEEP_MS = 7 * 24 * 60 * 60_000;
 /** How many of the latest user messages are matched against topics when the session has none. */
 const MATCH_TURNS = 3;
@@ -25,6 +23,8 @@ export interface RecallPorts {
   reminders(): readonly ReminderRecord[];
   topicMuted(topicId: string): boolean;
   emit(data: { reminderId: string; kind: string; topicId: string; text: string; sessionKey?: string }): Promise<void>;
+  /** A newer reminder for the topic takes the old one's place. */
+  resolve(data: { reminderId: string; topicId: string | null }): Promise<void>;
   cursors: { get(key: string): string | null; set(key: string, value: string): void };
   log(entry: RecallLogEntry): void;
   nowMs(): number;
@@ -35,7 +35,6 @@ interface RecallTask {
   sessionKey: string;
   topicId: string;
   userTurns: readonly string[];
-  firstAt: number;
   dueAt: number;
   failures: number;
 }
@@ -55,7 +54,6 @@ export class RecallService {
   readonly #ports: RecallPorts;
   readonly #queue: RecallTask[] = [];
   readonly #turnCounts = new Map<string, number>();
-  readonly #lastNewTurnAt = new Map<string, number>();
   #running = false;
 
   constructor(ports: RecallPorts) {
@@ -94,7 +92,6 @@ export class RecallService {
     if (userTurns.length === 0 || (previous !== undefined && userTurns.length <= previous)) return;
     this.#turnCounts.set(sessionKey, userTurns.length);
     const now = this.#ports.nowMs();
-    this.#lastNewTurnAt.set(sessionKey, now);
 
     const book = this.#ports.book();
     const assigned = book.sessions.find((session) => session.sessionKey === sessionKey)?.topicId ?? null;
@@ -130,7 +127,7 @@ export class RecallService {
       this.#log({ sessionKey, topicId, outcome: "no-memory" });
       return;
     }
-    this.#queue.push({ sessionKey, topicId, userTurns, firstAt: now, dueAt: now, failures: 0 });
+    this.#queue.push({ sessionKey, topicId, userTurns, dueAt: now, failures: 0 });
   }
 
   async #run(task: RecallTask): Promise<void> {
@@ -175,11 +172,8 @@ export class RecallService {
         return;
       }
       const now = this.#ports.nowMs();
-      const lastTurn = this.#lastNewTurnAt.get(sessionKey);
       const delivery = decideRecallDelivery({
         grade: decision.grade,
-        elapsedMs: now - task.firstAt,
-        stillOnTopic: lastTurn !== undefined && now - lastTurn <= RECALL_STILL_ON_TOPIC_MS,
         topicId,
         reminders: this.#ports.reminders(),
         nowMs: now,
@@ -205,6 +199,7 @@ export class RecallService {
         text: decision.text,
         ...(source === null ? {} : { sessionKey: source }),
       });
+      await this.#supersede(topicId, reminderId);
       this.#finish(task);
       this.#log({
         sessionKey,
@@ -222,8 +217,26 @@ export class RecallService {
     this.#retryOrGiveUp(task, failure);
   }
 
-  #retryOrGiveUp(task: RecallTask, reason: string): void {
-    task.failures += 1;
+  /** A newer reminder takes over: open ones for the same topic are closed as handled. */
+  async #supersede(topicId: string, keepReminderId: string): Promise<void> {
+    const stale = this.#ports.reminders().filter(
+      (item) =>
+        item.topicId === topicId &&
+        item.reminderId !== keepReminderId &&
+        (item.kind === RECALL_KIND.notify || item.kind === RECALL_KIND.quiet) &&
+        (item.status === "open" || item.status === "snoozed"),
+    );
+    for (const item of stale) {
+      try {
+        await this.#ports.resolve({ reminderId: item.reminderId, topicId });
+        this.#log({ sessionKey: "", topicId, outcome: "superseded", text: item.text });
+      } catch {
+        // Closing the old one is cosmetic; the new reminder is already out.
+      }
+    }
+  }
+
+  #retryOrGiveUp(task: RecallTask, reason: string): void {    task.failures += 1;
     const delay = RECALL_RETRY_DELAYS_MS[task.failures - 1];
     if (delay === undefined) {
       this.#drop(task);

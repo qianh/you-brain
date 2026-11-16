@@ -16,7 +16,7 @@ function sent(id: string, topicId: string, issuedAt: string, kind = "recall"): R
 }
 
 function input(extra: Partial<RecallDeliveryInput> = {}): RecallDeliveryInput {
-  return { grade: "normal", elapsedMs: 10_000, stillOnTopic: true, topicId: "t1", reminders: [], nowMs: NOW, timeZone: TZ, ...extra };
+  return { grade: "normal", topicId: "t1", reminders: [], nowMs: NOW, timeZone: TZ, ...extra };
 }
 
 describe("decideRecallDelivery", () => {
@@ -41,17 +41,13 @@ describe("decideRecallDelivery", () => {
     expect(decideRecallDelivery(input({ reminders: yesterdayLocal })).kind).toBe("recall");
   });
 
-  it("一般：超过 5 分钟且已离开 → 安静档；还在聊则照常", () => {
-    expect(decideRecallDelivery(input({ elapsedMs: 5 * 60_000 + 1, stillOnTopic: false }))).toEqual({ kind: "recall_quiet", reason: "late" });
-    expect(decideRecallDelivery(input({ elapsedMs: 5 * 60_000 + 1, stillOnTopic: true })).kind).toBe("recall");
-    expect(decideRecallDelivery(input({ elapsedMs: 5 * 60_000, stillOnTopic: false })).kind).toBe("recall");
+  it("一般：晚到且已离开也照常弹通知", () => {
+    expect(decideRecallDelivery(input({}))).toEqual({ kind: "recall", reason: "ok" });
   });
 
-  it("重要：晚到、已离开、话题冷却中、当天已满，仍然弹通知", () => {
+  it("重要：话题冷却中、当天已满，仍然弹通知", () => {
     const hard = input({
       grade: "important",
-      elapsedMs: 3_600_000,
-      stillOnTopic: false,
       reminders: [...sameTopicRecently, ...fiveToday],
     });
     expect(decideRecallDelivery(hard)).toEqual({ kind: "recall", reason: "ok" });
