@@ -9,7 +9,9 @@ import { Segmented } from "./components/segmented.js";
 import { useShortcuts } from "./components/shortcuts.js";
 import { StatusCapsule } from "./components/status-capsule.js";
 import { useToast } from "./components/toast.js";
+import { QuotaStrip } from "./components/quota-strip.js";
 import { Tooltip } from "./components/tooltip.js";
+import { useQuota } from "./pages/panel/use-quota.js";
 import { useDaemon } from "./daemon-context.js";
 import { devOverlayAllowed } from "./lib/dev-overlay.js";
 import { capsuleFromStatus, capsuleWarningCount, type CapsuleKind, type CapsuleStatus } from "./lib/health.js";
@@ -65,7 +67,8 @@ function capsuleText(kind: CapsuleKind, count: number, t: (key: MessageKey, vars
 }
 
 export function Shell({ children }: { children: ReactNode }) {
-  const { t, error, streamError, reload, loading, status } = useDaemon();
+  const { t, error, streamError, reload, loading, status, language } = useDaemon();
+  const { cards: quotaCards, nowMs: quotaNow, reload: reloadQuota } = useQuota();
   const { push } = useToast();
   const { href, location, navigate } = useRoute();
   const [refreshing, setRefreshing] = useState(false);
@@ -95,9 +98,10 @@ export function Shell({ children }: { children: ReactNode }) {
   const refresh = useCallback(async () => {
     setRefreshing(true);
     const ok = await reload("all");
+    void reloadQuota();
     setRefreshing(false);
     if (!ok) push({ message: t("refreshFailed"), tone: "danger" });
-  }, [push, reload, t]);
+  }, [push, reload, reloadQuota, t]);
 
   useEffect(() => {
     // 偏好写回 daemon 失败时只提示一次；本次的值在内存里仍然有效。
@@ -172,6 +176,7 @@ export function Shell({ children }: { children: ReactNode }) {
           <BrandMark size={20} />
           <span>{t("brand")}</span>
         </a>
+        <QuotaStrip cards={quotaCards} nowMs={quotaNow} language={language} />
         <div className="top-nav" {...(overlayTitlebar ? { "data-tauri-drag-region": "" } : {})}>
           <div className="nav-fade">
             <Segmented
