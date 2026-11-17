@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
-import { linuxBundlePath } from "../../native/layout.js";
+import { linuxBundlePaths } from "../../native/layout.js";
 
 export interface BundledDsh {
   /** 随 App 打包的 Node（≥ 24.9）。 */
@@ -20,7 +20,7 @@ export function bundledDsh(execPath: string, env: NodeJS.ProcessEnv = process.en
     env.YOU_BRAIN_DSH_DIR?.trim() ?? "",
     join(execDir, "dsh"),
     resolve(execDir, "..", "Resources", "dsh"),
-    linuxBundlePath(execDir, "dsh"),
+    ...linuxBundlePaths(execDir, "dsh"),
   ].filter((path) => path !== "");
   for (const dir of candidates) {
     const node = join(dir, "node");

@@ -338,7 +338,8 @@ export async function expandMessages(messages, deps = {}) {
     const fetched = await Promise.all(limited.map((ref) => fetchReference(ref, deps)));
     let context;
     try {
-      const { createUserMessage } = await import("@deepseek-ai/dsh-llm");
+      // 测试注入 createUserMessage，不依赖本机是否装了 dsh-host 的依赖。
+      const createUserMessage = deps.createUserMessage ?? (await import("@deepseek-ai/dsh-llm")).createUserMessage;
       context = createUserMessage({
         source: {
           kind: "u-brain-reference",
@@ -349,7 +350,7 @@ export async function expandMessages(messages, deps = {}) {
         content: [{ type: "text", text: renderContext(fetched) }],
       });
     } catch {
-      // 单元测试里没有 dsh-llm：只返回改写后的直接消息。
+      // 运行时缺 dsh-llm 时不展开引用，原样交给模型。
       return [message];
     }
     return [{ ...message, content }, context];

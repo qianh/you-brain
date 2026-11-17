@@ -1048,8 +1048,7 @@ export class YouBrainDaemon {
     } finally {
       this.#driveKnown = true;
       // The status read during startup cached `reachable: null`. Drop it before telling pages to refresh.
-      this.#forgetStatus();
-      this.changes.publish("status", this.#clock.now().toISOString());
+      this.#statusChanged(this.#clock.now().toISOString());
     }
     if (this.#stopped) return;
     if (!this.#llmKnown) {
@@ -1069,7 +1068,7 @@ export class YouBrainDaemon {
     if (this.#stopped) return;
     await log.time("ensureCoding", () => this.#ensureCoding());
     // Model warnings and the search index settle after Drive, so status changes again here.
-    this.changes.publish("status", this.#clock.now().toISOString());
+    this.#statusChanged(this.#clock.now().toISOString());
     // 知识库挂载是纯内存工作;钥匙串探测和首次同步留给后台 tick,
     // 启动路径既不等待网络也不等待 security CLI。
     if (this.#paths) {
@@ -1741,7 +1740,7 @@ export class YouBrainDaemon {
         this.#cliPausedUntilMs = this.#clock.nowMs() + wait;
       }
       this.#retry.fail(input.key, input.key, error);
-      this.changes.publish("status", this.#clock.now().toISOString());
+      this.#statusChanged(this.#clock.now().toISOString());
     }
   }
 
@@ -1867,7 +1866,7 @@ export class YouBrainDaemon {
       markdown = object.bytes.toString("utf8");
     } catch (error) {
       this.#retry.fail(item.sessionKey, item.sessionKey, error);
-      this.changes.publish("status", this.#clock.now().toISOString());
+      this.#statusChanged(this.#clock.now().toISOString());
       return;
     }
     const parsed = parseWebSession(markdown);
@@ -1877,7 +1876,7 @@ export class YouBrainDaemon {
         item.sessionKey,
         new LlmRequestError("client", "网页会话无法解析"),
       );
-      this.changes.publish("status", this.#clock.now().toISOString());
+      this.#statusChanged(this.#clock.now().toISOString());
       return;
     }
     const stored = store.getSession(item.sessionKey);
@@ -2477,7 +2476,7 @@ export class YouBrainDaemon {
     const at = this.#clock.now().toISOString();
     this.changes.publish("topics", at);
     this.changes.publish("today", at);
-    this.changes.publish("status", at);
+    this.#statusChanged(at);
     this.#markTopicFilesDirty();
   }
 
@@ -2741,7 +2740,7 @@ export class YouBrainDaemon {
         await this.#catchUpWebInbox();
       }
     }
-    this.changes.publish("status", this.#clock.now().toISOString());
+    this.#statusChanged(this.#clock.now().toISOString());
     if (update.removedDevices?.length) this.changes.publish("devices", this.#clock.now().toISOString());
   }
 
@@ -2977,7 +2976,7 @@ export class YouBrainDaemon {
       body.provider === this.#shared.llm.provider
     ) {
       this.#llm = await this.#createLlm();
-      this.changes.publish("status", this.#clock.now().toISOString());
+      this.#statusChanged(this.#clock.now().toISOString());
     }
     // magpie 的 Key 有无决定指挥台路由要不要带凭据：让 dsh 重新生成补丁。
     if (body.provider === "magpie" && this.#shared.llm.provider === "magpie") this.#deck?.refresh();
@@ -3032,7 +3031,7 @@ export class YouBrainDaemon {
                 onAuthorizationUrl: (info: { url: string; tunnel: string | null }) => {
                   this.#pendingAuthorization = info;
                   // 登录接口会阻塞到授权完成，界面靠这次推送拿到链接。
-                  this.changes.publish("status", this.#clock.now().toISOString());
+                  this.#statusChanged(this.#clock.now().toISOString());
                 },
               },
             }
@@ -3076,7 +3075,7 @@ export class YouBrainDaemon {
     } catch (error) {
       console.error(`login: drive ${error instanceof Error ? error.message : "failed"}`);
     }
-    this.changes.publish("status");
+    this.#statusChanged();
     // Pulls what Drive already has. A failure shows in status and does not fail the login.
     void this.#syncNow().catch(() => undefined);
     const email = opened.config.account.email;
@@ -3104,6 +3103,13 @@ export class YouBrainDaemon {
     this.#forgetStatus();
     await writeLocalConfig(this.#configFile, this.#local);
     this.#revokeInBackground(serialized);
+  }
+
+  /** 状态变了：丢掉缓存再通知页面，页面随后读到的就是新状态。 */
+  #statusChanged(at?: string): void {
+    this.#consolidationCache = null;
+    this.#forgetStatus();
+    this.changes.publish("status", at);
   }
 
   /** Drops a cached status so the next read sees an account or Drive change immediately. */
@@ -3161,7 +3167,7 @@ export class YouBrainDaemon {
       this.#unmountDrive();
       if (account.permissionId) store.setCursor(DRIVE_ACCOUNT_CURSOR, account.permissionId);
       await this.#dropGrant();
-      this.changes.publish("status");
+      this.#statusChanged();
       return { email: account.email };
     });
   }
@@ -3256,7 +3262,7 @@ export class YouBrainDaemon {
     }
     this.#local = next;
     await writeLocalConfig(this.#configFile, next);
-    this.changes.publish("status", this.#clock.now().toISOString());
+    this.#statusChanged(this.#clock.now().toISOString());
     return this.#oauthClientView();
   }
 
@@ -3431,7 +3437,7 @@ export class YouBrainDaemon {
           // 首次同步失败不打断保存;错误显示在状态里。
         }
         this.changes.publish("notion", this.#clock.now().toISOString());
-        this.changes.publish("status", this.#clock.now().toISOString());
+        this.#statusChanged(this.#clock.now().toISOString());
       },
       notionSync: async () => {
         const summary = await this.#requireNotion().sync();
@@ -3693,7 +3699,7 @@ export class YouBrainDaemon {
     this.#applyZone();
     this.#mountOutput();
     if (this.#sync) this.#rolesPush.submit(roles);
-    this.changes.publish("status", this.#clock.now().toISOString());
+    this.#statusChanged(this.#clock.now().toISOString());
   }
 
   #clearCliStall(): void {
@@ -3720,7 +3726,7 @@ export class YouBrainDaemon {
     await this.#ensureCoding();
     await this.#mountSearch();
     if (this.#sync) this.#sharedPush.submit(config);
-    this.changes.publish("status", this.#clock.now().toISOString());
+    this.#statusChanged(this.#clock.now().toISOString());
   }
 
   #onConfigPush(name: "shared" | "roles", failure: { error: unknown } | null): void {
@@ -3734,7 +3740,7 @@ export class YouBrainDaemon {
       this.#configPushErrors[name] = record;
       this.#lastSyncError = record;
     }
-    this.changes.publish("status", at);
+    this.#statusChanged(at);
   }
 
   /** Test seam: waits for the config pushes in flight to finish. Production code does not call it. */
@@ -4018,7 +4024,7 @@ export class YouBrainDaemon {
     if (outcome.status === "done" && outcome.attempted) {
       const at = this.#clock.now().toISOString();
       this.changes.publish("topics", at);
-      this.changes.publish("status", at);
+      this.#statusChanged(at);
     }
     if (outcome.status === "skipped") {
       return { day: outcome.day, ok: true, steps: [] };

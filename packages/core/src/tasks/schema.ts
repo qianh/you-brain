@@ -35,6 +35,7 @@ export const TaskRecordSchema = z.object({
   error: z.string().nullable().optional(),
   run: z.object({
     projectCwd: z.string(), branch: z.string(), worktreePath: z.string(), baseSha: z.string(),
+    requestId: z.string().optional(),
     threadId: z.string().nullable(), threadUrl: z.string().nullable(), reviewSha: z.string().nullable(),
     summary: z.string(), error: z.string().nullable(),
     pendingFeedback: z.object({ commandId: z.string(), prompt: z.string() }).optional(),

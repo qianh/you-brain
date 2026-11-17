@@ -20,7 +20,9 @@ function fakeDaemon(routes: Array<[string, unknown]>) {
     const body = typeof route[1] === "function" ? route[1](path) : route[1];
     return { ok: true, status: 200, text: () => Promise.resolve(JSON.stringify(body)) };
   };
-  return { calls, deps: { fetch, daemon: async () => ({ base: "http://127.0.0.1:1", token: "t" }) } };
+  // 与 dsh-llm 的 createUserMessage 相同：补上 role 并冻结。
+  const createUserMessage = (input: Record<string, unknown>) => Object.freeze({ ...input, role: "user" });
+  return { calls, deps: { fetch, createUserMessage, daemon: async () => ({ base: "http://127.0.0.1:1", token: "t" }) } };
 }
 
 const request = (url: string) =>

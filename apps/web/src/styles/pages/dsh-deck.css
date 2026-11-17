@@ -18,7 +18,10 @@
   padding-bottom: var(--sp-3);
 }
 
+/* .keep-page 是常驻挂载的外壳（app.tsx KeepAlive），也要接上高度链；
+   只匹配未隐藏的，避免 display 盖过 hidden 属性让切走的页面重新露出。 */
 .main-deck .route-fade,
+.main-deck .keep-page:not([hidden]),
 .main-deck .page-frame {
   flex: 1;
   min-height: 0;

@@ -36,8 +36,9 @@ async function setup() {
     async start(input) {
       starts.push(input);
       if (startFailure) throw new Error("dispatch uncertain");
-      states.set(input.threadId, "running");
-      return { threadId: input.threadId, threadUrl: `http://127.0.0.1:3773/env/${input.threadId}` };
+      const threadId = `thread-${input.requestId}`;
+      states.set(threadId, "running");
+      return { threadId, threadUrl: `http://127.0.0.1:3773/env/${threadId}` };
     },
     async inspect(threadId) { return { state: states.get(threadId) ?? "running", summary: "验证结果" }; },
     async followup(threadId, prompt, commandId) {
@@ -150,7 +151,7 @@ describe("T3 TODO serial queue", () => {
     await f.service.create({ title: "two", projectId: "one" });
     await Promise.all([enable(f.service), f.service.tick(), f.service.tick()]);
     expect(f.starts).toHaveLength(1);
-    await expect(f.service.update({ id: f.starts[0]!.threadId, title: "changed" })).rejects.toThrow();
+    await expect(f.service.update({ id: f.starts[0]!.requestId, title: "changed" })).rejects.toThrow();
     const task = (await f.board()).tasks.find((item) => item.status === "running")!;
     await expect(f.service.update({ id: task.id, title: "changed" })).rejects.toThrow("只有待处理");
   }));
@@ -204,12 +205,14 @@ describe("T3 TODO serial queue", () => {
     await enable(f.service);
     const task = (await f.board()).tasks[0]!;
     expect(task.status).toBe("failed");
-    expect(task.run?.threadId).toBe(f.starts[0]?.threadId);
+    expect(task.run?.requestId).toBe(f.starts[0]?.requestId);
+    expect(task.run?.threadId).toBeNull();
     f.setStartFailure(false);
     await f.service.action({ action: "retry", id: task.id });
     await f.service.tick();
     expect(f.starts).toHaveLength(2);
-    expect(f.starts[0]?.threadId).toBe(f.starts[1]?.threadId);
+    expect(f.starts[0]?.requestId).toBe(f.starts[1]?.requestId);
+    expect((await f.board()).tasks[0]?.run?.threadId).toBe(`thread-${f.starts[0]?.requestId}`);
   }));
 
   test("daemon restart resumes monitoring without duplicate dispatch", () => fixture(async (f) => {
@@ -220,7 +223,7 @@ describe("T3 TODO serial queue", () => {
     try {
       await resumed.tick();
       expect(f.starts).toHaveLength(1);
-      f.states.set(f.starts[0]!.threadId, "ready");
+      f.states.set(`thread-${f.starts[0]!.requestId}`, "ready");
       await resumed.tick();
       expect((await resumed.board()).tasks[0]?.status).toBe("review");
       expect(f.merges).toHaveLength(0);

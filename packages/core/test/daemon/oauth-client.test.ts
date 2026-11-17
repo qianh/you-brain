@@ -178,6 +178,8 @@ describe("OAuth client credentials over the API", () => {
       role: "server",
     });
     await writeLocalConfig(paths(dirs).configFile, config);
+    // 这条要验证服务器角色自己选文件存储，去掉测试统一指定的凭据文件。
+    delete dirs.env.YOU_BRAIN_SECRETS_FILE;
     const daemon = await start(dirs);
     await put(daemon, {
       mode: "custom",

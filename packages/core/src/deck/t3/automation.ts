@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash, randomBytes } from "node:crypto";
 import { access } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
@@ -7,42 +8,52 @@ import { delimiter, isAbsolute, join } from "node:path";
 import type { TaskAutomationPort } from "../../tasks/types.js";
 import { normalizeT3Url } from "./index.js";
 
-/** T3 0.0.45 的公开 HTTP orchestration 协议；不读取或修改 T3 数据库。 */
-interface ModelSelection { instanceId: string; model: string; options?: unknown }
-interface T3Project { id: string; title: string; workspaceRoot: string; defaultModelSelection?: ModelSelection | null }
-interface T3Message { id: string; role: string; text: string; streaming: boolean; createdAt: string }
-interface T3Thread {
-  id: string;
-  projectId: string;
-  modelSelection: ModelSelection;
-  runtimeMode: string;
-  interactionMode: string;
-  branch: string | null;
-  worktreePath: string | null;
-  updatedAt: string;
-  archivedAt?: string | null;
-  deletedAt?: string | null;
-  messages?: T3Message[];
-  latestTurn: { state: string; requestedAt: string; assistantMessageId: string | null } | null;
-  session: { status: string; lastError: string | null; activeTurnId: string | null } | null;
-}
+/**
+ * T3 0.1.9 起编排的 HTTP 写接口已移除，项目与任务会话全部走 T3 对外的 MCP 接口（`/mcp`）。
+ * 凭据由本机 t3 CLI 签发一次性配对码，再经 T3 的 MCP OAuth 换取；不读取或修改 T3 数据库。
+ */
+const MCP_PROTOCOL = "2025-06-18";
+const CLIENT_LABEL = "U-Brain TODO";
+const REDIRECT_URI = "http://127.0.0.1/u-brain-todo";
+/** 任务会话的权限沿用用户在 T3 的选择（可能是 full-access），凭据上限必须不低于它。 */
+const CLIENT_ACCESS = "full-access";
+const REFRESH_BEFORE_MS = 24 * 60 * 60 * 1000;
+/** 读尾部消息时覆盖的条目数；一轮里助手消息之间夹着工具调用等条目。 */
+const TAIL_ITEMS = 60;
 
-interface ShellSnapshot { projects: T3Project[]; threads: T3Thread[] }
 type RuntimeMode = "approval-required" | "auto-accept-edits" | "auto" | "full-access";
+const LIVE_STATUSES = new Set(["idle", "preparing", "queued", "starting", "running", "waiting"]);
+const STOPPED_STATUSES = new Set(["interrupted", "cancelled", "rolled_back"]);
+
+interface ModelSelection { instanceId: string; model: string; options?: unknown }
+interface T3Project { id: string; title: string; workspaceRoot: string; defaultModelSelection?: unknown; deletedAt?: string | null }
+interface T3ThreadSummary { threadId: string; title: string; providerInstanceId: string; model: string; runtimeMode: string }
+interface T3ThreadState {
+  threadId: string;
+  status: string;
+  activeRunId: string | null;
+  latestRunId: string | null;
+  pendingRequestCount: number;
+  archived: boolean;
+  worktreePath: string | null;
+  itemCount: number;
+}
+interface T3Item { position: number; type: string; runId: string | null; text: string | null; textTruncated: boolean }
+interface T3ThreadRead { thread: T3ThreadState; items: T3Item[] }
 
 export interface T3AutomationOptions {
   getUrl: () => Promise<string>;
-  /** 测试或自定义本机 T3 实例可注入；默认由本机 CLI 签发短期 token，仅留内存。 */
+  /** 测试或自定义本机 T3 实例可注入 MCP 访问令牌；默认经本机 t3 CLI 配对换取，仅留内存。 */
   getToken?: () => Promise<string>;
   fetch?: typeof fetch;
   env?: NodeJS.ProcessEnv;
   homeDir?: string;
-  /** 测试用，替代 t3 CLI。stdout 可能包含 token，调用方不得记录。 */
+  /** 测试用，替代 t3 CLI。stdout 可能包含配对码，调用方不得记录。 */
   runCli?: (args: string[]) => Promise<string>;
 }
 
 export class T3AutomationError extends Error {
-  constructor(readonly code: "AUTH_REQUIRED" | "UNAVAILABLE" | "INVALID_RESPONSE" | "INVALID_INPUT", message: string) {
+  constructor(readonly code: "AUTH_REQUIRED" | "UNAVAILABLE" | "INVALID_RESPONSE" | "INVALID_INPUT" | "NOT_FOUND", message: string) {
     super(message);
     this.name = "T3AutomationError";
   }
@@ -52,9 +63,12 @@ function object(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function text(value: unknown): value is string {
+  return typeof value === "string" && value !== "";
+}
+
 function model(value: unknown): value is ModelSelection {
-  return object(value) && typeof value.instanceId === "string" && value.instanceId !== "" &&
-    typeof value.model === "string" && value.model !== "";
+  return object(value) && text(value.instanceId) && text(value.model);
 }
 
 function runtimeMode(value: unknown): RuntimeMode | undefined {
@@ -62,121 +76,128 @@ function runtimeMode(value: unknown): RuntimeMode | undefined {
 }
 
 function isProject(value: unknown): value is T3Project {
-  return object(value) && typeof value.id === "string" && typeof value.title === "string" && typeof value.workspaceRoot === "string";
+  return object(value) && text(value.id) && typeof value.title === "string" && text(value.workspaceRoot);
 }
 
-function isThread(value: unknown): value is T3Thread {
-  return object(value) && typeof value.id === "string" && typeof value.projectId === "string" &&
-    typeof value.updatedAt === "string";
+function isThreadSummary(value: unknown): value is T3ThreadSummary {
+  return object(value) && text(value.threadId) && typeof value.title === "string" &&
+    typeof value.providerInstanceId === "string" && typeof value.model === "string" && typeof value.runtimeMode === "string";
+}
+
+function isThreadState(value: unknown): value is T3ThreadState {
+  return object(value) && text(value.threadId) && typeof value.status === "string" &&
+    (value.activeRunId === null || typeof value.activeRunId === "string") &&
+    (value.latestRunId === null || typeof value.latestRunId === "string") &&
+    typeof value.pendingRequestCount === "number" && typeof value.archived === "boolean" &&
+    (value.worktreePath === null || typeof value.worktreePath === "string") && typeof value.itemCount === "number";
+}
+
+function isItem(value: unknown): value is T3Item {
+  return object(value) && typeof value.position === "number" && typeof value.type === "string" &&
+    (value.runId === null || typeof value.runId === "string") && (value.text === null || typeof value.text === "string") &&
+    typeof value.textTruncated === "boolean";
+}
+
+function base64url(bytes: Buffer): string {
+  return bytes.toString("base64url");
 }
 
 /** 不将认证错误原文返回界面：上游错误和 CLI stdout 都可能含凭据。 */
 function invalidResponse(): never {
-  throw new T3AutomationError("INVALID_RESPONSE", "T3 接口返回格式不兼容，请检查 T3 版本。当前适配 T3 0.0.45。");
+  throw new T3AutomationError("INVALID_RESPONSE", "T3 接口返回格式不兼容，请检查 T3 版本。当前适配 T3 0.1.9。");
+}
+
+function unauthorized(): never {
+  throw new T3AutomationError("AUTH_REQUIRED", "T3 未授权。请确认该地址对应本机 t3 CLI 的服务；自定义 T3 实例需提供该实例的授权。");
 }
 
 export class T3Automation implements TaskAutomationPort {
   readonly #options: T3AutomationOptions;
-  #credential: { token: string; sessionId: string; expiresAt: number } | null = null;
+  #credential: { token: string; label: string; expiresAt: number } | null = null;
   #issuing: Promise<string> | null = null;
+  #staleCleaned = false;
+  #session: { url: string; token: string; id: string | null } | null = null;
+  #opening: Promise<string | null> | null = null;
+  #environments = new Map<string, string>();
+  #rpcId = 0;
 
   constructor(options: T3AutomationOptions) { this.#options = options; }
 
   async projects(): Promise<Array<{ id: string; name: string; cwd: string }>> {
-    const snapshot = await this.#shell();
-    return snapshot.projects.map((project) => ({ id: project.id, name: project.title, cwd: project.workspaceRoot }));
+    return (await this.#projects()).map((project) => ({ id: project.id, name: project.title, cwd: project.workspaceRoot }));
   }
 
   async start(input: Parameters<TaskAutomationPort["start"]>[0]): Promise<{ threadId: string; threadUrl: string }> {
-    if (!isAbsolute(input.cwd) || !input.threadId || input.prompt.trim() === "") {
-      throw new T3AutomationError("INVALID_INPUT", "任务必须有工作目录、T3 会话编号和任务说明。");
+    if (!isAbsolute(input.cwd) || !input.requestId || input.prompt.trim() === "") {
+      throw new T3AutomationError("INVALID_INPUT", "任务必须有工作目录、派发编号和任务说明。");
     }
     const url = await this.#url();
-    const snapshot = await this.#shell(url);
-    const project = snapshot.projects.find((item) => item.id === input.projectId);
+    const project = (await this.#projects()).find((item) => item.id === input.projectId);
     if (!project) throw new T3AutomationError("INVALID_INPUT", "T3 中已找不到这个项目，请重新选择项目。");
-    const existing = snapshot.threads.find((thread) => thread.id === input.threadId);
-    if (existing && (existing.projectId !== project.id || existing.worktreePath !== input.cwd || existing.branch !== input.branch)) {
-      throw new T3AutomationError("INVALID_INPUT", "任务会话与项目、分支或工作目录不一致，已停止派发。");
-    }
-    const selection = existing?.modelSelection ?? project.defaultModelSelection ?? snapshot.threads
-      .filter((thread) => thread.projectId === project.id && model(thread.modelSelection))
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]?.modelSelection;
-    if (!model(selection)) throw new T3AutomationError("INVALID_INPUT", "请先在 T3 中为这个项目选择模型或创建一次会话，再启动 TODO。");
-    // 沿用用户在 T3 已选择的权限；无历史配置时使用自动审批模式，不提升为 full-access。
-    const mode = runtimeMode(existing?.runtimeMode) ?? runtimeMode(snapshot.threads
-      .filter((thread) => thread.projectId === project.id && !thread.deletedAt && runtimeMode(thread.runtimeMode))
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]?.runtimeMode) ?? "auto";
-    const descriptor = await this.#request("GET", "/.well-known/t3/environment", undefined, url);
-    if (!object(descriptor) || typeof descriptor.environmentId !== "string") invalidResponse();
-    const result = { threadId: input.threadId, threadUrl: new URL(`${encodeURIComponent(descriptor.environmentId)}/${encodeURIComponent(input.threadId)}`, url).toString() };
-    const messageId = `u-brain-todo-message-${input.threadId}`;
-    if (existing && (await this.#thread(input.threadId)).messages?.some((message) => message.id === messageId)) return result;
 
-    const createdAt = new Date().toISOString();
-    // 稳定 commandId/messageId + 原子 bootstrap：重试不会另建 thread 或重复开始同一个任务。
-    await this.#request("POST", "/api/orchestration/dispatch", {
-      type: "thread.turn.start",
-      commandId: `u-brain-todo-start-${input.threadId}`,
-      threadId: input.threadId,
-      message: { messageId, role: "user", text: input.prompt, attachments: [] },
-      modelSelection: selection,
-      runtimeMode: mode,
-      interactionMode: "default",
-      createdAt,
-      ...(!existing ? { bootstrap: { createThread: {
-        projectId: project.id, title: input.title, modelSelection: selection,
-        runtimeMode: mode, interactionMode: "default", branch: input.branch,
-        worktreePath: input.cwd, createdAt,
-      } } } : {}),
-    }, url);
-    return result;
+    // T3 只在同一个 MCP 凭据内按 clientRequestId 去重，daemon 重启后凭据会换新；
+    // 先按标题和任务工作树找回已建的会话，避免重复派发。
+    const recovered = await this.#launched(project.id, input.title, input.cwd);
+    if (recovered) return { threadId: recovered, threadUrl: await this.#threadUrl(url, recovered) };
+
+    const history = await this.#threads(project.id);
+    const latest = history.find((thread) => text(thread.providerInstanceId) && text(thread.model));
+    const selection = model(project.defaultModelSelection) ? project.defaultModelSelection
+      : latest ? { instanceId: latest.providerInstanceId, model: latest.model } : undefined;
+    if (!selection) throw new T3AutomationError("INVALID_INPUT", "请先在 T3 中为这个项目选择模型或创建一次会话，再启动 TODO。");
+    // 沿用用户在 T3 已选择的权限；无历史配置时使用自动审批模式，不提升为 full-access。
+    const mode = runtimeMode(history.find((thread) => runtimeMode(thread.runtimeMode))?.runtimeMode) ?? "auto";
+
+    const launched = await this.#call("t3_thread_launch", {
+      projectId: project.id, title: input.title, message: input.prompt,
+      modelSelection: selection, runtimeMode: mode, interactionMode: "default",
+      workspaceStrategy: { type: "existing_worktree", worktreePath: input.cwd, branch: input.branch },
+      clientRequestId: `u-brain-todo-start-${input.requestId}`,
+    }, 60_000);
+    if (!object(launched) || !text(launched.threadId)) invalidResponse();
+    return { threadId: launched.threadId, threadUrl: await this.#threadUrl(url, launched.threadId) };
   }
 
   async followup(threadId: string, prompt: string, commandId: string): Promise<void> {
     if (prompt.trim() === "") throw new T3AutomationError("INVALID_INPUT", "请填写返工说明。");
-    const thread = await this.#thread(threadId);
-    const messageId = `u-brain-todo-feedback-${commandId}`;
-    // 未知投递结果用相同消息 ID 重试；消息已持久化即不再发第二次。
-    if (thread.messages?.some((message) => message.id === messageId)) return;
-    if (thread.latestTurn?.state === "running" || thread.session?.activeTurnId) {
+    const { thread } = await this.#read(threadId, { limit: 1, runLimit: 1 });
+    const failed = thread.status === "failed" || STOPPED_STATUSES.has(thread.status);
+    // 凭据换新后同一 clientRequestId 不再去重：最后一条用户消息已是这条说明且没有失败，说明已投递过。
+    const lastUser = (await this.#tail(thread)).filter((item) => item.type === "user_message").at(-1);
+    if (!failed && lastUser && !lastUser.textTruncated && lastUser.text === prompt) return;
+    if (thread.activeRunId || (LIVE_STATUSES.has(thread.status) && thread.status !== "idle") || thread.pendingRequestCount > 0) {
       throw new T3AutomationError("INVALID_INPUT", "T3 会话仍在执行，请等待当前任务结束后再提交返工。");
     }
-    await this.#request("POST", "/api/orchestration/dispatch", {
-      type: "thread.turn.start", commandId, threadId,
-      message: { messageId, role: "user", text: prompt, attachments: [] },
-      runtimeMode: runtimeMode(thread.runtimeMode) ?? "auto", interactionMode: "default", createdAt: new Date().toISOString(),
-    });
+    await this.#call("t3_thread_send", { threadId, message: prompt, mode: "queue", clientRequestId: `u-brain-todo-feedback-${commandId}` });
   }
 
   async inspect(threadId: string): Promise<Awaited<ReturnType<TaskAutomationPort["inspect"]>>> {
-    const thread = await this.#thread(threadId);
-    const messages = thread.messages ?? [];
-    const latestUser = messages.filter((message) => message.role === "user").at(-1);
-    const turn = thread.latestTurn;
-    const assistant = messages.find((message) => message.id === turn?.assistantMessageId);
-    const summary = (assistant?.text ?? messages.filter((message) => message.role === "assistant").at(-1)?.text ?? "").slice(0, 32_000);
-    if (thread.deletedAt || thread.archivedAt) return { state: "failed", summary, error: "T3 会话已删除或归档，请人工检查。" };
-    // 新消息已写入但新 turn 尚未投影时，不能把上一轮 completed 当作返工完成。
-    if (latestUser && (!turn || latestUser.createdAt > turn.requestedAt)) return { state: "running", summary };
-    if (turn?.state === "error" || thread.session?.status === "error") {
-      return { state: "failed", summary, error: "T3 任务执行失败，请在 T3 中检查。" };
+    let thread: T3ThreadState;
+    try { thread = (await this.#read(threadId, { limit: 1, runLimit: 1 })).thread; }
+    catch (error) {
+      if (error instanceof T3AutomationError && error.code === "NOT_FOUND") return { state: "failed", summary: "", error: "T3 会话已删除或归档，请人工检查。" };
+      throw error;
     }
-    if (turn?.state === "interrupted" || thread.session?.status === "interrupted" || thread.session?.status === "stopped") {
-      return { state: "failed", summary, error: "T3 任务已中断，请在 T3 中检查后重试。" };
-    }
-    if (turn?.state === "completed" && assistant?.role === "assistant" && !assistant.streaming &&
-      (!latestUser || assistant.createdAt >= latestUser.createdAt) && !thread.session?.activeTurnId) {
-      return { state: "ready", summary };
-    }
-    return { state: "running", summary };
+    if (thread.archived) return { state: "failed", summary: "", error: "T3 会话已删除或归档，请人工检查。" };
+    if (thread.status === "failed") return { state: "failed", summary: "", error: "T3 任务执行失败，请在 T3 中检查。" };
+    if (STOPPED_STATUSES.has(thread.status)) return { state: "failed", summary: "", error: "T3 任务已中断，请在 T3 中检查后重试。" };
+    if (thread.status !== "completed" || thread.activeRunId || thread.pendingRequestCount > 0) return { state: "running", summary: "" };
+
+    const tail = await this.#tail(thread);
+    const lastUser = tail.filter((item) => item.type === "user_message").at(-1);
+    const answers = tail.filter((item) => item.type === "assistant_message" && item.runId === thread.latestRunId);
+    const answer = answers.at(-1);
+    // 新消息已写入但新一轮尚未投影时，不能把上一轮 completed 当作返工完成。
+    if (!answer || (lastUser && lastUser.position > answer.position)) return { state: "running", summary: "" };
+    return { state: "ready", summary: (answer.text ?? "").slice(0, 32_000) };
   }
 
-  /** daemon 退出时撤销由此适配器签发的会话；外部注入凭据不动。 */
+  /** daemon 退出时撤销由此适配器签发的凭据；外部注入凭据不动。 */
   async close(): Promise<void> {
     const credential = this.#credential;
     this.#credential = null;
-    if (credential) await this.#runCli(["auth", "session", "revoke", credential.sessionId]).catch(() => undefined);
+    this.#session = null;
+    if (credential) await this.#revoke((label) => label === credential.label).catch(() => undefined);
   }
 
   async #url(): Promise<string> {
@@ -185,65 +206,232 @@ export class T3Automation implements TaskAutomationPort {
     return url;
   }
 
-  async #shell(url?: string): Promise<ShellSnapshot> {
-    const value = await this.#request("GET", "/api/orchestration/shell", undefined, url);
-    if (!object(value) || !Array.isArray(value.projects) || !value.projects.every(isProject) ||
-      !Array.isArray(value.threads) || !value.threads.every(isThread)) invalidResponse();
-    return value as unknown as ShellSnapshot;
+  async #projects(): Promise<T3Project[]> {
+    const projects: T3Project[] = [];
+    let cursor = 0;
+    for (let page = 0; page < 50; page++) {
+      const value = await this.#call("t3_project_list", { limit: 100, ...(cursor > 0 ? { cursor } : {}) });
+      if (!object(value) || !Array.isArray(value.projects) || !value.projects.every(isProject) ||
+        !(value.nextCursor === null || value.nextCursor === undefined || typeof value.nextCursor === "number")) invalidResponse();
+      projects.push(...value.projects.filter((project) => !project.deletedAt));
+      if (typeof value.nextCursor !== "number") return projects;
+      if (value.nextCursor <= cursor) invalidResponse();
+      cursor = value.nextCursor;
+    }
+    return projects;
   }
 
-  async #thread(threadId: string): Promise<T3Thread> {
-    const value = await this.#request("GET", `/api/orchestration/threads/${encodeURIComponent(threadId)}?turnLimit=1`);
-    if (!object(value) || !isThread(value.thread) || value.thread.id !== threadId || !Array.isArray(value.thread.messages)) invalidResponse();
-    const thread = value.thread;
-    if (!thread.messages?.every((message) => object(message) && typeof message.id === "string" &&
-      typeof message.role === "string" && typeof message.text === "string" && typeof message.createdAt === "string" && typeof message.streaming === "boolean")) invalidResponse();
-    if (thread.latestTurn !== null && (!object(thread.latestTurn) || typeof thread.latestTurn.state !== "string" ||
-      typeof thread.latestTurn.requestedAt !== "string" || !(thread.latestTurn.assistantMessageId === null || typeof thread.latestTurn.assistantMessageId === "string"))) invalidResponse();
-    if (thread.session !== null && (!object(thread.session) || typeof thread.session.status !== "string" ||
-      !(thread.session.activeTurnId === null || typeof thread.session.activeTurnId === "string"))) invalidResponse();
-    return thread;
+  /** 项目最近的会话，新的在前；只取模型与权限，不读会话内容。 */
+  async #threads(projectId: string, titleContains?: string): Promise<T3ThreadSummary[]> {
+    const value = await this.#call("t3_thread_list", { projectId, limit: 20, ...(titleContains ? { titleContains } : {}) });
+    if (!object(value) || !Array.isArray(value.threads) || !value.threads.every(isThreadSummary)) invalidResponse();
+    return value.threads;
   }
 
-  async #request(method: "GET" | "POST", path: string, body?: unknown, baseUrl?: string): Promise<unknown> {
-    const url = baseUrl ?? await this.#url();
-    const token = await this.#token();
-    let response: Response;
+  async #launched(projectId: string, title: string, cwd: string): Promise<string | null> {
+    for (const candidate of (await this.#threads(projectId, title)).filter((thread) => thread.title === title)) {
+      const { thread } = await this.#read(candidate.threadId, { limit: 1, runLimit: 1 });
+      if (!thread.archived && thread.worktreePath === cwd) return thread.threadId;
+    }
+    return null;
+  }
+
+  async #read(threadId: string, extra: Record<string, unknown>): Promise<T3ThreadRead> {
+    const value = await this.#call("t3_thread_read", { threadId, view: "messages", maxCharsPerItem: 32_000, ...extra });
+    if (!object(value) || !isThreadState(value.thread) || value.thread.threadId !== threadId ||
+      !Array.isArray(value.items) || !value.items.every(isItem)) invalidResponse();
+    return value as unknown as T3ThreadRead;
+  }
+
+  /** 会话末尾的用户与助手消息，按位置升序。 */
+  async #tail(thread: T3ThreadState): Promise<T3Item[]> {
+    const after = thread.itemCount - TAIL_ITEMS;
+    const { items } = await this.#read(thread.threadId, { limit: 100, runLimit: 1, ...(after > 0 ? { afterPosition: after } : {}) });
+    return [...items].sort((a, b) => a.position - b.position);
+  }
+
+  async #threadUrl(url: string, threadId: string): Promise<string> {
+    let environmentId = this.#environments.get(url);
+    if (!environmentId) {
+      const descriptor = await this.#json(await this.#fetch(new URL("/.well-known/t3/environment", url), { method: "GET" }));
+      if (!object(descriptor) || !text(descriptor.environmentId)) invalidResponse();
+      environmentId = descriptor.environmentId;
+      this.#environments.set(url, environmentId);
+    }
+    return new URL(`${encodeURIComponent(environmentId)}/${encodeURIComponent(threadId)}`, url).toString();
+  }
+
+  /** 调用一个 T3 MCP 工具，返回其结构化结果。凭据失效或 MCP 会话过期时各重建一次。 */
+  async #call(name: string, args: Record<string, unknown>, timeoutMs = 20_000): Promise<unknown> {
+    const url = await this.#url();
+    for (let attempt = 0; ; attempt++) {
+      const token = await this.#token(url);
+      const sessionId = await this.#open(url, token);
+      const id = ++this.#rpcId;
+      const response = await this.#post(url, token, sessionId, { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } }, timeoutMs);
+      if (attempt === 0 && response.status === 401 && !this.#options.getToken) {
+        this.#credential = null;
+        this.#session = null;
+        continue;
+      }
+      if (attempt === 0 && response.status === 404 && sessionId !== null) {
+        this.#session = null;
+        continue;
+      }
+      const result = await this.#rpcResult(response, id);
+      if (!object(result)) invalidResponse();
+      if (result.isError === true) throw this.#toolError(result);
+      if (result.structuredContent !== undefined) return result.structuredContent;
+      const first = Array.isArray(result.content) ? result.content[0] : undefined;
+      if (!object(first) || typeof first.text !== "string") invalidResponse();
+      try { return JSON.parse(first.text); } catch { invalidResponse(); }
+    }
+  }
+
+  #toolError(result: Record<string, unknown>): T3AutomationError {
+    const first = Array.isArray(result.content) ? result.content[0] : undefined;
+    let failure: unknown;
+    try { failure = object(first) && typeof first.text === "string" ? JSON.parse(first.text) : undefined; } catch { failure = undefined; }
+    if (object(failure) && failure.code === "thread_not_found") return new T3AutomationError("NOT_FOUND", "T3 会话不存在或已删除。");
+    const detail = object(failure) && typeof failure.message === "string" ? failure.message.slice(0, 500) : "未知原因";
+    return new T3AutomationError("UNAVAILABLE", `T3 拒绝了请求：${detail}`);
+  }
+
+  async #open(url: string, token: string): Promise<string | null> {
+    if (this.#session && this.#session.url === url && this.#session.token === token) return this.#session.id;
+    if (this.#opening) return this.#opening;
+    this.#opening = (async () => {
+      const id = ++this.#rpcId;
+      const response = await this.#post(url, token, null, {
+        jsonrpc: "2.0", id, method: "initialize",
+        params: { protocolVersion: MCP_PROTOCOL, capabilities: {}, clientInfo: { name: "u-brain-todo", version: "1" } },
+      }, 20_000);
+      const sessionId = response.headers.get("mcp-session-id");
+      await this.#rpcResult(response, id);
+      const ack = await this.#post(url, token, sessionId, { jsonrpc: "2.0", method: "notifications/initialized" }, 20_000);
+      if (ack.status === 401 || ack.status === 403) unauthorized();
+      if (!ack.ok) throw new T3AutomationError("UNAVAILABLE", `T3 接口请求失败（HTTP ${ack.status}），请在 T3 中检查任务状态。`);
+      await ack.body?.cancel();
+      this.#session = { url, token, id: sessionId };
+      return sessionId;
+    })();
+    try { return await this.#opening; } finally { this.#opening = null; }
+  }
+
+  async #post(url: string, token: string, sessionId: string | null, body: unknown, timeoutMs: number): Promise<Response> {
+    return this.#fetch(new URL("/mcp", url), {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`, accept: "application/json, text/event-stream", "content-type": "application/json",
+        "mcp-protocol-version": MCP_PROTOCOL, ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+      },
+      body: JSON.stringify(body),
+    }, timeoutMs);
+  }
+
+  async #fetch(url: URL, init: RequestInit, timeoutMs = 20_000): Promise<Response> {
     try {
-      response = await (this.#options.fetch ?? fetch)(new URL(path, url), {
-        method, redirect: "error", credentials: "omit", signal: AbortSignal.timeout(20_000),
-        headers: { authorization: `Bearer ${token}`, accept: "application/json", ...(body === undefined ? {} : { "content-type": "application/json" }) },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      });
+      return await (this.#options.fetch ?? fetch)(url, { ...init, redirect: "error", credentials: "omit", signal: AbortSignal.timeout(timeoutMs) });
     } catch {
-      throw new T3AutomationError("UNAVAILABLE", "无法连接 T3 或请求超时；任务会话编号已保留，请先在 T3 中确认派发结果。");
+      throw new T3AutomationError("UNAVAILABLE", "无法连接 T3 或请求超时；任务派发编号已保留，请先在 T3 中确认派发结果。");
     }
-    if (response.status === 401 || response.status === 403) {
-      throw new T3AutomationError("AUTH_REQUIRED", "T3 未授权。请确认该地址对应本机 t3 CLI 的服务；自定义 T3 实例需提供该实例的授权。");
-    }
+  }
+
+  async #json(response: Response): Promise<unknown> {
+    if (response.status === 401 || response.status === 403) unauthorized();
     if (!response.ok) throw new T3AutomationError("UNAVAILABLE", `T3 接口请求失败（HTTP ${response.status}），请在 T3 中检查任务状态。`);
     try { return await response.json(); } catch { invalidResponse(); }
   }
 
-  async #token(): Promise<string> {
+  /** MCP 可以按 JSON 或 SSE 回复；只取与请求 id 对应的那条消息。 */
+  async #rpcResult(response: Response, id: number): Promise<unknown> {
+    if (response.status === 401 || response.status === 403) unauthorized();
+    if (!response.ok) throw new T3AutomationError("UNAVAILABLE", `T3 接口请求失败（HTTP ${response.status}），请在 T3 中检查任务状态。`);
+    let messages: unknown[];
+    try {
+      if ((response.headers.get("content-type") ?? "").includes("text/event-stream")) {
+        messages = (await response.text()).split(/\r?\n/u).filter((line) => line.startsWith("data:"))
+          .map((line) => JSON.parse(line.slice(5)) as unknown);
+      } else {
+        const value = await response.json() as unknown;
+        messages = Array.isArray(value) ? value : [value];
+      }
+    } catch { invalidResponse(); }
+    const message = messages.find((item) => object(item) && item.id === id);
+    if (!object(message)) invalidResponse();
+    if (object(message.error)) throw new T3AutomationError("UNAVAILABLE", `T3 接口调用失败（${typeof message.error.code === "number" ? message.error.code : "未知"}），请检查 T3 版本。`);
+    return message.result;
+  }
+
+  async #token(url: string): Promise<string> {
     if (this.#options.getToken) return this.#options.getToken();
-    if (this.#credential && this.#credential.expiresAt > Date.now() + 60_000) return this.#credential.token;
+    if (this.#credential && this.#credential.expiresAt > Date.now() + REFRESH_BEFORE_MS) return this.#credential.token;
     if (this.#issuing) return this.#issuing;
-    this.#issuing = this.#issueToken();
+    this.#issuing = this.#issueToken(url);
     try { return await this.#issuing; } finally { this.#issuing = null; }
   }
 
-  async #issueToken(): Promise<string> {
-    let value: unknown;
-    try { value = JSON.parse(await this.#runCli(["auth", "session", "issue", "--ttl", "1h", "--label", "U-Brain TODO", "--json"])); }
-    catch { throw new T3AutomationError("AUTH_REQUIRED", "无法通过本机 t3 CLI 为 TODO 授权。请先启动 T3，并确认 t3 auth session issue 可用。"); }
-    if (!object(value) || typeof value.token !== "string" || !value.token || typeof value.sessionId !== "string" || typeof value.expiresAt !== "string") invalidResponse();
-    const expiresAt = Date.parse(value.expiresAt);
-    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) invalidResponse();
+  /** 配对码 → 注册 MCP 客户端 → 用配对码批准 → 换取访问令牌（PKCE）。 */
+  async #issueToken(url: string): Promise<string> {
+    if (!this.#staleCleaned) {
+      // 上次 daemon 异常退出时留下的凭据不再使用，先撤销。
+      this.#staleCleaned = true;
+      await this.#revoke((label) => label === CLIENT_LABEL || label.startsWith(`${CLIENT_LABEL} `)).catch(() => undefined);
+    }
+    const label = `${CLIENT_LABEL} ${randomBytes(4).toString("hex")}`;
+    let code: unknown;
+    try { code = (JSON.parse(await this.#runCli(["auth", "pairing", "create", "--ttl", "5m", "--label", label, "--json"])) as Record<string, unknown>).credential; }
+    catch { throw new T3AutomationError("AUTH_REQUIRED", "无法通过本机 t3 CLI 为 TODO 授权。请先启动 T3，并确认 t3 auth pairing create 可用。"); }
+    if (!text(code)) invalidResponse();
+
+    const resource = new URL("/mcp", url).toString();
+    const registered = await this.#json(await this.#fetch(new URL("/oauth/mcp/register", url), {
+      method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ client_name: label, redirect_uris: [REDIRECT_URI], token_endpoint_auth_method: "none" }),
+    }));
+    if (!object(registered) || !text(registered.client_id)) invalidResponse();
+
+    const verifier = base64url(randomBytes(32));
+    const state = base64url(randomBytes(16));
+    const decided = await this.#json(await this.#fetch(new URL("/oauth/mcp/decision", url), {
+      method: "POST", headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({
+        authorization: {
+          response_type: "code", client_id: registered.client_id, redirect_uri: REDIRECT_URI, resource, state,
+          code_challenge: base64url(createHash("sha256").update(verifier).digest()), code_challenge_method: "S256",
+        },
+        decision: { _tag: "pairing-code", access: CLIENT_ACCESS, code },
+      }),
+    }));
+    if (!object(decided) || !text(decided.redirectTo)) invalidResponse();
+    const redirect = URL.parse(decided.redirectTo);
+    const authorization = redirect?.searchParams.get("code");
+    if (!authorization || redirect?.searchParams.get("state") !== state) unauthorized();
+
+    const issued = await this.#json(await this.#fetch(new URL("/oauth/mcp/token", url), {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code", code: authorization, redirect_uri: REDIRECT_URI,
+        client_id: registered.client_id, code_verifier: verifier, resource,
+      }).toString(),
+    }));
+    if (!object(issued) || !text(issued.access_token) || typeof issued.expires_in !== "number" || issued.expires_in <= 0) invalidResponse();
     const previous = this.#credential;
-    this.#credential = { token: value.token, sessionId: value.sessionId, expiresAt };
-    if (previous) await this.#runCli(["auth", "session", "revoke", previous.sessionId]).catch(() => undefined);
-    return value.token;
+    this.#credential = { token: issued.access_token, label, expiresAt: Date.now() + issued.expires_in * 1000 };
+    this.#session = null;
+    if (previous) await this.#revoke((value) => value === previous.label).catch(() => undefined);
+    return issued.access_token;
+  }
+
+  /** 按标签撤销本适配器签发过的 T3 会话；输出不含令牌。 */
+  async #revoke(match: (label: string) => boolean): Promise<void> {
+    const value = JSON.parse(await this.#runCli(["auth", "session", "list", "--json"])) as unknown;
+    const sessions = Array.isArray(value) ? value : object(value) && Array.isArray(value.sessions) ? value.sessions : [];
+    for (const session of sessions) {
+      if (!object(session) || !text(session.sessionId)) continue;
+      const label = object(session.client) && typeof session.client.label === "string" ? session.client.label : "";
+      if (match(label)) await this.#runCli(["auth", "session", "revoke", session.sessionId]).catch(() => undefined);
+    }
   }
 
   async #runCli(args: string[]): Promise<string> {
@@ -265,7 +453,7 @@ export class T3Automation implements TaskAutomationPort {
       const timeout = setTimeout(() => { child.kill("SIGTERM"); reject(new Error("T3 CLI timed out")); }, 15_000);
       child.stdout.setEncoding("utf8").on("data", (chunk: string) => {
         stdout += chunk;
-        if (stdout.length > 65_536) { child.kill("SIGTERM"); reject(new Error("T3 CLI output limit")); }
+        if (stdout.length > 1_048_576) { child.kill("SIGTERM"); reject(new Error("T3 CLI output limit")); }
       });
       child.once("error", () => { clearTimeout(timeout); reject(new Error("T3 CLI failed")); });
       child.once("close", (code) => { clearTimeout(timeout); if (code === 0) resolve(stdout); else reject(new Error("T3 CLI failed")); });

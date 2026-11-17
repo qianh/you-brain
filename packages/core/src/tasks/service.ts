@@ -223,17 +223,21 @@ export class TaskService implements TaskHttpPort {
     if (!task.run) {
       const prepared = await this.options.git.prepare(project, task.id);
       task.run = {
-        ...prepared, projectCwd: project.cwd, threadId: randomUUID(), threadUrl: null,
+        ...prepared, projectCwd: project.cwd, requestId: randomUUID(), threadId: null, threadUrl: null,
         reviewSha: null, summary: "", error: null,
       };
       await this.#save(task);
     }
     if (this.#stopped) return;
+    // 旧记录在派发前就存了自定的会话编号，沿用它作派发编号。
+    const requestId = task.run.requestId ?? task.run.threadId;
+    if (!requestId) throw new Error("任务缺少派发编号，请人工检查。");
     const started = await this.options.automation.start({
       projectId: project.id, title: task.title, prompt: this.#taskPrompt(task),
-      cwd: task.run.worktreePath, branch: task.run.branch, threadId: task.run.threadId!,
+      cwd: task.run.worktreePath, branch: task.run.branch, requestId,
     });
-    if (started.threadId !== task.run.threadId) throw new Error("T3 返回的会话与已保存的任务会话不一致。");
+    task.run.requestId = requestId;
+    task.run.threadId = started.threadId;
     task.run.threadUrl = started.threadUrl;
     task.run.error = null;
     task.status = "running";

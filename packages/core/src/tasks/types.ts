@@ -15,6 +15,8 @@ export interface TaskRun {
   branch: string;
   worktreePath: string;
   baseSha: string;
+  /** 派发编号：T3 用它对同一次派发去重。会话编号由 T3 分配，派发成功后才写入 threadId。 */
+  requestId?: string | undefined;
   threadId: string | null;
   threadUrl: string | null;
   reviewSha: string | null;
@@ -90,7 +92,7 @@ export interface TaskGitPort {
 
 export interface TaskAutomationPort {
   projects(): Promise<Array<Omit<TaskProject, "enabled">>>;
-  start(input: { projectId: string; title: string; prompt: string; cwd: string; branch: string; threadId: string }): Promise<{ threadId: string; threadUrl: string }>;
+  start(input: { projectId: string; title: string; prompt: string; cwd: string; branch: string; requestId: string }): Promise<{ threadId: string; threadUrl: string }>;
   inspect(threadId: string): Promise<{ state: "running" | "ready" | "failed"; summary: string; error?: string }>;
   followup(threadId: string, prompt: string, commandId: string): Promise<void>;
 }

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "bun:test";
 
-import { DESKTOP_PRODUCT_NAME } from "../../src/native/layout.js";
+import { DESKTOP_PRODUCT_NAME, SERVER_LIB_NAME } from "../../src/native/layout.js";
 import { exportTarget, resolveVendorEntry, vendorNodeModulesDir } from "../../src/native/resolver.js";
 
 describe("vendor package entry", () => {
@@ -86,7 +86,8 @@ describe("vendor directory", () => {
     );
     const config = JSON.parse(readFileSync(configPath, "utf8")) as { productName: string };
     expect(DESKTOP_PRODUCT_NAME).toBe(config.productName);
-    expect(DESKTOP_PRODUCT_NAME).toBe("you-brain");
+    // 服务器包沿用改名前的目录（scripts/build-server.ts）。
+    expect(SERVER_LIB_NAME).toBe("you-brain");
   });
 
   it("finds Linux usr/lib/<productName>/vendor/node_modules", async () => {

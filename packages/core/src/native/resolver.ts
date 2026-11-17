@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import Module, { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 
-import { linuxBundlePath } from "./layout.js";
+import { linuxBundlePaths } from "./layout.js";
 
 interface PackageJson {
   main?: string;
@@ -138,9 +138,7 @@ export function vendorNodeModulesDir(execPath = process.execPath): string | null
   if (existsSync(sibling)) return sibling;
   const resources = resolve(execDir, "..", "Resources", "vendor", "node_modules");
   if (existsSync(resources)) return resources;
-  const linux = linuxBundlePath(execDir, "vendor", "node_modules");
-  if (existsSync(linux)) return linux;
-  return null;
+  return linuxBundlePaths(execDir, "vendor", "node_modules").find((linux) => existsSync(linux)) ?? null;
 }
 
 export function usesVendorModules(execPath = process.execPath): boolean {

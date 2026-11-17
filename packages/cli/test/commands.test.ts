@@ -240,5 +240,7 @@ async function emptyEnv(): Promise<NodeJS.ProcessEnv & {
     ...process.env,
     YOU_BRAIN_DATA_DIR: dataDir,
     YOU_BRAIN_HOME: homeDir,
+    // 不读本机钥匙串：存过的 Notion 令牌会让 daemon 真去同步。
+    YOU_BRAIN_SECRETS_FILE: join(root, "secrets.json"),
   };
 }

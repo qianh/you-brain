@@ -2,7 +2,7 @@ import { stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { linuxBundlePath } from "../native/layout.js";
+import { linuxBundlePaths } from "../native/layout.js";
 
 export interface WebDirInput {
   env: NodeJS.ProcessEnv;
@@ -50,8 +50,10 @@ export async function resolveWebDir(input: WebDirInput): Promise<string | null> 
   if (sibling) return sibling;
   const resources = await directory(resolve(execDir, "..", "Resources", "web"));
   if (resources) return resources;
-  const linux = await directory(linuxBundlePath(execDir, "web"));
-  if (linux) return linux;
+  for (const candidate of linuxBundlePaths(execDir, "web")) {
+    const linux = await directory(candidate);
+    if (linux) return linux;
+  }
   let moduleDir = execDir;
   try {
     moduleDir = dirname(fileURLToPath(input.moduleUrl));

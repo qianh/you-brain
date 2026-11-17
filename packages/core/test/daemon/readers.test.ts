@@ -102,7 +102,7 @@ describe("daemon readers", () => {
       signals: false,
     });
     daemons.push(daemon);
-    const script = `<script>window.__YOU_BRAIN__=${JSON.stringify({ token: daemon.token })}</script>`;
+    const script = `<script>window.__YOU_BRAIN__=${JSON.stringify({ token: daemon.token, prefs: {} })}</script>`;
     for (const path of ["/", "/panel"]) {
       const response = await fetch(`${daemon.baseUrl}${path}`);
       expect(response.status).toBe(200);

@@ -96,4 +96,15 @@ describe("resolveWebDir", () => {
     await mkdir(macLinux, { recursive: true });
     expect(await resolveWebDir(input(root, {}, macExec))).toBe(macWeb);
   });
+
+  it("finds the renamed Linux desktop directory before the server package directory", async () => {
+    const root = await tempRoot();
+    const execPath = join(root, "usr", "bin", "you-brain");
+    const desktop = join(root, "usr", "lib", "U-Brain", "web");
+    const server = join(root, "usr", "lib", "you-brain", "web");
+    await mkdir(server, { recursive: true });
+    expect(await resolveWebDir(input(root, {}, execPath))).toBe(server);
+    await mkdir(desktop, { recursive: true });
+    expect(await resolveWebDir(input(root, {}, execPath))).toBe(desktop);
+  });
 });

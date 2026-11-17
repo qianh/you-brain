@@ -1,153 +1,134 @@
 import { describe, expect, test } from "bun:test";
 
 import { T3Automation } from "../../src/deck/t3/automation.js";
+import { fakeT3, fakeThread, type FakeProject, type FakeThread } from "./t3-mcp-fake.js";
 
 const baseUrl = "http://127.0.0.1:3773/";
 const selection = { instanceId: "codex", model: "configured-model" };
-const project = { id: "project-1", title: "Project", workspaceRoot: "/repo", defaultModelSelection: null };
-const timestamp = "2026-11-16T00:00:00.000Z";
-const later = "2026-11-16T00:01:00.000Z";
-const message = { id: "assistant-1", role: "assistant", text: "Implemented and tested.", streaming: false, createdAt: timestamp };
+const project: FakeProject = { id: "project-1", title: "Project", workspaceRoot: "/repo", defaultModelSelection: null };
+const startInput = { projectId: project.id, title: "Implement", prompt: "Do the task", cwd: "/worktrees/new", branch: "todo/new", requestId: "req-1" };
 
-function thread(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  return {
-    id: "task-thread", projectId: project.id, modelSelection: selection, runtimeMode: "approval-required",
-    interactionMode: "default", branch: "todo/task", worktreePath: "/worktrees/task", updatedAt: timestamp,
-    latestTurn: { state: "completed", requestedAt: timestamp, assistantMessageId: message.id },
-    session: { status: "ready", activeTurnId: null, lastError: null }, messages: [message], ...overrides,
-  };
+function harness(input: { projects?: FakeProject[]; threads?: FakeThread[] } = {}) {
+  const t3 = fakeT3({ projects: input.projects ?? [project], threads: input.threads ?? [] });
+  const client = new T3Automation({ getUrl: async () => baseUrl, getToken: async () => t3.token, fetch: t3.fetch });
+  const launches = () => t3.calls.filter((call) => call.name === "t3_thread_launch");
+  const sends = () => t3.calls.filter((call) => call.name === "t3_thread_send");
+  return { client, t3, launches, sends };
 }
 
-function harness(input: { shell?: unknown; detail?: unknown; status?: number } = {}) {
-  const requests: Array<{ method: string; path: string; body: unknown }> = [];
-  const client = new T3Automation({
-    getUrl: async () => baseUrl,
-    getToken: async () => "synthetic-token",
-    fetch: (async (value: string | URL | Request, init?: RequestInit) => {
-      const url = new URL(String(value));
-      requests.push({ method: init?.method ?? "GET", path: url.pathname, body: init?.body ? JSON.parse(String(init.body)) : null });
-      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer synthetic-token");
-      expect(init?.redirect).toBe("error");
-      if (input.status) return Response.json({ token: "sensitive-response-must-not-escape" }, { status: input.status });
-      if (url.pathname === "/api/orchestration/shell") return Response.json(input.shell ?? { projects: [project], threads: [thread({ id: "historical-thread" })] });
-      if (url.pathname === "/.well-known/t3/environment") return Response.json({ environmentId: "local-env" });
-      if (url.pathname.startsWith("/api/orchestration/threads/")) return Response.json(input.detail ?? { thread: thread() });
-      if (url.pathname === "/api/orchestration/dispatch") return Response.json({ sequence: 42 });
-      throw new Error("Unexpected route");
-    }) as typeof fetch,
-  });
-  return { client, requests };
-}
-
-describe("T3 TODO automation HTTP adapter", () => {
-  test("loads projects from the authenticated shell without reading T3 storage", async () => {
-    const { client, requests } = harness();
+describe("T3 TODO automation MCP adapter", () => {
+  test("loads projects through one MCP session without reading T3 storage", async () => {
+    const { client, t3 } = harness({ projects: [project, { ...project, id: "gone", deletedAt: "2026-11-16T00:00:00.000Z" }] });
     expect(await client.projects()).toEqual([{ id: project.id, name: project.title, cwd: "/repo" }]);
-    expect(requests).toHaveLength(1);
+    await client.projects();
+    expect(t3.state.initializes).toBe(1);
   });
 
-  test("starts with one bootstrap command and stable thread, command and message identifiers", async () => {
-    const { client, requests } = harness();
-    const input = { projectId: project.id, title: "Implement", prompt: "Do the task", cwd: "/worktrees/task", branch: "todo/task", threadId: "new-task" };
-    expect(await client.start(input)).toEqual({ threadId: "new-task", threadUrl: `${baseUrl}local-env/new-task` });
-    const writes = requests.filter((request) => request.method === "POST");
-    expect(writes).toHaveLength(1);
-    const body = writes[0]?.body as Record<string, unknown>;
-    expect(body.type).toBe("thread.turn.start");
-    expect(body.commandId).toBe("u-brain-todo-start-new-task");
-    expect(body.runtimeMode).toBe("approval-required");
-    expect(body.modelSelection).toEqual(selection);
-    expect(body.bootstrap).toMatchObject({ createThread: { projectId: project.id, worktreePath: input.cwd, branch: input.branch } });
-    expect(body.message).toEqual({ messageId: "u-brain-todo-message-new-task", role: "user", text: input.prompt, attachments: [] });
+  test("reopens an expired MCP session once", async () => {
+    const { client, t3 } = harness();
+    await client.projects();
+    t3.state.expireSession = true;
+    expect(await client.projects()).toHaveLength(1);
+    expect(t3.state.initializes).toBe(2);
   });
 
-  test("recovers a known accepted start without sending another turn", async () => {
-    const current = thread({ messages: [{ ...message, id: "u-brain-todo-message-task-thread", role: "user" }] });
-    const { client, requests } = harness({ shell: { projects: [project], threads: [current] }, detail: { thread: current } });
-    await client.start({ projectId: project.id, title: "Task", prompt: "Do it", cwd: "/worktrees/task", branch: "todo/task", threadId: "task-thread" });
-    expect(requests.filter((request) => request.method === "POST")).toHaveLength(0);
-  });
-
-  test("new tasks inherit the latest project permission mode and default to auto without history", async () => {
-    for (const [threads, expected] of [
-      [[], "auto"],
-      [[thread({ id: "older", runtimeMode: "full-access" }), thread({ id: "latest", runtimeMode: "auto-accept-edits", updatedAt: later })], "auto-accept-edits"],
-      [[thread({ id: "other-project", projectId: "other", runtimeMode: "full-access" })], "auto"],
-      [[thread({ id: "deleted", runtimeMode: "full-access", deletedAt: later })], "auto"],
-      [[thread({ id: "unknown-mode", runtimeMode: "unsupported" })], "auto"],
-    ] as const) {
-      const { client, requests } = harness({ shell: { projects: [{ ...project, defaultModelSelection: selection }], threads } });
-      await client.start({ projectId: project.id, title: "Task", prompt: "Do it", cwd: "/worktrees/task", branch: "todo/task", threadId: "new-task" });
-      expect(requests.find((request) => request.method === "POST")?.body).toMatchObject({
-        runtimeMode: expected, bootstrap: { createThread: { runtimeMode: expected } },
-      });
-    }
-  });
-
-  test("start recovery and rework retain the task thread's current permission mode", async () => {
-    const current = thread({ runtimeMode: "auto", messages: [] });
-    const { client, requests } = harness({
-      shell: { projects: [project], threads: [current, thread({ id: "newer", runtimeMode: "full-access", updatedAt: later })] },
-      detail: { thread: current },
+  test("launches into the task worktree with a stable request key and a local thread link", async () => {
+    const { client, launches } = harness({ projects: [{ ...project, defaultModelSelection: selection }] });
+    const started = await client.start(startInput);
+    expect(started).toEqual({ threadId: "thread-u-brain-todo-start-req-1", threadUrl: `${baseUrl}local-env/thread-u-brain-todo-start-req-1` });
+    expect(launches()).toHaveLength(1);
+    expect(launches()[0]?.args).toMatchObject({
+      projectId: project.id, title: "Implement", message: "Do the task", modelSelection: selection, runtimeMode: "auto",
+      interactionMode: "default", clientRequestId: "u-brain-todo-start-req-1",
+      workspaceStrategy: { type: "existing_worktree", worktreePath: "/worktrees/new", branch: "todo/new" },
     });
-    await client.start({ projectId: project.id, title: "Task", prompt: "Do it", cwd: "/worktrees/task", branch: "todo/task", threadId: "task-thread" });
-    expect(requests.find((request) => request.method === "POST")?.body).toMatchObject({ runtimeMode: "auto" });
-    for (const mode of ["approval-required", "auto-accept-edits", "auto", "full-access"]) {
-      const rework = harness({ detail: { thread: thread({ runtimeMode: mode }) } });
-      await rework.client.followup("task-thread", "Fix it", "feedback");
-      expect(rework.requests.find((request) => request.method === "POST")?.body).toMatchObject({ runtimeMode: mode });
-    }
   });
 
-  test("will not reuse a thread whose worktree changed", async () => {
-    const { client, requests } = harness({ shell: { projects: [project], threads: [thread({ worktreePath: "/other" })] } });
-    await expect(client.start({ projectId: project.id, title: "Task", prompt: "Do it", cwd: "/worktrees/task", branch: "todo/task", threadId: "task-thread" })).rejects.toThrow("不一致");
-    expect(requests.filter((request) => request.method === "POST")).toHaveLength(0);
+  test("recovers a thread already launched for this task worktree instead of launching again", async () => {
+    const existing = fakeThread({ threadId: "launched", title: "Implement", worktreePath: "/worktrees/new", status: "running" });
+    const { client, launches } = harness({ threads: [existing, fakeThread({ threadId: "other", title: "Implement", worktreePath: "/elsewhere" })] });
+    expect((await client.start(startInput)).threadId).toBe("launched");
+    expect(launches()).toHaveLength(0);
+  });
+
+  test("new tasks inherit the latest project model and permission mode, default to auto without history", async () => {
+    for (const [threads, expected] of [
+      [[fakeThread({ threadId: "latest", runtimeMode: "auto-accept-edits", title: "x" }), fakeThread({ threadId: "older", runtimeMode: "full-access", title: "y" })], "auto-accept-edits"],
+      [[fakeThread({ threadId: "other-project", projectId: "other", runtimeMode: "full-access" })], "auto"],
+      [[fakeThread({ threadId: "unknown-mode", runtimeMode: "unsupported", title: "x" })], "auto"],
+    ] as const) {
+      const { client, launches } = harness({ projects: [{ ...project, defaultModelSelection: selection }], threads: [...threads] });
+      await client.start(startInput);
+      expect(launches()[0]?.args).toMatchObject({ runtimeMode: expected });
+    }
+    const inherited = harness({ threads: [fakeThread({ title: "x", providerInstanceId: "claude", model: "opus" })] });
+    await inherited.client.start(startInput);
+    expect(inherited.launches()[0]?.args).toMatchObject({ modelSelection: { instanceId: "claude", model: "opus" } });
   });
 
   test("requires a configured project model rather than inventing a default", async () => {
-    const { client } = harness({ shell: { projects: [project], threads: [] } });
-    await expect(client.start({ projectId: project.id, title: "Task", prompt: "Do it", cwd: "/worktrees/task", branch: "todo/task", threadId: "new" })).rejects.toThrow("选择模型");
+    await expect(harness().client.start(startInput)).rejects.toThrow("选择模型");
   });
 
-  test("only a completed latest turn with its complete assistant message is ready", async () => {
-    expect(await harness().client.inspect("task-thread")).toEqual({ state: "ready", summary: message.text });
-    for (const overrides of [
-      { latestTurn: null, session: { status: "idle", activeTurnId: null } },
-      { latestTurn: { state: "running", requestedAt: timestamp, assistantMessageId: null } },
-      { messages: [{ ...message, streaming: true }] },
-      { messages: [{ ...message, id: "different-assistant" }] },
-      { session: { status: "running", activeTurnId: "active" } },
-    ]) {
-      expect((await harness({ detail: { thread: thread(overrides) } }).client.inspect("task-thread")).state).toBe("running");
+  test("only a completed latest run with its own answer is ready", async () => {
+    const cases: Array<[Partial<FakeThread>, "ready" | "running" | "failed"]> = [
+      [{}, "ready"],
+      [{ status: "running", activeRunId: "run-1" }, "running"],
+      [{ status: "waiting" }, "running"],
+      [{ pendingRequestCount: 1 }, "running"],
+      [{ items: [{ type: "user_message", runId: "run-1", text: "Do it" }] }, "running"],
+      [{ items: [{ type: "assistant_message", runId: "run-1", text: "old" }, { type: "user_message", runId: "run-2", text: "again" }] }, "running"],
+      [{ latestRunId: "run-2" }, "running"],
+    ];
+    for (const [overrides, expected] of cases) {
+      const { client } = harness({ threads: [fakeThread(overrides)] });
+      expect((await client.inspect("task-thread")).state).toBe(expected);
     }
+    expect((await harness({ threads: [fakeThread()] }).client.inspect("task-thread")).summary).toBe("Implemented and tested.");
   });
 
-  test("new feedback cannot be mistaken for the preceding completed turn after a daemon restart", async () => {
-    const current = thread({ messages: [message, { id: "new-user", role: "user", text: "Fix it", streaming: false, createdAt: later }] });
-    expect((await harness({ detail: { thread: current } }).client.inspect("task-thread")).state).toBe("running");
+  test("failure, interruption, archive and deletion cannot be accepted for review", async () => {
+    for (const [overrides, message] of [
+      [{ status: "failed" }, "执行失败"],
+      [{ status: "interrupted" }, "已中断"],
+      [{ status: "cancelled" }, "已中断"],
+      [{ archived: true }, "已删除或归档"],
+    ] as const) {
+      const result = await harness({ threads: [fakeThread(overrides)] }).client.inspect("task-thread");
+      expect(result.state).toBe("failed");
+      expect(result.error).toContain(message);
+    }
+    expect(await harness().client.inspect("missing")).toMatchObject({ state: "failed", error: expect.stringContaining("已删除或归档") });
   });
 
-  test("error and interruption cannot be accepted for review, provider errors are withheld", async () => {
-    const failed = await harness({ detail: { thread: thread({ session: { status: "error", activeTurnId: null, lastError: "sensitive-response-must-not-escape" } }) } }).client.inspect("task-thread");
-    expect(failed.state).toBe("failed");
-    expect(failed.error).not.toContain("sensitive-response");
-    expect((await harness({ detail: { thread: thread({ latestTurn: { state: "interrupted", requestedAt: timestamp, assistantMessageId: null } }) } }).client.inspect("task-thread")).state).toBe("failed");
-  });
-
-  test("uses the persisted feedback commandId and recovers an accepted retry", async () => {
-    const { client, requests } = harness();
+  test("rework is queued with a stable request key and refused while the thread is busy", async () => {
+    const { client, sends } = harness({ threads: [fakeThread()] });
     await client.followup("task-thread", "Fix the issue", "feedback-1");
-    expect(requests.find((request) => request.method === "POST")?.body).toMatchObject({ commandId: "feedback-1", message: { messageId: "u-brain-todo-feedback-feedback-1", text: "Fix the issue" } });
-    const recovered = harness({ detail: { thread: thread({ messages: [{ ...message, id: "u-brain-todo-feedback-feedback-1", role: "user" }] }) } });
-    await recovered.client.followup("task-thread", "Fix the issue", "feedback-1");
-    expect(recovered.requests.filter((request) => request.method === "POST")).toHaveLength(0);
+    expect(sends()[0]?.args).toEqual({ threadId: "task-thread", message: "Fix the issue", mode: "queue", clientRequestId: "u-brain-todo-feedback-feedback-1" });
+    const busy = harness({ threads: [fakeThread({ status: "running", activeRunId: "run-1" })] });
+    await expect(busy.client.followup("task-thread", "Fix", "feedback-2")).rejects.toThrow("仍在执行");
   });
 
-  test("rejects unsupported responses and withholds unauthenticated response contents", async () => {
-    await expect(harness({ shell: { projects: [], threads: "invalid" } }).client.projects()).rejects.toThrow("格式不兼容");
-    await expect(harness({ detail: { thread: thread({ latestTurn: {} }) } }).client.inspect("task-thread")).rejects.toThrow("格式不兼容");
-    await expect(harness({ status: 401 }).client.projects()).rejects.toThrow("T3 未授权");
+  test("an already delivered rework is not sent twice, a failed one is sent again", async () => {
+    const delivered = fakeThread({ status: "running", activeRunId: "run-2", latestRunId: "run-2", items: [{ type: "user_message", runId: "run-2", text: "Fix it" }] });
+    const recovered = harness({ threads: [delivered] });
+    await recovered.client.followup("task-thread", "Fix it", "feedback-1");
+    expect(recovered.sends()).toHaveLength(0);
+    const failed = harness({ threads: [fakeThread({ status: "failed", items: [{ type: "user_message", runId: "run-1", text: "Fix it" }] })] });
+    await failed.client.followup("task-thread", "Fix it", "feedback-2");
+    expect(failed.sends()).toHaveLength(1);
+  });
+
+  test("surfaces T3 refusals, rejects unsupported responses and withholds unauthenticated contents", async () => {
+    const refused = harness();
+    refused.t3.state.toolFailure = { code: "invalid_request", message: "worktreePath must be one of the project's git worktrees." };
+    await expect(refused.client.projects()).rejects.toThrow("T3 拒绝了请求：worktreePath");
+    const invalid = harness();
+    invalid.t3.state.invalid = true;
+    await expect(invalid.client.projects()).rejects.toThrow("格式不兼容");
+    const t3 = fakeT3({ projects: [project] });
+    const unauthorized = new T3Automation({ getUrl: async () => baseUrl, getToken: async () => "wrong-token", fetch: t3.fetch });
+    await expect(unauthorized.projects()).rejects.toThrow("T3 未授权");
   });
 
   test("rejects nonlocal endpoints before requesting a credential or fetching", async () => {
@@ -157,20 +138,47 @@ describe("T3 TODO automation HTTP adapter", () => {
     expect(accessed).toBe(false);
   });
 
-  test("issues one short lived local CLI credential, shares concurrent requests, and revokes it on close", async () => {
-    const calls: string[][] = [];
+  test("exchanges one CLI pairing code for an MCP credential, shares it, and revokes it on close", async () => {
+    const t3 = fakeT3({ projects: [project], token: "issued-mcp-token" });
+    const cli: string[][] = [];
+    const oauth: string[] = [];
+    let pairingLabel = "";
+    let challenge = "";
     const client = new T3Automation({
       getUrl: async () => baseUrl,
-      runCli: async (args) => { calls.push(args); return args.includes("issue") ? JSON.stringify({ token: "synthetic-cli-token", sessionId: "session-1", expiresAt: new Date(Date.now() + 3_600_000).toISOString() }) : ""; },
-      fetch: (async (_url: unknown, init?: RequestInit) => {
-        expect(new Headers(init?.headers).get("authorization")).toBe("Bearer synthetic-cli-token");
-        return Response.json({ projects: [], threads: [] });
+      runCli: async (args) => {
+        cli.push(args);
+        if (args[1] === "pairing") { pairingLabel = args[args.indexOf("--label") + 1]!; return JSON.stringify({ id: "p", credential: "PAIRCODE" }); }
+        if (args[2] === "list") return JSON.stringify([
+          { sessionId: "stale", client: { label: "U-Brain TODO" } },
+          { sessionId: "current", client: { label: pairingLabel } },
+          { sessionId: "unrelated", client: { label: "Browser" } },
+        ]);
+        return "";
+      },
+      fetch: (async (value: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(value));
+        if (!url.pathname.startsWith("/oauth/")) return t3.fetch(value, init);
+        oauth.push(url.pathname);
+        if (url.pathname === "/oauth/mcp/register") return Response.json({ client_id: "client-1" }, { status: 201 });
+        if (url.pathname === "/oauth/mcp/decision") {
+          const body = JSON.parse(String(init?.body)) as { authorization: { state: string; code_challenge: string }; decision: unknown };
+          expect(body.decision).toEqual({ _tag: "pairing-code", access: "full-access", code: "PAIRCODE" });
+          challenge = body.authorization.code_challenge;
+          return Response.json({ redirectTo: `http://127.0.0.1/u-brain-todo?code=auth-code&state=${body.authorization.state}` });
+        }
+        const form = new URLSearchParams(String(init?.body));
+        expect(form.get("code")).toBe("auth-code");
+        expect(new Bun.CryptoHasher("sha256").update(form.get("code_verifier")!).digest("base64url")).toBe(challenge);
+        return Response.json({ access_token: "issued-mcp-token", token_type: "Bearer", expires_in: 2_592_000, scope: "orchestration:read" });
       }) as typeof fetch,
     });
     await Promise.all([client.projects(), client.projects()]);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("1h");
+    expect(oauth).toEqual(["/oauth/mcp/register", "/oauth/mcp/decision", "/oauth/mcp/token"]);
+    expect(cli.filter((args) => args[1] === "pairing")).toHaveLength(1);
+    expect(cli).toContainEqual(["auth", "session", "revoke", "stale"]);
+    expect(cli).not.toContainEqual(["auth", "session", "revoke", "unrelated"]);
     await client.close();
-    expect(calls[1]).toEqual(["auth", "session", "revoke", "session-1"]);
+    expect(cli.at(-1)).toEqual(["auth", "session", "revoke", "current"]);
   });
 });

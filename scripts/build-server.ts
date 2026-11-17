@@ -10,9 +10,9 @@
  *     lib/you-brain/vendor/node_modules/...
  *     install.sh
  *
- * `bin` + `lib/you-brain` 这个布局和 Linux 桌面包一致，所以
- * `resolveWebDir` 与 `vendorNodeModulesDir` 里的 `../lib/<productName>` 兜底能直接用，
- * 不需要额外的环境变量。
+ * 桌面包改名 U-Brain 后 Linux 资源目录是 `lib/U-Brain`；服务器包保留 `lib/you-brain`，
+ * 已部署的服务器升级时目录不变。`resolveWebDir`、`vendorNodeModulesDir` 和 dsh 查找
+ * 两个目录都认（`linuxBundlePaths`），不需要额外的环境变量。
  *
  * 只能在目标平台上跑：`bun build --compile` 不能交叉编译，vendor 里的
  * onnxruntime-node / sharp 是本机原生二进制。所以在 Linux 机器或 Linux CI 上执行。
