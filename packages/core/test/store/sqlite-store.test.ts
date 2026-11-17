@@ -563,3 +563,45 @@ describe("sqlite store", () => {
     });
   });
 });
+
+describe("event cache", () => {
+  const event = (seq: number, ts: string, device = "dev-a") =>
+    createEvent({ type: "topic.created", data: { topicId: `t-${device}-${seq}`, name: `T${seq}`, aliases: [] }, device, ts, seq });
+  const add = (store: SqliteStore, events: ReturnType<typeof event>[]) =>
+    store.replaceDerived({ topics: [], sessions: [], conclusions: [], todos: [], events });
+
+  it("sees events another connection wrote and keeps the table order", () => {
+    const directory = tempDir();
+    const path = join(directory, "brain.sqlite");
+    const daemon = new SqliteStore(path);
+    const cli = new SqliteStore(path);
+    try {
+      add(daemon, [event(1, "2026-07-01T00:00:00.000Z"), event(2, "2026-07-03T00:00:00.000Z")]);
+      expect(daemon.listEvents().map((e) => e.seq)).toEqual([1, 2]);
+      // A pulled event from another device that happened in between, written elsewhere.
+      add(cli, [event(1, "2026-07-02T00:00:00.000Z", "dev-b")]);
+      expect(daemon.listEvents().map((e) => `${e.device}:${e.seq}`)).toEqual(["dev-a:1", "dev-b:1", "dev-a:2"]);
+      add(daemon, [event(3, "2026-07-04T00:00:00.000Z")]);
+      expect(daemon.listEvents().map((e) => e.seq)).toEqual([1, 1, 2, 3]);
+      expect(daemon.listEventsByType(["topic.created"]).length).toBe(4);
+      expect(daemon.listEventsByType([])).toEqual([]);
+    } finally {
+      daemon.close();
+      cli.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("hands out events no caller can change", () => {
+    withStore((store) => {
+      add(store, [event(1, "2026-07-01T00:00:00.000Z")]);
+      const [first] = store.listEvents();
+      expect(() => {
+        (first as { seq: number }).seq = 9;
+      }).toThrow();
+      const list = store.listEvents();
+      list.pop();
+      expect(store.listEvents().length).toBe(1);
+    });
+  });
+});

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
 import { startDaemon } from "../../src/daemon/daemon.js";
-import { INTERVALS, intervalDue, pullInterval } from "../../src/daemon/schedule.js";
+import { INTERVALS, intervalDue, pullInterval, watchScanDelay } from "../../src/daemon/schedule.js";
 import type { YouBrainDaemon } from "../../src/daemon/daemon.js";
 import {
   claudeLine,
@@ -137,3 +137,15 @@ async function startTracked(
   started.push(daemon);
   return daemon;
 }
+
+describe("watchScanDelay", () => {
+  it("scans soon after the first change when no watch scan ran recently", () => {
+    expect(watchScanDelay(100_000, null)).toBe(INTERVALS.watchDebounceMs);
+    expect(watchScanDelay(100_000, 100_000 - INTERVALS.watchMinGapMs - 1)).toBe(INTERVALS.watchDebounceMs);
+  });
+
+  it("holds the next scan until the minimum gap since the last one has passed", () => {
+    // An agent writing its session file every few seconds must not start a worker each time.
+    expect(watchScanDelay(100_000, 100_000 - 4_000)).toBe(INTERVALS.watchMinGapMs - 4_000);
+  });
+});

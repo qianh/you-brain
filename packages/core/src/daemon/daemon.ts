@@ -252,6 +252,7 @@ import { allocateCopied, appendCopied } from "./events.js";
 import { moveStateAside, revokeStoredGrant, takeGoogleCredential } from "./account-switch.js";
 import { openGoogleDrive } from "./google.js";
 import { acquireDaemonLock } from "./lock.js";
+import { startMemoryTrace, traceStage } from "./memory-trace.js";
 import { createStartupLog, type StartupLog } from "./startup-log.js";
 import {
   preferLocalLlm,
@@ -265,7 +266,7 @@ import {
   syncTopicFiles,
   type TopicFilesResult,
 } from "../topic-files/sync.js";
-import { INTERVALS, intervalDue, pullInterval } from "./schedule.js";
+import { INTERVALS, intervalDue, pullInterval, watchScanDelay } from "./schedule.js";
 import {
   WEB_SESSION_BATCH,
   WEB_SESSION_CONCURRENCY,
@@ -790,6 +791,17 @@ export class YouBrainDaemon {
   #files = new Map<string, CaptureFileCursor>();
   #watchers: FSWatcher[] = [];
   #watchTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When the last scan a file change triggered started; spaces the next by watchMinGapMs. */
+  #lastWatchScanAt: number | null = null;
+  /** A watch-triggered scan sits in the work chain and has not started yet. */
+  #watchScanQueued = false;
+  #stopMemoryTrace: (() => void) | null = null;
+  #memoryTracePath: string | null = null;
+
+  /** Runs a background stage; with YOU_BRAIN_MEMORY_TRACE=1 also records what it allocated. */
+  #traced<T>(name: string, run: () => Promise<T>): Promise<T> {
+    return this.#memoryTracePath === null ? run() : traceStage(this.#memoryTracePath, name, run);
+  }
   #timer: { cancel(): void } | null = null;
   #chain: Promise<void> = Promise.resolve();
   #stopped = false;
@@ -1033,7 +1045,7 @@ export class YouBrainDaemon {
     this.#lastVector = startedAt;
     this.#started = true;
     try {
-      await this.#issueReminders();
+      await this.#traced("reminders", () => this.#issueReminders());
     } catch {
       // A reminder failure must not block startup.
     }
@@ -1049,6 +1061,10 @@ export class YouBrainDaemon {
     this.#services = this.#online.then(async () => {
       if (this.#stopped) return;
       this.#arm();
+      if (process.env.YOU_BRAIN_MEMORY_TRACE === "1") {
+        this.#memoryTracePath = join(this.#paths.dataDir, "memory-trace.jsonl");
+        this.#stopMemoryTrace = startMemoryTrace(this.#memoryTracePath);
+      }
       if (this.#stopped) return;
       await log.time("scan", () => this.scan().catch(() => undefined));
     });
@@ -1259,6 +1275,8 @@ export class YouBrainDaemon {
       clearTimeout(this.#watchTimer);
       this.#watchTimer = null;
     }
+    this.#stopMemoryTrace?.();
+    this.#stopMemoryTrace = null;
     if (this.#onSignal) {
       process.off("SIGINT", this.#onSignal);
       process.off("SIGTERM", this.#onSignal);
@@ -1399,7 +1417,7 @@ export class YouBrainDaemon {
       now >= this.#scanNotBefore
     ) {
       try {
-        await this.#scanBody();
+        await this.#traced("scan", () => this.#scanBody());
         this.#lastFullScan = this.#clock.nowMs();
       } catch {
         // A failed scan must not skip sync. Backoff is recorded in #scanBody.
@@ -1410,7 +1428,7 @@ export class YouBrainDaemon {
     await this.#withSyncWindow(async () => {
       if (this.#sync && intervalDue(this.#lastFlush, now, INTERVALS.flushMs)) {
         try {
-          await this.#sync.flush();
+          await this.#traced("flush", () => this.#sync!.flush());
           this.#setDriveReachable(true);
         } catch (error) {
           await this.#reviewDrive(error);
@@ -1426,7 +1444,7 @@ export class YouBrainDaemon {
         intervalDue(this.#lastPull, now, pullInterval(this.changes.subscriberCount()))
       ) {
         try {
-          const pulled = await this.#sync.pull();
+          const pulled = await this.#traced("pull", () => this.#sync!.pull());
           this.#rememberSyncSuccess();
           if (pulled.applied > 0) this.#scheduleWebhook();
         } catch (error) {
@@ -1438,7 +1456,7 @@ export class YouBrainDaemon {
       }
       if (this.#inboxDirty) {
         try {
-          await this.#drainInbox({ budgetMs: INTERVALS.inboxBudgetMs });
+          await this.#traced("inbox", () => this.#drainInbox({ budgetMs: INTERVALS.inboxBudgetMs }));
         } catch {
           // One bad pass must not stop the loop. The queue stays for the next tick.
         }
@@ -1446,7 +1464,7 @@ export class YouBrainDaemon {
     });
     if (intervalDue(this.#lastWebSessions, now, INTERVALS.webSessionsMs)) {
       this.#lastWebSessions = this.#clock.nowMs();
-      this.#webJob ??= this.#processWebSessions()
+      this.#webJob ??= this.#traced("webSessions", () => this.#processWebSessions())
         .catch(() => {
           // One bad pass must not stop the loop.
         })
@@ -1456,8 +1474,7 @@ export class YouBrainDaemon {
     }
     this.#quota.refreshIfOlder(QUOTA_REFRESH_MS);
     if (this.#recallEnabled()) {
-      this.#recallJob ??= this.#recall
-        .tick()
+      this.#recallJob ??= this.#traced("recall", () => this.#recall.tick())
         .catch(() => {
           // A reminder failure must not stop the loop.
         })
@@ -1467,7 +1484,7 @@ export class YouBrainDaemon {
     }
     if (intervalDue(this.#lastRefineBackfill, now, INTERVALS.refineBackfillMs)) {
       this.#lastRefineBackfill = this.#clock.nowMs();
-      this.#backfillJob ??= this.#refineBackfill()
+      this.#backfillJob ??= this.#traced("refineBackfill", () => this.#refineBackfill())
         .catch(() => {
           // One bad pass must not stop the loop.
         })
@@ -1477,7 +1494,7 @@ export class YouBrainDaemon {
     }
     if (this.#notion && this.#notionJob === null && intervalDue(this.#lastNotionSync, now, this.#notionInterval())) {
       this.#lastNotionSync = this.#clock.nowMs();
-      this.#notionJob = this.#syncNotion()
+      this.#notionJob = this.#traced("notion", () => this.#syncNotion())
         .catch(() => {
           // 限流或令牌失效都不是致命的;状态里能看到 lastError。
         })
@@ -1490,7 +1507,7 @@ export class YouBrainDaemon {
       (this.#portraitSoon || intervalDue(this.#lastPortrait, now, INTERVALS.portraitMs))
     ) {
       try {
-        await this.#portrait.pull();
+        await this.#traced("portrait", () => this.#portrait!.pull());
       } catch {
         // A missing twin file is not fatal.
       }
@@ -1500,7 +1517,7 @@ export class YouBrainDaemon {
     if (this.#search) {
       if (this.#searchTextDue(now)) {
         try {
-          const result = await this.#search.sync({ budgetMs: 20_000, embed: false });
+          const result = await this.#traced("searchSync", () => this.#search!.sync({ budgetMs: 20_000, embed: false }));
           // Unfinished text sync stays dirty so the next tick continues it.
           this.#searchTextDirty = !result.done;
           // Freshly indexed chunks have no vectors yet. Fill them before the next interval.
@@ -1514,7 +1531,7 @@ export class YouBrainDaemon {
       // Text sync comes first: vectors for a document that is not indexed yet are wasted work.
       if (!this.#searchTextDirty && this.#vectorDue(now)) {
         try {
-          const filled = await this.#search.backfillVectors({ budgetMs: 10_000 });
+          const filled = await this.#traced("vectorBackfill", () => this.#search!.backfillVectors({ budgetMs: 10_000 }));
           // One tick embeds at most once. Progress with holes continues next tick;
           // no progress means a missing model or a spent retry window, so wait for the interval.
           this.#vectorDirty = filled.remaining > 0 && filled.embedded > 0;
@@ -1533,7 +1550,7 @@ export class YouBrainDaemon {
     }
     if (intervalDue(this.#lastReminders, now, INTERVALS.reminderMs)) {
       try {
-        await this.#issueReminders();
+        await this.#traced("reminders", () => this.#issueReminders());
       } catch {
         // Keep the loop alive. The next interval tries again.
       }
@@ -1541,7 +1558,7 @@ export class YouBrainDaemon {
     }
     if (intervalDue(this.#lastConsolidation, now, INTERVALS.consolidationMs)) {
       try {
-        await this.#consolidate({ manual: false, force: false });
+        await this.#traced("consolidate", () => this.#consolidate({ manual: false, force: false }));
       } catch {
         // A bad lease or model call must not stop the loop.
       }
@@ -1554,7 +1571,7 @@ export class YouBrainDaemon {
     ) {
       if (this.#canWriteTopicFiles()) {
         try {
-          await this.#writeTopicFiles();
+          await this.#traced("topicFiles", () => this.#writeTopicFiles());
         } catch {
           this.#topicFilesDirty = true;
           this.#topicFilesQuietUntil = this.#clock.nowMs() + INTERVALS.topicFilesDebounceMs;
@@ -1563,7 +1580,7 @@ export class YouBrainDaemon {
     }
     if (!this.#stopped && intervalDue(this.#lastWebhook, now, INTERVALS.webhookMs)) {
       try {
-        await this.#runWebhook();
+        await this.#traced("webhook", () => this.#runWebhook());
       } catch {
         // One bad delivery must not stop the loop.
       }
@@ -4465,11 +4482,23 @@ export class YouBrainDaemon {
 
   #scheduleWatch(): void {
     if (this.#stopped) return;
-    if (this.#watchTimer) clearTimeout(this.#watchTimer);
+    // A scan is already booked; it reads every changed file, this one included. Not
+    // pushing it back also means a file written nonstop still gets scanned.
+    if (this.#watchTimer) return;
+    const now = Date.now();
     this.#watchTimer = setTimeout(() => {
       this.#watchTimer = null;
-      void this.scan().catch(() => undefined);
-    }, INTERVALS.watchDebounceMs);
+      // Scans wait in the work chain behind a long tick. One already waiting there will
+      // read this change when it starts; queueing another ran two workers back to back.
+      if (this.#watchScanQueued) return;
+      this.#watchScanQueued = true;
+      this.#lastWatchScanAt = Date.now();
+      if (this.#stopped) return;
+      void this.#run(async () => {
+        this.#watchScanQueued = false;
+        await this.#traced("scan", () => this.#scanBody());
+      }).catch(() => undefined);
+    }, watchScanDelay(now, this.#lastWatchScanAt));
   }
 
   #isIdle(live: LiveSession, now: number, idleMs: number): boolean {

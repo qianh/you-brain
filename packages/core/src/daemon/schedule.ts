@@ -38,6 +38,12 @@ export const INTERVALS = {
   notionBackfillMs: 1_000,
   outputDebounceMs: 10_000,
   watchDebounceMs: 250,
+  /**
+   * Shortest gap between scans that file changes trigger. A running agent writes its
+   * session file every few seconds; with the debounce alone every write started a new
+   * capture worker (a fresh process, 100-200 MB), fourteen a minute.
+   */
+  watchMinGapMs: 15_000,
   /** Quiet period after the last topic-book change before Drive topic files sync. */
   topicFilesDebounceMs: 5 * 60_000,
   /** How often the web-session processor looks for idle `inbox/web-` sessions. */
@@ -68,4 +74,14 @@ export function intervalDue(last: number | null, now: number, everyMs: number): 
 /** SSE subscribers pull every 5 seconds. Otherwise the poll stays at 60 seconds. */
 export function pullInterval(subscribers: number): number {
   return subscribers > 0 ? INTERVALS.fastPullMs : INTERVALS.pullMs;
+}
+
+/**
+ * When a scan for a file change should run: after the debounce, but no sooner than
+ * `watchMinGapMs` after the previous watch-triggered scan. Changes arriving meanwhile are
+ * picked up by that scan, since a scan reads every file that changed.
+ */
+export function watchScanDelay(now: number, lastScanAt: number | null): number {
+  const gapLeft = lastScanAt === null ? 0 : lastScanAt + INTERVALS.watchMinGapMs - now;
+  return Math.max(INTERVALS.watchDebounceMs, gapLeft);
 }

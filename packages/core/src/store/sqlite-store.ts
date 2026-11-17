@@ -491,24 +491,60 @@ export class SqliteStore {
       .map(mapTodo);
   }
 
+  /**
+   * Every event, oldest first. Parsed events are cached: reading and validating all of them
+   * took about 170 ms and left 230,000 objects for the collector, and the daemon asks several
+   * times a tick and per page request. Events are only ever added (INSERT OR IGNORE), so the
+   * row count and the largest rowid tell whether anything changed, including writes from
+   * other processes (CLI, MCP) on the same file. New rows are read and merged; anything else
+   * reloads. Events come back frozen: a caller that changed one would corrupt the cache.
+   */
   listEvents(): Event[] {
-    const rows = this.#db
-      .query<EventRow, []>("SELECT payload FROM events ORDER BY ts_ms, device, seq, id")
-      .all();
-    return rows.map((row) => parseEvent(parsePayload(row.payload)));
+    return this.#cachedEvents().slice();
   }
 
   /** Same order as {@link listEvents}. An empty type list matches nothing. */
   listEventsByType(types: readonly EventType[]): Event[] {
-    const unique = [...new Set(types)];
-    if (unique.length === 0) return [];
-    const placeholders = unique.map(() => "?").join(", ");
-    const rows = this.#db
-      .query<EventRow, string[]>(
-        `SELECT payload FROM events WHERE type IN (${placeholders}) ORDER BY ts_ms, device, seq, id`,
+    const wanted = new Set(types);
+    if (wanted.size === 0) return [];
+    return this.#cachedEvents().filter((event) => wanted.has(event.type));
+  }
+
+  #eventCache: { rows: Event[]; count: number; maxRowid: number } | null = null;
+
+  #cachedEvents(): Event[] {
+    const now = this.#db
+      .query<{ count: number; maxRowid: number | null }, []>(
+        "SELECT COUNT(*) AS count, MAX(rowid) AS maxRowid FROM events",
       )
-      .all(...unique);
-    return rows.map((row) => parseEvent(parsePayload(row.payload)));
+      .get() ?? { count: 0, maxRowid: null };
+    const maxRowid = now.maxRowid ?? 0;
+    const cache = this.#eventCache;
+    if (cache !== null && cache.count === now.count && cache.maxRowid === maxRowid) return cache.rows;
+    if (cache !== null && now.count > cache.count && maxRowid > cache.maxRowid) {
+      const added = this.#db
+        .query<EventRow, [number]>("SELECT payload FROM events WHERE rowid > ?")
+        .all(cache.maxRowid)
+        .map((row) => freezeEvent(parseEvent(parsePayload(row.payload))));
+      if (cache.count + added.length === now.count) {
+        added.sort(compareEvents);
+        const last = cache.rows.at(-1);
+        // Usually this device's own new events, all later than the cache: append. A pulled
+        // event from another device can land earlier, then the whole list is re-sorted.
+        const rows =
+          last === undefined || added.length === 0 || compareEvents(last, added[0]!) <= 0
+            ? cache.rows.concat(added)
+            : cache.rows.concat(added).sort(compareEvents);
+        this.#eventCache = { rows, count: now.count, maxRowid };
+        return rows;
+      }
+    }
+    const rows = this.#db
+      .query<EventRow, []>("SELECT payload FROM events ORDER BY ts_ms, device, seq, id")
+      .all()
+      .map((row) => freezeEvent(parseEvent(parsePayload(row.payload))));
+    this.#eventCache = { rows, count: now.count, maxRowid };
+    return rows;
   }
 
   replaceDerived(snapshot: DerivedSnapshot): void {
@@ -922,4 +958,21 @@ export class SqliteStore {
     });
     apply();
   }
+}
+
+/** The table's order: ts_ms, device, seq, id. */
+function compareEvents(left: Event, right: Event): number {
+  const byTime = Date.parse(left.ts) - Date.parse(right.ts);
+  if (byTime !== 0) return byTime;
+  if (left.device !== right.device) return left.device < right.device ? -1 : 1;
+  if (left.seq !== right.seq) return left.seq - right.seq;
+  return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+}
+
+function freezeEvent<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) freezeEvent(child);
+    Object.freeze(value);
+  }
+  return value;
 }
