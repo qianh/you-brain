@@ -195,6 +195,15 @@ export function CommandPalette({
     setActive(0);
   }, [query, hits]);
 
+  // 面板关掉再打开时，上次的词还在：全选它，直接输入就是换词，不会接在后面。
+  useEffect(() => {
+    if (!open) return;
+    const frame = requestAnimationFrame(() => {
+      document.querySelector<HTMLInputElement>(".palette-search input")?.select();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [open]);
+
   const onKey = (event: ReactKeyboardEvent): void => {
     if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Home" || event.key === "End") {
       event.preventDefault();

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, it, test } from "bun:test";
 
 import {
   MEMORY_NAV,
@@ -6,6 +6,7 @@ import {
   isNavActive,
   isPrimaryNavActive,
   memoryHref,
+  primaryNavTarget,
   parseAppLocation,
   readQuery,
   searchHref,
@@ -148,5 +149,20 @@ describe("memory entry", () => {
     for (const path of ["/deck", "/knowledge", "/settings", "/search"]) expect(isPrimaryNavActive(path, MEMORY_NAV)).toBe(false);
     expect(isPrimaryNavActive("/today", "/deck")).toBe(false);
     expect(isPrimaryNavActive("/deck", "/deck")).toBe(true);
+  });
+});
+
+describe("primaryNavTarget", () => {
+  it("returns to where the reader left a menu, selected topic included", () => {
+    const last = new Map([["/memory", "/topics?id=t-42"], ["/knowledge", "/knowledge?id=page-7"]]);
+    expect(primaryNavTarget("/memory", last, null)).toBe("/topics?id=t-42");
+    expect(primaryNavTarget("/knowledge", last, null)).toBe("/knowledge?id=page-7");
+  });
+
+  it("falls back to the menu itself, and memory to its remembered segment, when not visited", () => {
+    const last = new Map<string, string>();
+    expect(primaryNavTarget("/todos", last, null)).toBe("/todos");
+    expect(primaryNavTarget("/memory", last, "topics")).toBe("/topics");
+    expect(primaryNavTarget("/memory", last, null)).toBe("/today");
   });
 });

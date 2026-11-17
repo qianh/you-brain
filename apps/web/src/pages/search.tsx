@@ -252,7 +252,8 @@ export function SearchPage() {
           </Banner>
         ) : null}
         <div className="search-stage" aria-busy={busy || undefined}>
-          {showSkeleton ? (
+          {/* 已有结果时不插骨架：旧结果原地变淡，等新结果替换，页面不跳。 */}
+          {showSkeleton && hits.length === 0 ? (
             <Card className="search-skel" aria-hidden="true">
               <SkeletonRow />
               <SkeletonRow />

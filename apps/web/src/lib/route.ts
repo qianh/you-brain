@@ -97,6 +97,18 @@ export function isMemoryPath(pathname: string): boolean {
 }
 
 /** 顶部菜单某一项是否高亮；「记忆」在今日、话题册、历史三个地址下都高亮。 */
+/**
+ * 顶部菜单某项要去的地址：本次运行里去过就回到上次停留的完整地址（含 `?id=` 等），
+ * 页面常驻挂载保住了滚动和展开，地址保住选中项；没去过时「记忆」按记住的分段，其余去菜单本身。
+ */
+export function primaryNavTarget(
+  href: string,
+  last: ReadonlyMap<string, string>,
+  storedMemoryTab: string | null,
+): string {
+  return last.get(href) ?? (href === MEMORY_NAV ? memoryHref(storedMemoryTab) : href);
+}
+
 export function isPrimaryNavActive(pathname: string, href: string): boolean {
   if (href === MEMORY_NAV) return isMemoryPath(pathname);
   if (href === "/topics") return pathname === "/topics" || pathname === "/topics/history";

@@ -9,6 +9,7 @@ import { Icon } from "../components/icons.js";
 import { Input, Textarea } from "../components/input.js";
 import { Page, PageHeader } from "../components/page.js";
 import { Select } from "../components/select.js";
+import { Skeleton } from "../components/skeleton.js";
 import { Spinner } from "../components/spinner.js";
 import { useToast } from "../components/toast.js";
 import { useDaemon } from "../daemon-context.js";
@@ -122,6 +123,9 @@ export function TasksPage() {
     review: tasks.filter((task) => task.status === "review").length,
     done: tasks.filter((task) => task.status === "done").length,
   };
+  // 还没拿到数据时数字显示「—」：0 会被读成「没有任务」。
+  const pendingBoard = board === null;
+  const shown = (value: number): string => (pendingBoard ? "—" : String(value));
 
   return <Page>
     <div className="tasks-page">
@@ -134,14 +138,14 @@ export function TasksPage() {
       {board?.connectionError && <Banner tone="warn">{t("tasksConnection", { detail: board.connectionError })}</Banner>}
       <div className="tasks-metrics">
         {(["queued", "active", "review", "done"] as const).map((key) => <button type="button" className={`tasks-metric is-${key}${status === key ? " is-selected" : ""}`} key={key} onClick={() => setStatus(status === key ? "all" : key)} aria-pressed={status === key}>
-          <span>{t(key === "active" ? "tasksActive" : key === "review" ? "tasksReview" : key === "done" ? "tasksDone" : "tasksQueued")}</span><strong>{counts[key]}</strong>
+          <span>{t(key === "active" ? "tasksActive" : key === "review" ? "tasksReview" : key === "done" ? "tasksDone" : "tasksQueued")}</span><strong className={pendingBoard ? "is-pending" : undefined}>{shown(counts[key])}</strong>
         </button>)}
       </div>
       <div className="tasks-layout">
         <aside className="tasks-projects" aria-label={t("tasksProjects")}>
-          <header><h2>{t("tasksProjects")}</h2><span>{projects.length}</span></header>
-          <button type="button" className={`tasks-project-filter${project === "all" ? " is-selected" : ""}`} aria-pressed={project === "all"} onClick={() => setProject("all")}><Icon name="inbox" />{t("tasksAllProjects")}<span>{tasks.length}</span></button>
-          <button type="button" className={`tasks-project-filter${project === "unassigned" ? " is-selected" : ""}`} aria-pressed={project === "unassigned"} onClick={() => setProject("unassigned")}><Icon name="folder" />{t("tasksUnassigned")}<span>{tasks.filter((task) => task.projectId === null).length}</span></button>
+          <header><h2>{t("tasksProjects")}</h2><span>{shown(projects.length)}</span></header>
+          <button type="button" className={`tasks-project-filter${project === "all" ? " is-selected" : ""}`} aria-pressed={project === "all"} onClick={() => setProject("all")}><Icon name="inbox" />{t("tasksAllProjects")}<span>{shown(tasks.length)}</span></button>
+          <button type="button" className={`tasks-project-filter${project === "unassigned" ? " is-selected" : ""}`} aria-pressed={project === "unassigned"} onClick={() => setProject("unassigned")}><Icon name="folder" />{t("tasksUnassigned")}<span>{shown(tasks.filter((task) => task.projectId === null).length)}</span></button>
           {projects.map((item) => {
             const current = projectTask(tasks, item.id);
             const queued = tasks.filter((task) => task.projectId === item.id && task.status === "queued").length;
@@ -159,6 +163,9 @@ export function TasksPage() {
               }} icon={<Icon name={item.enabled ? "minus" : "play"} size={13} />}>{t(item.enabled ? "tasksPause" : "tasksStart")}</Button>
             </section>;
           })}
+          {pendingBoard && loading && <div className="tasks-project-skeletons" aria-hidden="true">
+            {[0, 1].map((index) => <div className="tasks-project is-skeleton" key={index}><Skeleton width="55%" height={14} /><Skeleton width="80%" height={10} /><Skeleton width="40%" height={10} /></div>)}
+          </div>}
           {!loading && projects.length === 0 && <div className="tasks-no-projects"><strong>{t("tasksNoProjects")}</strong><p>{t("tasksNoProjectsHint")}</p></div>}
         </aside>
         <section className="tasks-queue" aria-label={t("navTasks")}>
@@ -167,7 +174,7 @@ export function TasksPage() {
             { value: "active", label: t("tasksActive") },
             ...Object.entries(TASK_STATUS_KEYS).map(([value, key]) => ({ value, label: t(key) })),
           ]} /></div>
-          {loading && !board ? <div className="tasks-loading" role="status"><Spinner /><span>{t("loading")}</span></div> : filtered.length === 0 ? <EmptyState title={t(tasks.length === 0 ? "tasksNoTasks" : "tasksNoMatches")} {...(tasks.length === 0 ? { description: t("tasksNoTasksHint"), action: <Button onClick={() => setEditor({ task: null })}>{t("tasksNew")}</Button> } : {})} /> : <ul className="tasks-list">
+          {loading && !board ? <div className="tasks-loading" role="status"><Spinner /><span>{t("tasksLoadingBoard")}</span></div> : filtered.length === 0 ? <EmptyState title={t(tasks.length === 0 ? "tasksNoTasks" : "tasksNoMatches")} {...(tasks.length === 0 ? { description: t("tasksNoTasksHint"), action: <Button onClick={() => setEditor({ task: null })}>{t("tasksNew")}</Button> } : {})} /> : <ul className="tasks-list">
             {filtered.map((task) => {
               const linked = projects.find((item) => item.id === task.projectId);
               return <li className={`tasks-item is-${task.status}`} key={task.id}>

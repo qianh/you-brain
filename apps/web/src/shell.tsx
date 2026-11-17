@@ -18,7 +18,7 @@ import { devOverlayAllowed } from "./lib/dev-overlay.js";
 import { capsuleFromStatus, capsuleWarningCount, type CapsuleKind, type CapsuleStatus } from "./lib/health.js";
 import { prefs } from "./lib/prefs.js";
 import { routeFadeAnimationEnded, useRouteEnter } from "./lib/route-fade.js";
-import { MEMORY_NAV, MEMORY_TAB_KEY, isPrimaryNavActive, memoryHref, readQuery, settingsHref } from "./lib/route.js";
+import { MEMORY_NAV, MEMORY_TAB_KEY, isPrimaryNavActive, primaryNavTarget, readQuery, settingsHref } from "./lib/route.js";
 import { modLabel, shortcutMod } from "./lib/shortcuts.js";
 import { isUnreachableError } from "./pages/status/logic.js";
 import { useRoute } from "./router.js";
@@ -31,10 +31,6 @@ const TABS: ReadonlyArray<{ key: MessageKey; href: string; icon: IconName }> = [
   { key: "navKnowledge", href: "/knowledge", icon: "book-open" },
 ];
 
-/** 顶部菜单某项实际要去的地址；「记忆」去上次停留的分段。 */
-function tabTarget(href: string): string {
-  return href === MEMORY_NAV ? memoryHref(prefs.getItem(MEMORY_TAB_KEY)) : href;
-}
 
 function RouteFade({ pathname, children }: { pathname: string; children: ReactNode }) {
   const { entering, clear } = useRouteEnter(pathname);
@@ -144,6 +140,16 @@ export function Shell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("you-brain-refresh", onRefresh);
   }, [refresh]);
 
+  // 每个顶部菜单最后停留的完整地址，切回时回到那里（见 primaryNavTarget）。
+  const lastByTab = useRef(new Map<string, string>());
+  const activeTab = TABS.find((tab) => isPrimaryNavActive(location.pathname, tab.href))?.href;
+  if (activeTab !== undefined) lastByTab.current.set(activeTab, href);
+  const tabTarget = useCallback((tabHref: string): string => {
+    let stored: string | null = null;
+    try { stored = prefs.getItem(MEMORY_TAB_KEY); } catch { /* 读不到就按没记过。 */ }
+    return primaryNavTarget(tabHref, lastByTab.current, stored);
+  }, []);
+
   const shortcuts = useMemo(
     () => ({
       onPalette: () => setPalette(true),
@@ -160,7 +166,7 @@ export function Shell({ children }: { children: ReactNode }) {
       },
       onEscape: () => setPalette(false),
     }),
-    [navigate, refresh],
+    [navigate, refresh, tabTarget],
   );
   useShortcuts(shortcuts);
 
