@@ -57,6 +57,7 @@ export function terminalWebSocket(token: string, deps: HttpDeps) {
             ws.data.authenticated = true;
             ws.data.connection = open(request.pane, request.size, {
               ready: () => control(ws, { type: "ready" }),
+              live: () => control(ws, { type: "live" }),
               output(bytes) {
                 // 浏览器解析完成才 ACK，避免快速输出把渲染队列撑满。
                 ws.data.inFlight += bytes.length;

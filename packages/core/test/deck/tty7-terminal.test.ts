@@ -76,7 +76,7 @@ async function fixture(run: (h: {
 }
 
 function events(overrides: Partial<Tty7TerminalEvents> = {}): Tty7TerminalEvents {
-  return { ready() {}, output() {}, size() {}, lease() {}, warning() {}, exit() {}, error(message) { throw new Error(message); }, close() {}, ...overrides };
+  return { ready() {}, live() {}, output() {}, size() {}, lease() {}, warning() {}, exit() {}, error(message) { throw new Error(message); }, close() {}, ...overrides };
 }
 
 describe("tty7 real terminal transport", () => {
@@ -102,6 +102,28 @@ describe("tty7 real terminal transport", () => {
         expect(Buffer.concat(output).includes(Buffer.from("\x1b[?1049h\x1b[32m原终端\x1b[0m"))).toBe(true);
         // 从未 Attach，因此不会顶掉原控制端。
         expect(h.openings).not.toContain(2);
+      } finally { connection.close(); }
+      await until(h.released);
+    });
+  });
+
+  it("announces live output once, after the replay and before the first live frame", async () => {
+    await fixture(async (h) => {
+      const order: string[] = [];
+      const connection = openTty7Terminal({ pane: 3, size: SIZE, socketPath: h.path,
+        events: events({
+          live() { order.push("live"); },
+          output(bytes) { order.push(Buffer.from(bytes).toString()); },
+        }),
+      });
+      try {
+        await until(() => order.length > 0);
+        expect(order).toEqual(["\x1b[?1049h\x1b[32m原终端\x1b[0m"]);
+        // fixture 把输入原样作为实时输出（帧 3）回显。
+        connection.input(Buffer.from("a"));
+        connection.input(Buffer.from("b"));
+        await until(() => order.includes("b"));
+        expect(order.slice(1)).toEqual(["live", "a", "b"]);
       } finally { connection.close(); }
       await until(h.released);
     });

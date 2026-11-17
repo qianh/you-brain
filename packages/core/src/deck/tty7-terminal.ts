@@ -11,6 +11,11 @@ export interface TerminalSize {
 
 export interface Tty7TerminalEvents {
   ready(): void;
+  /**
+   * 连接时的历史回放（帧 2）已经结束，此后是实时输出（帧 3）。在第一帧实时输出之前触发一次。
+   * 回放里有程序当初发出的终端查询（DA、CPR、OSC 颜色等），浏览器要据此不再回答它们。
+   */
+  live(): void;
   output(bytes: Uint8Array): void;
   size(size: TerminalSize): void;
   lease(by: string | null): void;
@@ -102,6 +107,7 @@ export function openTty7Terminal(options: {
   let closed = false;
   let ready = false;
   let warned = false;
+  let live = false;
   let writing = false;
   let writer: Socket | undefined;
   let queue: Buffer[] = [];
@@ -192,7 +198,14 @@ export function openTty7Terminal(options: {
     try {
       frames.push(bytes, (kind, payload) => {
         if (closed) return;
-        if (kind === 2 || kind === 3) events.output(payload);
+        if (kind === 2) events.output(payload);
+        else if (kind === 3) {
+          if (!live) {
+            live = true;
+            events.live();
+          }
+          events.output(payload);
+        }
         else if (kind === 9) {
           const next: unknown = JSON.parse(payload.toString());
           if (validTerminalSize(next)) events.size(next);

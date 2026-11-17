@@ -9,6 +9,7 @@ import { useDaemon } from "../daemon-context.js";
 import { preserveTerminalImeInput } from "./deck-terminal-input.js";
 import { createLatencyProbe } from "./deck-terminal-latency.js";
 import { createBatchedTerminalOutput } from "./deck-terminal-output.js";
+import { muteReplayReplies } from "./deck-terminal-replies.js";
 import type { TerminalAppearance } from "./deck-terminal-font.js";
 
 type Status = "connecting" | "ready" | "disconnected" | "exited";
@@ -66,6 +67,8 @@ export function DeckTty7Terminal({
     let resizeFrame = 0;
     let layoutFrame = 0;
     let webglFrame = 0;
+    // 收到 daemon 的 live 之前写入的都是历史回放，其中的终端查询不作答。
+    let replaying = true;
     setStatus("connecting");
     setError(null);
     setWarning(null);
@@ -87,6 +90,7 @@ export function DeckTty7Terminal({
       disableStdin: true,
       theme: { ...(background === "" ? {} : { background }), foreground: "#e4e4e7", cursor: "#f4f4f5", selectionBackground: "#53617f99" },
     });
+    const replies = muteReplayReplies(terminal.parser, () => replaying);
     const fit = new FitAddon();
     terminal.loadAddon(fit);
     terminal.open(host);
@@ -199,7 +203,8 @@ export function DeckTty7Terminal({
           control({ type: "resize", size: measure() });
           webglFrame = requestAnimationFrame(() => loadWebgl());
           if (activeRef.current) terminal.focus();
-        } else if (message.type === "size" && message.size) terminal.resize(message.size.cols, message.size.rows);
+        } else if (message.type === "live") replaying = false;
+        else if (message.type === "size" && message.size) terminal.resize(message.size.cols, message.size.rows);
         else if (message.type === "warning" && typeof message.message === "string") setWarning(message.message);
         else if (message.type === "lease") setLeaseLost(message.by !== "U-Brain");
         else if (message.type === "exit") {
@@ -275,6 +280,7 @@ export function DeckTty7Terminal({
       socket.close();
       data.dispose();
       binary.dispose();
+      replies.dispose();
       terminal.dispose();
     };
   }, [client, pane, revision]);
