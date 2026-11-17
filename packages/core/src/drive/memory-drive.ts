@@ -245,6 +245,10 @@ export class MemoryDrive implements DrivePort {
     return this.update(existing.id, input.bytes, updateOptions);
   }
 
+  async metadata(id: string): Promise<DriveEntry> {
+    return this.#entry(this.#require(id));
+  }
+
   async read(id: string): Promise<DriveObject> {
     const object = this.#require(id);
     const bytes = this.#corruptReads

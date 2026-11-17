@@ -807,7 +807,7 @@ describe("protocol sync", () => {
         aliases: [],
       });
       const flushed = await sync.flush();
-      // The flush itself reads the file for its etag; only the pull must not.
+      // Only the pull is under test here.
       readsBefore.mockClear();
       await sync.pull();
 
@@ -836,6 +836,44 @@ describe("protocol sync", () => {
       expect(readsBefore).toHaveBeenCalledTimes(1);
       expect(local.store.getCursor(`sync.lines.${entry!.id}`)).toBe("3");
       expect(local.store.getTopic("topic-3")).toMatchObject({ name: "Three" });
+    } finally {
+      local.close();
+    }
+  });
+});
+
+describe("flush downloads", () => {
+  it("does not download its own unchanged day file, and still merges when it changed elsewhere", async () => {
+    const drive = new MemoryDrive();
+    const local = openStore();
+    try {
+      const sync = new ProtocolSync({ drive, store: local.store, device: identity(DEVICE_A, "MacBook Air") });
+      await sync.append("topic.created", { topicId: "topic-1", name: "One", aliases: [] });
+      const first = await sync.flush();
+      const dayPath = first.files[0]!.path;
+
+      const reads = spyOn(drive, "read");
+      await sync.append("topic.created", { topicId: "topic-2", name: "Two", aliases: [] });
+      await sync.flush();
+      // Neither the merge nor the etag for the write needs the file's bytes.
+      expect(reads).not.toHaveBeenCalled();
+      const written = parseEventsJsonl((await drive.readPath(dayPath))!.bytes.toString("utf8")).events;
+      expect(written.map((event) => (event.data as { topicId: string }).topicId)).toEqual(["topic-1", "topic-2"]);
+
+      // Another writer (an older install, say) adds a line of this device: md5 differs, so
+      // the next flush reads the file and keeps that line.
+      const remote = await drive.readPath(dayPath);
+      const outside = topic(DEVICE_A, 99, "2026-07-01T03:00:00.000Z", "topic-x", "Outside");
+      await upsertByPath(drive, dayPath, `${remote!.bytes.toString("utf8")}${serializeEventsJsonl([outside])}`, {
+        mimeType: "application/jsonl",
+      });
+      reads.mockClear();
+      await sync.append("topic.created", { topicId: "topic-3", name: "Three", aliases: [] });
+      await sync.flush();
+      expect(reads).toHaveBeenCalledTimes(1);
+      const merged = parseEventsJsonl((await drive.readPath(dayPath))!.bytes.toString("utf8")).events;
+      expect(merged.map((event) => (event.data as { topicId: string }).topicId)).toContain("topic-x");
+      expect(merged.map((event) => (event.data as { topicId: string }).topicId)).toContain("topic-3");
     } finally {
       local.close();
     }

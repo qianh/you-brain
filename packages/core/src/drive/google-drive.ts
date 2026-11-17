@@ -926,6 +926,12 @@ export class GoogleDrive implements DrivePort {
     return this.update(existing.id, input.bytes, options);
   }
 
+  async metadata(id: string): Promise<DriveEntry> {
+    await this.#assertDescendant(id);
+    const metadata = await this.#metadataResponse(id);
+    return this.#entry(metadata.data, await this.#pathFor(id), headerValue(metadata.headers, "etag"));
+  }
+
   async read(id: string): Promise<DriveObject> {
     await this.#assertDescendant(id);
     const metadata = await this.#metadataResponse(id);

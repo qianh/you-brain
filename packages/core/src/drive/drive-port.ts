@@ -82,6 +82,11 @@ export interface DrivePort {
   upsert(input: DrivePutInput): Promise<DriveEntry>;
   /** Bytes plus etag, md5Checksum, and modifiedTime. */
   read(id: string): Promise<DriveObject>;
+  /**
+   * What `read` returns minus the bytes: the etag `update` checks `ifMatch` against, md5 and
+   * times. Optional; without it callers fall back to `read`.
+   */
+  metadata?(id: string): Promise<DriveEntry>;
   readPath(path: string): Promise<DriveObject | null>;
   findByPath(path: string): Promise<DriveEntry | null>;
   findByAppProperty(key: string, value: string): Promise<DriveEntry[]>;

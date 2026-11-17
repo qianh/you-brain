@@ -1,6 +1,6 @@
 import type { Event } from "@you-brain/protocol";
 
-import { foldEvents } from "../topics/fold.js";
+import { foldEventsCached } from "../topics/book-cache.js";
 import { computeDueReminders, type ReminderActionFact, type ReminderIssuedData } from "./due.js";
 import { foldReminders } from "./fold.js";
 
@@ -25,7 +25,7 @@ export function dueRemindersForDevice(input: DueDeviceInput): ReminderIssuedData
   if (input.mainDevice === null || input.mainDevice !== input.deviceId) return [];
   void input.notifications;
   return computeDueReminders({
-    book: foldEvents(input.events),
+    book: foldEventsCached(input.events),
     sessionUpdatedAt: input.sessionUpdatedAt,
     reminders: foldReminders(input.events),
     actions: reminderActions(input.events),

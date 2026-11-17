@@ -1,4 +1,5 @@
 import { watch, type FSWatcher } from "node:fs";
+import { foldEventsCached } from "../topics/book-cache.js";
 import { access, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -207,7 +208,6 @@ import { ProtocolSync } from "../sync/service.js";
 import type { DeviceIdentity } from "../sync/types.js";
 import {
   applyEvents,
-  foldEvents,
   partitionTopics,
   persistTopicBook,
   recentSessionTitles,
@@ -2128,14 +2128,14 @@ export class YouBrainDaemon {
   #createRecall(): RecallService {
     return new RecallService({
       llm: () => (this.#cliPaused() ? null : this.#llm),
-      book: () => foldEvents(this.#store?.listEvents() ?? []),
+      book: () => foldEventsCached(this.#store?.listEvents() ?? []),
       candidateTopics: () => this.#candidateTopics(),
       sessionUpdatedAt: () => this.#sessionUpdatedAt(),
       reminders: () => foldReminders(this.#store?.listEvents() ?? []),
       topicMuted: (topicId) => {
         const events = this.#store?.listEvents() ?? [];
         return topicIsMuted(topicId, {
-          book: foldEvents(events),
+          book: foldEventsCached(events),
           sessionUpdatedAt: this.#sessionUpdatedAt(),
           actions: reminderActions(events),
         });
@@ -2174,7 +2174,7 @@ export class YouBrainDaemon {
       },
       replies: (topicId) => {
         const events = this.#store?.listEvents() ?? [];
-        const book = foldEvents(events);
+        const book = foldEventsCached(events);
         const wanted = resolveMergedTopic(book, topicId);
         const timeZone = this.#roles.timezone;
         const replies = readReminderReplies(this.#replyLogPath())
@@ -2531,7 +2531,7 @@ export class YouBrainDaemon {
     if (!this.#log || !this.#store) return;
     const allocated = allocateCopied(this.#log, event);
     this.#enqueueLocal(allocated);
-    persistTopicBook(this.#store, applyEvents(foldEvents(this.#store.listEvents()), [allocated]));
+    persistTopicBook(this.#store, applyEvents(foldEventsCached(this.#store.listEvents()), [allocated]));
     this.#onTopicsChanged();
     this.#scheduleWebhook();
   }
@@ -2545,7 +2545,7 @@ export class YouBrainDaemon {
     if (!this.#log || !this.#store) return;
     const event = this.#log.allocate(type, data);
     this.#enqueueLocal(event);
-    persistTopicBook(this.#store, applyEvents(foldEvents(this.#store.listEvents()), [event]));
+    persistTopicBook(this.#store, applyEvents(foldEventsCached(this.#store.listEvents()), [event]));
     this.#onTopicsChanged();
     this.#scheduleWebhook();
   }
@@ -2562,7 +2562,7 @@ export class YouBrainDaemon {
     const log = this.#log;
     const events = items.map((item) => log.allocate(item.type, item.data));
     for (const event of events) this.#enqueueLocal(event);
-    persistTopicBook(this.#store, applyEvents(foldEvents(this.#store.listEvents()), events));
+    persistTopicBook(this.#store, applyEvents(foldEventsCached(this.#store.listEvents()), events));
     this.#onTopicsChanged();
     this.#scheduleWebhook();
   }
@@ -2684,7 +2684,7 @@ export class YouBrainDaemon {
       timeZoneOffsetMinutes: timeZoneOffsetMinutes(this.#roles.timezone, now),
       mergeLines: mergeSuggestionLines(
         parseMergeSuggestions(store.getCursor(MERGE_SUGGESTIONS_CURSOR)),
-        foldEvents(events).topics,
+        foldEventsCached(events).topics,
       ),
     });
     for (const item of due) {
@@ -3672,14 +3672,14 @@ export class YouBrainDaemon {
         if (!llm) throw new HttpError(409, "NO_LLM", "还没有配置模型，没法整理话题");
         return this.#reorganizeJob.start(
           (onRunning) =>
-            planTopicReorganization(llm, reorganizeTopics(foldEvents(store.listEvents())), { onRunning }),
+            planTopicReorganization(llm, reorganizeTopics(foldEventsCached(store.listEvents())), { onRunning }),
           input,
         );
       },
       topicReorganizeStatus: () => this.#reorganizeJob.status(),
       applyTopicReorganization: (body) =>
         this.#run(async () => {
-          const { events, merged } = reorganizeEvents(foldEvents(store.listEvents()), body.groups);
+          const { events, merged } = reorganizeEvents(foldEventsCached(store.listEvents()), body.groups);
           await this.#emitUserBatch(events);
           this.#reorganizeJob.clear();
           return { merged };
@@ -3728,7 +3728,7 @@ export class YouBrainDaemon {
       reminderDetail: async (id) => {
         const reminder = await readers.reminder(id);
         if (!reminder) return { detail: null };
-        const book = foldEvents(store.listEvents());
+        const book = foldEventsCached(store.listEvents());
         const issuedAt = new Date(reminder.issuedAt);
         return {
           detail: reminderDetail({
@@ -4215,7 +4215,7 @@ export class YouBrainDaemon {
     for (const session of store?.listSessions() ?? []) {
       if (session.updatedAt !== null) sessionUpdatedAt[session.sessionKey] = session.updatedAt;
     }
-    return { book: foldEvents(events), sessionUpdatedAt };
+    return { book: foldEventsCached(events), sessionUpdatedAt };
   }
 
   async #consolidation(): Promise<StatusResponse["consolidation"]> {
@@ -4369,7 +4369,7 @@ export class YouBrainDaemon {
 
   #candidateTopics(): CandidateTopic[] {
     if (!this.#store) return [];
-    const book = foldEvents(this.#store.listEvents());
+    const book = foldEventsCached(this.#store.listEvents());
     const activity: Record<string, string> = {};
     for (const session of this.#store.listSessions()) {
       if (session.updatedAt) activity[session.sessionKey] = session.updatedAt;

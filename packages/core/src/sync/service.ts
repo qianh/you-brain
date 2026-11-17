@@ -23,12 +23,13 @@ import {
   type SharedConfig,
 } from "@you-brain/protocol";
 
+import { foldEventsCached } from "../topics/book-cache.js";
 import { YouBrainError } from "../domain/errors.js";
 import type { DriveChanges, DriveEntry, DrivePort } from "../drive/drive-port.js";
 import { md5Hex } from "../drive/hash.js";
 import { ACTIVITY_EPOCH } from "../reminders/delivery.js";
 import { updateJsonWithMerge, upsertByPath } from "../upload/write.js";
-import { applyEvents, foldEvents, persistTopicBook } from "../topics/index.js";
+import { applyEvents, persistTopicBook } from "../topics/index.js";
 import type { TopicBook } from "../topics/types.js";
 import { zonedDay } from "./day.js";
 import { lineCursorKey, selfUploadKey, SYNC_DRIVE_CURSOR } from "./cursors.js";
@@ -199,7 +200,7 @@ export class ProtocolSync {
   }
 
   topicBook(): TopicBook {
-    return foldEvents(this.#store.listEvents());
+    return foldEventsCached(this.#store.listEvents());
   }
 
   pendingEvents(): Event[] {
@@ -397,7 +398,13 @@ export class ProtocolSync {
 
   async #writeDay(day: string, timeZone: string): Promise<DayWrite> {
     const path = eventLogPath(this.#device.deviceId, day);
-    const remote = await this.#drive.readPath(path);
+    // When Drive still holds exactly what this device last wrote (same md5), every line in
+    // it is already in the local store (see #rememberSelfUpload), so the merge below needs
+    // only local events: skip downloading and parsing the file. A busy day is thousands of
+    // events and a megabyte, re-read on every flush before this.
+    const known = await this.#drive.findByPath(path);
+    const ours = known !== null && this.#selfUpload(known.id)?.md5 === known.md5Checksum;
+    const remote = known === null || ours ? null : await this.#drive.read(known.id);
     const remoteEvents = remote
       ? parseEventsJsonl(remote.bytes.toString("utf8")).events.filter(
           (event) => event.device === this.#device.deviceId,

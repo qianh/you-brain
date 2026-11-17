@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 
+import { foldEventsCached } from "../topics/book-cache.js";
 import {
   DEFAULT_ACTIVE_TOPIC_LIMIT,
   DEFAULT_HISTORY_DAYS,
@@ -20,7 +21,6 @@ import type {
   TopicRecord,
 } from "../store/types.js";
 import { presentReminders } from "../reminders/present.js";
-import { foldEvents } from "../topics/index.js";
 import type { OutputClock, OutputTimer } from "./clock.js";
 import { systemClock } from "./clock.js";
 import { renderLocalMarkdown, type RenderedOutput } from "./render.js";
@@ -168,7 +168,7 @@ function loadSessions(
 ): SessionRecord[] {
   const byKey = new Map<string, SessionRecord>();
   if (events.length > 0) {
-    for (const session of foldEvents(events).sessions) {
+    for (const session of foldEventsCached(events).sessions) {
       const stored = source.getSession(session.sessionKey);
       byKey.set(
         session.sessionKey,

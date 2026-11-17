@@ -62,7 +62,9 @@ export async function upsertByPath(
         assertChecksum(created, bytes);
         return created;
       }
-      const current = await drive.read(existing.id);
+      // Only the etag is needed. Reading the file for it downloaded the whole thing first,
+      // so every update of a busy event file moved its bytes twice.
+      const current = drive.metadata ? await drive.metadata(existing.id) : await drive.read(existing.id);
       const updateOptions: DriveUpdateOptions = {
         ifMatch: current.etag,
         mimeType,

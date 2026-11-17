@@ -139,6 +139,15 @@ export class InboxScopedDrive implements DrivePort {
     return registered;
   }
 
+  async metadata(id: string): Promise<DriveEntry> {
+    const entry = this.#drive.metadata ? await this.#drive.metadata(id) : await this.#drive.read(id);
+    const registered = this.#register(entry);
+    if (!registered) {
+      throw new YouBrainError("INVALID_INPUT", "Drive returned an object outside inbox");
+    }
+    return registered;
+  }
+
   async read(id: string): Promise<DriveObject> {
     const object = await this.#drive.read(id);
     const registered = this.#register(object);
