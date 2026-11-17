@@ -208,7 +208,7 @@ console.log(`使用 Node ${node.version.join(".")}：${node.path}`);
 
 await rm(outDir, { recursive: true, force: true });
 await mkdir(sidecar, { recursive: true });
-for (const file of ["package.json", "package-lock.json", "login-oauth.mjs"]) {
+for (const file of ["package.json", "package-lock.json", "login-oauth.mjs", "parent-watch.mjs"]) {
   await copyFile(join(source, file), join(sidecar, file));
 }
 // 随 App 带的 dsh 插件（GUI App 桥等）。

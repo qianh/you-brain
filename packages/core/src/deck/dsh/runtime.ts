@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { LlmProvider } from "@you-brain/protocol";
 
@@ -164,8 +164,11 @@ export class DshRuntime {
     await mkdir(join(this.#root, "work"), { recursive: true });
     await this.#linkProfileModules(dshHome, "web");
     const node = base.node;
+    // daemon 被强杀或崩溃时 DSH 会成孤儿，预加载的监视脚本让它在父进程消失后自行退出。
+    const parentWatch = join(this.sidecarDir, "parent-watch.mjs");
     this.#web = new DshWeb({
       nodePath: node.path,
+      ...(existsSync(parentWatch) ? { nodeArgs: ["--import", pathToFileURL(parentWatch).href] } : {}),
       binPath: join(this.sidecarDir, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js"),
       cwd: join(this.#root, "work"),
       // DSH 的定时任务（自动化任务）只在它运行时触发：随 U-Brain 常驻，崩溃后自动拉起。

@@ -14,6 +14,8 @@ export interface DshWebOptions {
   nodePath: string;
   /** dsh 可执行入口（sidecar 里 node_modules/@deepseek-ai/dsh/lib/bin.js）。 */
   binPath: string;
+  /** 放在入口脚本之前的 Node 参数（如 `--import` 父进程监视脚本）。 */
+  nodeArgs?: readonly string[];
   cwd: string;
   /** dsh 进程的完整环境（DSH_HOME、PATH、各供应商密钥…）。 */
   env: () => Promise<Record<string, string>>;
@@ -91,6 +93,7 @@ export class DshWeb {
       const [env, patches] = await Promise.all([this.#options.env(), this.#options.patches()]);
       // 启动器参数（--profile / --patch）必须在 app 参数（--no-open / --port）之前。
       const args = [
+        ...(this.#options.nodeArgs ?? []),
         this.#options.binPath,
         "--profile",
         "web",

@@ -207,6 +207,35 @@ describe("dsh web process", () => {
     }
   });
 
+  it("hands nodeArgs to the runtime ahead of the entry script, not to DSH", async () => {
+    const probe = await fakeWebScript(
+      `require("node:fs").writeFileSync(require("node:path").join(__dirname, "args.json"), JSON.stringify(process.argv.slice(2))); console.log("http://127.0.0.1:2/?token=y"); setInterval(() => {}, 1000);`,
+    );
+    const preload = join(probe.dir, "preload.js");
+    await writeFile(preload, `require("node:fs").writeFileSync(${JSON.stringify(join(probe.dir, "preloaded"))}, "1");`);
+    const web = new DshWeb({
+      nodePath: process.execPath,
+      // Bun's equivalent of node --import, so the test runs without a Node install.
+      nodeArgs: ["--preload", preload],
+      binPath: probe.script,
+      cwd: probe.dir,
+      env: async () => ({ PATH: process.env.PATH ?? "" }),
+      patches: async () => [],
+      startTimeoutMs: 3_000,
+    });
+    try {
+      web.ensureStarted();
+      await waitFor(web, "ready");
+      expect(await readFile(join(probe.dir, "preloaded"), "utf8")).toBe("1");
+      expect(JSON.parse(await readFile(join(probe.dir, "args.json"), "utf8"))).toEqual([
+        "--profile", "web", "--no-open", "--port", "0",
+      ]);
+    } finally {
+      web.stop();
+      await rm(probe.dir, { recursive: true, force: true });
+    }
+  });
+
   it("reports an early exit with the stderr tail and restarts on the next request", async () => {
     const { dir, script } = await fakeWebScript(`console.error("boom: no pnpm"); process.exit(2);`);
     const web = webFor(script, dir);
