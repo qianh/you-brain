@@ -4,7 +4,7 @@ import type { Database } from "bun:sqlite";
 
 import { chunkText } from "./chunk-text.js";
 import type { SearchDrive, SearchDriveEntry } from "./drive.js";
-import { deviceOfInboxPath, excerptAround, queryTerms } from "./remote.js";
+import { deviceOfInboxPath, excerptAround, queryTerms, stripFrontmatter } from "./remote.js";
 import { inScope } from "./scope.js";
 import {
   E5_SMALL,
@@ -637,7 +637,10 @@ export class SearchService {
     const reusable = this.#semantic && this.#reusable();
     for (const { entry, markdown } of loaded) {
       const metadata = parseFrontmatter(markdown);
-      const textChunks = chunkText(this.#redact(stripImages(markdown)), {
+      // The header is metadata, already kept in columns; as text it only showed up in excerpts
+      // and matched queries on ids and hashes. Chunks indexed before this keep it until the
+      // file changes; #excerpt hides it from those.
+      const textChunks = chunkText(this.#redact(stripImages(stripFrontmatter(markdown))), {
         maxTokens: this.#chunkTokens,
         overlapTokens: this.#chunkOverlap,
       });
@@ -1257,9 +1260,10 @@ export class SearchService {
     // Only the page actually returned needs text; fetching it for every candidate is the
     // cost this split exists to avoid.
     const page: RankedHit[] = ranked.slice(0, input.limit);
+    const terms = queryTerms(input.query);
     for (const result of page) {
       if (result.fileId !== undefined && result.chunkId !== undefined) {
-        result.excerpt = this.#excerpt(result.fileId, result.chunkId);
+        result.excerpt = this.#excerpt(result.fileId, result.chunkId, terms);
       }
     }
     return {
@@ -1271,14 +1275,14 @@ export class SearchService {
     };
   }
 
-  /** Whitespace-collapsed chunk text, trimmed for a one-line preview. */
-  #excerpt(fileId: string, chunkId: string): string {
+  /** A one-line preview of the chunk around the first query term, without the file header. */
+  #excerpt(fileId: string, chunkId: string, terms: readonly string[]): string {
     const row = this.#database
       .prepare(
         "SELECT text FROM search_chunks WHERE drive_file_id = ? AND chunk_id = ?",
       )
       .get(fileId, chunkId) as { text: string } | null;
-    return (row?.text ?? "").replace(/\s+/gu, " ").trim().slice(0, 360);
+    return excerptAround(row?.text ?? "", terms);
   }
 
   /**

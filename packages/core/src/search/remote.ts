@@ -8,9 +8,14 @@ export function queryTerms(query: string): string[] {
   return query.toLowerCase().split(/\s+/u).filter(Boolean);
 }
 
+/** The session file's YAML header (source, ids, hashes): metadata, not transcript. */
+export function stripFrontmatter(markdown: string): string {
+  return markdown.replace(/^---\n[\s\S]*?\n---\n?/u, "");
+}
+
 /** A window of the transcript around the first matching term, without the frontmatter. */
 export function excerptAround(markdown: string, terms: readonly string[], width = 360): string {
-  const body = markdown.replace(/^---\n[\s\S]*?\n---\n/u, "").replace(/\s+/gu, " ").trim();
+  const body = stripFrontmatter(markdown).replace(/\s+/gu, " ").trim();
   const lower = body.toLowerCase();
   let at = -1;
   for (const term of terms) {
