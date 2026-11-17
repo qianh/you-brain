@@ -5,6 +5,7 @@ import { Icon } from "../components/icons.js";
 import { InlineRename } from "../components/inline-rename.js";
 import { Popover } from "../components/popover.js";
 import { useDaemon } from "../daemon-context.js";
+import { usePageActive } from "../page-active.js";
 import { prefs } from "../lib/prefs.js";
 import { modLabel, shortcutMod } from "../lib/shortcuts.js";
 import { FONT_MAX, FONT_MIN, FONT_SIZE_KEY, resolveAppearance, stepFontSize } from "./deck-terminal-font.js";
@@ -29,6 +30,7 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
   shown: boolean;
 }) {
   const { t, client } = useDaemon();
+  const pageActive = usePageActive();
   const { view, reload } = shared;
   const { rename, reportError } = useSessionRename(reload);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -86,7 +88,7 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
     return () => window.removeEventListener("keydown", onKey, true);
   }, [mod, tabs, onTabsChange, fontSize]);
 
-  // 告诉 daemon 正在看哪个会话，这个会话完成时不弹通知。窗口失焦、页面隐藏或离开时报 null。
+  // 告诉 daemon 正在看哪个会话，这个会话完成时不弹通知。窗口失焦、页面隐藏、切到别的菜单或离开时报 null。
   // 失败一律静默：上报不能影响终端使用。
   useEffect(() => {
     let last: number | null = null;
@@ -95,7 +97,7 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
     };
     const sync = (): void => {
       const target = viewingTarget(
-        shown ? tabs.active : null,
+        shown && pageActive ? tabs.active : null,
         document.hasFocus(),
         document.visibilityState === "visible",
       );
@@ -119,7 +121,7 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
       document.removeEventListener("visibilitychange", sync);
       if (last !== null) send(null);
     };
-  }, [client, tabs.active, shown]);
+  }, [client, tabs.active, shown, pageActive]);
 
   useEffect(() => {
     activeTabRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });

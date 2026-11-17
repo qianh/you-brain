@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -35,6 +36,17 @@ export function Router({ children }: { children: ReactNode }) {
   }, []);
   const value: RouterValue = { href, location: parseAppLocation(href), navigate };
   return <RouterContext.Provider value={value}>{children}</RouterContext.Provider>;
+}
+
+/**
+ * 隐藏的常驻页面用：`frozen` 时保持隐藏那一刻的地址。路由里的 `id` 是通用参数（话题、知识库页都用），
+ * 不冻结的话，隐藏的页面会拿别的页面的 id 去加载、清掉自己的选中状态。
+ */
+export function FrozenRoute({ frozen, children }: { frozen: boolean; children: ReactNode }) {
+  const live = useContext(RouterContext);
+  const held = useRef(live);
+  if (!frozen) held.current = live;
+  return <RouterContext.Provider value={held.current}>{children}</RouterContext.Provider>;
 }
 
 export function useRoute(): RouterValue {

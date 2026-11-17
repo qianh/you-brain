@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { TopicDetail } from "@you-brain/core/http/types.js";
 
 import { BrowserDaemonError } from "../api/client.js";
@@ -15,7 +15,7 @@ import { useDaemon } from "../daemon-context.js";
 import { topicHref } from "../lib/route.js";
 import { isTextEntry } from "../lib/shortcuts.js";
 import { useRoute } from "../router.js";
-import { highlightId, moveInList, showsNarrowDetail, statusCounts, visibleTopics, type StatusFilter } from "./topics/logic.js";
+import { applyListPatch, highlightId, moveInList, showsNarrowDetail, statusCounts, visibleTopics, type StatusFilter } from "./topics/logic.js";
 import { TopicDetailPane } from "./topics/topic-detail.js";
 import { ReorganizeDialog } from "./topics/reorganize-dialog.js";
 import { TopicList } from "./topics/topic-list.js";
@@ -67,12 +67,19 @@ export function TopicsPage({ zone }: { zone: "active" | "history" }) {
   const actions = useTopicActions(detail, setDetail, zone, epoch, busyRef);
 
   const queryForZone = zone === "history" ? query : "";
-  const patched = topics.map((topic) => actions.displayTopic(topic));
-  const inZone = patched.filter((topic) => topic.zone === zone);
-  const counted = visibleTopics(patched, zone, "all", queryForZone);
-  const counts = statusCounts(counted);
-  const visible = visibleTopics(patched, zone, filter, queryForZone);
-  const visibleIds = visible.map((topic) => topic.topicId);
+  // 话题有上千条；只在列表、乐观更新、分区、筛选或搜索词变化时重算，键盘移动光标等不重算。
+  const { patch } = actions;
+  const { patched, inZone, counts, visible, visibleIds } = useMemo(() => {
+    const patched = topics.map((topic) => applyListPatch(topic, patch));
+    const shown = visibleTopics(patched, zone, filter, queryForZone);
+    return {
+      patched,
+      inZone: patched.filter((topic) => topic.zone === zone),
+      counts: statusCounts(visibleTopics(patched, zone, "all", queryForZone)),
+      visible: shown,
+      visibleIds: shown.map((topic) => topic.topicId),
+    };
+  }, [topics, patch, zone, filter, queryForZone]);
   const detailOpen = showsNarrowDetail(narrow, selected);
   const highlighted = highlightId(visibleIds, selected, cursor, narrow && !detailOpen);
   const sessionCount = detail !== null && detail.topicId === highlighted ? detail.sessions.length : null;

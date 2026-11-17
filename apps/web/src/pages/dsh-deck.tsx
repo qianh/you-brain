@@ -7,6 +7,7 @@ import { Page } from "../components/page.js";
 import { Segmented } from "../components/segmented.js";
 import { Spinner } from "../components/spinner.js";
 import { useDaemon } from "../daemon-context.js";
+import { usePageActive } from "../page-active.js";
 import { createDshCookiePreparer } from "../lib/dsh-cookies.js";
 import { terminalReferenceMessage, type TerminalReference } from "../lib/terminal-reference.js";
 import { DeckTerminalScreen } from "./deck-terminal-screen.js";
@@ -31,6 +32,7 @@ const DECK_VIEWS = [{ value: "t3", label: "T3" }, { value: "dsh", label: "DSH" }
  */
 export function DshDeckPage() {
   const { client, t } = useDaemon();
+  const pageActive = usePageActive();
   const [activePage, setActivePage] = useState<"dsh" | "t3">(() => {
     try { return initialDeckView(prefs.getItem(DECK_VIEW_KEY)); } catch { return initialDeckView(null); }
   });
@@ -115,17 +117,20 @@ export function DshDeckPage() {
     return () => window.removeEventListener("message", receive);
   }, [readyUrl]);
 
+  // 切到别的菜单（常驻但隐藏）时不确认；切回时立即确认一次，地址变了就换。
   useEffect(() => {
-    if (readyUrl === null) return undefined;
-    const timer = setInterval(() => {
+    if (readyUrl === null || !pageActive) return undefined;
+    const check = (): void => {
       void load(false).then((next) => {
         if (next.state === "ready" && next.url === readyUrl) return;
         setView(next);
         if (next.state === "starting") setAttempt((value) => value + 1);
       });
-    }, 3_000);
+    };
+    check();
+    const timer = setInterval(check, 3_000);
     return () => clearInterval(timer);
-  }, [readyUrl, load]);
+  }, [readyUrl, load, pageActive]);
 
   const toggleTty7 = (open: boolean): void => {
     setTty7Open(open);

@@ -370,6 +370,17 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
   return <DaemonContext.Provider value={value}>{children}</DaemonContext.Provider>;
 }
 
+/**
+ * 隐藏的常驻页面用：`frozen` 时继续提供隐藏那一刻的值，daemon 推送更新时这些页面不跟着重渲染；
+ * 重新显示时接上最新值。方法（client、reload 等）照常可用。
+ */
+export function FrozenDaemon({ frozen, children }: { frozen: boolean; children: ReactNode }) {
+  const live = useContext(DaemonContext);
+  const held = useRef(live);
+  if (!frozen) held.current = live;
+  return <DaemonContext.Provider value={held.current}>{children}</DaemonContext.Provider>;
+}
+
 export function useDaemon(): DaemonValue {
   const value = useContext(DaemonContext);
   if (!value) throw new Error("useDaemon must be used inside DaemonProvider");

@@ -12,6 +12,7 @@ import { Select } from "../components/select.js";
 import { Spinner } from "../components/spinner.js";
 import { useToast } from "../components/toast.js";
 import { useDaemon } from "../daemon-context.js";
+import { usePageActive } from "../page-active.js";
 import { formatRelative } from "../lib/format.js";
 import { projectTask, TASK_PRIORITY_KEYS, TASK_STATUS_KEYS, taskThreadUrl, visibleTasks } from "./tasks/logic.js";
 
@@ -27,6 +28,7 @@ function ThreadLink({ task }: { task: DevelopmentTask }) {
 
 export function TasksPage() {
   const { client, t, language, timeZone } = useDaemon();
+  const pageActive = usePageActive();
   const { push } = useToast();
   const [board, setBoard] = useState<TaskBoard | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -68,19 +70,26 @@ export function TasksPage() {
 
   useEffect(() => {
     mounted.current = true;
+    return () => {
+      mounted.current = false;
+      version.current += 1;
+    };
+  }, []);
+
+  // 页面切走（常驻但隐藏）时不轮询；切回或首次进入时立即拉一次。
+  useEffect(() => {
+    if (!pageActive) return;
     void load();
     const visible = (): void => { if (document.visibilityState === "visible") void load(); };
     const timer = window.setInterval(visible, 5_000);
     window.addEventListener("you-brain-refresh", visible);
     document.addEventListener("visibilitychange", visible);
     return () => {
-      mounted.current = false;
-      version.current += 1;
       window.clearInterval(timer);
       window.removeEventListener("you-brain-refresh", visible);
       document.removeEventListener("visibilitychange", visible);
     };
-  }, [load]);
+  }, [load, pageActive]);
 
   const mutate = async (work: () => Promise<TaskBoard>, success?: string): Promise<boolean> => {
     if (mutating.current) return false;

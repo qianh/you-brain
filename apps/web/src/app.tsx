@@ -1,8 +1,9 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { memo, useEffect, useState, type ReactNode } from "react";
 
 import { BrandMark } from "./components/icons.js";
 import { ToastProvider } from "./components/toast.js";
-import { DaemonProvider, useDaemon } from "./daemon-context.js";
+import { DaemonProvider, FrozenDaemon, useDaemon } from "./daemon-context.js";
+import { PageActiveContext } from "./page-active.js";
 import { DshDeckPage } from "./pages/dsh-deck.js";
 import { DesignPage } from "./pages/design.js";
 import { PanelPage } from "./pages/panel.js";
@@ -14,7 +15,7 @@ import { KnowledgePage } from "./pages/knowledge.js";
 import { SettingsPage } from "./pages/settings.js";
 import { TasksPage } from "./pages/tasks.js";
 import { settingsHref } from "./lib/route.js";
-import { Router, useRoute } from "./router.js";
+import { FrozenRoute, Router, useRoute } from "./router.js";
 import { Shell } from "./shell.js";
 import { ThemeProvider } from "./theme-context.js";
 
@@ -98,6 +99,9 @@ function Frame() {
  * 主导航页面常驻挂载，切走只隐藏不卸载：回到原来的菜单时滚动位置、
  * 展开的条目和指挥台的会话状态都还在。数据本身来自 DaemonProvider，
  * 由 daemon 变更事件保持最新，常驻不会看过期内容。
+ *
+ * 隐藏的页面不做后台工作：KeepPage 用 memo 挡住外层重渲染，FrozenDaemon / FrozenRoute 让它不随 daemon 推送
+ * 和地址变化重渲染，usePageActive() 让轮询和上报暂停；切回时接上最新数据，各页面自行补拉一次。
  */
 function KeepAlive({ active }: { active: string }) {
   const [mounted, setMounted] = useState([active]);
@@ -107,13 +111,23 @@ function KeepAlive({ active }: { active: string }) {
   return (
     <>
       {mounted.map((pathname) => (
-        <div key={pathname} className="keep-page" hidden={pathname !== active}>
-          {renderKeepPage(pathname)}
-        </div>
+        <KeepPage key={pathname} pathname={pathname} active={pathname === active} />
       ))}
     </>
   );
 }
+
+const KeepPage = memo(function KeepPage({ pathname, active }: { pathname: string; active: boolean }) {
+  return (
+    <div className="keep-page" hidden={!active}>
+      <PageActiveContext.Provider value={active}>
+        <FrozenRoute frozen={!active}>
+          <FrozenDaemon frozen={!active}>{renderKeepPage(pathname)}</FrozenDaemon>
+        </FrozenRoute>
+      </PageActiveContext.Provider>
+    </div>
+  );
+});
 
 function renderKeepPage(pathname: string): ReactNode {
   switch (pathname) {

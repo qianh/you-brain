@@ -28,6 +28,7 @@ import { Icon } from "../components/icons.js";
 import { Input } from "../components/input.js";
 import { useToast } from "../components/toast.js";
 import { useDaemon } from "../daemon-context.js";
+import { usePageActive } from "../page-active.js";
 import { openLocalPath } from "../lib/local-path.js";
 import { useImeGuard } from "../lib/ime-guard.js";
 import { settingsHref } from "../lib/route.js";
@@ -190,6 +191,7 @@ function writeCollapsed(ids: ReadonlySet<string>): void {
 
 export function KnowledgePage() {
   const { client, t, language, notionRevision } = useDaemon();
+  const pageActive = usePageActive();
   const { push } = useToast();
   const { location, navigate } = useRoute();
   const titleIme = useImeGuard();
@@ -357,7 +359,9 @@ export function KnowledgePage() {
     syncStale.current = true;
     void refreshMeta().catch(() => undefined);
   }, [notionRevision, refreshMeta]);
+  // 切到别的菜单（常驻但隐藏）时不检查；切回后照常补上。
   useEffect(() => {
+    if (!pageActive) return;
     const timer = setInterval(() => {
       if (!syncStale.current) return;
       if (pendingJobs.current > 0 || titleInFlight.current > 0 || titleTarget.current || isEditingBlocks()) return;
@@ -365,7 +369,7 @@ export function KnowledgePage() {
       setReloadTick((value) => value + 1);
     }, 1000);
     return () => clearInterval(timer);
-  }, []);
+  }, [pageActive]);
 
   // 标题编辑框:点外面就保存并收起(有的区域按下时会阻止失焦,不能只靠 blur)。
   useEffect(() => {

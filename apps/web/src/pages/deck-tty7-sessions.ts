@@ -3,6 +3,7 @@ import type { DeckTty7SessionsResponse } from "@you-brain/core/http/types.js";
 
 import { useToast } from "../components/toast.js";
 import { useDaemon } from "../daemon-context.js";
+import { usePageActive } from "../page-active.js";
 import type { TerminalReference } from "../lib/terminal-reference.js";
 
 export type Session = DeckTty7SessionsResponse["sessions"][number];
@@ -61,6 +62,7 @@ export function useTty7Sessions(): {
   reload(): Promise<DeckTty7SessionsResponse | null>;
 } {
   const { client } = useDaemon();
+  const pageActive = usePageActive();
   const [view, setView] = useState<DeckTty7SessionsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const sequence = useRef(0);
@@ -81,13 +83,15 @@ export function useTty7Sessions(): {
     }
   }, [client]);
 
+  // 指挥台切走（常驻但隐藏）时不轮询；切回时立即拉一次。
   useEffect(() => {
+    if (!pageActive) return;
     void reload();
     const timer = setInterval(() => {
       if (document.visibilityState === "visible") void reload();
     }, SESSIONS_POLL_MS);
     return () => clearInterval(timer);
-  }, [reload]);
+  }, [reload, pageActive]);
 
   return { view, error, reload };
 }
