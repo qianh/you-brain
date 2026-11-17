@@ -126,6 +126,18 @@ h3 {
   to { opacity: 1; transform: none; }
 }
 
+/* 按需加载页面时的占位（app.tsx PageLoading）：先占住高度，150 ms 后才出现文字。 */
+.page-loading {
+  min-height: 60vh;
+  display: grid;
+  place-items: center;
+}
+
+.page-loading-text {
+  margin: 0;
+  color: var(--text-2);
+}
+
 .boot {
   min-height: 100vh;
   display: grid;

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 
 import { IconButton } from "../components/button.js";
 import { Icon } from "../components/icons.js";
@@ -6,14 +6,17 @@ import { InlineRename } from "../components/inline-rename.js";
 import { Popover } from "../components/popover.js";
 import { useDaemon } from "../daemon-context.js";
 import { usePageActive } from "../page-active.js";
+import { loadChunk } from "../lib/load-chunk.js";
 import { prefs } from "../lib/prefs.js";
 import { modLabel, shortcutMod } from "../lib/shortcuts.js";
 import { FONT_MAX, FONT_MIN, FONT_SIZE_KEY, resolveAppearance, stepFontSize } from "./deck-terminal-font.js";
 import { DeckTty7NewForm, DeckTty7SessionList, readGroupColors } from "./deck-tty7-list.js";
 import { baseName, sessionTitle, useSessionRename, type Session, type useTty7Sessions } from "./deck-tty7-sessions.js";
-import { DeckTty7Terminal } from "./deck-tty7-terminal.js";
 import { closeTab, cycleTab, hideScreen, openTab, terminalShortcut, type TerminalTabs } from "./deck-terminal-tabs.js";
 import { VIEWING_REPORT_MS, viewingTarget } from "./deck-terminal-viewing.js";
+
+// xterm（约 470 KB）只在第一次打开整屏终端时加载。
+const DeckTty7Terminal = lazy(() => loadChunk(() => import("./deck-tty7-terminal.js")).then((m) => ({ default: m.DeckTty7Terminal })));
 
 /**
  * 整屏终端：盖住整个窗口，顶部一行是返回、本次打开过的会话标签、全部会话下拉。
@@ -305,14 +308,16 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
         </div>
       </div>
       <div className="deck-term-body">
-        {tabs.open.map((pane) => (
-          <DeckTty7Terminal
-            key={pane}
-            pane={pane}
-            appearance={appearance}
-            active={shown && pane === tabs.active}
-          />
-        ))}
+        <Suspense fallback={null}>
+          {tabs.open.map((pane) => (
+            <DeckTty7Terminal
+              key={pane}
+              pane={pane}
+              appearance={appearance}
+              active={shown && pane === tabs.active}
+            />
+          ))}
+        </Suspense>
       </div>
     </div>
   );

@@ -1,23 +1,64 @@
-import { memo, useEffect, useState, type ReactNode } from "react";
+import { lazy, memo, Suspense, useEffect, useState, type ReactNode } from "react";
 
 import { BrandMark } from "./components/icons.js";
 import { ToastProvider } from "./components/toast.js";
 import { DaemonProvider, FrozenDaemon, useDaemon } from "./daemon-context.js";
 import { PageActiveContext } from "./page-active.js";
-import { DshDeckPage } from "./pages/dsh-deck.js";
-import { DesignPage } from "./pages/design.js";
-import { PanelPage } from "./pages/panel.js";
-import { ReminderPopupPage } from "./pages/reminder-popup.js";
-import { TodayPage } from "./pages/today.js";
-import { TopicsPage } from "./pages/topics.js";
-import { SearchPage } from "./pages/search.js";
-import { KnowledgePage } from "./pages/knowledge.js";
-import { SettingsPage } from "./pages/settings.js";
-import { TasksPage } from "./pages/tasks.js";
+import { useDelayed } from "./components/use-delayed.js";
+import { loadChunk } from "./lib/load-chunk.js";
 import { settingsHref } from "./lib/route.js";
 import { FrozenRoute, Router, useRoute } from "./router.js";
 import { Shell } from "./shell.js";
 import { ThemeProvider } from "./theme-context.js";
+
+/*
+ * 页面一律按需加载：托盘面板、提醒弹窗是独立窗口，只拿自己那一页，不再带上 xterm、KaTeX 等；
+ * 主窗口首屏只加载当前页，其余页面在空闲时预取（见 prefetchPages）；块加载失败的处理见 lib/load-chunk。
+ */
+const loadDeck = () => import("./pages/dsh-deck.js");
+const loadToday = () => import("./pages/today.js");
+const loadTopics = () => import("./pages/topics.js");
+const loadKnowledge = () => import("./pages/knowledge.js");
+const loadTasks = () => import("./pages/tasks.js");
+const loadSearch = () => import("./pages/search.js");
+const loadSettings = () => import("./pages/settings.js");
+const DshDeckPage = lazy(() => loadChunk(loadDeck).then((m) => ({ default: m.DshDeckPage })));
+const TodayPage = lazy(() => loadChunk(loadToday).then((m) => ({ default: m.TodayPage })));
+const TopicsPage = lazy(() => loadChunk(loadTopics).then((m) => ({ default: m.TopicsPage })));
+const KnowledgePage = lazy(() => loadChunk(loadKnowledge).then((m) => ({ default: m.KnowledgePage })));
+const TasksPage = lazy(() => loadChunk(loadTasks).then((m) => ({ default: m.TasksPage })));
+const SearchPage = lazy(() => loadChunk(loadSearch).then((m) => ({ default: m.SearchPage })));
+const SettingsPage = lazy(() => loadChunk(loadSettings).then((m) => ({ default: m.SettingsPage })));
+const DesignPage = lazy(() => loadChunk(() => import("./pages/design.js")).then((m) => ({ default: m.DesignPage })));
+const PanelPage = lazy(() => loadChunk(() => import("./pages/panel.js")).then((m) => ({ default: m.PanelPage })));
+const ReminderPopupPage = lazy(() =>
+  loadChunk(() => import("./pages/reminder-popup.js")).then((m) => ({ default: m.ReminderPopupPage })),
+);
+
+/**
+ * 首屏出来后预取主窗口的其余页面：第一次切菜单不用等下载，升级替换 web 目录后也少踩旧块缺失。
+ * 预取失败只忽略，不触发刷新。WKWebView 没有 requestIdleCallback，用定时器。
+ */
+function prefetchPages(): () => void {
+  const timer = window.setTimeout(() => {
+    const terminal = () => import("./pages/deck-tty7-terminal.js");
+    for (const load of [loadDeck, loadToday, loadTopics, loadKnowledge, loadTasks, loadSearch, loadSettings, terminal]) {
+      void load().catch(() => undefined);
+    }
+  }, 1_500);
+  return () => window.clearTimeout(timer);
+}
+
+/** 按需加载期间的占位：本地加载通常几十毫秒，短于 150 ms 就什么都不显示，避免闪一下。 */
+function PageLoading() {
+  const { t } = useDaemon();
+  const shown = useDelayed(true);
+  return (
+    <div className="page page-loading" aria-busy="true">
+      {shown ? <p className="page-loading-text">{t("loading")}</p> : null}
+    </div>
+  );
+}
 
 export function App() {
   return (
@@ -71,7 +112,12 @@ function Frame() {
     document.title = `${page} · U-Brain`;
   }, [location.pathname, t]);
 
-  if (reminderPopup) return <ReminderPopupPage />;
+  useEffect(() => {
+    if (panel || reminderPopup) return undefined;
+    return prefetchPages();
+  }, [panel, reminderPopup]);
+
+  if (reminderPopup) return <Suspense fallback={null}><ReminderPopupPage /></Suspense>;
   if (loading && !today && !panel) {
     return (
       <div className="boot">
@@ -80,7 +126,7 @@ function Frame() {
       </div>
     );
   }
-  if (panel) return <PanelPage />;
+  if (panel) return <Suspense fallback={null}><PanelPage /></Suspense>;
 
   let page = <Missing />;
   if (location.pathname === "/" || location.pathname === "/deck") page = <KeepAlive active="/deck" />;
@@ -89,9 +135,9 @@ function Frame() {
   else if (location.pathname === "/topics/history") page = <KeepAlive active="/topics/history" />;
   else if (location.pathname === "/knowledge") page = <KeepAlive active="/knowledge" />;
   else if (location.pathname === "/todos") page = <KeepAlive active="/todos" />;
-  else if (location.pathname === "/search") page = <SearchPage />;
-  else if (location.pathname === "/settings") page = <SettingsPage />;
-  else if (location.pathname === "/_design") page = <DesignPage />;
+  else if (location.pathname === "/search") page = <Suspense fallback={<PageLoading />}><SearchPage /></Suspense>;
+  else if (location.pathname === "/settings") page = <Suspense fallback={<PageLoading />}><SettingsPage /></Suspense>;
+  else if (location.pathname === "/_design") page = <Suspense fallback={<PageLoading />}><DesignPage /></Suspense>;
   return <Shell>{page}</Shell>;
 }
 
@@ -122,7 +168,9 @@ const KeepPage = memo(function KeepPage({ pathname, active }: { pathname: string
     <div className="keep-page" hidden={!active}>
       <PageActiveContext.Provider value={active}>
         <FrozenRoute frozen={!active}>
-          <FrozenDaemon frozen={!active}>{renderKeepPage(pathname)}</FrozenDaemon>
+          <FrozenDaemon frozen={!active}>
+            <Suspense fallback={<PageLoading />}>{renderKeepPage(pathname)}</Suspense>
+          </FrozenDaemon>
         </FrozenRoute>
       </PageActiveContext.Provider>
     </div>
