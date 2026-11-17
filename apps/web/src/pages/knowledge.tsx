@@ -2626,6 +2626,7 @@ function TreeNodes({
                   type="button"
                   className={"knowledge-caret" + (isCollapsed ? " is-collapsed" : "")}
                   aria-label={node.title}
+                  aria-expanded={!isCollapsed}
                   onClick={() => onToggle(node.id)}
                 >
                   <Icon name="chevron-right" size={12} />

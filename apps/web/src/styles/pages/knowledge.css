@@ -91,8 +91,9 @@
   transition: transform 0.12s ease;
 }
 
-.knowledge-caret.is-collapsed {
-  transform: rotate(-90deg);
+/* 图标是「>」：折叠时原样，展开时转成「v」。原来反过来，展开的显示「>」、折叠的显示「^」。 */
+.knowledge-caret:not(.is-collapsed):not(.is-leaf) {
+  transform: rotate(90deg);
 }
 
 .knowledge-caret.is-leaf {
