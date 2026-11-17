@@ -83,14 +83,6 @@ export function Shell({ children }: { children: ReactNode }) {
   const settings = location.pathname === "/settings";
   const knowledge = location.pathname === "/knowledge";
   const deck = location.pathname === "/deck";
-  // 今日/话题册也随窗口自适应(用户 2026-11-04 要求);列表类页面宽度跟随窗口。
-  const wide =
-    deck ||
-    settings ||
-    knowledge ||
-    location.pathname === "/today" ||
-    location.pathname === "/todos" ||
-    location.pathname === "/topics";
   const overlayTitlebar = typeof window !== "undefined" && window.__TAURI__ !== undefined && /Mac/.test(navigator.platform);
   const mod = shortcutMod(typeof navigator === "undefined" ? "" : navigator.platform);
   const chord = (key: string): string => `${modLabel(mod)}${mod === "meta" ? "" : "+"}${key}`;
@@ -256,11 +248,9 @@ export function Shell({ children }: { children: ReactNode }) {
         className={
           deck
             ? "main main-wide main-deck"
-            : wide
-              ? knowledge
-                ? "main main-wide main-bleed"
-                : "main main-wide"
-              : "main"
+            : knowledge
+              ? "main main-wide main-bleed"
+              : "main main-wide"
         }
       >
         {error && !offlineHome ? (

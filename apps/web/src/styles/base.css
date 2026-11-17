@@ -9,6 +9,8 @@ html { background: var(--bg); }
 
 /* The menu-bar panel is a transparent window; its frame draws the rounded corners. */
 html:has(.panel-page), html:has(.panel-page) body { background: transparent; }
+/* The reminder popup is also a transparent window; the card's radius shows through. */
+html:has(.popup-page), html:has(.popup-page) body { background: transparent; }
 
 body {
   margin: 0;
@@ -95,7 +97,7 @@ h3 {
 
 .main {
   flex: 1;
-  width: min(100%, calc(var(--page-max) + var(--page-pad) * 2));
+  width: 100%;
   margin: 0 auto;
   /* 窗口边缘 12px 节奏的唯一定义处。满高页(知识库等)挂 .main-bleed
      退掉这一层,由页面容器自己负责边缘,严禁两层 padding 叠加。 */
@@ -107,7 +109,7 @@ h3 {
   padding-bottom: 0;
 }
 
-/* 设置页(数字分身等)跟随窗口宽度;其余页面保持 1040 的阅读宽度。 */
+/* 所有页面都跟窗口宽度。类名保留，避免旧标记失效。 */
 .main-wide {
   width: 100%;
 }

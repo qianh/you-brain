@@ -8,6 +8,7 @@ import { EmptyState } from "../components/empty.js";
 import { Icon } from "../components/icons.js";
 import { Input, Textarea } from "../components/input.js";
 import { Page, PageHeader } from "../components/page.js";
+import { Segmented } from "../components/segmented.js";
 import { Select } from "../components/select.js";
 import { Skeleton } from "../components/skeleton.js";
 import { Spinner } from "../components/spinner.js";
@@ -37,6 +38,7 @@ export function TasksPage() {
   const [busy, setBusy] = useState(false);
   const [project, setProject] = useState("all");
   const [status, setStatus] = useState("all");
+  const [tab, setTab] = useState<"tasks" | "projects">("tasks");
   const [editor, setEditor] = useState<{ task: DevelopmentTask | null } | null>(null);
   const [reviewing, setReviewing] = useState<DevelopmentTask | null>(null);
   const [starting, setStarting] = useState<TaskProject | null>(null);
@@ -130,50 +132,57 @@ export function TasksPage() {
   return <Page>
     <div className="tasks-page">
       <PageHeader title={t("navTasks")} description={t("tasksLead")} actions={<>
+        <Segmented label={t("tasksProjects")} value={tab} options={[{ value: "tasks", label: t("tasksTabTasks") }, { value: "projects", label: t("tasksTabProjects") }]} onChange={(value) => setTab(value === "projects" ? "projects" : "tasks")} />
         <Button variant="ghost" onClick={() => void load()} disabled={busy} aria-label={t("tasksRefresh")} icon={<Icon name="refresh" />}>{t("reload")}</Button>
         <Button variant="primary" onClick={() => setEditor({ task: null })} icon={<Icon name="plus" />}>{t("tasksNew")}</Button>
       </>} />
-      <div className="tasks-flow"><span className="tasks-flow-label">T3 → develop</span><span>{t("tasksWorkflow")}</span></div>
       {error && <Banner tone="danger" action={<Button size="sm" onClick={() => void load()}>{t("retry")}</Button>}>{t("tasksLoadFailed")}: {error}</Banner>}
       {board?.connectionError && <Banner tone="warn">{t("tasksConnection", { detail: board.connectionError })}</Banner>}
-      <div className="tasks-metrics">
-        {(["queued", "active", "review", "done"] as const).map((key) => <button type="button" className={`tasks-metric is-${key}${status === key ? " is-selected" : ""}`} key={key} onClick={() => setStatus(status === key ? "all" : key)} aria-pressed={status === key}>
-          <span>{t(key === "active" ? "tasksActive" : key === "review" ? "tasksReview" : key === "done" ? "tasksDone" : "tasksQueued")}</span><strong className={pendingBoard ? "is-pending" : undefined}>{shown(counts[key])}</strong>
-        </button>)}
-      </div>
-      <div className="tasks-layout">
-        <aside className="tasks-projects" aria-label={t("tasksProjects")}>
-          <header><h2>{t("tasksProjects")}</h2><span>{shown(projects.length)}</span></header>
-          <button type="button" className={`tasks-project-filter${project === "all" ? " is-selected" : ""}`} aria-pressed={project === "all"} onClick={() => setProject("all")}><Icon name="inbox" />{t("tasksAllProjects")}<span>{shown(tasks.length)}</span></button>
-          <button type="button" className={`tasks-project-filter${project === "unassigned" ? " is-selected" : ""}`} aria-pressed={project === "unassigned"} onClick={() => setProject("unassigned")}><Icon name="folder" />{t("tasksUnassigned")}<span>{shown(tasks.filter((task) => task.projectId === null).length)}</span></button>
-          {projects.map((item) => {
-            const current = projectTask(tasks, item.id);
-            const queued = tasks.filter((task) => task.projectId === item.id && task.status === "queued").length;
-            return <section className={`tasks-project${project === item.id ? " is-selected" : ""}`} key={item.id}>
-              <button type="button" className="tasks-project-name" aria-pressed={project === item.id} onClick={() => setProject(item.id)}>
-                <span><Icon name="folder" /><strong>{item.name}</strong><span className="tasks-project-queue">{queued}</span></span>
-                <small title={item.cwd}>{item.cwd}</small>
-              </button>
-              <div className="tasks-project-state"><span className={`tasks-indicator${item.enabled ? " is-enabled" : ""}`} />{t(item.enabled ? "tasksEnabled" : "tasksPaused")}</div>
-              {current && <p className={`tasks-project-current is-${current.status}`}>{t(current.status === "review" ? "tasksProjectReview" : current.status === "failed" ? "tasksProjectFailed" : TASK_STATUS_KEYS[current.status])}<span>{current.title}</span></p>}
-              {!current && queued === 0 && <p className="tasks-project-idle">{t("tasksProjectIdle")}</p>}
-              <Button size="sm" variant={item.enabled ? "ghost" : "secondary"} disabled={busy || (!item.enabled && !!board?.connectionError)} title={item.enabled ? t("tasksPauseHint") : undefined} onClick={() => {
-                if (item.enabled) void act({ action: "project", projectId: item.id, enabled: false });
-                else setStarting(item);
-              }} icon={<Icon name={item.enabled ? "minus" : "play"} size={13} />}>{t(item.enabled ? "tasksPause" : "tasksStart")}</Button>
-            </section>;
-          })}
-          {pendingBoard && loading && <div className="tasks-project-skeletons" aria-hidden="true">
-            {[0, 1].map((index) => <div className="tasks-project is-skeleton" key={index}><Skeleton width="55%" height={14} /><Skeleton width="80%" height={10} /><Skeleton width="40%" height={10} /></div>)}
-          </div>}
-          {!loading && projects.length === 0 && <div className="tasks-no-projects"><strong>{t("tasksNoProjects")}</strong><p>{t("tasksNoProjectsHint")}</p></div>}
-        </aside>
+      {tab === "projects" ? <div className="tasks-projects-grid" aria-label={t("tasksProjects")}>
+        {projects.map((item) => {
+          const current = projectTask(tasks, item.id);
+          const queued = tasks.filter((task) => task.projectId === item.id && task.status === "queued").length;
+          return <section className={`tasks-project${project === item.id ? " is-selected" : ""}`} key={item.id}>
+            <button type="button" className="tasks-project-name" aria-pressed={project === item.id} onClick={() => { setProject(item.id); setTab("tasks"); }}>
+              <span><Icon name="folder" /><strong>{item.name}</strong><span className="tasks-project-queue">{queued}</span></span>
+              <small title={item.cwd}>{item.cwd}</small>
+            </button>
+            <div className="tasks-project-state"><span className={`tasks-indicator${item.enabled ? " is-enabled" : ""}`} />{t(item.enabled ? "tasksEnabled" : "tasksPaused")}</div>
+            {current && <p className={`tasks-project-current is-${current.status}`}>{t(current.status === "review" ? "tasksProjectReview" : current.status === "failed" ? "tasksProjectFailed" : TASK_STATUS_KEYS[current.status])}<span>{current.title}</span></p>}
+            {!current && queued === 0 && <p className="tasks-project-idle">{t("tasksProjectIdle")}</p>}
+            <Button size="sm" variant={item.enabled ? "ghost" : "secondary"} disabled={busy || (!item.enabled && !!board?.connectionError)} title={item.enabled ? t("tasksPauseHint") : undefined} onClick={() => {
+              if (item.enabled) void act({ action: "project", projectId: item.id, enabled: false });
+              else setStarting(item);
+            }} icon={<Icon name={item.enabled ? "minus" : "play"} size={13} />}>{t(item.enabled ? "tasksPause" : "tasksStart")}</Button>
+          </section>;
+        })}
+        {pendingBoard && loading && <>
+          {[0, 1, 2, 3].map((index) => <div className="tasks-project is-skeleton" key={index} aria-hidden="true"><Skeleton width="55%" height={14} /><Skeleton width="80%" height={10} /><Skeleton width="40%" height={10} /></div>)}
+        </>}
+        {!loading && projects.length === 0 && <div className="tasks-no-projects" style={{ gridColumn: "1 / -1" }}><strong>{t("tasksNoProjects")}</strong><p>{t("tasksNoProjectsHint")}</p></div>}
+      </div> : <>
+        <div className="tasks-flow"><span className="tasks-flow-label">T3 → develop</span><span>{t("tasksWorkflow")}</span></div>
+        <div className="tasks-metrics">
+          {(["queued", "active", "review", "done"] as const).map((key) => <button type="button" className={`tasks-metric is-${key}${status === key ? " is-selected" : ""}`} key={key} onClick={() => setStatus(status === key ? "all" : key)} aria-pressed={status === key}>
+            <span>{t(key === "active" ? "tasksActive" : key === "review" ? "tasksReview" : key === "done" ? "tasksDone" : "tasksQueued")}</span><strong className={pendingBoard ? "is-pending" : undefined}>{shown(counts[key])}</strong>
+          </button>)}
+        </div>
         <section className="tasks-queue" aria-label={t("navTasks")}>
-          <div className="tasks-toolbar"><span>{t("tasksCount", { count: filtered.length })}</span><Select label={t("tasksStatusFilter")} value={status} onChange={setStatus} options={[
-            { value: "all", label: t("tasksAllStates") },
-            { value: "active", label: t("tasksActive") },
-            ...Object.entries(TASK_STATUS_KEYS).map(([value, key]) => ({ value, label: t(key) })),
-          ]} /></div>
+          <div className="tasks-toolbar">
+            <span>{t("tasksCount", { count: filtered.length })}</span>
+            <div className="tasks-toolbar-filters">
+              <Select label={t("tasksProjectFilter")} value={project} onChange={setProject} options={[
+                { value: "all", label: t("tasksAllProjects") },
+                { value: "unassigned", label: t("tasksUnassigned") },
+                ...projects.map((item) => ({ value: item.id, label: item.name })),
+              ]} />
+              <Select label={t("tasksStatusFilter")} value={status} onChange={setStatus} options={[
+                { value: "all", label: t("tasksAllStates") },
+                { value: "active", label: t("tasksActive") },
+                ...Object.entries(TASK_STATUS_KEYS).map(([value, key]) => ({ value, label: t(key) })),
+              ]} />
+            </div>
+          </div>
           {loading && !board ? <div className="tasks-loading" role="status"><Spinner /><span>{t("tasksLoadingBoard")}</span></div> : filtered.length === 0 ? <EmptyState title={t(tasks.length === 0 ? "tasksNoTasks" : "tasksNoMatches")} {...(tasks.length === 0 ? { description: t("tasksNoTasksHint"), action: <Button onClick={() => setEditor({ task: null })}>{t("tasksNew")}</Button> } : {})} /> : <ul className="tasks-list">
             {filtered.map((task) => {
               const linked = projects.find((item) => item.id === task.projectId);
@@ -196,7 +205,7 @@ export function TasksPage() {
           </ul>}
           <p className="tasks-queue-note"><Icon name="info" size={13} />{t("tasksQueueHint")}</p>
         </section>
-      </div>
+      </>}
     </div>
     {editor && <TaskEditor key={editor.task?.id ?? "new"} task={editor.task} projects={projects} initialProject={project} busy={busy} onClose={() => { if (!busy) setEditor(null); }} onSave={async (input) => {
       const ok = await mutate(() => editor.task ? client.updateTask({ id: editor.task.id, ...input }) : client.createTask(input), t(editor.task ? "tasksSaved" : "tasksCreated"));
