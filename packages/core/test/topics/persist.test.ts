@@ -180,3 +180,74 @@ describe("persist topic book", () => {
     });
   });
 });
+
+describe("incremental persist", () => {
+  const events = [
+    buildEvent({ type: "topic.created", data: { topicId: "topic-1", name: "Design", aliases: [] }, device: "dev-a", ts: plus(1), seq: 1 }),
+    buildEvent({
+      type: "session.refined",
+      data: { sessionKey: KEY_1, fileId: "f", source: "codex", title: "Refined", summary: "s", refinedUpTo: 4 },
+      device: "dev-a", ts: plus(2), seq: 2,
+    }),
+    buildEvent({ type: "topic.assigned", data: { topicId: "topic-1", sessionKey: KEY_1 }, device: "dev-a", ts: plus(3), seq: 3 }),
+    buildEvent({
+      type: "conclusion.added",
+      data: { conclusionId: "c1", topicId: "topic-1", text: "shipped", sessionKey: KEY_1 },
+      device: "dev-a", ts: plus(4), seq: 4,
+    }),
+    buildEvent({
+      type: "todo.added",
+      data: { todoId: "t1", topicId: "topic-1", text: "write docs", sessionKey: KEY_1, confidence: 0.9 },
+      device: "dev-a", ts: plus(5), seq: 5,
+    }),
+  ];
+
+  const derived = (store: SqliteStore) => ({
+    topics: store.listTopics(),
+    conclusions: store.listConclusions(),
+    todos: store.listTodos(),
+    sessionTopic: store.getSession(KEY_1)?.topicId ?? null,
+  });
+
+  function fresh(book: ReturnType<typeof foldEvents>) {
+    let result: ReturnType<typeof derived> | null = null;
+    withStore((store) => {
+      persistTopicBook(store, book);
+      result = derived(store);
+    });
+    return result!;
+  }
+
+  it("writes the same tables as a full rewrite, removals included", () => {
+    withStore((store) => {
+      persistTopicBook(store, foldEvents(events));
+      const generation = store.derivedGeneration();
+      // A smaller book: the conclusion, todo and the session's topic link go away.
+      const smaller = foldEvents(events.slice(0, 2));
+      persistTopicBook(store, smaller);
+      expect(store.derivedGeneration()).toBe(generation + 1);
+      expect(derived(store)).toEqual(fresh(smaller));
+      expect(store.listConclusions()).toEqual([]);
+    });
+  });
+
+  it("falls back to a full rewrite after another connection rewrote the tables", () => {
+    const directory = mkdtempSync(join(tmpdir(), "you-brain-persist-"));
+    const path = join(directory, "brain.sqlite");
+    const mine = new SqliteStore(path);
+    const other = new SqliteStore(path);
+    try {
+      persistTopicBook(mine, foldEvents(events.slice(0, 3)));
+      persistTopicBook(other, foldEvents(events));
+      // `mine` still remembers the 3-event book; a diff against it would leave c1 and t1 behind.
+      const book = foldEvents(events.slice(0, 4));
+      persistTopicBook(mine, book);
+      expect(derived(mine)).toEqual(fresh(book));
+      expect(mine.listTodos()).toEqual([]);
+    } finally {
+      mine.close();
+      other.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+});

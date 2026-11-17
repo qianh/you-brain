@@ -111,9 +111,30 @@ export interface DerivedSnapshot {
   reminders?: readonly ReminderRecord[];
 }
 
+/** What changed in the derived tables since generation `basedOn` (see applyDerivedChanges). */
+export interface DerivedChanges {
+  basedOn: number;
+  /** Events not written yet. */
+  events: readonly Event[];
+  /** Rows that are new or differ; written by primary key. */
+  topics: readonly TopicRecord[];
+  conclusions: readonly ConclusionRecord[];
+  todos: readonly TodoRecord[];
+  sessions: readonly DerivedSessionRow[];
+  removedTopics: readonly string[];
+  removedConclusions: readonly string[];
+  removedTodos: readonly string[];
+  /** Sessions no longer in the book: their topic link is cleared, as a full rewrite does. */
+  detachedSessions: readonly string[];
+  reminders?: readonly ReminderRecord[];
+}
+
 export interface TopicBookPersistence {
   getSession(sessionKey: string): SessionRecord | null;
   replaceDerived(snapshot: DerivedSnapshot): void;
+  /** Optional incremental path; stores without it always get `replaceDerived`. */
+  derivedGeneration?(): number;
+  applyDerivedChanges?(changes: DerivedChanges): number | null;
 }
 
 export type OutboxKind = "event" | "upload";

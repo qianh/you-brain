@@ -31,6 +31,7 @@ import { ACTIVITY_EPOCH } from "../reminders/delivery.js";
 import { updateJsonWithMerge, upsertByPath } from "../upload/write.js";
 import { applyEvents, persistTopicBook } from "../topics/index.js";
 import type { TopicBook } from "../topics/types.js";
+import { zonedDayRange } from "../store/time.js";
 import { zonedDay } from "./day.js";
 import { lineCursorKey, selfUploadKey, SYNC_DRIVE_CURSOR } from "./cursors.js";
 import { EventLog, type AllocateOptions } from "./event-log.js";
@@ -430,12 +431,17 @@ export class ProtocolSync {
     const included = this.#pending().filter(
       (event) => this.#dayOf(event, timeZone) === day,
     );
+    const anchor = included[0];
+    const range = anchor ? zonedDayRange(new Date(anchor.ts), timeZone) : null;
     const local = this.#store
       .listEvents()
-      .filter(
-        (event) =>
-          event.device === this.#device.deviceId && this.#dayOf(event, timeZone) === day,
-      );
+      .filter((event) => {
+        if (event.device !== this.#device.deviceId) return false;
+        // Every event of the day falls inside one range; comparing timestamps against it
+        // spares converting each of the store's events to a zoned day.
+        const at = Date.parse(event.ts);
+        return range !== null ? at >= range.startMs && at < range.endMs : this.#dayOf(event, timeZone) === day;
+      });
     const merged = unionBySeq([remoteEvents, local, included]);
     const body = serializeEventsJsonl(merged);
     const entry = await upsertByPath(this.#drive, path, body, { mimeType: JSONL_MIME, known });

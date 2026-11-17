@@ -1,3 +1,4 @@
+import { dateTimeFormat } from "../domain/date-format.js";
 import type {
   ConclusionRecord,
   SessionRecord,
@@ -33,7 +34,7 @@ function compareText(left: string, right: string): number {
 }
 
 export function formatZonedDate(instant: Date, timeZone: string): string {
-  return new Intl.DateTimeFormat("en-CA", {
+  return dateTimeFormat("en-CA", {
     timeZone,
     year: "numeric",
     month: "2-digit",

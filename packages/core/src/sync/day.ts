@@ -1,3 +1,4 @@
+import { dateTimeFormat } from "../domain/date-format.js";
 import { YouBrainError } from "../domain/errors.js";
 import { zonedDayRange } from "../store/time.js";
 
@@ -11,7 +12,7 @@ export function zonedDay(instant: Date, timeZone: string): string {
   }
   // Local midnight can be reported as the previous date at hour 24.
   const probe = new Date(startMs + 60_000);
-  const parts = new Intl.DateTimeFormat("en-US", {
+  const parts = dateTimeFormat("en-US", {
     timeZone,
     year: "numeric",
     month: "2-digit",

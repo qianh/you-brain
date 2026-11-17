@@ -1,3 +1,4 @@
+import { dateTimeFormat } from "../domain/date-format.js";
 import type { UiLanguage } from "@you-brain/protocol";
 
 import type {
@@ -217,7 +218,7 @@ export function formatWhen(iso: string | null, timeZone: string, copy: OutputCop
   if (!iso) return copy.unknownTime;
   const instant = new Date(iso);
   if (Number.isNaN(instant.getTime())) return copy.unknownTime;
-  const parts = new Intl.DateTimeFormat("en-US", {
+  const parts = dateTimeFormat("en-US", {
     timeZone,
     hourCycle: "h23",
     year: "numeric",
@@ -353,12 +354,19 @@ function toSessionState(session: SessionRecord): SessionState {
   };
 }
 
+/** Topics by id, built once per topic list rather than on every lookup. */
+const topicsById = new WeakMap<readonly TopicRecord[], Map<string, TopicRecord>>();
+
 function resolveTopic(
   topics: readonly TopicRecord[],
   topicId: string | null,
 ): TopicRecord | null {
   if (!topicId) return null;
-  const byId = new Map(topics.map((topic) => [topic.topicId, topic]));
+  let byId = topicsById.get(topics);
+  if (!byId) {
+    byId = new Map(topics.map((topic) => [topic.topicId, topic]));
+    topicsById.set(topics, byId);
+  }
   let current = topicId;
   const seen = new Set<string>();
   while (!seen.has(current)) {
@@ -371,22 +379,56 @@ function resolveTopic(
   return null;
 }
 
+/**
+ * Todos, conclusions and sessions bucketed by the topic they resolve to (after merges),
+ * once per render input. Filtering every list for every topic, and rebuilding the id map on
+ * each check, held the daemon's thread for six seconds per render with a thousand topics.
+ */
+interface TopicBuckets {
+  todos: Map<string, TodoRecord[]>;
+  conclusions: Map<string, ConclusionRecord[]>;
+  sessions: Map<string, SessionRecord[]>;
+}
+
+const bucketsByInput = new WeakMap<OutputRenderInput, TopicBuckets>();
+
+function bucketsFor(input: OutputRenderInput): TopicBuckets {
+  const cached = bucketsByInput.get(input);
+  if (cached) return cached;
+  const bucket = <T>(items: readonly T[], topicOf: (item: T) => string | null, keep: (item: T) => boolean) => {
+    const map = new Map<string, T[]>();
+    for (const item of items) {
+      if (!keep(item)) continue;
+      const resolved = resolveTopic(input.topics, topicOf(item))?.topicId;
+      if (resolved === undefined) continue;
+      const list = map.get(resolved);
+      if (list) list.push(item);
+      else map.set(resolved, [item]);
+    }
+    return map;
+  };
+  const buckets: TopicBuckets = {
+    todos: bucket(input.todos, (todo) => todo.topicId, (todo) => todo.status === "open"),
+    conclusions: bucket(input.conclusions, (conclusion) => conclusion.topicId, () => true),
+    sessions: bucket(
+      input.sessions,
+      (session) => session.topicId,
+      (session) => !session.sessionKey.startsWith("last-active:"),
+    ),
+  };
+  bucketsByInput.set(input, buckets);
+  return buckets;
+}
+
 function openTodos(input: OutputRenderInput, topicId: string): TodoRecord[] {
-  return input.todos
-    .filter(
-      (todo) =>
-        todo.status === "open" && resolveTopic(input.topics, todo.topicId)?.topicId === topicId,
-    )
+  return [...(bucketsFor(input).todos.get(topicId) ?? [])]
     .sort(
       (left, right) => left.ts.localeCompare(right.ts) || left.todoId.localeCompare(right.todoId),
     );
 }
 
 function recentConclusions(input: OutputRenderInput, topicId: string): ConclusionRecord[] {
-  return input.conclusions
-    .filter(
-      (conclusion) => resolveTopic(input.topics, conclusion.topicId)?.topicId === topicId,
-    )
+  return [...(bucketsFor(input).conclusions.get(topicId) ?? [])]
     .sort(
       (left, right) =>
         right.ts.localeCompare(left.ts) || left.conclusionId.localeCompare(right.conclusionId),
@@ -394,13 +436,7 @@ function recentConclusions(input: OutputRenderInput, topicId: string): Conclusio
 }
 
 function relatedSessions(input: OutputRenderInput, topicId: string): SessionRecord[] {
-  return input.sessions
-    .filter(
-      (session) =>
-        !session.sessionKey.startsWith("last-active:") &&
-        resolveTopic(input.topics, session.topicId)?.topicId === topicId,
-    )
-    .sort(byRecency);
+  return [...(bucketsFor(input).sessions.get(topicId) ?? [])].sort(byRecency);
 }
 
 function sessionItem(session: SessionRecord, copy: OutputCopy): string {

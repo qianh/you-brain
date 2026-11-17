@@ -31,6 +31,11 @@ const schema = `
     drive_path TEXT NOT NULL,
     md5 TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS search_fts_rows (
+    fts_rowid INTEGER PRIMARY KEY,
+    drive_file_id TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS search_fts_rows_file ON search_fts_rows(drive_file_id);
   CREATE TABLE IF NOT EXISTS manifest (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -51,6 +56,25 @@ export function ensureSearchSchema(database: Database): void {
   database.exec("PRAGMA foreign_keys = ON");
   database.exec(schema);
   ensureCursors(database);
+  backfillFtsRows(database);
+}
+
+const FTS_ROWS_KEY = "fts_rows_v1";
+
+/**
+ * `search_fts_rows` maps each full-text row to its file, so replacing a file deletes its FTS
+ * rows by rowid. FTS5 cannot index `drive_file_id`; deleting by it scanned the whole table,
+ * one to two seconds on the daemon's thread per committed batch. Indexes built before the
+ * map get it filled once from the FTS table.
+ */
+function backfillFtsRows(database: Database): void {
+  const done = database.prepare("SELECT 1 FROM manifest WHERE key = ?").get(FTS_ROWS_KEY);
+  if (done) return;
+  database.transaction(() => {
+    database.exec("DELETE FROM search_fts_rows");
+    database.exec("INSERT INTO search_fts_rows(fts_rowid, drive_file_id) SELECT rowid, drive_file_id FROM search_chunks_fts");
+    database.prepare("INSERT INTO manifest(key, value) VALUES (?, '1')").run(FTS_ROWS_KEY);
+  })();
 }
 
 function ensureCursors(database: Database): void {

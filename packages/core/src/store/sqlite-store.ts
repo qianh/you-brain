@@ -16,6 +16,7 @@ import { SCHEMA_MIGRATIONS } from "./schema.js";
 import { parseTimestamp, zonedDayRange } from "./time.js";
 import type {
   ConclusionRecord,
+  DerivedChanges,
   DerivedSnapshot,
   OutboxInput,
   OutboxKind,
@@ -252,6 +253,9 @@ function assertNonNegativeInt(value: number, field: string): void {
     throw new YouBrainError("INVALID_INPUT", `${field} must be a non-negative integer`);
   }
 }
+
+/** Generation of the derived tables; see SqliteStore.derivedGeneration. */
+const DERIVED_GENERATION_CURSOR = "derived.generation";
 
 export class SqliteStore {
   readonly #db: Database;
@@ -549,131 +553,185 @@ export class SqliteStore {
 
   replaceDerived(snapshot: DerivedSnapshot): void {
     const write = this.#db.transaction(() => {
-      const insertEvent = this.#db.query(
-        `
-        INSERT OR IGNORE INTO events (id, ts, ts_ms, device, seq, type, payload)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `,
-      );
-      for (const event of snapshot.events) {
-        const parsed = parseEvent(event);
-        const tsMs = parseTimestamp(parsed.ts, "event.ts");
-        insertEvent.run(
-          parsed.id,
-          parsed.ts,
-          tsMs,
-          parsed.device,
-          parsed.seq,
-          parsed.type,
-          JSON.stringify(parsed),
-        );
-      }
+      this.#insertEvents(snapshot.events);
       this.#db.exec("DELETE FROM conclusions");
       this.#db.exec("DELETE FROM todos");
       this.#db.exec("DELETE FROM topics");
       this.#db.exec("UPDATE sessions SET topic_id = NULL");
-      const insertTopic = this.#db.query(
-        `
-        INSERT INTO topics (
-          topic_id, name, aliases, status, status_by, summary, next_step,
-          last_active, merged_into, created_ts, last_user_op_at, last_content_at, user_locked
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
-      );
-      for (const topic of snapshot.topics) {
-        insertTopic.run(
-          topic.topicId,
-          topic.name,
-          JSON.stringify(topic.aliases),
-          topic.status,
-          topic.statusBy,
-          topic.summary,
-          topic.nextStep,
-          topic.lastActive,
-          topic.mergedInto,
-          topic.createdTs,
-          topic.lastUserOpAt,
-          topic.lastContentAt,
-          sqlBool(topic.userLocked),
-        );
-      }
-      const insertConclusion = this.#db.query(
-        `
-        INSERT INTO conclusions (conclusion_id, topic_id, session_key, text, ts)
-        VALUES (?, ?, ?, ?, ?)
-      `,
-      );
-      for (const conclusion of snapshot.conclusions) {
-        insertConclusion.run(
-          conclusion.conclusionId,
-          conclusion.topicId,
-          conclusion.sessionKey,
-          conclusion.text,
-          conclusion.ts,
-        );
-      }
-      const insertTodo = this.#db.query(
-        `
-        INSERT INTO todos (
-          todo_id, topic_id, session_key, text, status, status_by,
-          confidence, ts, user_locked
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `,
-      );
-      for (const todo of snapshot.todos) {
-        insertTodo.run(
-          todo.todoId,
-          todo.topicId,
-          todo.sessionKey,
-          todo.text,
-          todo.status,
-          todo.statusBy,
-          todo.confidence,
-          todo.ts,
-          sqlBool(todo.userLocked),
-        );
-      }
-      const upsertDerivedSession = this.#db.query(
-        `
-        INSERT INTO sessions (
-          session_key, source, device, file_id, title, summary,
-          started_at, updated_at, started_at_ms, updated_at_ms,
-          msg_count, refined_up_to, topic_id
-        ) VALUES (?, ?, '', ?, ?, ?, NULL, ?, NULL, ?, 0, ?, ?)
-        ON CONFLICT(session_key) DO UPDATE SET
-          updated_at = COALESCE(sessions.updated_at, excluded.updated_at),
-          updated_at_ms = COALESCE(sessions.updated_at_ms, excluded.updated_at_ms),
-          source = CASE WHEN excluded.source = '' THEN sessions.source ELSE excluded.source END,
-          file_id = CASE
-            WHEN excluded.file_id IS NULL THEN sessions.file_id
-            ELSE excluded.file_id
-          END,
-          title = excluded.title,
-          summary = excluded.summary,
-          refined_up_to = excluded.refined_up_to,
-          topic_id = excluded.topic_id
-      `,
-      );
-      for (const session of snapshot.sessions) {
-        const refinedMs = session.refinedAt ? Date.parse(session.refinedAt) : Number.NaN;
-        upsertDerivedSession.run(
-          session.sessionKey,
-          session.source,
-          session.fileId,
-          session.title,
-          session.summary,
-          Number.isNaN(refinedMs) ? null : session.refinedAt ?? null,
-          Number.isNaN(refinedMs) ? null : refinedMs,
-          session.refinedUpTo,
-          session.topicId,
-        );
-      }
+      this.#writeDerivedRows(snapshot);
       if (snapshot.reminders !== undefined) {
         this.#db.exec("DELETE FROM reminders");
         for (const reminder of snapshot.reminders) this.upsertReminder(reminder);
       }
+      this.#bumpDerivedGeneration();
     });
     write();
+  }
+
+  /**
+   * Bumped by every derived write. `applyDerivedChanges` only applies a diff computed against
+   * the generation it was based on, so a full rewrite elsewhere (the CLI, another store
+   * instance) sends the next persist back to `replaceDerived`.
+   */
+  derivedGeneration(): number {
+    const raw = this.getCursor(DERIVED_GENERATION_CURSOR);
+    const value = raw === null ? 0 : Number(raw);
+    return Number.isSafeInteger(value) ? value : 0;
+  }
+
+  #bumpDerivedGeneration(): number {
+    const next = this.derivedGeneration() + 1;
+    this.setCursor(DERIVED_GENERATION_CURSOR, String(next));
+    return next;
+  }
+
+  /**
+   * Writes only what changed since the derived tables were at `changes.basedOn`. Returns the
+   * new generation, or null when the tables moved on meanwhile (nothing is written then).
+   */
+  applyDerivedChanges(changes: DerivedChanges): number | null {
+    let generation: number | null = null;
+    const write = this.#db.transaction(() => {
+      if (this.derivedGeneration() !== changes.basedOn) return;
+      this.#insertEvents(changes.events);
+      const removeConclusion = this.#db.query("DELETE FROM conclusions WHERE conclusion_id = ?");
+      for (const id of changes.removedConclusions) removeConclusion.run(id);
+      const removeTodo = this.#db.query("DELETE FROM todos WHERE todo_id = ?");
+      for (const id of changes.removedTodos) removeTodo.run(id);
+      const removeTopic = this.#db.query("DELETE FROM topics WHERE topic_id = ?");
+      for (const id of changes.removedTopics) removeTopic.run(id);
+      const detach = this.#db.query("UPDATE sessions SET topic_id = NULL WHERE session_key = ?");
+      for (const key of changes.detachedSessions) detach.run(key);
+      this.#writeDerivedRows(changes);
+      if (changes.reminders !== undefined) {
+        this.#db.exec("DELETE FROM reminders");
+        for (const reminder of changes.reminders) this.upsertReminder(reminder);
+      }
+      generation = this.#bumpDerivedGeneration();
+    });
+    write();
+    return generation;
+  }
+
+  #insertEvents(events: readonly Event[]): void {
+    const insertEvent = this.#db.query(
+      `
+      INSERT OR IGNORE INTO events (id, ts, ts_ms, device, seq, type, payload)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `,
+    );
+    for (const event of events) {
+      const parsed = parseEvent(event);
+      const tsMs = parseTimestamp(parsed.ts, "event.ts");
+      insertEvent.run(
+        parsed.id,
+        parsed.ts,
+        tsMs,
+        parsed.device,
+        parsed.seq,
+        parsed.type,
+        JSON.stringify(parsed),
+      );
+    }
+  }
+
+  #writeDerivedRows(rows: Pick<DerivedSnapshot, "topics" | "conclusions" | "todos" | "sessions">): void {
+    const insertTopic = this.#db.query(
+      `
+      INSERT OR REPLACE INTO topics (
+        topic_id, name, aliases, status, status_by, summary, next_step,
+        last_active, merged_into, created_ts, last_user_op_at, last_content_at, user_locked
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    );
+    for (const topic of rows.topics) {
+      insertTopic.run(
+        topic.topicId,
+        topic.name,
+        JSON.stringify(topic.aliases),
+        topic.status,
+        topic.statusBy,
+        topic.summary,
+        topic.nextStep,
+        topic.lastActive,
+        topic.mergedInto,
+        topic.createdTs,
+        topic.lastUserOpAt,
+        topic.lastContentAt,
+        sqlBool(topic.userLocked),
+      );
+    }
+    const insertConclusion = this.#db.query(
+      `
+      INSERT OR REPLACE INTO conclusions (conclusion_id, topic_id, session_key, text, ts)
+      VALUES (?, ?, ?, ?, ?)
+    `,
+    );
+    for (const conclusion of rows.conclusions) {
+      insertConclusion.run(
+        conclusion.conclusionId,
+        conclusion.topicId,
+        conclusion.sessionKey,
+        conclusion.text,
+        conclusion.ts,
+      );
+    }
+    const insertTodo = this.#db.query(
+      `
+      INSERT OR REPLACE INTO todos (
+        todo_id, topic_id, session_key, text, status, status_by,
+        confidence, ts, user_locked
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+    );
+    for (const todo of rows.todos) {
+      insertTodo.run(
+        todo.todoId,
+        todo.topicId,
+        todo.sessionKey,
+        todo.text,
+        todo.status,
+        todo.statusBy,
+        todo.confidence,
+        todo.ts,
+        sqlBool(todo.userLocked),
+      );
+    }
+    const upsertDerivedSession = this.#db.query(
+      `
+      INSERT INTO sessions (
+        session_key, source, device, file_id, title, summary,
+        started_at, updated_at, started_at_ms, updated_at_ms,
+        msg_count, refined_up_to, topic_id
+      ) VALUES (?, ?, '', ?, ?, ?, NULL, ?, NULL, ?, 0, ?, ?)
+      ON CONFLICT(session_key) DO UPDATE SET
+        updated_at = COALESCE(sessions.updated_at, excluded.updated_at),
+        updated_at_ms = COALESCE(sessions.updated_at_ms, excluded.updated_at_ms),
+        source = CASE WHEN excluded.source = '' THEN sessions.source ELSE excluded.source END,
+        file_id = CASE
+          WHEN excluded.file_id IS NULL THEN sessions.file_id
+          ELSE excluded.file_id
+        END,
+        title = excluded.title,
+        summary = excluded.summary,
+        refined_up_to = excluded.refined_up_to,
+        topic_id = excluded.topic_id
+    `,
+    );
+    for (const session of rows.sessions) {
+      const refinedMs = session.refinedAt ? Date.parse(session.refinedAt) : Number.NaN;
+      upsertDerivedSession.run(
+        session.sessionKey,
+        session.source,
+        session.fileId,
+        session.title,
+        session.summary,
+        Number.isNaN(refinedMs) ? null : session.refinedAt ?? null,
+        Number.isNaN(refinedMs) ? null : refinedMs,
+        session.refinedUpTo,
+        session.topicId,
+      );
+    }
   }
 
   enqueueOutbox(input: OutboxInput): void {

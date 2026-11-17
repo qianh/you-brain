@@ -3,6 +3,7 @@ export { SqliteStore } from "./sqlite-store.js";
 export { zonedDayRange } from "./time.js";
 export type {
   ConclusionRecord,
+  DerivedChanges,
   DerivedSessionRow,
   DerivedSnapshot,
   DeviceRecord,

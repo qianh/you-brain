@@ -693,13 +693,15 @@ export class SearchService {
         "DELETE FROM search_chunks WHERE drive_file_id = ?",
       );
       const deleteFts = database.prepare(
-        "DELETE FROM search_chunks_fts WHERE drive_file_id = ?",
+        "DELETE FROM search_chunks_fts WHERE rowid IN (SELECT fts_rowid FROM search_fts_rows WHERE drive_file_id = ?)",
       );
+      const deleteFtsRows = database.prepare("DELETE FROM search_fts_rows WHERE drive_file_id = ?");
       const deleteFile = database.prepare("DELETE FROM search_files WHERE drive_file_id = ?");
       const remove = (id: string): void => {
         deleteVectors.run(id);
         deleteChunks.run(id);
         deleteFts.run(id);
+        deleteFtsRows.run(id);
         deleteFile.run(id);
       };
       if (input.applyListing) {
@@ -707,6 +709,7 @@ export class SearchService {
           database.exec("DELETE FROM search_vectors");
           database.exec("DELETE FROM search_chunks");
           database.exec("DELETE FROM search_chunks_fts");
+          database.exec("DELETE FROM search_fts_rows");
           database.exec("DELETE FROM search_files");
         }
         for (const id of input.work.removed) remove(id);
@@ -731,6 +734,9 @@ export class SearchService {
         INSERT INTO search_chunks_fts(body, drive_file_id, chunk_id)
         VALUES (?, ?, ?)
       `);
+      const insertFtsRow = database.prepare(
+        "INSERT INTO search_fts_rows(fts_rowid, drive_file_id) VALUES (?, ?)",
+      );
       for (const chunk of input.chunks) {
         insertChunk.run(
           chunk.driveFileId,
@@ -753,7 +759,8 @@ export class SearchService {
         } else if (chunk.stored) {
           insertVector.run(chunk.driveFileId, chunk.chunkId, this.#dimensions, chunk.stored);
         }
-        insertFts.run(indexBody(chunk.text), chunk.driveFileId, chunk.chunkId);
+        const fts = insertFts.run(indexBody(chunk.text), chunk.driveFileId, chunk.chunkId);
+        insertFtsRow.run(fts.lastInsertRowid, chunk.driveFileId);
       }
       const finished = input.next >= input.work.entries.length;
       if (!finished) {

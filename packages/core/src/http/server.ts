@@ -32,6 +32,8 @@ export interface StartDaemonHttpOptions {
   staticDir?: string;
   createId?: () => string;
   hub?: ChangeHub;
+  /** Wraps each request (except the event stream) for the daemon's opt-in memory trace. */
+  trace?: (name: string, run: () => Promise<Response>) => Promise<Response>;
 }
 
 export interface DaemonHttpServer {
@@ -72,7 +74,13 @@ export async function startDaemonHttp(
         if (server.upgrade(request, { data: { authenticated: false, inFlight: 0 } })) return;
         return apiError(400, "BAD_REQUEST", "需要 WebSocket 连接");
       }
-      return dispatch(request, token, options.staticDir, context);
+      const trace = options.trace;
+      // The event stream stays open for the whole session; as a traced span it would
+      // overlap everything.
+      if (trace === undefined || url.pathname === "/api/events") {
+        return dispatch(request, token, options.staticDir, context);
+      }
+      return trace(`http ${url.pathname}`, async () => dispatch(request, token, options.staticDir, context));
     },
     websocket: terminal.handler,
   });

@@ -1024,6 +1024,7 @@ export class YouBrainDaemon {
         dataDir: this.#paths.dataDir,
         deps: this.#deps(),
         hub: this.changes,
+        trace: (name, run) => this.#traced(name, run),
         ...(this.#options.port !== undefined ? { port: this.#options.port } : {}),
         ...(this.#options.staticDir ? { staticDir: this.#options.staticDir } : {}),
       }),

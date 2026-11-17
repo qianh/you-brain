@@ -1,3 +1,5 @@
+import { dateTimeFormat } from "../domain/date-format.js";
+
 export interface LocalParts {
   year: number;
   month: number;
@@ -65,7 +67,7 @@ export function weekdayReached(parts: LocalParts, day: number, time: string): bo
 
 /** Minutes east of UTC for an IANA zone at `now`. */
 export function timeZoneOffsetMinutes(timeZone: string, now: Date): number {
-  const formatted = new Intl.DateTimeFormat("en-US", {
+  const formatted = dateTimeFormat("en-US", {
     timeZone,
     hourCycle: "h23",
     year: "numeric",

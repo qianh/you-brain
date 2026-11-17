@@ -1,3 +1,4 @@
+import { dateTimeFormat } from "../domain/date-format.js";
 import { YouBrainError } from "../domain/errors.js";
 
 interface WallTime {
@@ -11,14 +12,14 @@ interface WallTime {
 
 function assertTimeZone(timeZone: string): void {
   try {
-    new Intl.DateTimeFormat("en-US", { timeZone }).format(0);
+    dateTimeFormat("en-US", { timeZone }).format(0);
   } catch {
     throw new YouBrainError("INVALID_INPUT", `Invalid time zone: ${timeZone}`);
   }
 }
 
 function wallTime(timeZone: string, instant: Date): WallTime {
-  const parts = new Intl.DateTimeFormat("en-US", {
+  const parts = dateTimeFormat("en-US", {
     timeZone,
     hourCycle: "h23",
     year: "numeric",
