@@ -1,0 +1,103 @@
+/* 记忆提醒弹框：桌面壳的独立小窗，置顶弹出，回复或忽略。 */
+.popup-page {
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-panel);
+  box-shadow: var(--shadow-float);
+  overflow: hidden;
+}
+.popup-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex: none;
+  user-select: none;
+}
+.popup-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-1);
+  min-width: 0;
+}
+.popup-count {
+  font-size: var(--fs-micro);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.popup-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-height: 0;
+}
+.popup-topic {
+  margin: 0;
+  font-size: var(--fs-micro);
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.popup-text {
+  margin: 0;
+  font-size: var(--fs-md);
+  line-height: 1.6;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+.popup-error {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--danger, #c0392b);
+}
+.popup-settled {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+  color: var(--accent);
+}
+.popup-input {
+  width: 100%;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: var(--r-panel, 10px);
+  background: var(--surface);
+  color: var(--text-1);
+  padding: var(--sp-2);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  outline: none;
+}
+.popup-input:focus-visible {
+  border-color: var(--accent);
+}
+.popup-input::placeholder {
+  color: var(--text-3);
+}
+.popup-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+.popup-state {
+  margin: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+}

@@ -59,6 +59,7 @@ import {
   OAuthClientPutSchema,
   PortraitCorrectionBodySchema,
   ReminderActionBodySchema,
+  ReminderReplyBodySchema,
   TodoActionBodySchema,
   TopicMutationBodySchema,
   TopicReorganizeApplyBodySchema,
@@ -475,6 +476,9 @@ export async function handleApi(
   if (path === "/api/activity") return method(request, "POST", () => activity(request, context));
   if (path === "/api/actions/reminder") {
     return method(request, "POST", () => reminderAction(request, context));
+  }
+  if (path === "/api/actions/reminder-reply") {
+    return method(request, "POST", () => reminderReply(request, context));
   }
   if (path === "/api/actions/sync") return method(request, "POST", () => sync(context));
   if (path === "/api/actions/webhook-test") {
@@ -1138,6 +1142,14 @@ async function reminderAction(request: Request, context: ApiContext): Promise<Re
   }
   publish(context.hub, kinds);
   return json(plan.reminder);
+}
+
+async function reminderReply(request: Request, context: ApiContext): Promise<Response> {
+  if (!context.deps.reminderReply) notSupported();
+  const body = ReminderReplyBodySchema.parse(await readJson(request));
+  const updated = await context.deps.reminderReply(body.reminderId, body.text);
+  publish(context.hub, ["status", "today"]);
+  return json(updated);
 }
 
 async function consolidate(request: Request, context: ApiContext): Promise<Response> {

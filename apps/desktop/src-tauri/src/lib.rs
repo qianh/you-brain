@@ -32,10 +32,16 @@ const PANEL: &str = "panel";
 const TRAY_TITLE_FONT_SIZE: f64 = 11.0;
 const MAIN: &str = "main";
 const TRAY: &str = "main";
+const REMINDER_POPUP: &str = "reminder-popup";
 const PANEL_WIDTH: f64 = 380.0;
 const PANEL_HEIGHT: f64 = 560.0;
 const MAIN_WIDTH: f64 = 1100.0;
 const MAIN_HEIGHT: f64 = 760.0;
+/// 记忆提醒弹框：一条正文加一个回复输入框，小而醒目。
+const POPUP_WIDTH: f64 = 420.0;
+const POPUP_HEIGHT: f64 = 280.0;
+/// 弹框离屏幕顶边的距离，避开 macOS 的菜单栏。
+const POPUP_TOP_INSET: f64 = 64.0;
 const PANEL_GAP: f64 = 6.0;
 const BLUR_GUARD: Duration = Duration::from_millis(350);
 const DAEMON_WAIT: Duration = Duration::from_secs(30);
@@ -47,6 +53,8 @@ struct ShellState {
     attention: Mutex<Option<String>>,
     panel_target: Mutex<Option<String>>,
     main_target: Mutex<Option<String>>,
+    /// 记忆提醒弹框当前加载的地址；弹框按需创建，存在时随 daemon 端口跟走。
+    popup_target: Mutex<Option<String>>,
     launch_attempt: Mutex<u32>,
     /// Pid of the daemon process this shell started and has not yet seen go healthy.
     launching: Mutex<Option<u32>>,
@@ -92,6 +100,7 @@ pub fn run() {
             quit,
             quit_now,
             open_local_path,
+            hide_reminder_popup,
             cookies::prepare_dsh_cookies
         ])
         .setup(|app| {
@@ -105,6 +114,7 @@ pub fn run() {
                 attention: Mutex::new(None),
                 panel_target: Mutex::new(None),
                 main_target: Mutex::new(None),
+                popup_target: Mutex::new(None),
                 launch_attempt: Mutex::new(0),
                 launching: Mutex::new(None),
                 notified: Mutex::new(None),
@@ -541,6 +551,14 @@ fn notify_due_reminders(
         existing,
         now_ms,
     );
+    if selected.is_empty() {
+        return;
+    }
+    // 聊到时提醒额外弹置顶弹框；系统通知照旧，两层都到，弹框是主要入口。
+    let (recall, _others) = reminders::partition_recall(&selected);
+    if !recall.is_empty() {
+        show_reminder_popup(app);
+    }
     let body = reminders::notification_text(&selected);
     if body.is_empty() {
         return;
@@ -549,6 +567,83 @@ fn notify_due_reminders(
     let updated = reminders::remember_notified(existing, &selected);
     reminders::save_notified(&daemon::notified_file(data_dir), &updated);
     *known = Some(updated);
+}
+
+/// 有新的聊到时提醒：把记忆提醒弹框带到屏幕上方居中、置顶并获得焦点。
+/// 页面自己拉提醒队列并渲染，回复/忽略后没有剩余时经 `hide_reminder_popup` 收起。
+fn show_reminder_popup(app: &tauri::AppHandle) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        let Some(endpoint) = current_endpoint(&app) else {
+            return;
+        };
+        ensure_reminder_popup(&app, &format!("http://127.0.0.1:{}", endpoint.port));
+        let Some(window) = app.get_webview_window(REMINDER_POPUP) else {
+            return;
+        };
+        position_reminder_popup(&app, &window);
+        let _ = window.show();
+        let _ = window.set_focus();
+    });
+}
+
+/// 弹框已存在时才被发布逻辑导航；这里负责首次创建。
+fn ensure_reminder_popup(app: &tauri::AppHandle, origin: &str) {
+    let url = format!("{origin}/reminder-popup");
+    let state = app.state::<ShellState>();
+    if let Some(window) = app.get_webview_window(REMINDER_POPUP) {
+        let mut current = state
+            .popup_target
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if current.as_deref() != Some(url.as_str()) {
+            if let Ok(parsed) = url.parse::<url::Url>() {
+                if window.navigate(parsed).is_ok() {
+                    *current = Some(url);
+                }
+            }
+        }
+        return;
+    }
+    let Ok(parsed) = url.parse::<url::Url>() else {
+        return;
+    };
+    if build_reminder_popup(app, WebviewUrl::External(parsed)).is_ok() {
+        *state
+            .popup_target
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(url);
+    }
+}
+
+fn build_reminder_popup(app: &tauri::AppHandle, url: WebviewUrl) -> tauri::Result<WebviewWindow> {
+    let window = WebviewWindowBuilder::new(app, REMINDER_POPUP, url)
+        .title("U-Brain 记忆提醒")
+        .inner_size(POPUP_WIDTH, POPUP_HEIGHT)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .visible(false)
+        .skip_taskbar(true)
+        .always_on_top(true)
+        .build()?;
+    let popup = window.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            // 关窗口等于收起：提醒还在列表里，不销毁窗口。
+            api.prevent_close();
+            let _ = popup.hide();
+        }
+    });
+    Ok(window)
+}
+
+/// 顶部居中：醒目，又不完全遮住它下面正在用的窗口。
+fn position_reminder_popup(app: &tauri::AppHandle, window: &WebviewWindow) {
+    let area = current_work_area(app);
+    let x = area.x + ((area.width - POPUP_WIDTH) / 2.0).max(0.0);
+    let y = area.y + POPUP_TOP_INSET;
+    let _ = window.set_position(tauri::LogicalPosition::new(x, y));
 }
 
 fn sync_now(app: &tauri::AppHandle) {
@@ -570,6 +665,10 @@ fn sync_now(app: &tauri::AppHandle) {
 /// the loopback token into `index.html`; the shell must not put it in the URL.
 fn publish_daemon_windows(app: &tauri::AppHandle, port: u16) {
     ensure_content(app, PANEL, &format!("http://127.0.0.1:{port}/panel"), true);
+    // 弹框只在第一条聊到时提醒到达时创建；已存在时跟到新端口。
+    if app.get_webview_window(REMINDER_POPUP).is_some() {
+        ensure_reminder_popup(app, &format!("http://127.0.0.1:{port}"));
+    }
     // A deep link already on this daemon origin must survive the supervisor.
     // The homepage URL is unchanged, so a main window at `/` still no-ops.
     if app.get_webview_window(MAIN).is_some() && main_target_on_port(app, port) {
@@ -816,9 +915,19 @@ fn open_local_path(path: String) -> Result<(), String> {
         .map_err(|err| format!("打开失败: {err}"))
 }
 
+/// 弹框页面回复/忽略完队列后把自己收起来；Esc 也走这里。
 #[tauri::command]
-fn open_main_window(app: tauri::AppHandle, path: Option<String>) -> Result<(), String> {
-    let requested = match path.as_deref() {
+fn hide_reminder_popup(app: tauri::AppHandle) {
+    let app = app.clone();
+    let _ = app.clone().run_on_main_thread(move || {
+        if let Some(window) = app.get_webview_window(REMINDER_POPUP) {
+            let _ = window.hide();
+        }
+    });
+}
+
+#[tauri::command]
+fn open_main_window(app: tauri::AppHandle, path: Option<String>) -> Result<(), String> {    let requested = match path.as_deref() {
         None => None,
         Some(raw) => match normalize_app_path(raw) {
             Ok(path) => Some(path),

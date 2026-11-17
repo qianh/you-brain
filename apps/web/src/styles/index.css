@@ -27,6 +27,7 @@
 @import "./components/status-capsule.css";
 @import "./pages/today.css";
 @import "./pages/panel.css";
+@import "./pages/reminder-popup.css";
 @import "./pages/topics.css";
 @import "./pages/search.css";
 @import "./pages/portrait.css";

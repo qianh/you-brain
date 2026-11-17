@@ -4,6 +4,7 @@ import {
   RECALL_USER_CHARS,
   buildRecallPrompt,
   parseRecallDecision,
+  type RecallHistoryItem,
   type RecallMemory,
 } from "../../src/recall/index.js";
 
@@ -17,6 +18,16 @@ const memory: RecallMemory = {
     { id: "todo:todo-1", kind: "todo", text: "接入 10 月运价数据后重训", day: "2026-11-13", sessionKey: "s".repeat(64) },
   ],
 };
+
+const history: RecallHistoryItem[] = [
+  {
+    id: "history:abc123",
+    sessionKey: "s".repeat(64),
+    day: "2026-11-08",
+    title: "运价预测讨论",
+    text: "我想预测海运运价，先按月聚合试试。",
+  },
+];
 
 const ok = (extra: Record<string, unknown> = {}) =>
   JSON.stringify({ say: true, grade: "normal", text: "11-13 你说等 10 月数据到了再重训，还没接。", basisId: "todo:todo-1", ...extra });
@@ -37,6 +48,21 @@ describe("parseRecallDecision", () => {
 
   it("依据不在记忆里时当作不说", () => {
     expect(parseRecallDecision(ok({ basisId: "todo:none" }), memory)).toEqual({ say: false });
+  });
+
+  it("依据是历史会话片段时可以说", () => {
+    expect(
+      parseRecallDecision(ok({ basisId: "history:abc123" }), memory, history),
+    ).toEqual({
+      say: true,
+      grade: "normal",
+      text: "11-13 你说等 10 月数据到了再重训，还没接。",
+      basisId: "history:abc123",
+    });
+  });
+
+  it("没传入历史时引用片段 id 当作不说", () => {
+    expect(parseRecallDecision(ok({ basisId: "history:abc123" }), memory)).toEqual({ say: false });
   });
 
   it.each([
@@ -69,5 +95,28 @@ describe("buildRecallPrompt", () => {
     expect(user).toContain("最新的话");
     const kept = (user.match(/旧/gu) ?? []).length;
     expect(kept).toBe(RECALL_USER_CHARS - Array.from("最新的话").length);
+  });
+
+  it("历史片段与回复都进入提示词，超长片段保留尾部", () => {
+    const long = "前".repeat(3000) + "结尾才是重点";
+    const { user } = buildRecallPrompt({
+      memory,
+      userTurns: ["第一句"],
+      today: "2026-11-16",
+      history: [{ ...history[0]!, text: long }],
+      replies: [{ day: "2026-11-14", text: "重训的事月底再说" }],
+    });
+    expect(user).toContain("## 历史会话片段");
+    expect(user).toContain("[history:abc123] 2026-11-08 会话「运价预测讨论」他说过：");
+    expect(user).toContain("结尾才是重点");
+    expect(user).not.toContain("前".repeat(2500));
+    expect(user).toContain("他回复过：重训的事月底再说");
+    expect(user).toContain("（已处理，不要再提）");
+  });
+
+  it("没有历史与回复时不留空段", () => {
+    const { user } = buildRecallPrompt({ memory, userTurns: ["第一句"], today: "2026-11-16" });
+    expect(user).toContain("## 历史会话片段\n（无）");
+    expect(user).not.toContain("他回复过");
   });
 });

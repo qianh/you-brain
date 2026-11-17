@@ -129,9 +129,26 @@ import {
 import { reminderDetail } from "../reminders/detail.js";
 import { topicIsMuted } from "../reminders/due.js";
 import { foldReminders } from "../reminders/fold.js";
+import {
+  REMINDER_REPLY_TEXT_MAX,
+  createReminderReplyLog,
+  readReminderReplies,
+  type ReminderReplyRecord,
+} from "../reminders/replies.js";
 import { dueRemindersForDevice, reminderActions } from "../reminders/run.js";
 import { QuotaService, readMagpieAccounts } from "../quota/index.js";
-import { RECALL_FRESH_MS, RecallService, createRecallLog, type RecallLogEntry } from "../recall/index.js";
+import {
+  RECALL_FRESH_MS,
+  RECALL_HISTORY_CHARS,
+  RECALL_HISTORY_SESSIONS,
+  RecallService,
+  createRecallLog,
+  recallHistoryId,
+  type RecallHistoryItem,
+  type RecallLogEntry,
+} from "../recall/index.js";
+import { localDayKey } from "../consolidate/schedule.js";
+import { resolveMergedTopic } from "../topics/zones.js";
 import { timeZoneOffsetMinutes } from "../reminders/time.js";
 import {
   WEBHOOK_STATE_CURSOR,
@@ -276,6 +293,9 @@ const INBOX_READ_CONCURRENCY = 8;
  * gets turned into topics and portrait material.
  */
 const REFINE_BACKFILL_WINDOW_DAYS = 7;
+
+/** 传给记忆判断的回复条数上限；服务侧再按时效过滤并截到 RECALL_REPLIES。 */
+const RECALL_REPLY_PORT_LIMIT = 20;
 
 /**
  * Cursor key holding the file fingerprint of the last capture scan.
@@ -870,6 +890,8 @@ export class YouBrainDaemon {
   /** Turn count last read for a session, so a rewrite with no new turn costs no parse. */
   readonly #recallSeen = new Map<string, number>();
   #recallLogWriter: ((entry: RecallLogEntry) => void) | null = null;
+  /** 弹框提醒的回复落盘；只在本机，重启后仍能显示与参与下一次记忆判断。 */
+  #replyLogWriter: ((record: ReminderReplyRecord) => void) | null = null;
   readonly #recall: RecallService = this.#createRecall();
   readonly #quota: QuotaService = new QuotaService({
     read: () => readMagpieAccounts({ env: this.#env, homeDir: this.#homeDir, signal: this.#abort.signal }),
@@ -2086,6 +2108,54 @@ export class YouBrainDaemon {
           actions: reminderActions(events),
         });
       },
+      history: async ({ sessionKeys }) => {
+        const timeZone = this.#roles.timezone;
+        const updated = this.#sessionUpdatedAt();
+        const items: RecallHistoryItem[] = [];
+        for (const key of sessionKeys) {
+          if (items.length >= RECALL_HISTORY_SESSIONS) break;
+          const live = this.#live.get(key);
+          if (!live) continue;
+          try {
+            const session = await this.#materialize(live);
+            if (!session) continue;
+            const turns = session.turns
+              .filter((turn) => turn.role === "user")
+              .map((turn) => turn.text.trim())
+              .filter((text) => text !== "");
+            if (turns.length === 0) continue;
+            const at = updated[key] ?? session.updatedAt;
+            items.push({
+              id: recallHistoryId(key),
+              sessionKey: key,
+              day: localDayKey(new Date(Date.parse(at) || this.#clock.nowMs()), timeZone),
+              title:
+                this.#store?.getSession(key)?.title?.trim() ||
+                `${live.source} 会话`,
+              text: turns.join("\n").slice(-RECALL_HISTORY_CHARS),
+            });
+          } catch {
+            // A session that fails to parse just contributes no excerpt.
+          }
+        }
+        return items;
+      },
+      replies: (topicId) => {
+        const events = this.#store?.listEvents() ?? [];
+        const book = foldEvents(events);
+        const wanted = resolveMergedTopic(book, topicId);
+        const timeZone = this.#roles.timezone;
+        const replies = readReminderReplies(this.#replyLogPath())
+          .filter((reply) => reply.topicId !== null && resolveMergedTopic(book, reply.topicId) === wanted)
+          .map((reply) => {
+            const ms = Date.parse(reply.ts);
+            return {
+              day: Number.isNaN(ms) ? null : localDayKey(new Date(ms), timeZone),
+              text: reply.text,
+            };
+          });
+        return replies.slice(-RECALL_REPLY_PORT_LIMIT).reverse();
+      },
       emit: async (data) => {
         if (this.#stopped) throw new Error("daemon 已停止");
         await this.#emitUser("reminder.issued", data);
@@ -2105,6 +2175,15 @@ export class YouBrainDaemon {
       nowMs: () => this.#clock.nowMs(),
       timeZone: () => this.#roles.timezone,
     });
+  }
+
+  #replyLogPath(): string {
+    return join(this.#paths.dataDir, "reminder-replies.jsonl");
+  }
+
+  #replyLog(): (record: ReminderReplyRecord) => void {
+    this.#replyLogWriter ??= createReminderReplyLog(this.#replyLogPath());
+    return this.#replyLogWriter;
   }
 
   #sessionUpdatedAt(): Record<string, string> {
@@ -3576,8 +3655,12 @@ export class YouBrainDaemon {
       },
       reminders: async (all) => {
         const body = await readers.reminders(all);
+        const replies = new Map(readReminderReplies(this.#replyLogPath()).map((item) => [item.reminderId, item.text]));
         return {
-          ...body,
+          reminders: body.reminders.map((item) => {
+            const reply = replies.get(item.reminderId);
+            return reply === undefined ? item : { ...item, reply };
+          }),
           delivery: decideDelivery({
             notifications: this.#shared.reminders.notifications,
             deviceId: this.#local.deviceId,
@@ -3588,6 +3671,25 @@ export class YouBrainDaemon {
         };
       },
       reminder: (id) => readers.reminder(id),
+      reminderReply: async (reminderId, text) => {
+        const current = await readers.reminder(reminderId);
+        if (!current) throw new HttpError(404, "NOT_FOUND", "提醒不存在");
+        if (this.#stopped) throw new HttpError(409, "DAEMON_STOPPED", "daemon 已停止");
+        await this.#emitUser("reminder.action", {
+          reminderId,
+          topicId: current.topicId,
+          action: "done",
+          until: null,
+        });
+        this.#replyLog()({
+          reminderId,
+          topicId: current.topicId,
+          sessionKey: current.sessionKey ?? null,
+          text: text.trim().slice(0, REMINDER_REPLY_TEXT_MAX),
+          ts: this.#clock.now().toISOString(),
+        });
+        return { ...current, status: "done", until: null, reply: text };
+      },
       reminderDetail: async (id) => {
         const reminder = await readers.reminder(id);
         if (!reminder) return { detail: null };

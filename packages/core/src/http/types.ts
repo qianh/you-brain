@@ -279,6 +279,13 @@ export const ReminderActionBodySchema = z.object({
 
 export type ReminderActionBody = z.infer<typeof ReminderActionBodySchema>;
 
+export const ReminderReplyBodySchema = z.object({
+  reminderId: z.string().min(1),
+  text: z.string().min(1).max(500),
+});
+
+export type ReminderReplyBody = z.infer<typeof ReminderReplyBodySchema>;
+
 export const ActivityBodySchema = z.object({
   at: IsoTimestampSchema.optional(),
 });
@@ -481,6 +488,8 @@ export interface ReminderView {
   status: string;
   until: string | null;
   issuedAt: string;
+  /** What the user replied from the popup, when this machine has it. */
+  reply?: string | null;
 }
 
 export interface ReminderDelivery {

@@ -6,6 +6,7 @@ import { DaemonProvider, useDaemon } from "./daemon-context.js";
 import { DshDeckPage } from "./pages/dsh-deck.js";
 import { DesignPage } from "./pages/design.js";
 import { PanelPage } from "./pages/panel.js";
+import { ReminderPopupPage } from "./pages/reminder-popup.js";
 import { TodayPage } from "./pages/today.js";
 import { TopicsPage } from "./pages/topics.js";
 import { SearchPage } from "./pages/search.js";
@@ -35,6 +36,7 @@ function Frame() {
   const { location, navigate } = useRoute();
   const { loading, today, t } = useDaemon();
   const panel = location.pathname === "/panel";
+  const reminderPopup = location.pathname === "/reminder-popup";
   useEffect(() => {
     if (location.pathname === "/") navigate("/deck", "replace");
   }, [location.pathname, navigate]);
@@ -68,6 +70,7 @@ function Frame() {
     document.title = `${page} · U-Brain`;
   }, [location.pathname, t]);
 
+  if (reminderPopup) return <ReminderPopupPage />;
   if (loading && !today && !panel) {
     return (
       <div className="boot">

@@ -6,9 +6,12 @@ import {
   RECALL_RETRY_DELAYS_MS,
   RECALL_SYSTEM_PROMPT,
   RecallService,
+  recallHistoryId,
   recallReminderId,
+  type RecallHistoryItem,
   type RecallLogEntry,
   type RecallPorts,
+  type RecallReplyItem,
 } from "../../src/recall/index.js";
 import type { CandidateTopic } from "../../src/refine/types.js";
 import type { ReminderRecord } from "../../src/store/types.js";
@@ -27,9 +30,28 @@ const topics: CandidateTopic[] = [
   { topicId: TOPIC, name: "海运运价预测", aliases: ["运价"], summary: "预测海运运价", zone: "active" },
 ];
 
+const HISTORY_ITEMS: RecallHistoryItem[] = [
+  {
+    id: recallHistoryId(OLD),
+    sessionKey: OLD,
+    day: "2026-11-08",
+    title: "运价预测讨论",
+    text: "我想预测海运运价。欧洲线的基差很大，10 月的数据还没到手，先按月聚合试试。",
+  },
+];
+
 type Reply = string | Error;
 
-function setup(replies: Reply[], options: { muted?: boolean; llmMissing?: boolean; emitFails?: boolean } = {}) {
+function setup(
+  replies: Reply[],
+  options: {
+    muted?: boolean;
+    llmMissing?: boolean;
+    emitFails?: boolean;
+    history?: RecallHistoryItem[] | Error;
+    topicReplies?: RecallReplyItem[];
+  } = {},
+) {
   let now = START;
   const requests: { at: number; request: LlmCompleteRequest }[] = [];
   const emitted: { reminderId: string; kind: string; topicId: string; text: string; sessionKey?: string }[] = [];
@@ -56,6 +78,11 @@ function setup(replies: Reply[], options: { muted?: boolean; llmMissing?: boolea
     sessionUpdatedAt: () => ({}),
     reminders: () => reminders,
     topicMuted: () => options.muted === true,
+    async history() {
+      if (options.history instanceof Error) throw options.history;
+      return options.history ?? [];
+    },
+    replies: () => options.topicReplies ?? [],
     async emit(data) {
       if (options.emitFails) throw new Error("写事件失败");
       emitted.push(data);
@@ -334,6 +361,8 @@ describe("RecallService", () => {
       sessionUpdatedAt: () => { throw new Error("x"); },
       reminders: () => { throw new Error("x"); },
       topicMuted: () => { throw new Error("x"); },
+      history: async () => { throw new Error("x"); },
+      replies: () => { throw new Error("x"); },
       emit: async () => { throw new Error("x"); },
       resolve: async () => { throw new Error("x"); },
       cursors: { get: () => { throw new Error("x"); }, set: () => { throw new Error("x"); } },
@@ -344,5 +373,51 @@ describe("RecallService", () => {
     const service = new RecallService(ports);
     expect(() => service.consider({ sessionKey: SESSION, userTurns: TURNS })).not.toThrow();
     await expect(service.tick()).resolves.toBeUndefined();
+  });
+
+  it("历史会话片段进入提示词，模型引用片段 id 时提醒记下那段会话", async () => {
+    const say = JSON.stringify({
+      say: true,
+      grade: "normal",
+      text: "11-08 那次你说欧洲线基差大，先按月聚合，现在改周要慎重。",
+      basisId: HISTORY_ITEMS[0]?.id,
+    });
+    const t = setup([say], { history: HISTORY_ITEMS });
+    t.service.consider({ sessionKey: SESSION, userTurns: TURNS });
+    await t.service.tick();
+    const user = t.requests[0]?.request.user ?? "";
+    expect(user).toContain("## 历史会话片段");
+    expect(user).toContain(`[${HISTORY_ITEMS[0]?.id}]`);
+    expect(user).toContain("我想预测海运运价");
+    expect(t.emitted).toEqual([
+      {
+        reminderId: recallReminderId(SESSION, TOPIC),
+        kind: "recall",
+        topicId: TOPIC,
+        text: expect.any(String),
+        sessionKey: OLD,
+      },
+    ]);
+  });
+
+  it("历史端口失败不阻塞提醒，提示词里历史为空", async () => {
+    const t = setup([SAY_NORMAL], { history: new Error("读不了") });
+    t.service.consider({ sessionKey: SESSION, userTurns: TURNS });
+    await t.service.tick();
+    expect(t.emitted).toHaveLength(1);
+    expect(t.requests[0]?.request.user).not.toContain("## 历史会话片段\n\n[");
+    expect(t.requests[0]?.request.user).toContain("## 历史会话片段");
+  });
+
+  it("本话题的回复作为上下文进入提示词", async () => {
+    const t = setup([SILENT], {
+      topicReplies: [{ day: "2026-11-14", text: "重训的事这个月底再说" }],
+    });
+    t.service.consider({ sessionKey: SESSION, userTurns: TURNS });
+    await t.service.tick();
+    const user = t.requests[0]?.request.user ?? "";
+    expect(user).toContain("他回复过：重训的事这个月底再说");
+    expect(user).toContain("2026-11-14");
+    expect(t.logs.at(-1)?.outcome).toBe("silent");
   });
 });

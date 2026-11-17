@@ -71,6 +71,13 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.reminder-reply {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
 .reminder-expand {
   padding: 0;
   border: 0;

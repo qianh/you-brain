@@ -12,6 +12,7 @@ import { startDaemonHttp, type DaemonHttpServer } from "../../src/http/server.js
 import type { DaemonEvent } from "../../src/http/types.js";
 import { EventLog } from "../../src/sync/event-log.js";
 import { SqliteStore } from "../../src/store/sqlite-store.js";
+import { createReminderReplyLog, readReminderReplies } from "../../src/reminders/replies.js";
 import { applyEvents, foldEvents } from "../../src/topics/fold.js";
 import { persistTopicBook } from "../../src/topics/persist.js";
 import { KEY_1, buildEvent } from "../topics/helpers.js";
@@ -86,6 +87,7 @@ function seed(store: SqliteStore): void {
 
 async function withHttp(
   run: (ctx: { server: DaemonHttpServer; store: SqliteStore; now: { value: string } }) => Promise<void>,
+  options: { withReply?: boolean } = {},
 ): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "you-brain-reminder-http-"));
   const store = new SqliteStore(join(dir, "state.sqlite"));
@@ -98,6 +100,9 @@ async function withHttp(
     historyDays: 30,
     now: () => new Date(now.value),
   });
+  const replyLog = options.withReply === true
+    ? createReminderReplyLog(join(dir, "reminder-replies.jsonl"))
+    : null;
   const deps: HttpDeps = {
     uiPrefs: { read: async () => ({}), patch: async () => ({}) },
     today: () => readers.today(),
@@ -128,8 +133,40 @@ async function withHttp(
     },
     sync: async () => ({ started: false, at: now.value }),
     upload: async () => ({ dryRun: true, scanned: 0, uploaded: 0, warnings: [] }),
-    reminders: (all) => readers.reminders(all),
+    reminders: async (all) => {
+      const body = await readers.reminders(all);
+      if (replyLog === null) return body;
+      const replies = new Map(readReminderReplies(join(dir, "reminder-replies.jsonl")).map((item) => [item.reminderId, item.text]));
+      return {
+        reminders: body.reminders.map((item) => {
+          const reply = replies.get(item.reminderId);
+          return reply === undefined ? item : { ...item, reply };
+        }),
+      };
+    },
     reminder: (id) => readers.reminder(id),
+    ...(replyLog === null
+      ? {}
+      : {
+        reminderReply: async (reminderId: string, text: string) => {
+          const current = await readers.reminder(reminderId);
+          if (!current) throw new Error("提醒不存在");
+          await deps.events.emit("reminder.action", {
+            reminderId,
+            topicId: current.topicId,
+            action: "done" as const,
+            until: null,
+          });
+          replyLog({
+            reminderId,
+            topicId: current.topicId,
+            sessionKey: current.sessionKey ?? null,
+            text,
+            ts: now.value,
+          });
+          return { ...current, status: "done", until: null, reply: text };
+        },
+      }),
     reportActivity: async (at) => ({ at }),
     now: () => new Date(now.value),
     events: {
@@ -241,5 +278,35 @@ describe("reminder HTTP", () => {
       expect(topic.status).toBe("done");
       expect(topic.statusBy).toBe("user");
     });
+  });
+
+  it("弹框回复：关闭提醒、落盘回复，并合并进提醒视图", async () => {
+    await withHttp(
+      async ({ server }) => {
+        const client = createDaemonClient({ port: server.port, token: server.token });
+        if (!client.reminderReply) throw new Error("client reminderReply is missing");
+
+        const missing = await client.reminderReply({ reminderId: "missing", text: "没有这条" }).catch(
+          (error: unknown) => error,
+        );
+        expect((missing as Error).message).toContain("提醒不存在");
+
+        const replied = await client.reminderReply({
+          reminderId: "stale:topic-1:2026-10-01",
+          text: "这个我早上已经处理了",
+        });
+        expect(replied).toMatchObject({
+          reminderId: "stale:topic-1:2026-10-01",
+          status: "done",
+          reply: "这个我早上已经处理了",
+        });
+
+        const listed = await client.reminders(true);
+        const row = listed.reminders.find((item) => item.reminderId === "stale:topic-1:2026-10-01");
+        expect(row?.reply).toBe("这个我早上已经处理了");
+        expect(row?.status).toBe("done");
+      },
+      { withReply: true },
+    );
   });
 });

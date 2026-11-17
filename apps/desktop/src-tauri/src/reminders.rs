@@ -138,6 +138,24 @@ pub fn notification_text(reminders: &[ReminderNotice]) -> String {
     format!("{line}（另有 {} 条）", reminders.len() - 1)
 }
 
+/// 聊到时提醒走弹框窗口；晨报、周回顾等仍走系统通知。
+pub const RECALL_KIND: &str = "recall";
+
+/// Splits freshly delivered reminders into popup ones (聊到时) and the rest.
+/// Both halves keep the newest-first order of the input.
+pub fn partition_recall(reminders: &[ReminderNotice]) -> (Vec<ReminderNotice>, Vec<ReminderNotice>) {
+    let mut recall = Vec::new();
+    let mut others = Vec::new();
+    for item in reminders {
+        if item.kind == RECALL_KIND {
+            recall.push(item.clone());
+        } else {
+            others.push(item.clone());
+        }
+    }
+    (recall, others)
+}
+
 pub fn parse_notified_ids(text: &str) -> Vec<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         return Vec::new();
@@ -597,5 +615,30 @@ mod tests {
         save_notified(&path, &remember_notified(&[], &first));
         let loaded = load_notified(&path);
         assert!(select_reminders_to_notify(&reminders, Some(&gate(true)), &loaded, now).is_empty());
+    }
+
+    #[test]
+    fn recall_reminders_split_off_from_the_rest_in_order() {
+        let mut recall = notice("r1", "旧事", "2026-10-23T11:00:00.000Z");
+        recall.kind = "recall".to_string();
+        let mut digest = notice("m1", "晨报", "2026-10-23T09:00:00.000Z");
+        digest.kind = "morning_digest".to_string();
+        let mut recall2 = notice("r2", "又一桩", "2026-10-23T10:30:00.000Z");
+        recall2.kind = "recall".to_string();
+        let mut stale = notice("s1", "搁置", "2026-10-23T08:00:00.000Z");
+        stale.kind = "stale".to_string();
+        // 最新在前，与 select 的顺序一致。
+        let selected = vec![recall.clone(), recall2.clone(), digest.clone(), stale.clone()];
+        let (popped, others) = partition_recall(&selected);
+        assert_eq!(
+            popped.iter().map(|item| item.reminder_id.as_str()).collect::<Vec<_>>(),
+            vec!["r1", "r2"]
+        );
+        assert_eq!(
+            others.iter().map(|item| item.reminder_id.as_str()).collect::<Vec<_>>(),
+            vec!["m1", "s1"]
+        );
+        let empty = partition_recall(&[]);
+        assert!(empty.0.is_empty() && empty.1.is_empty());
     }
 }

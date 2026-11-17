@@ -153,6 +153,11 @@ export function ReminderCard({
         {isRecallReminder(reminder) ? <span className="reminder-kind">{t("reminderKindRecall")}</span> : null}
         {shown}
       </span>
+      {reminder.reply ? (
+        <span className="reminder-reply">
+          {t("reminderReplyLabel")}：“{reminder.reply}”
+        </span>
+      ) : null}
       {canExpand ? (
         <button
           type="button"

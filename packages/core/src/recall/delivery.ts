@@ -15,6 +15,11 @@ export function recallReminderId(sessionKey: string, topicId: string): string {
   return `recall:${createHash("sha1").update(`${sessionKey}\n${topicId}`).digest("hex").slice(0, 16)}`;
 }
 
+/** Stable short id for a history excerpt, so the model can cite the session it read. */
+export function recallHistoryId(sessionKey: string): string {
+  return `history:${createHash("sha1").update(sessionKey).digest("hex").slice(0, 16)}`;
+}
+
 export interface RecallDeliveryInput {
   grade: RecallGrade;
   topicId: string;

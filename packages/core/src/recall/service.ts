@@ -6,9 +6,17 @@ import type { TopicBook } from "../topics/types.js";
 import { decideRecallDelivery, recallReminderId } from "./delivery.js";
 import type { RecallLogEntry } from "./log.js";
 import { matchRecallTopic } from "./match.js";
-import { buildRecallMemory } from "./memory.js";
+import { historyCandidates, buildRecallMemory } from "./memory.js";
 import { RECALL_JSON_SCHEMA, buildRecallPrompt, parseRecallDecision } from "./prompt.js";
-import { RECALL_KIND, RECALL_RETRY_DELAYS_MS, RECALL_USER_CHARS } from "./types.js";
+import {
+  RECALL_KIND,
+  RECALL_REPLY_KEEP_MS,
+  RECALL_REPLIES,
+  RECALL_RETRY_DELAYS_MS,
+  RECALL_USER_CHARS,
+  type RecallHistoryItem,
+  type RecallReplyItem,
+} from "./types.js";
 
 export const RECALL_CONSIDERED_CURSOR = "recall.considered";
 const CONSIDERED_KEEP_MS = 7 * 24 * 60 * 60_000;
@@ -22,6 +30,13 @@ export interface RecallPorts {
   sessionUpdatedAt(): Readonly<Record<string, string>>;
   reminders(): readonly ReminderRecord[];
   topicMuted(topicId: string): boolean;
+  /**
+   * Raw excerpts of the topic's older sessions, newest first. Best effort: a read
+   * failure returns fewer items or none, and never blocks the reminder.
+   */
+  history(input: { sessionKeys: readonly string[] }): Promise<readonly RecallHistoryItem[]>;
+  /** What the user replied to earlier reminders on this topic, newest first. */
+  replies(topicId: string): readonly RecallReplyItem[];
   emit(data: { reminderId: string; kind: string; topicId: string; text: string; sessionKey?: string }): Promise<void>;
   /** A newer reminder for the topic takes the old one's place. */
   resolve(data: { reminderId: string; topicId: string | null }): Promise<void>;
@@ -149,17 +164,21 @@ export class RecallService {
         this.#log({ sessionKey, topicId, outcome: "no-memory" });
         return;
       }
+      const history = await this.#history(memory.topicId, sessionKey);
+      const replies = this.#recentReplies(memory.topicId);
       const prompt = buildRecallPrompt({
         memory,
         userTurns: task.userTurns,
         today: localDayKey(new Date(this.#ports.nowMs()), this.#ports.timeZone()),
+        ...(history.length > 0 ? { history } : {}),
+        ...(replies.length > 0 ? { replies } : {}),
       });
       const raw = await llm.complete({
         system: prompt.system,
         user: prompt.user,
         jsonSchema: RECALL_JSON_SCHEMA,
       });
-      const decision = parseRecallDecision(raw, memory);
+      const decision = parseRecallDecision(raw, memory, history);
       if (!decision.say) {
         this.#finish(task);
         this.#log({ sessionKey, topicId, outcome: "silent" });
@@ -191,7 +210,9 @@ export class RecallService {
         });
         return;
       }
-      const source = memory.items.find((item) => item.id === decision.basisId)?.sessionKey ?? null;
+      const basisMemory = memory.items.find((item) => item.id === decision.basisId);
+      const basisHistory = history.find((item) => item.id === decision.basisId);
+      const source = basisMemory?.sessionKey ?? basisHistory?.sessionKey ?? null;
       await this.#ports.emit({
         reminderId,
         kind: delivery.kind,
@@ -215,6 +236,36 @@ export class RecallService {
       failure = error instanceof Error ? error.message : String(error);
     }
     this.#retryOrGiveUp(task, failure);
+  }
+
+  /** Best effort: a history read that fails never blocks the reminder. */
+  async #history(topicId: string, sessionKey: string): Promise<readonly RecallHistoryItem[]> {
+    try {
+      const candidates = historyCandidates({
+        book: this.#ports.book(),
+        topicId,
+        sessionKey,
+        sessionUpdatedAt: this.#ports.sessionUpdatedAt(),
+        nowMs: this.#ports.nowMs(),
+      });
+      if (candidates.length === 0) return [];
+      return await this.#ports.history({ sessionKeys: candidates });
+    } catch {
+      return [];
+    }
+  }
+
+  #recentReplies(topicId: string): readonly RecallReplyItem[] {
+    const now = this.#ports.nowMs();
+    return this.#ports
+      .replies(topicId)
+      .filter((reply) => reply.day === null || now - this.#dayMs(reply.day) <= RECALL_REPLY_KEEP_MS)
+      .slice(0, RECALL_REPLIES);
+  }
+
+  #dayMs(day: string): number {
+    const ms = Date.parse(`${day}T00:00:00Z`);
+    return Number.isNaN(ms) ? 0 : ms;
   }
 
   /** A newer reminder takes over: open ones for the same topic are closed as handled. */

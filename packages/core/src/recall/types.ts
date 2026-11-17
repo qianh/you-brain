@@ -16,6 +16,30 @@ export const RECALL_ITEM_CHARS = 300;
 export const RECALL_TOPIC_COOLDOWN_MS = 24 * 60 * 60_000;
 export const RECALL_DAILY_LIMIT = 5;
 export const RECALL_RETRY_DELAYS_MS = [60_000, 5 * 60_000, 30 * 60_000] as const;
+/** Historical sessions of the topic handed to the model as raw excerpts. */
+export const RECALL_HISTORY_SESSIONS = 3;
+/** Per-session excerpt budget, in characters of the user's own turns. */
+export const RECALL_HISTORY_CHARS = 2_400;
+/** Sessions tried for an excerpt before the port gives up on missing files. */
+export const RECALL_HISTORY_CANDIDATES = 6;
+/** The topic's replies newer than this are shown to the model as context. */
+export const RECALL_REPLY_KEEP_MS = 14 * 24 * 60 * 60_000;
+export const RECALL_REPLIES = 5;
+
+/** One reply the user sent from the reminder popup, as stored on this machine. */
+export interface RecallReplyItem {
+  day: string | null;
+  text: string;
+}
+
+/** An excerpt of an older session of the same topic, given to the model as history. */
+export interface RecallHistoryItem {
+  id: string;
+  sessionKey: string;
+  day: string | null;
+  title: string;
+  text: string;
+}
 
 export type RecallGrade = "important" | "normal";
 

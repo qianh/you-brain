@@ -117,6 +117,7 @@ export interface BrowserDaemon
   extends Omit<
     DaemonClient,
     | "reminderAction"
+    | "reminderReply"
     | "consolidate"
     | "planTopicReorganization"
     | "topicReorganizeStatus"
@@ -138,6 +139,8 @@ export interface BrowserDaemon
   updateWebhook(body: WebhookPutBody): Promise<WebhookPublic>;
   testWebhook(): Promise<WebhookTestResult>;
   reminderAction(reminderId: string, action: ReminderActionName, until?: string): Promise<ReminderView>;
+  /** 弹框回复：关闭提醒并记下这句话。 */
+  reminderReply(reminderId: string, text: string): Promise<ReminderView>;
   /** 提醒被截短的原文;没有更多内容为 null。 */
   reminderDetail(reminderId: string): Promise<{ detail: string | null }>;
   consolidate(body?: { force?: boolean }): Promise<ConsolidateActionResult>;
@@ -309,6 +312,8 @@ export function createBrowserDaemon(options?: {
         action,
         ...(until === undefined ? {} : { until }),
       }),
+    reminderReply: (reminderId, text) =>
+      request<ReminderView>("POST", "/api/actions/reminder-reply", { reminderId, text }),
     consolidate: (body) => request<ConsolidateActionResult>("POST", "/api/actions/consolidate", body ?? {}),
     planTopicReorganization: (body) =>
       request<TopicReorganizeStatus>("POST", "/api/actions/topics-reorganize/plan", body ?? {}),

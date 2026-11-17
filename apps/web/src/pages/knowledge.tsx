@@ -458,11 +458,14 @@ export function KnowledgePage() {
   // 进入知识库没带页面 id 时(顶栏切回来、重启应用):优先回到上次看的页面,
   // 它已不在目录里才退回第一篇。
   useEffect(() => {
+    // 页面常驻挂载后,切到其他菜单这里也会重跑:地址上没有 id 时 selectedId
+    // 变成 null,不拦住会把每一次导航都 replace 回知识库,人就被钉在知识库里。
+    if (location.pathname !== "/knowledge") return;
     if (selectedId || roots === null || roots.length === 0) return;
     const last = cached.current.pageId;
     const target = last && findNode(roots, last) ? last : defaultPageId(roots);
     if (target) navigate(`/knowledge?id=${encodeURIComponent(target)}`, "replace");
-  }, [navigate, roots, selectedId]);
+  }, [location.pathname, navigate, roots, selectedId]);
 
   const runSync = useCallback(async () => {
     setSyncing(true);

@@ -14,6 +14,7 @@ import {
   type PortraitResponse,
   type PortraitSnapshotsResponse,
   type ReminderActionBody,
+  type ReminderReplyBody,
   type ReminderView,
   type RemindersResponse,
   type SearchRequest,
@@ -124,6 +125,8 @@ export interface DaemonClient {
   reminders(all?: boolean): Promise<RemindersResponse>;
   /** Optional so the web client can adopt the write call in a later task. */
   reminderAction?(body: ReminderActionBody): Promise<ReminderView>;
+  /** 忽略弹框提醒后用户补的一句话；落在本机，提醒随之关闭。 */
+  reminderReply?(body: ReminderReplyBody): Promise<ReminderView>;
   /** Optional so older clients can ignore the manual trigger. */
   consolidate?(body?: ConsolidateActionInput): Promise<ConsolidateActionResult>;
   planTopicReorganization?(body?: { refresh?: boolean }): Promise<TopicReorganizeStatus>;
@@ -265,6 +268,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     quota: () => request("GET", "/api/quota"),
     reminders: (all) => request("GET", all ? "/api/reminders?all=1" : "/api/reminders"),
     reminderAction: (body) => request("POST", "/api/actions/reminder", body),
+    reminderReply: (body) => request("POST", "/api/actions/reminder-reply", body),
     consolidate: (body) => request("POST", "/api/actions/consolidate", body ?? {}),
     planTopicReorganization: (body) => request("POST", "/api/actions/topics-reorganize/plan", body ?? {}),
     topicReorganizeStatus: () => request("GET", "/api/actions/topics-reorganize/status"),
