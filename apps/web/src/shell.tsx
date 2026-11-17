@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Banner } from "./components/banner.js";
 import { Button } from "./components/button.js";
 import { CommandPalette } from "./components/command-palette.js";
+import { warmSearch } from "./lib/search-warm.js";
 import { BrandMark, Icon, type IconName } from "./components/icons.js";
 import { Kbd } from "./components/kbd.js";
 import { Segmented } from "./components/segmented.js";
@@ -67,7 +68,7 @@ function capsuleText(kind: CapsuleKind, count: number, t: (key: MessageKey, vars
 }
 
 export function Shell({ children }: { children: ReactNode }) {
-  const { t, error, streamError, reload, loading, status, language } = useDaemon();
+  const { t, error, streamError, reload, loading, status, language, client } = useDaemon();
   const { cards: quotaCards, nowMs: quotaNow, reload: reloadQuota } = useQuota();
   const { push } = useToast();
   const { href, location, navigate } = useRoute();
@@ -80,6 +81,9 @@ export function Shell({ children }: { children: ReactNode }) {
   const requested = overlay ? readQuery(href, "open") : null;
   const [palette, setPalette] = useState(requested === "palette");
   const preset = requested === "palette" ? (readQuery(href, "pq") ?? "") : "";
+  useEffect(() => {
+    if (palette) warmSearch(client);
+  }, [palette, client]);
   const settings = location.pathname === "/settings";
   const knowledge = location.pathname === "/knowledge";
   const deck = location.pathname === "/deck";

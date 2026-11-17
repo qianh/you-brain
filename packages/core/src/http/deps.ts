@@ -106,6 +106,8 @@ export interface HttpDeps {
   portraitSnapshots(): Promise<PortraitSnapshot[]>;
   portraitCorrections(variant?: string): Promise<PortraitCorrectionView[]>;
   search(query: SearchRequest): Promise<SearchResponse>;
+  /** Load the vector cache and the query model ahead of a likely search. Returns at once. */
+  searchWarm?(): void;
   /** 会话原文（Drive inbox，markdown）；Drive 未就绪时缺省。conversationId 与 sessionKey 任给一个。指挥台 @ 引用展开用。 */
   sessionContent?(input: { source: string; conversationId?: string; sessionKey?: string }): Promise<SessionContentView>;
   /** 供应商的可用模型（现在只有 magpie）；网关不可达时缺省或抛错，设置页退回手动填写。 */

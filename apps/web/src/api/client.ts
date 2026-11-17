@@ -156,6 +156,8 @@ export interface BrowserDaemon
   notionTest(): Promise<NotionTestResult>;
   putNotionKey(body: NotionKeyPutBody): Promise<void>;
   searchSettings(): Promise<SearchSettings>;
+  /** 用户可能马上要搜索（打开搜索页或 ⌘K）：让 daemon 先拉起嵌入进程。不等结果，失败无妨。 */
+  searchWarm(): Promise<void>;
   putSearchKey(body: SearchKeyPutBody): Promise<void>;
   putSearchActive(body: SearchActivePutBody): Promise<SearchSettings>;
   /** 编辑块内容(可选 turn-into)/增删/移动/复制/改标题,均返回刷新后的页面。 */
@@ -385,6 +387,9 @@ export function createBrowserDaemon(options?: {
       await request("PUT", "/api/secrets/notion", body);
     },
     searchSettings: () => request<SearchSettings>("GET", "/api/search-provider"),
+    searchWarm: async () => {
+      await request("POST", "/api/search/warm");
+    },
     putSearchActive: (body: SearchActivePutBody) =>
       request<SearchSettings>("PUT", "/api/search-provider", body),
     putSearchKey: async (body: SearchKeyPutBody) => {

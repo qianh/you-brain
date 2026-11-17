@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { SearchResponse } from "@you-brain/core/http/types.js";
 
 import { useDaemon } from "../daemon-context.js";
+import { warmSearch } from "../lib/search-warm.js";
 import { useRoute } from "../router.js";
 import { BrowserDaemonError } from "../api/client.js";
 import { Banner } from "../components/banner.js";
@@ -81,6 +82,10 @@ export function SearchPage() {
         if (generation.current === id) setBusy(false);
       });
   }
+
+  useEffect(() => {
+    warmSearch(client);
+  }, [client]);
 
   useEffect(() => {
     if (location.q === null) return;

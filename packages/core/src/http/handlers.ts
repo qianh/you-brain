@@ -239,6 +239,12 @@ export async function handleApi(
   }
   if (path === "/api/portrait") return method(request, "GET", () => portrait(url, context));
   if (path === "/api/search") return method(request, "GET", () => search(url, context));
+  if (path === "/api/search/warm") {
+    return method(request, "POST", () => {
+      context.deps.searchWarm?.();
+      return json({ ok: true });
+    });
+  }
   if (path === "/api/session-content") return method(request, "GET", () => sessionContent(url, context));
   if (path === "/api/llm-models") return method(request, "GET", () => llmModels(url, context));
   if (path === "/api/devices") return method(request, "GET", () => devices(context));

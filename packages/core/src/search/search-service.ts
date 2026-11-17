@@ -132,6 +132,8 @@ export interface SearchStatus {
 const SYNC_BATCH_ENTRIES = 10;
 /** Chunks embedded per backfill batch. The time budget is checked after each batch. */
 export const BACKFILL_CHUNK_BATCH = 8;
+/** Missing-vector keys picked per lookup; their text is read one chunk batch at a time. */
+const BACKFILL_KEY_BATCH = 256;
 /** One embed call must not stall a tick longer than this. A timeout is a missing model. */
 const EMBED_CALL_TIMEOUT_MS = 60_000;
 /** Without a model, rows stay vectorless. Do not rebuild the index to fill them more often than this. */
@@ -189,7 +191,7 @@ const remoteUnavailable = {
 const QUERY_VECTOR_CACHE = 64;
 
 /** Resident decoded vectors are kept only under this budget; beyond it every query re-reads. */
-const VECTOR_CACHE_MAX_BYTES = 128 * 1024 * 1024;
+const VECTOR_CACHE_MAX_BYTES = 256 * 1024 * 1024;
 
 /** Hits read from Drive per query; each costs one download. */
 const REMOTE_HITS = 6;
@@ -237,6 +239,12 @@ function dot(query: Float32Array, vector: Float32Array): number {
     sum += query[index]! * vector[index]!;
   }
   return sum;
+}
+
+function decodeVector(bytes: Uint8Array): Float32Array {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return new Float32Array(copy.buffer);
 }
 
 function encodeVector(vector: number[]): Uint8Array {
@@ -345,12 +353,15 @@ export class SearchService {
     const vectors = this.#database
       .prepare("SELECT drive_file_id, chunk_id, vector FROM search_vectors")
       .all() as Array<{ drive_file_id: string; chunk_id: string; vector: Uint8Array }>;
+    // Every chunk of a file carries the same metadata, so one row per file is enough.
+    // GROUP BY walks the primary-key index and reads one row per file. DISTINCT read all
+    // ninety thousand rows in index order, a random page read each: about nine seconds.
     const files = this.#database
       .prepare(
         `
-        SELECT DISTINCT drive_file_id, drive_path, source, conversation_id,
-               started_at, updated_at
+        SELECT drive_file_id, drive_path, source, conversation_id, started_at, updated_at
         FROM search_chunks
+        GROUP BY drive_file_id
       `,
       )
       .all() as ChunkMeta[];
@@ -779,7 +790,76 @@ export class SearchService {
       this.#clearPending();
     });
     commit();
-    this.#vectorCache = null;
+    if (input.applyListing && input.work.reset) {
+      this.#vectorCache = null;
+      return;
+    }
+    // Patch the resident cache instead of dropping it: rebuilding it read the whole
+    // vector table again on the next query, after every batch the daemon committed.
+    const touched = new Set(input.batch.map((entry) => entry.id));
+    if (input.applyListing) for (const id of input.work.removed) touched.add(id);
+    this.#patchCache(
+      touched,
+      input.chunks.flatMap((chunk) => {
+        const vector = chunk.vector
+          ? Float32Array.from(chunk.vector)
+          : chunk.stored
+            ? decodeVector(chunk.stored)
+            : null;
+        if (vector === null) return [];
+        return [{
+          drive_file_id: chunk.driveFileId,
+          drive_path: chunk.drivePath,
+          source: chunk.source,
+          conversation_id: chunk.conversationId,
+          started_at: chunk.startedAt,
+          updated_at: chunk.updatedAt,
+          chunk_id: chunk.chunkId,
+          vector,
+        }];
+      }),
+    );
+  }
+
+  /** Drops the cached rows of `touched` files and adds `added`. A no-op while nothing is cached. */
+  #patchCache(touched: ReadonlySet<string>, added: VectorRow[]): void {
+    const cache = this.#vectorCache;
+    if (cache === null) return;
+    const rows =
+      touched.size === 0 ? cache.rows : cache.rows.filter((row) => !touched.has(row.drive_file_id));
+    rows.push(...added);
+    if (rows.length * this.#dimensions * 4 > VECTOR_CACHE_MAX_BYTES) {
+      this.#vectorCache = null;
+      return;
+    }
+    this.#vectorCache = {
+      rows,
+      keys: touched.size === 0
+        ? (() => {
+            for (const row of added) cache.keys.add(chunkKey(row.drive_file_id, row.chunk_id));
+            return cache.keys;
+          })()
+        : new Set(rows.map((row) => chunkKey(row.drive_file_id, row.chunk_id))),
+    };
+  }
+
+  /**
+   * Builds the resident vector cache and loads the query model ahead of the first search,
+   * so the first query after a daemon start does not pay for both. Errors are swallowed:
+   * a later query retries the same work.
+   */
+  async warm(): Promise<void> {
+    if (!this.#semantic) return;
+    ensureSearchSchema(this.#database);
+    this.#vectorRows();
+    if (this.#embedder === null) return;
+    try {
+      // Straight to the embedder, not the query cache: a cached answer would not start a
+      // worker the idle timer has stopped.
+      await this.#embedder.embedQuery("warm up");
+    } catch {
+      // The query path falls back to keywords and reports it.
+    }
   }
 
   status(): SearchStatus {
@@ -827,9 +907,12 @@ export class SearchService {
     const deadline = options.budgetMs === undefined ? Infinity : Date.now() + options.budgetMs;
     const warnings: SearchOutput["warnings"] = [];
     let embedded = 0;
-    const select = this.#database.prepare(
+    // Pick the holes by key only, then read text for one small batch at a time. Selecting
+    // text in the ordered query sorted every missing chunk's text and blocked the daemon
+    // for half a second per batch of eight, five seconds when cold.
+    const missing = this.#database.prepare(
       `
-      SELECT c.drive_file_id, c.chunk_id, c.text
+      SELECT c.drive_file_id, c.chunk_id
       FROM search_chunks c
       LEFT JOIN search_vectors v
         ON v.drive_file_id = c.drive_file_id AND v.chunk_id = c.chunk_id
@@ -838,12 +921,18 @@ export class SearchService {
       LIMIT ?
     `,
     );
+    const textOf = this.#database.prepare(
+      "SELECT text FROM search_chunks WHERE drive_file_id = ? AND chunk_id = ?",
+    );
+    let queue: Array<{ drive_file_id: string; chunk_id: string }> = [];
     while (true) {
-      const batch = select.all(BACKFILL_CHUNK_BATCH) as Array<{
-        drive_file_id: string;
-        chunk_id: string;
-        text: string;
-      }>;
+      if (queue.length === 0) {
+        queue = missing.all(BACKFILL_KEY_BATCH) as Array<{ drive_file_id: string; chunk_id: string }>;
+      }
+      const batch = queue.splice(0, BACKFILL_CHUNK_BATCH).flatMap((key) => {
+        const row = textOf.get(key.drive_file_id, key.chunk_id) as { text: string } | null;
+        return row ? [{ ...key, text: row.text }] : [];
+      });
       if (batch.length === 0) break;
       let vectors: number[][];
       try {
@@ -905,7 +994,21 @@ export class SearchService {
       }
     });
     write();
-    this.#vectorCache = null;
+    if (this.#vectorCache === null) return;
+    const meta = database.prepare(
+      `SELECT drive_path, source, conversation_id, started_at, updated_at
+       FROM search_chunks WHERE drive_file_id = ? AND chunk_id = ?`,
+    );
+    const added: VectorRow[] = [];
+    batch.forEach((row, index) => {
+      const vector = vectors[index];
+      const found = vector
+        ? (meta.get(row.drive_file_id, row.chunk_id) as Omit<ChunkMeta, "drive_file_id"> | null)
+        : null;
+      if (!vector || !found) return;
+      added.push({ ...found, drive_file_id: row.drive_file_id, chunk_id: row.chunk_id, vector: Float32Array.from(vector) });
+    });
+    this.#patchCache(new Set(), added);
   }
 
   /**

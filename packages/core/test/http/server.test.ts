@@ -80,6 +80,7 @@ interface Harness {
     search: SearchRequest[];
     upload: UploadActionInput[];
     sync: number;
+    searchWarm: number;
   };
 }
 
@@ -91,7 +92,7 @@ async function withServer(
   const events: Harness["events"] = [];
   const roles = { current: createDefaultRoles() };
   const config = { current: createDefaultSharedConfig() };
-  const calls: Harness["calls"] = { topics: [], search: [], upload: [], sync: 0 };
+  const calls: Harness["calls"] = { topics: [], search: [], upload: [], sync: 0, searchWarm: 0 };
   const listItem: TopicListItem = {
     topicId: "topic-1",
     name: "设计",
@@ -175,6 +176,9 @@ async function withServer(
       { name: "twin-v1.md", path: "/portrait/twin-v1.md", updatedAt: null },
     ],
     portraitCorrections: async () => [],
+    searchWarm: () => {
+      calls.searchWarm += 1;
+    },
     search: async (query) => {
       calls.search.push(query);
       return {
@@ -355,6 +359,9 @@ describe("local HTTP API", () => {
       expect((await api(server, "/api/search?q=")).status).toBe(400);
       expect((await api(server, "/api/search?q=a&limit=0")).status).toBe(400);
       expect((await api(server, "/api/search?q=a&limit=51")).status).toBe(400);
+      expect((await api(server, "/api/search/warm", { method: "POST" })).status).toBe(200);
+      expect(calls.searchWarm).toBe(1);
+      expect((await api(server, "/api/search/warm")).status).toBe(405);
 
       const sessionBody = await readJson(
         await api(server, "/api/session-content?source=codex&conversationId=conv-1"),

@@ -872,6 +872,7 @@ export class YouBrainDaemon {
   #searchTextDirty = false;
   /** Vector backfill filled holes on the last pass, so the next tick continues it. */
   #vectorDirty = false;
+  #searchWarmed = false;
   /** `inbox.pending` still has files to index. Cleared only when that queue is empty. */
   #inboxDirty = false;
   #portraitSoon = false;
@@ -1522,6 +1523,12 @@ export class YouBrainDaemon {
           this.#vectorDirty = false;
         }
         this.#lastVector = this.#clock.nowMs();
+      }
+      // Once per process: build the vector cache and load the query model now, so the
+      // user's first search after a start does not wait ten seconds for both.
+      if (!this.#searchWarmed) {
+        this.#searchWarmed = true;
+        void this.#search.warm().catch(() => undefined);
       }
     }
     if (intervalDue(this.#lastReminders, now, INTERVALS.reminderMs)) {
@@ -3435,6 +3442,9 @@ export class YouBrainDaemon {
           variant,
         ),
       search: (query) => this.#searchLocal(query),
+      searchWarm: () => {
+        void this.#search?.warm().catch(() => undefined);
+      },
       sessionContent: async (input) => {
         const drive = this.#drive;
         if (!drive) throw new HttpError(503, "DRIVE_UNAVAILABLE", "Drive 未就绪");
