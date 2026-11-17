@@ -8,6 +8,7 @@ import "@xterm/xterm/css/xterm.css";
 import { useDaemon } from "../daemon-context.js";
 import { preserveTerminalImeInput } from "./deck-terminal-input.js";
 import { createLatencyProbe } from "./deck-terminal-latency.js";
+import { createBatchedTerminalOutput } from "./deck-terminal-output.js";
 import type { TerminalAppearance } from "./deck-terminal-font.js";
 
 type Status = "connecting" | "ready" | "disconnected" | "exited";
@@ -27,13 +28,24 @@ interface LiveTerminal {
  * 同一真实 pane 的终端客户端；xterm 负责终端协议、输入法和按键编码，组件不编辑指令。
  * `appearance` 只改 xterm 的选项并重新排版，不重建终端和连接。
  */
-export function DeckTty7Terminal({ pane, appearance }: { pane: number; appearance: TerminalAppearance }) {
+export function DeckTty7Terminal({
+  pane,
+  appearance,
+  active = true,
+}: {
+  pane: number;
+  appearance: TerminalAppearance;
+  /** 非当前标签时保持连接，只隐藏不卸载。 */
+  active?: boolean;
+}) {
   const { client, t } = useDaemon();
   const hostRef = useRef<HTMLDivElement>(null);
   // 建终端时读最新的外观；它不进建连 effect 的依赖，后续变化由下面单独的 effect 处理。
   const appearanceRef = useRef(appearance);
   appearanceRef.current = appearance;
   const liveRef = useRef<LiveTerminal | null>(null);
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const [revision, setRevision] = useState(0);
   const [status, setStatus] = useState<Status>("connecting");
   const [focused, setFocused] = useState(false);
@@ -53,7 +65,7 @@ export function DeckTty7Terminal({ pane, appearance }: { pane: number; appearanc
     let retry: ReturnType<typeof setTimeout> | undefined;
     let resizeFrame = 0;
     let layoutFrame = 0;
-    let renderQueue = Promise.resolve();
+    let webglFrame = 0;
     setStatus("connecting");
     setError(null);
     setWarning(null);
@@ -79,23 +91,7 @@ export function DeckTty7Terminal({ pane, appearance }: { pane: number; appearanc
     terminal.loadAddon(fit);
     terminal.open(host);
     host.addEventListener("keydown", preserveTerminalImeInput, true);
-    // GPU 渲染：构造或加载失败就继续用默认渲染；上下文丢失时释放扩展，退回默认渲染。
     let webgl: WebglAddon | undefined;
-    if (!webglDisabledForDebug()) {
-      try {
-        webgl = new WebglAddon();
-        const addon = webgl;
-        addon.onContextLoss(() => {
-          addon.dispose();
-          if (webgl === addon) webgl = undefined;
-          if (!disposed) scheduleRelayout();
-        });
-        terminal.loadAddon(addon);
-      } catch {
-        try { webgl?.dispose(); } catch { /* 半途失败的扩展释放不了也不影响默认渲染。 */ }
-        webgl = undefined;
-      }
-    }
     fit.fit();
     const measure = (): DeckTerminalSize => {
       const grid = fit.proposeDimensions();
@@ -122,6 +118,24 @@ export function DeckTty7Terminal({ pane, appearance }: { pane: number; appearanc
       layoutFrame = requestAnimationFrame(relayout);
     };
     liveRef.current = { terminal, relayout: scheduleRelayout };
+    // GPU 渲染延后到连接建立后，避免首帧与回放争抢主线程。
+    const loadWebgl = (): void => {
+      if (disposed || webgl !== undefined || webglDisabledForDebug()) return;
+      try {
+        webgl = new WebglAddon();
+        const addon = webgl;
+        addon.onContextLoss(() => {
+          addon.dispose();
+          if (webgl === addon) webgl = undefined;
+          if (!disposed) scheduleRelayout();
+        });
+        terminal.loadAddon(addon);
+        scheduleRelayout();
+      } catch {
+        try { webgl?.dispose(); } catch { /* 半途失败的扩展释放不了也不影响默认渲染。 */ }
+        webgl = undefined;
+      }
+    };
     // 仅开发模式：输入到写入完成的延迟，正式包里这段会被整体删掉。
     const probe = import.meta.env.DEV
       ? createLatencyProbe({
@@ -147,44 +161,56 @@ export function DeckTty7Terminal({ pane, appearance }: { pane: number; appearanc
     });
     // 非 UTF-8 的鼠标报告等必须逐字节发送，不经过 TextEncoder。
     const binary = terminal.onBinary((text) => send(Uint8Array.from(text, (char) => char.charCodeAt(0))));
+    const output = createBatchedTerminalOutput(
+      {
+        writeBinary(bytes, onComplete) {
+          terminal.write(bytes, () => {
+            probe?.written();
+            onComplete();
+          });
+        },
+        ack(bytes) {
+          if (!disposed) control({ type: "ack", bytes });
+        },
+      },
+      () => disposed,
+    );
     socket.onmessage = (event: MessageEvent<string | ArrayBuffer>) => {
       if (disposed) return;
-      // resize 必须排在前一段 write 完成之后；tty7 的回放包含不同尺寸的历史段。
-      renderQueue = renderQueue.then(async () => {
+      if (event.data instanceof ArrayBuffer) {
+        output.pushBinary(new Uint8Array(event.data));
+        return;
+      }
+      let message: { type: string; size?: { cols: number; rows: number }; message?: string; by?: string | null };
+      try {
+        message = JSON.parse(event.data);
+      } catch {
+        failed = true;
+        setError("无法解析终端数据，请重新连接");
+        socket.close();
+        return;
+      }
+      output.enqueue(() => {
         if (disposed) return;
-        if (event.data instanceof ArrayBuffer) {
-          const bytes = new Uint8Array(event.data);
-          await new Promise<void>((resolve) => terminal.write(bytes, () => {
-            probe?.written();
-            resolve();
-          }));
-          if (!disposed) control({ type: "ack", bytes: bytes.length });
-          return;
-        }
-        const message = JSON.parse(event.data);
         if (message.type === "ready") {
           connected = true;
           terminal.options.disableStdin = false;
           setStatus("ready");
           control({ type: "resize", size: measure() });
-          terminal.focus();
-        } else if (message.type === "size") terminal.resize(message.size.cols, message.size.rows);
-        else if (message.type === "warning") setWarning(message.message);
+          webglFrame = requestAnimationFrame(() => loadWebgl());
+          if (activeRef.current) terminal.focus();
+        } else if (message.type === "size" && message.size) terminal.resize(message.size.cols, message.size.rows);
+        else if (message.type === "warning" && typeof message.message === "string") setWarning(message.message);
         else if (message.type === "lease") setLeaseLost(message.by !== "U-Brain");
         else if (message.type === "exit") {
           exited = true;
           connected = false;
           terminal.options.disableStdin = true;
           setStatus("exited");
-        } else if (message.type === "error") {
+        } else if (message.type === "error" && typeof message.message === "string") {
           failed = true;
           setError(message.message);
         }
-      }).catch(() => {
-        if (disposed) return;
-        failed = true;
-        setError("无法解析终端数据，请重新连接");
-        socket.close();
       });
     };
     socket.onclose = () => {
@@ -192,7 +218,7 @@ export function DeckTty7Terminal({ pane, appearance }: { pane: number; appearanc
       if (disposed) return;
       terminal.options.disableStdin = true;
       // 等排队的 exit/error 事件处理完，避免误把会话结束当成网络断线。
-      void renderQueue.finally(() => {
+      void output.whenIdle().finally(() => {
         if (disposed || exited) return;
         setStatus("disconnected");
         if (!failed) retry = setTimeout(() => setRevision((value) => value + 1), 1500);
@@ -202,7 +228,7 @@ export function DeckTty7Terminal({ pane, appearance }: { pane: number; appearanc
     const observer = new ResizeObserver(() => {
       cancelAnimationFrame(resizeFrame);
       resizeFrame = requestAnimationFrame(() => {
-        if (connected) control({ type: "resize", size: measure() });
+        if (connected && activeRef.current) control({ type: "resize", size: measure() });
       });
     });
     observer.observe(host);
@@ -231,14 +257,15 @@ export function DeckTty7Terminal({ pane, appearance }: { pane: number; appearanc
       })();
     };
     host.addEventListener("paste", onPaste, true);
-    const focusFrame = requestAnimationFrame(() => terminal.focus());
+    const focusFrame = activeRef.current ? requestAnimationFrame(() => terminal.focus()) : 0;
     return () => {
       disposed = true;
       connected = false;
       clearTimeout(retry);
-      cancelAnimationFrame(focusFrame);
+      if (focusFrame !== 0) cancelAnimationFrame(focusFrame);
       cancelAnimationFrame(resizeFrame);
       cancelAnimationFrame(layoutFrame);
+      cancelAnimationFrame(webglFrame);
       if (liveRef.current?.terminal === terminal) liveRef.current = null;
       observer.disconnect();
       host.removeEventListener("focusin", onFocus);
@@ -251,6 +278,14 @@ export function DeckTty7Terminal({ pane, appearance }: { pane: number; appearanc
       terminal.dispose();
     };
   }, [client, pane, revision]);
+
+  useEffect(() => {
+    if (!active) return;
+    const live = liveRef.current;
+    if (live === null) return;
+    live.relayout();
+    live.terminal.focus();
+  }, [active]);
 
   // 外观变化：只改 xterm 选项并重新排版，不重建终端和连接。
   const { fontFamily, fontSize, lineHeight } = appearance;
@@ -269,7 +304,11 @@ export function DeckTty7Terminal({ pane, appearance }: { pane: number; appearanc
     : t(status === "connecting" ? "deckTty7Connecting" : status === "exited" ? "deckTty7Exited" : "deckTty7Disconnected");
   const hasFloat = connectionText !== null || pasting || error !== null || warning !== null || leaseLost;
   return (
-    <div className={`deck-tty7-terminal${focused ? " is-focused" : ""}`}>
+    <div className={[
+      "deck-tty7-terminal",
+      focused && active ? "is-focused" : "",
+      active ? "is-active" : "is-inactive",
+    ].filter(Boolean).join(" ")}>
       <div ref={hostRef} className="deck-tty7-xterm" aria-label={t("deckTty7ScreenLabel")}
         // xterm 已编码这些按键；不要让应用快捷键再处理。
         onKeyDown={(event) => event.stopPropagation()} />

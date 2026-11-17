@@ -18,13 +18,15 @@ import { VIEWING_REPORT_MS, viewingTarget } from "./deck-terminal-viewing.js";
  * 整屏终端：盖住整个窗口，顶部一行是返回、本次打开过的会话标签、全部会话下拉。
  * 关标签和返回都只改变显示，不会结束 tty7 里的会话。
  */
-export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClose }: {
+export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClose, shown }: {
   tabs: TerminalTabs;
   /** 指挥台共享的会话数据。 */
   sessions: ReturnType<typeof useTty7Sessions>;
   onTabsChange: (next: TerminalTabs) => void;
   /** 返回：收起整屏终端，标签保留。 */
   onClose: () => void;
+  /** false 时整屏隐藏但已打开的标签保持挂载，切回时不再重连。 */
+  shown: boolean;
 }) {
   const { t, client } = useDaemon();
   const { view, reload } = shared;
@@ -92,7 +94,11 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
       void client.deckTty7Viewing(pane).catch(() => undefined);
     };
     const sync = (): void => {
-      const target = viewingTarget(tabs.active, document.hasFocus(), document.visibilityState === "visible");
+      const target = viewingTarget(
+        shown ? tabs.active : null,
+        document.hasFocus(),
+        document.visibilityState === "visible",
+      );
       if (target !== null) {
         send(target);
         last = target;
@@ -113,7 +119,7 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
       document.removeEventListener("visibilitychange", sync);
       if (last !== null) send(null);
     };
-  }, [client, tabs.active]);
+  }, [client, tabs.active, shown]);
 
   useEffect(() => {
     activeTabRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -225,7 +231,12 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
   );
 
   return (
-    <div className="deck-term-screen" role="region" aria-label={t("deckTerminalScreen")}>
+    <div
+      className={["deck-term-screen", shown ? "" : "is-collapsed"].filter(Boolean).join(" ")}
+      role="region"
+      aria-label={t("deckTerminalScreen")}
+      aria-hidden={!shown}
+    >
       <div className="deck-term-bar" {...(overlayTitlebar ? { "data-tauri-drag-region": "" } : {})}>
         <button
           type="button"
@@ -292,7 +303,14 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
         </div>
       </div>
       <div className="deck-term-body">
-        {tabs.active !== null && <DeckTty7Terminal key={tabs.active} pane={tabs.active} appearance={appearance} />}
+        {tabs.open.map((pane) => (
+          <DeckTty7Terminal
+            key={pane}
+            pane={pane}
+            appearance={appearance}
+            active={shown && pane === tabs.active}
+          />
+        ))}
       </div>
     </div>
   );

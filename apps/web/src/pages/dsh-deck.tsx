@@ -209,8 +209,14 @@ export function DshDeckPage() {
           <DeckTty7Panel sessions={sessions} onClose={() => toggleTty7(false)} onOpen={openPane} activePane={tabs.active} openRequest={terminalRequest} onOpenRequestHandled={terminalRequestHandled} />
         ) : null}
       </div>
-      {tabs.active !== null ? (
-        <DeckTerminalScreen tabs={tabs} sessions={sessions} onTabsChange={setTabs} onClose={() => setTabs(hideScreen)} />
+      {tabs.open.length > 0 ? (
+        <DeckTerminalScreen
+          tabs={tabs}
+          sessions={sessions}
+          shown={tabs.active !== null}
+          onTabsChange={setTabs}
+          onClose={() => setTabs(hideScreen)}
+        />
       ) : null}
     </Page>
   );

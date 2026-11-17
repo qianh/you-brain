@@ -401,8 +401,8 @@ export function DeckTty7NewForm({ view, sessions, projectLabel, reload, onStarte
         ...(workspace === "" ? {} : { workspace }),
       });
       writeStored(HARNESS_KEY, harness);
-      await reload();
       onStarted(created.pane);
+      void reload();
     } catch (caught) {
       setError(message(caught));
     } finally {

@@ -173,6 +173,14 @@
   background: var(--term-bg);
   color: var(--term-fg);
 }
+.deck-tty7-terminal.is-inactive {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.deck-tty7-terminal.is-active { z-index: 1; }
 
 .deck-tty7-xterm {
   flex: 1;
@@ -221,6 +229,10 @@
   flex-direction: column;
   background: var(--term-bg);
   color: var(--term-fg);
+}
+.deck-term-screen.is-collapsed {
+  visibility: hidden;
+  pointer-events: none;
 }
 .deck-term-bar {
   flex: none;
@@ -333,7 +345,14 @@
 .deck-term-font-btn:disabled { opacity: 0.4; cursor: default; }
 .deck-term-font-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .deck-term-font-size { font-variant-numeric: tabular-nums; }
-.deck-term-body { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.deck-term-body {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
 
 .deck-term-menu { display: flex; flex-direction: column; gap: var(--sp-2, 8px); padding: var(--sp-2, 8px); font-size: var(--fs-sm, 13px); }
 .deck-term-menu-new, .deck-term-menu-back { align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; }
