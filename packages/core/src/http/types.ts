@@ -416,6 +416,8 @@ export interface StatusResponse {
   search: {
     ready: boolean;
     documents: number;
+    /** 跨多轮的索引工作（含 Drive 游标过期后的重建）已处理的文件数与总数；没有时不出现。 */
+    progress?: { done: number; total: number };
   };
   refine: {
     pending: number;

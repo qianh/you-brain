@@ -252,7 +252,13 @@ export function StatusPage({ embedded = false }: { embedded?: boolean } = {}) {
               <StatBlock
                 value={String(status.search.documents)}
                 label={t("statusStatDocs")}
-                hint={status.search.ready ? t("statusIndexReady") : t("notReady")}
+                hint={
+                  status.search.progress
+                    ? t("statusIndexing", status.search.progress)
+                    : status.search.ready
+                      ? t("statusIndexReady")
+                      : t("notReady")
+                }
                 english={language === "en"}
                 onSelect={() => navigate("/search")}
                 title={t("statusStatDocsHint")}

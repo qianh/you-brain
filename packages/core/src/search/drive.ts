@@ -2,6 +2,8 @@ export interface SearchDriveEntry {
   id: string;
   path: string;
   mimeType: string;
+  /** Content md5 from Drive. After a 410, files whose md5 matches the last index are not downloaded again. Missing means always reindex. */
+  md5Checksum?: string;
 }
 
 export interface SearchDriveObject {

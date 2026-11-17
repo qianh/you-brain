@@ -20,6 +20,21 @@ export class MemoryDrive implements SearchDrive {
   #changeCounter = 0;
   readonly #changes: Array<{ sequence: number; id: string }> = [];
   #failChanges = false;
+  #expired = false;
+  /** Every id passed to `read`, so tests can tell which files were downloaded. */
+  readonly reads: string[] = [];
+
+  /** Like Drive's 410: the next `changes` with a cursor lists everything again with `reset`. */
+  expireCursor(): void {
+    this.#expired = true;
+  }
+
+  trash(id: string): void {
+    const object = this.#objects.get(id);
+    if (!object) return;
+    object.trashed = true;
+    this.#recordChange(id);
+  }
 
   failChanges(failed: boolean): void {
     this.#failChanges = failed;
@@ -31,7 +46,12 @@ export class MemoryDrive implements SearchDrive {
   }
 
   #entry(object: StoredObject): SearchDriveEntry {
-    return { id: object.id, path: object.path, mimeType: object.mimeType };
+    return {
+      id: object.id,
+      path: object.path,
+      mimeType: object.mimeType,
+      md5Checksum: createHash("md5").update(object.bytes).digest("hex"),
+    };
   }
 
   list(query: { prefix?: string } = {}): SearchDriveEntry[] {
@@ -103,7 +123,8 @@ export class MemoryDrive implements SearchDrive {
     cursor?: string;
   }): Promise<SearchDriveChanges> {
     if (this.#failChanges) throw new Error("offline");
-    if (query.cursor === undefined) {
+    if (query.cursor === undefined || this.#expired) {
+      this.#expired = false;
       return {
         entries: this.list({ prefix: query.prefix }),
         removedIds: [],
@@ -141,6 +162,7 @@ export class MemoryDrive implements SearchDrive {
   }
 
   async read(id: string): Promise<SearchDriveObject> {
+    this.reads.push(id);
     const object = this.#objects.get(id);
     if (!object || object.trashed) {
       throw new Error(`Drive object not found: ${id}`);

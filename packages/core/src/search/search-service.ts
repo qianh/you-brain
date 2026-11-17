@@ -40,6 +40,8 @@ interface IndexedChunk {
   chunkId: string;
   text: string;
   vector: number[] | null;
+  /** The encoded vector of an unchanged chunk from this file's previous index. Written when `vector` is null. */
+  stored?: Uint8Array;
 }
 
 interface ChunkRow {
@@ -120,6 +122,8 @@ export interface SearchOutput {
 export interface SearchStatus {
   ready: boolean;
   documents: number;
+  /** How far a multi-pass indexing job (such as the rebuild after a 410) has got. Absent when there is none. */
+  progress?: { done: number; total: number };
   cursor?: string;
   generatedAt?: string;
 }
@@ -142,6 +146,8 @@ const VECTOR_RETRY_EPOCH_KEY = "vector_retry_epoch";
 const VECTOR_RETRY_EPOCH = "2";
 const PENDING_KEY = "pending_sync";
 const PENDING_DONE_KEY = "pending_done";
+/** File count of the pending job, kept apart so `status()` need not parse the whole job. */
+const PENDING_TOTAL_KEY = "pending_total";
 const VECTOR_RETRY_KEY = "vector_retry_after";
 /** `backfill` fills vectors in the background. `eager` may rebuild when vectors are missing. */
 const VECTOR_MODE_KEY = "vector_mode";
@@ -479,14 +485,21 @@ export class SearchService {
     for (const entry of changes.entries) {
       if (!entries.includes(entry)) removedIds.add(entry.id);
     }
-    const work: PendingSync = {
+    let work: PendingSync = {
       fingerprint: this.#indexFingerprint(),
       reset: changes.reset,
       removed: [...removedIds],
       cursor: changes.cursor,
       entries,
     };
-    if (entries.length > SYNC_BATCH_ENTRIES) {
+    if (changes.reset && this.#reusable()) {
+      // Same model and chunking, just a listing from scratch (an expired Drive cursor, or eager
+      // mode refilling vector holes). Do not clear first, so search keeps working: drop files the
+      // listing no longer has and replace the rest, reusing vectors of unchanged chunks. After a
+      // 410 (there was a cursor) files whose md5 and path are unchanged are not even downloaded.
+      work = this.#reconcile(work, cursor !== undefined);
+    }
+    if (work.entries.length > SYNC_BATCH_ENTRIES) {
       // Only a pass that may stop early needs to survive a restart.
       this.#database
         .prepare(
@@ -495,8 +508,64 @@ export class SearchService {
         )
         .run(PENDING_KEY, JSON.stringify(work));
       this.#setManifest(PENDING_DONE_KEY, "0");
+      this.#setManifest(PENDING_TOTAL_KEY, String(work.entries.length));
     }
     return { ...work, offset: 0 };
+  }
+
+  /** Stored chunks and vectors are reusable only when the index matches the current model, dimensions, chunking and scope. */
+  #reusable(): boolean {
+    const metadata = metadataMap(this.#database);
+    return (
+      metadata.index_fingerprint === this.#indexFingerprint() &&
+      metadata.dimensions === String(this.#dimensions)
+    );
+  }
+
+  /**
+   * Turns a listing from scratch into an incremental pass: files indexed but no longer listed are
+   * removed. With `skipUnchanged`, files whose md5 and path match the last index are left alone.
+   */
+  #reconcile(work: PendingSync, skipUnchanged: boolean): PendingSync {
+    const listed = new Set(work.entries.map((entry) => entry.id));
+    const indexed = this.#database
+      .prepare(
+        "SELECT drive_file_id AS id FROM search_files UNION SELECT DISTINCT drive_file_id AS id FROM search_chunks",
+      )
+      .all() as Array<{ id: string }>;
+    const removed = new Set(work.removed);
+    for (const { id } of indexed) if (!listed.has(id)) removed.add(id);
+    let entries = work.entries;
+    if (skipUnchanged) {
+      const known = new Map(
+        (
+          this.#database.prepare("SELECT drive_file_id, drive_path, md5 FROM search_files").all() as Array<{
+            drive_file_id: string;
+            drive_path: string;
+            md5: string;
+          }>
+        ).map((row) => [row.drive_file_id, row]),
+      );
+      entries = entries.filter((entry) => {
+        const previous = known.get(entry.id);
+        const md5 = entry.md5Checksum ?? "";
+        return !(previous && md5 !== "" && previous.md5 === md5 && previous.drive_path === entry.path);
+      });
+    }
+    return { ...work, reset: false, removed: [...removed], entries };
+  }
+
+  /** This file's vectors from its previous index, keyed by chunk text. */
+  #storedVectors(driveFileId: string): Map<string, Uint8Array> {
+    const rows = this.#database
+      .prepare(
+        `SELECT c.text AS text, v.vector AS vector
+         FROM search_chunks c
+         JOIN search_vectors v ON v.drive_file_id = c.drive_file_id AND v.chunk_id = c.chunk_id
+         WHERE c.drive_file_id = ? AND v.dimensions = ?`,
+      )
+      .all(driveFileId, this.#dimensions) as Array<{ text: string; vector: Uint8Array }>;
+    return new Map(rows.map((row) => [row.text, row.vector]));
   }
 
   #readPending(): (PendingSync & { offset: number }) | null {
@@ -526,7 +595,9 @@ export class SearchService {
   }
 
   #clearPending(): void {
-    this.#database.prepare("DELETE FROM manifest WHERE key IN (?, ?)").run(PENDING_KEY, PENDING_DONE_KEY);
+    this.#database
+      .prepare("DELETE FROM manifest WHERE key IN (?, ?, ?)")
+      .run(PENDING_KEY, PENDING_DONE_KEY, PENDING_TOTAL_KEY);
   }
 
   async #indexEntries(
@@ -552,30 +623,43 @@ export class SearchService {
     );
     const chunks: IndexedChunk[] = [];
     let available = modelAvailable;
+    const reusable = this.#semantic && this.#reusable();
     for (const { entry, markdown } of loaded) {
       const metadata = parseFrontmatter(markdown);
       const textChunks = chunkText(this.#redact(stripImages(markdown)), {
         maxTokens: this.#chunkTokens,
         overlapTokens: this.#chunkOverlap,
       });
-      let vectors: number[][] = [];
-      if (embed && this.#semantic && available && textChunks.length > 0) {
+      // Session files mostly grow at the end: earlier chunks keep their text and their vectors,
+      // only new or changed chunks are embedded.
+      const stored = reusable ? this.#storedVectors(entry.id) : new Map<string, Uint8Array>();
+      const pending = textChunks.filter((chunk) => !stored.has(chunk.text));
+      const vectors = new Map<string, number[]>();
+      if (embed && this.#semantic && available && pending.length > 0) {
         try {
-          vectors = await this.#embedBatched(textChunks.map((chunk) => chunk.text));
+          const computed = await this.#embedBatched(pending.map((chunk) => chunk.text));
+          pending.forEach((chunk, index) => {
+            const vector = computed[index];
+            if (vector) vectors.set(chunk.text, vector);
+          });
         } catch {
           available = false;
           addWarning(warnings, keywordFallback);
         }
       }
       chunks.push(
-        ...textChunks.map((chunk, index) => ({
-          driveFileId: entry.id,
-          drivePath: entry.path,
-          ...metadata,
-          chunkId: chunk.id,
-          text: chunk.text,
-          vector: vectors[index] ?? null,
-        })),
+        ...textChunks.map((chunk) => {
+          const previous = stored.get(chunk.text);
+          return {
+            driveFileId: entry.id,
+            drivePath: entry.path,
+            ...metadata,
+            chunkId: chunk.id,
+            text: chunk.text,
+            vector: vectors.get(chunk.text) ?? null,
+            ...(previous ? { stored: previous } : {}),
+          };
+        }),
       );
     }
     return { chunks, warnings, modelAvailable: available };
@@ -597,20 +681,28 @@ export class SearchService {
       const deleteFts = database.prepare(
         "DELETE FROM search_chunks_fts WHERE drive_file_id = ?",
       );
+      const deleteFile = database.prepare("DELETE FROM search_files WHERE drive_file_id = ?");
       const remove = (id: string): void => {
         deleteVectors.run(id);
         deleteChunks.run(id);
         deleteFts.run(id);
+        deleteFile.run(id);
       };
       if (input.applyListing) {
         if (input.work.reset) {
           database.exec("DELETE FROM search_vectors");
           database.exec("DELETE FROM search_chunks");
           database.exec("DELETE FROM search_chunks_fts");
+          database.exec("DELETE FROM search_files");
         }
         for (const id of input.work.removed) remove(id);
       }
       for (const entry of input.batch) remove(entry.id);
+      const recordFile = database.prepare(`
+        INSERT INTO search_files(drive_file_id, drive_path, md5) VALUES (?, ?, ?)
+        ON CONFLICT(drive_file_id) DO UPDATE SET drive_path = excluded.drive_path, md5 = excluded.md5
+      `);
+      for (const entry of input.batch) recordFile.run(entry.id, entry.path, entry.md5Checksum ?? "");
       const insertChunk = database.prepare(`
         INSERT INTO search_chunks(
           drive_file_id, drive_path, source, conversation_id,
@@ -644,6 +736,8 @@ export class SearchService {
             chunk.vector.length,
             encodeVector(chunk.vector),
           );
+        } else if (chunk.stored) {
+          insertVector.run(chunk.driveFileId, chunk.chunkId, this.#dimensions, chunk.stored);
         }
         insertFts.run(indexBody(chunk.text), chunk.driveFileId, chunk.chunkId);
       }
@@ -697,9 +791,15 @@ export class SearchService {
     const cursor = this.#database
       .prepare("SELECT value FROM cursors WHERE key = ?")
       .get(SEARCH_DRIVE_CURSOR) as { value: string } | null;
+    const total = Number(metadata[PENDING_TOTAL_KEY] ?? "0");
+    const progress =
+      PENDING_KEY in metadata && total > 0
+        ? { done: Math.min(total, Number(metadata[PENDING_DONE_KEY] ?? "0") || 0), total }
+        : null;
     return {
       ready: Boolean(cursor?.value) && !(PENDING_KEY in metadata),
       documents: count.count,
+      ...(progress ? { progress } : {}),
       ...(cursor?.value ? { cursor: cursor.value } : {}),
       ...(metadata.generated_at ? { generatedAt: metadata.generated_at } : {}),
     };

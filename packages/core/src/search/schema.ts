@@ -26,6 +26,11 @@ const schema = `
     FOREIGN KEY (drive_file_id, chunk_id)
       REFERENCES search_chunks(drive_file_id, chunk_id) ON DELETE CASCADE
   );
+  CREATE TABLE IF NOT EXISTS search_files (
+    drive_file_id TEXT PRIMARY KEY,
+    drive_path TEXT NOT NULL,
+    md5 TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS manifest (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL

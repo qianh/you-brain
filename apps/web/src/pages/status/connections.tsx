@@ -26,7 +26,9 @@ export function Connections({
 }) {
   const view = consolidationView(status.consolidation);
   const drive = driveLine(status, t);
-  const search = status.search.ready
+  const search = status.search.progress
+    ? `${t("statusIndexing", status.search.progress)} · ${t("documents", { count: status.search.documents })}`
+    : status.search.ready
     ? `${t("ready")} · ${t("documents", { count: status.search.documents })}`
     : status.search.documents > 0
       ? `${t("notReady")} · ${t("documents", { count: status.search.documents })}`

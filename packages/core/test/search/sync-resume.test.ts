@@ -173,7 +173,7 @@ describe("batched search sync", () => {
     expect(await service.sync({ budgetMs: 0 })).toMatchObject({ done: false, documents: 10 });
     expect(driveCursor(database)).toBeNull();
     expect(manifestValue(database, "pending_done")).toBe("10");
-    expect(service.status()).toEqual({ ready: false, documents: 10 });
+    expect(service.status()).toEqual({ ready: false, documents: 10, progress: { done: 10, total: 25 } });
 
     expect(await service.sync({ budgetMs: 0 })).toMatchObject({ done: false, documents: 20 });
     expect(driveCursor(database)).toBeNull();

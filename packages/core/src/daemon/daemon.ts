@@ -4023,10 +4023,14 @@ export class YouBrainDaemon {
         }
       }
     }
-    let search = { ready: false, documents: 0 };
+    let search: StatusResponse["search"] = { ready: false, documents: 0 };
     if (this.#search) {
       const status = this.#search.status();
-      search = { ready: status.ready, documents: status.documents };
+      search = {
+        ready: status.ready,
+        documents: status.documents,
+        ...(status.progress ? { progress: status.progress } : {}),
+      };
     }
     const consolidation = await this.#consolidation();
     if (consolidation.status === "stale") {
