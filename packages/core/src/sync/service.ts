@@ -55,6 +55,8 @@ export const HEARTBEAT_INTERVAL_MS = DEFAULT_HEARTBEAT_MINUTES * 60 * 1000;
 
 const JSONL_MIME = "application/jsonl";
 const JSON_MIME = "application/json";
+/** How long flush trusts roles it already read (see #currentRoles). */
+const ROLES_CACHE_MS = 10 * 60_000;
 
 const YOU_BRAIN_PREFIX = `${DRIVE_PATHS.youBrain}/`;
 const INBOX_PREFIX = `${DRIVE_PATHS.inbox}/`;
@@ -332,8 +334,22 @@ export class ProtocolSync {
 
   async readRoles(): Promise<Roles> {
     const current = await readJson(this.#drive, DRIVE_PATHS.roles);
-    if (current === null) return createDefaultRoles();
-    return parseRoles(current);
+    const roles = current === null ? createDefaultRoles() : parseRoles(current);
+    this.#roles = { value: roles, at: this.#now().getTime() };
+    return roles;
+  }
+
+  /**
+   * Roles as last read. Flush only needs the timezone, and reading roles.json cost three
+   * Drive requests on every flush. Pull re-reads it whenever the change feed shows it
+   * changed and updateRoles stores what it wrote; the age limit covers anything missed.
+   */
+  #roles: { value: Roles; at: number } | null = null;
+
+  async #currentRoles(): Promise<Roles> {
+    const cached = this.#roles;
+    if (cached !== null && this.#now().getTime() - cached.at < ROLES_CACHE_MS) return cached.value;
+    return this.readRoles();
   }
 
   async updateShared(patch: JsonPatch<SharedConfig>): Promise<SharedConfig> {
@@ -354,6 +370,7 @@ export class ProtocolSync {
       const base = current === null ? createDefaultRoles() : parseRoles(current);
       return parseRoles(mergeDefaults(base, patch));
     });
+    this.#roles = { value: result.value, at: this.#now().getTime() };
     await this.#emitConfig({ roles: result.value });
     return result.value;
   }
@@ -372,7 +389,7 @@ export class ProtocolSync {
   }
 
   async #flushBody(): Promise<FlushResult> {
-    const roles = await this.readRoles();
+    const roles = await this.#currentRoles();
     const pending = this.#pending();
     if (pending.length === 0) return { files: [], eventCount: 0 };
     const healed = this.#apply(pending);
@@ -421,7 +438,7 @@ export class ProtocolSync {
       );
     const merged = unionBySeq([remoteEvents, local, included]);
     const body = serializeEventsJsonl(merged);
-    const entry = await upsertByPath(this.#drive, path, body, { mimeType: JSONL_MIME });
+    const entry = await upsertByPath(this.#drive, path, body, { mimeType: JSONL_MIME, known });
     this.#rememberSelfUpload(entry.id, body);
     return { entry, included, eventCount: merged.length };
   }

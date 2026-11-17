@@ -44,13 +44,19 @@ export async function upsertByPath(
     mimeType?: string;
     appProperties?: Record<string, string>;
     maxAttempts?: number;
+    /**
+     * What the caller's own `findByPath` just returned, used for the first attempt instead
+     * of looking the path up again. A conflict retry still looks it up afresh.
+     */
+    known?: DriveEntry | null;
   },
 ): Promise<DriveEntry> {
   const bytes = asBuffer(content);
   const mimeType = options?.mimeType ?? "application/octet-stream";
   const limit = attempts(options?.maxAttempts);
   for (let attempt = 0; attempt < limit; attempt += 1) {
-    const existing = await drive.findByPath(path);
+    const existing =
+      attempt === 0 && options?.known !== undefined ? options.known : await drive.findByPath(path);
     try {
       if (!existing) {
         const created = await drive.create({

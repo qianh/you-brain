@@ -406,6 +406,35 @@ describe("protocol sync", () => {
     }
   });
 
+  it("reads roles once for repeated flushes and follows a timezone another device sets", async () => {
+    const drive = new MemoryDrive();
+    const a = openStore();
+    const b = openStore();
+    try {
+      const mine = new ProtocolSync({ drive, store: a.store, device: identity(DEVICE_A, "MacBook Air") });
+      const other = new ProtocolSync({ drive, store: b.store, device: identity(DEVICE_B, "Mac mini") });
+      await mine.pull();
+      const reads = spyOn(drive, "readPath");
+      await mine.append("topic.created", { topicId: "t-1", name: "One", aliases: [] }, { ts: "2026-07-01T10:00:00.000Z" });
+      await mine.flush();
+      await mine.append("topic.created", { topicId: "t-2", name: "Two", aliases: [] }, { ts: "2026-07-01T11:00:00.000Z" });
+      await mine.flush();
+      expect(reads.mock.calls.filter(([path]) => path === "you-brain/config/roles.json")).toHaveLength(0);
+
+      // The other device moves the household to New York; this device sees it on pull.
+      await other.updateRoles({ timezone: "America/New_York" });
+      await mine.pull();
+      await mine.append("topic.created", { topicId: "t-3", name: "Night", aliases: [] }, { ts: "2026-07-02T03:30:00.000Z" });
+      await mine.flush();
+      expect(await drive.findByPath(eventLogPath(DEVICE_A, "2026-07-01"))).not.toBeNull();
+      const day2 = await drive.readPath(eventLogPath(DEVICE_A, "2026-07-02"));
+      expect(day2 === null || !day2.bytes.toString("utf8").includes("t-3")).toBe(true);
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+
   it("replays every protocol event on the first pull", async () => {
     const drive = new MemoryDrive();
     const seeded = [

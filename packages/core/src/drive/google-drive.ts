@@ -302,15 +302,16 @@ export class GoogleDrive implements DrivePort {
     return info;
   }
 
-  async #assertDescendant(id: string): Promise<void> {
+  async #assertDescendant(id: string, known?: drive_v3.Schema$File): Promise<void> {
     let current = id;
     const visited = new Set<string>();
     while (current !== this.#rootFolderId) {
       if (visited.has(current)) throw new Error("Drive parent cycle detected");
       const first = visited.size === 0;
       visited.add(current);
-      // The object itself is read fresh; only the folders above it come from the cache.
-      const metadata = first ? await this.#metadata(current) : await this.#ancestor(current);
+      // The object itself is read fresh (or passed in, already fresh); only the folders
+      // above it come from the cache.
+      const metadata = first ? (known ?? (await this.#metadata(current))) : await this.#ancestor(current);
       const parent = metadata.parents?.[0];
       if (!parent) {
         throw new YouBrainError(
@@ -862,9 +863,9 @@ export class GoogleDrive implements DrivePort {
     content: Buffer | string,
     options?: DriveUpdateOptions,
   ): Promise<DriveEntry> {
-    await this.#assertDescendant(fileId);
     const bytes = asBuffer(content);
     const current = await this.#metadataResponse(fileId);
+    await this.#assertDescendant(fileId, current.data);
     const currentEtag = this.#etagOf(current.data, current.headers);
     if (options?.ifMatch !== undefined && options.ifMatch !== currentEtag) {
       throw new ConflictError();
@@ -883,7 +884,8 @@ export class GoogleDrive implements DrivePort {
       ...(options?.ifMatch !== undefined ? { ifMatch: options.ifMatch } : {}),
     });
     if (uploaded) {
-      const path = await this.#pathFor(fileId);
+      // The upload answers with name and parents, enough for the path without a request.
+      const path = await this.#pathFor(fileId, uploaded.file);
       return this.#entry(uploaded.file, path, uploaded.etag);
     }
     const request = {
@@ -900,7 +902,7 @@ export class GoogleDrive implements DrivePort {
               headers: { "If-Match": options.ifMatch },
             })
           : await this.#client.files.update(request);
-      const path = await this.#pathFor(fileId);
+      const path = await this.#pathFor(fileId, response.data);
       return this.#entry(
         response.data,
         path,
@@ -927,14 +929,16 @@ export class GoogleDrive implements DrivePort {
   }
 
   async metadata(id: string): Promise<DriveEntry> {
-    await this.#assertDescendant(id);
+    // One metadata request serves the root check, the etag and the path. They used to be
+    // three separate requests for the same fields.
     const metadata = await this.#metadataResponse(id);
-    return this.#entry(metadata.data, await this.#pathFor(id), headerValue(metadata.headers, "etag"));
+    await this.#assertDescendant(id, metadata.data);
+    return this.#entry(metadata.data, await this.#pathFor(id, metadata.data), headerValue(metadata.headers, "etag"));
   }
 
   async read(id: string): Promise<DriveObject> {
-    await this.#assertDescendant(id);
     const metadata = await this.#metadataResponse(id);
+    await this.#assertDescendant(id, metadata.data);
     const content =
       metadata.data.mimeType === googleDocumentMimeType
         ? await this.#client.files.export(
@@ -945,7 +949,7 @@ export class GoogleDrive implements DrivePort {
             { fileId: id, alt: "media", supportsAllDrives: true },
             { responseType: "arraybuffer" },
           );
-    const path = await this.#pathFor(id);
+    const path = await this.#pathFor(id, metadata.data);
     return {
       ...this.#entry(metadata.data, path, headerValue(metadata.headers, "etag")),
       bytes: Buffer.from(content.data as ArrayBuffer),

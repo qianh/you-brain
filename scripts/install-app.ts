@@ -69,7 +69,9 @@ await cp(join(built, "vendor"), join(staging, "vendor"), { recursive: true, dere
 await cp(join(staging, "web"), join(resources, "web"), { recursive: true, dereference: true });
 await cp(join(staging, "vendor"), join(resources, "vendor"), { recursive: true, dereference: true });
 // dsh 不经 staging：体积大，且 node_modules/.bin 里的链接要原样保留。
-await cp(join(built, "dsh"), join(resources, "dsh"), { recursive: true, verbatimSymlinks: true });
+// 用 ditto 而不是 fs.cp：2026-11-17 一次安装里 Bun 的 cp 在这一步无声挂起（进程空等、没有子进程），
+// 只拷了 8 MB，留下一个不完整的 App。ditto 默认保留符号链接。
+await run(["ditto", join(built, "dsh"), join(resources, "dsh")]);
 await rm(staging, { recursive: true, force: true });
 
 await cp(join(built, "you-brain"), join(binaries, "you-brain"));

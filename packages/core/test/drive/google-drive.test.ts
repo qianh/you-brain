@@ -494,6 +494,38 @@ describe("Google Drive boundary", () => {
     );
   });
 
+  it("asks for a file's metadata once per read, metadata or update", async () => {
+    const folder = { id: "folder-1", name: "events", mimeType: "application/vnd.google-apps.folder", parents: ["my-drive-root"] };
+    const file = {
+      id: "file-1", name: "day.jsonl", mimeType: "application/jsonl", parents: ["folder-1"],
+      size: "3", modifiedTime: "2026-07-25T00:00:00.000Z", appProperties: {}, version: "1", trashed: false,
+      md5Checksum: "x",
+    };
+    const metadataGets: string[] = [];
+    const client = {
+      files: {
+        get: async (request: { fileId?: string; alt?: string }) => {
+          if (request.fileId === "root") return { data: { id: "my-drive-root" } };
+          if (request.alt === "media") return { data: Buffer.from("abc") };
+          metadataGets.push(request.fileId ?? "");
+          return { data: request.fileId === "folder-1" ? folder : file, headers: { etag: "etag-1" } };
+        },
+        update: async () => ({ data: file, headers: { etag: "etag-2" } }),
+      },
+    };
+    const drive = await GoogleDrive.openMyDrive(client as never);
+    const ofFile = () => metadataGets.filter((id) => id === "file-1").length;
+
+    expect((await drive.metadata("file-1")).path).toBe("events/day.jsonl");
+    expect(ofFile()).toBe(1);
+    metadataGets.length = 0;
+    expect((await drive.read("file-1")).bytes.toString("utf8")).toBe("abc");
+    expect(ofFile()).toBe(1);
+    metadataGets.length = 0;
+    expect((await drive.update("file-1", "abcd", { ifMatch: "etag-1" })).path).toBe("events/day.jsonl");
+    expect(ofFile()).toBe(1);
+  });
+
   it("exports a Google Docs profile as Markdown", async () => {
     const profile = {
       id: "profile-doc",
