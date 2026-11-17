@@ -33,6 +33,8 @@ const DROP_PACKAGES: RegExp[] = [
   /^@deepseek-ai\/libreoffice-kit-/u,
   /^sherpa-onnx/u,
   /^@deepseek-ai\/dsh-experimental-inspector$/u,
+  // sharp 的 wasm 兜底；macOS / Linux 都带原生 sharp，用不到。
+  /^@img\/sharp-wasm32$/u,
 ];
 const DROP_FILE = /(?:\.d\.(?:ts|mts|cts)|\.map|\.md|\.markdown)$/iu;
 const KEEP_FILE = /^(?:license|licence|notice)/iu;
@@ -83,6 +85,115 @@ async function prune(modules: string): Promise<void> {
     }
   };
   await sweep(modules);
+  await hoistScopedDuplicates(modules);
+}
+
+type Manifest = {
+  name?: string;
+  version?: string;
+  dependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
+};
+
+async function readManifest(dir: string): Promise<Manifest | null> {
+  try {
+    return JSON.parse(await readFile(join(dir, "package.json"), "utf8")) as Manifest;
+  } catch {
+    return null;
+  }
+}
+
+async function listPackages(modules: string): Promise<string[]> {
+  const names: string[] = [];
+  let entries;
+  try {
+    entries = await readdir(modules, { withFileTypes: true });
+  } catch {
+    return names;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith(".") || entry.name === "node_modules") continue;
+    if (!entry.name.startsWith("@")) {
+      names.push(entry.name);
+      continue;
+    }
+    for (const inner of await readdir(join(modules, entry.name), { withFileTypes: true })) {
+      if (inner.isDirectory() && inner.name !== "node_modules") names.push(`${entry.name}/${inner.name}`);
+    }
+  }
+  return names;
+}
+
+/**
+ * 同一 scope 下多个包各自嵌套了同一版本的依赖时（DSH 的 51 个 @deepseek-ai 包各带一份 zod 4.4.3，
+ * 共 250 MB），只留一份放到 `<scope>/node_modules/<dep>`，删掉其余副本。Node 的 CJS 和 ESM 解析
+ * 都会先查 `@scope/node_modules` 再查顶层，所以这些包仍解析到同一版本。
+ *
+ * 不用符号链接：Tauri 打包资源时会把链接展开成实体文件，省不下体积。
+ *
+ * 提升后，同 scope 里原本解析到顶层的包也会改用这份。只有它们声明的版本范围都接受这个版本、
+ * 且被提升的包没有自己的依赖（换了位置后解析不到）时才提升，否则保留原样。
+ */
+async function hoistScopedDuplicates(modules: string): Promise<void> {
+  for (const scope of (await readdir(modules)).filter((name) => name.startsWith("@"))) {
+    const scopeDir = join(modules, scope);
+    const owners = (await readdir(scopeDir, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && entry.name !== "node_modules")
+      .map((entry) => entry.name);
+    // 依赖名 → 版本 → 嵌套副本所在目录
+    const copies = new Map<string, Map<string, string[]>>();
+    for (const owner of owners) {
+      const nested = join(scopeDir, owner, "node_modules");
+      for (const dep of await listPackages(nested)) {
+        const manifest = await readManifest(join(nested, dep));
+        if (manifest?.version === undefined) continue;
+        const byVersion = copies.get(dep) ?? new Map<string, string[]>();
+        byVersion.set(manifest.version, [...(byVersion.get(manifest.version) ?? []), join(nested, dep)]);
+        copies.set(dep, byVersion);
+      }
+    }
+    for (const [dep, byVersion] of copies) {
+      const [version, dirs] = [...byVersion].sort((a, b) => b[1].length - a[1].length)[0]!;
+      if (dirs.length < 2) continue;
+      const label = `${scope}/*/node_modules/${dep}@${version}`;
+      const target = join(scopeDir, "node_modules", dep);
+      if (await exists(target)) {
+        console.log(`跳过提升 ${label}：${target} 已存在`);
+        continue;
+      }
+      const hoisted = await readManifest(dirs[0]!);
+      if (Object.keys({ ...hoisted?.dependencies, ...hoisted?.peerDependencies }).length > 0) {
+        console.log(`跳过提升 ${label}：它自己有依赖，换位置后可能解析不到`);
+        continue;
+      }
+      const conflicts: string[] = [];
+      for (const owner of owners) {
+        if (await exists(join(scopeDir, owner, "node_modules", dep))) continue;
+        const manifest = await readManifest(join(scopeDir, owner));
+        const range =
+          manifest?.dependencies?.[dep] ?? manifest?.peerDependencies?.[dep] ?? manifest?.optionalDependencies?.[dep];
+        if (range !== undefined && !Bun.semver.satisfies(version, range)) conflicts.push(`${scope}/${owner}（${range}）`);
+      }
+      if (conflicts.length > 0) {
+        console.log(`跳过提升 ${label}：${conflicts.join("、")} 不接受 ${version}`);
+        continue;
+      }
+      await mkdir(dirname(target), { recursive: true });
+      await rename(dirs[0]!, target);
+      for (const dir of dirs.slice(1)) await rm(dir, { recursive: true, force: true });
+      console.log(`已提升 ${label}：${dirs.length} 份合并为 1 份`);
+    }
+  }
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const node = await locateNode({
