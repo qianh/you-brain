@@ -67,7 +67,7 @@ function writeBootSnapshot(snapshot: DaemonSnapshot): void {
   }
 }
 
-interface DaemonValue extends DaemonSnapshot {
+export interface DaemonValue extends DaemonSnapshot {
   client: BrowserDaemon;
   language: Language;
   setLanguage: (language: Language) => void;

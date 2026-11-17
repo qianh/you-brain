@@ -1,4 +1,4 @@
-import { forwardRef, type ReactNode } from "react";
+import { forwardRef, memo, type ReactNode } from "react";
 import type { TopicListItem } from "@you-brain/core/http/types.js";
 import type { TopicStatus } from "@you-brain/protocol";
 
@@ -9,10 +9,12 @@ import { SearchField } from "../../components/input.js";
 import { Row } from "../../components/row.js";
 import { SkeletonRow } from "../../components/skeleton.js";
 import { useDaemon } from "../../daemon-context.js";
+import type { DaemonValue } from "../../daemon-context.js";
+import type { Language } from "../../lib/format.js";
 import { topicHref } from "../../lib/route.js";
 import { STATUS_FILTERS, statusLabelKey, type StatusFilter } from "./logic.js";
 import { listSessionCount } from "./session-count.js";
-import { RelativeTime } from "./relative-time.js";
+import { RelativeTimeText } from "./relative-time.js";
 import { StatusDot } from "./status-dot.js";
 
 export const TopicList = forwardRef<HTMLDivElement, {
@@ -44,7 +46,7 @@ export const TopicList = forwardRef<HTMLDivElement, {
   onOpen,
   onScroll,
 }, ref) {
-  const { t } = useDaemon();
+  const { t, language, timeZone } = useDaemon();
   const filters: Array<{ id: StatusFilter; label: string }> = STATUS_FILTERS.map((id) => ({
     id,
     label: id === "all" ? t("filterAll") : t(statusLabelKey(id as TopicStatus)),
@@ -84,42 +86,76 @@ export const TopicList = forwardRef<HTMLDivElement, {
             onFilter={onFilter}
           />
         ) : (
-          topics.map((topic) => {
-            const selected = topic.topicId === highlighted;
-            const sessions = listSessionCount(topic, highlighted, sessionCount);
-            return (
-              <div key={topic.topicId} className={selected ? "topics-item is-selected" : "topics-item"} data-topic-id={topic.topicId} role="listitem">
-                <Row
-                  href={topicHref(zone, topic.topicId)}
-                  current={selected}
-                  onClick={() => onOpen(topic.topicId)}
-                  icon={<StatusDot status={topic.status} />}
-                  title={topic.name}
-                  titleText={topic.name}
-                  subtitle={
-                    <span className="topics-subline">
-                      <span className="topics-sr">{t(statusLabelKey(topic.status))}</span>
-                      {sessions !== null ? <span>{t("topicSessionCount", { count: sessions })}</span> : null}
-                      {sessions !== null ? <span aria-hidden="true"> · </span> : null}
-                      <RelativeTime iso={topic.lastActive} />
-                    </span>
-                  }
-                  trailing={
-                    <>
-                      {topic.status !== "active" ? (
-                        <Chip tone={topic.status === "follow_up" ? "warn" : topic.status === "done" ? "accent" : "neutral"}>
-                          {t(statusLabelKey(topic.status))}
-                        </Chip>
-                      ) : null}
-                      {topic.openTodoCount > 0 ? <Chip>{topic.openTodoCount}</Chip> : null}
-                    </>
-                  }
-                />
-              </div>
-            );
-          })
+          topics.map((topic) => (
+            <TopicRow
+              key={topic.topicId}
+              topic={topic}
+              zone={zone}
+              selected={topic.topicId === highlighted}
+              sessions={listSessionCount(topic, highlighted, sessionCount)}
+              onOpen={onOpen}
+              t={t}
+              language={language}
+              timeZone={timeZone}
+            />
+          ))
         )}
       </div>
+    </div>
+  );
+});
+
+/**
+ * 一行话题。列表有上千行：memo 后，移动光标只重渲染选中变化的两行；
+ * 文案、语言、时区由列表传入，行本身不订阅 daemon 上下文。
+ */
+const TopicRow = memo(function TopicRow({
+  topic,
+  zone,
+  selected,
+  sessions,
+  onOpen,
+  t,
+  language,
+  timeZone,
+}: {
+  topic: TopicListItem;
+  zone: "active" | "history";
+  selected: boolean;
+  sessions: number | null;
+  onOpen: (id: string) => void;
+  t: DaemonValue["t"];
+  language: Language;
+  timeZone: string;
+}) {
+  return (
+    <div className={selected ? "topics-item is-selected" : "topics-item"} data-topic-id={topic.topicId} role="listitem">
+      <Row
+        href={topicHref(zone, topic.topicId)}
+        current={selected}
+        onClick={() => onOpen(topic.topicId)}
+        icon={<StatusDot status={topic.status} />}
+        title={topic.name}
+        titleText={topic.name}
+        subtitle={
+          <span className="topics-subline">
+            <span className="topics-sr">{t(statusLabelKey(topic.status))}</span>
+            {sessions !== null ? <span>{t("topicSessionCount", { count: sessions })}</span> : null}
+            {sessions !== null ? <span aria-hidden="true"> · </span> : null}
+            <RelativeTimeText iso={topic.lastActive} language={language} timeZone={timeZone} />
+          </span>
+        }
+        trailing={
+          <>
+            {topic.status !== "active" ? (
+              <Chip tone={topic.status === "follow_up" ? "warn" : topic.status === "done" ? "accent" : "neutral"}>
+                {t(statusLabelKey(topic.status))}
+              </Chip>
+            ) : null}
+            {topic.openTodoCount > 0 ? <Chip>{topic.openTodoCount}</Chip> : null}
+          </>
+        }
+      />
     </div>
   );
 });

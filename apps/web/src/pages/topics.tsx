@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { TopicDetail } from "@you-brain/core/http/types.js";
 
 import { BrowserDaemonError } from "../api/client.js";
@@ -98,14 +98,15 @@ export function TopicsPage({ zone }: { zone: "active" | "history" }) {
   const keyboardRef = useRef({ ids: visibleIds, highlighted, narrow, detailOpen, zone });
   keyboardRef.current = { ids: visibleIds, highlighted, narrow, detailOpen, zone };
 
-  const openTopic = (id: string): void => {
+  // 只读 ref，引用保持稳定，列表行的 memo 才不会每次都失效。
+  const openTopic = useCallback((id: string): void => {
     if (narrowRef.current) {
       if (listRef.current) savedScroll.current = listRef.current.scrollTop;
       navigate(topicHref(zoneRef.current, id));
       return;
     }
     navigate(topicHref(zoneRef.current, id), "replace");
-  };
+  }, [navigate]);
   const openRef = useRef(openTopic);
   openRef.current = openTopic;
 

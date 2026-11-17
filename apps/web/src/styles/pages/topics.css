@@ -65,6 +65,12 @@
 }
 
 .topics-item + .topics-item { border-top: 1px solid var(--border); }
+/* 上千行时只排版、绘制可见的部分。auto 记住渲染过的真实高度，滚动条不会跳；
+   焦点框和选中标记都画在行内，不会被裁掉。 */
+.topics-item {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 60px;
+}
 .topics-item .row-chevron { display: none; }
 
 .topics-item.is-selected .row,
