@@ -1,4 +1,4 @@
-import type { QuotaAccount } from "@you-brain/core/http/types.js";
+import type { QuotaAccount, QuotaTokenUsage, QuotaView } from "@you-brain/core/http/types.js";
 
 import type { Language } from "../../lib/format.js";
 
@@ -35,6 +35,15 @@ export interface QuotaCardView {
   /** magpie could not read this one last time; the numbers are from `readAt`. */
   stale: boolean;
   readAt: string;
+  /** Token consumption over 今天 / 近 3 天 / 近 7 天, for agents riding a gateway rather than a subscription. */
+  tokens?: QuotaTokenUsage;
+}
+
+/** Compact token count: "339.9M", "17.5K", "842". */
+export function tokenCount(total: number): string {
+  if (total >= 1_000_000) return `${(total / 1_000_000).toFixed(1)}M`;
+  if (total >= 1_000) return `${Math.round(total / 1_000)}K`;
+  return `${total}`;
 }
 
 /** Whole minutes since `readAt`, at least 1. */
@@ -83,35 +92,55 @@ export function resetIn(resetsAt: string | null, nowMs: number, language: Langua
 /**
  * Which subscriptions the panel shows, in a fixed order: known agents whose source
  * captured a session in the last 7 days, using the account magpie marks active.
- * Without capture data (an older daemon) nothing is shown.
+ * An agent with no subscription but mapped token usage (Codex rides the dzg gateway)
+ * still gets a card, showing what its traffic cost in tokens. Without capture data
+ * nothing is shown.
  */
 export function quotaCards(
-  accounts: readonly QuotaAccount[],
+  quota: Pick<QuotaView, "accounts" | "tokens"> | null,
   captures: ReadonlyArray<{ source: string; lastCaptureAt: string | null }> | undefined,
   nowMs: number,
   language: Language,
 ): QuotaCardView[] {
+  const accounts = quota?.accounts ?? [];
+  const tokens = quota?.tokens ?? {};
   const cards: QuotaCardView[] = [];
   for (const { agent, source, label } of QUOTA_AGENTS) {
     const capture = captures?.find((item) => item.source === source);
     const last = capture?.lastCaptureAt ? Date.parse(capture.lastCaptureAt) : Number.NaN;
     if (Number.isNaN(last) || nowMs - last > QUOTA_RECENT_MS) continue;
     const account = accounts.find((item) => item.agent === agent && item.active && item.windows.length > 0);
-    if (!account) continue;
-    cards.push({
-      agent,
-      label,
-      plan: account.plan,
-      stale: account.stale,
-      readAt: account.readAt,
-      windows: account.windows.map((window) => ({
-        name: window.name,
-        label: windowLabel(window.name, language),
-        used: window.used,
-        tone: quotaTone(window.used),
-        resetsAt: window.resetsAt,
-      })),
-    });
+    const agentTokens = tokens[agent];
+    if (account === undefined && agentTokens === undefined) continue;
+    const windows = (account?.windows ?? []).map((window) => ({
+      name: window.name,
+      label: windowLabel(window.name, language),
+      used: window.used,
+      tone: quotaTone(window.used),
+      resetsAt: window.resetsAt,
+    }));
+    if (agentTokens !== undefined && account === undefined) {
+      // A gateway agent with no subscription: the card shows what its traffic cost in tokens.
+      cards.push({
+        agent,
+        label,
+        plan: null,
+        stale: false,
+        readAt: new Date(nowMs).toISOString(),
+        windows,
+        tokens: agentTokens,
+      });
+    } else if (account !== undefined) {
+      cards.push({
+        agent,
+        label,
+        plan: account.plan,
+        stale: account.stale,
+        readAt: account.readAt,
+        windows,
+        ...(agentTokens !== undefined ? { tokens: agentTokens } : {}),
+      });
+    }
   }
   return cards;
 }

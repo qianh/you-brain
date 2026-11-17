@@ -95,7 +95,7 @@ import {
   type UserEvent,
 } from "./types.js";
 
-const EMPTY_QUOTA: QuotaView = { accounts: [], readAt: null, stale: false };
+const EMPTY_QUOTA: QuotaView = { accounts: [], tokens: {}, readAt: null, stale: false };
 const SECTION_LIMIT = 80;
 const TEXT_LIMIT = 1_000;
 const SECTION_MESSAGE = "「哪一部分」需要 1 到 80 个字";

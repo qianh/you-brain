@@ -19,7 +19,8 @@ import type { MessageKey } from "../i18n/messages.js";
 import { StartGuide } from "./today/guide.js";
 import { emptyCaptureView, guideSteps } from "./today/model.js";
 import { panelShortcut } from "./panel/model.js";
-import { minutesAgo, resetIn, type QuotaCardView } from "./panel/quota.js";
+import { minutesAgo, resetIn, tokenCount, type QuotaCardView } from "./panel/quota.js";
+import type { QuotaTokenUsage } from "@you-brain/core/http/types.js";
 import { useQuota } from "./panel/use-quota.js";
 import { openAppPath } from "./panel/open.js";
 import { ReminderList } from "./reminders/list.js";
@@ -278,10 +279,35 @@ function QuotaCard({
               </div>
             );
           })}
+          {card.tokens !== undefined ? tokenRows(card.tokens, t) : null}
         </div>
       ))}
     </Card>
   );
+}
+
+/** 卡片上 Token 消耗的三行，按今天 → 近 3 天 → 近 7 天排列。 */
+const TOKEN_SPANS: ReadonlyArray<{ span: keyof QuotaTokenUsage; labelKey: MessageKey }> = [
+  { span: "today", labelKey: "panelQuotaTokensToday" },
+  { span: "threeDays", labelKey: "panelQuotaTokens3d" },
+  { span: "sevenDays", labelKey: "panelQuotaTokens7d" },
+];
+
+function tokenRows(
+  usage: QuotaTokenUsage,
+  t: (key: MessageKey, vars?: Record<string, string | number>) => string,
+): ReactNode {
+  return TOKEN_SPANS.map(({ span, labelKey }) => {
+    const tokens = usage[span];
+    return (
+      <div key={span} className="quota-row">
+        <span className="quota-window">{t(labelKey)}</span>
+        <span className="quota-balance" title={`${tokens.input} → ${tokens.output} · cache ${tokens.cacheRead}`}>
+          {tokenCount(tokens.total)}
+        </span>
+      </div>
+    );
+  });
 }
 
 function PanelScroll({ children }: { children: ReactNode }) {

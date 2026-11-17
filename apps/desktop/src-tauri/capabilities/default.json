@@ -1,7 +1,7 @@
 {
   "identifier": "shell",
-  "description": "Menu-bar shell. The Web UI is loaded from the loopback daemon and may open the full window.",
-  "windows": ["panel", "main"],
+  "description": "Menu-bar shell. The Web UI is loaded from the loopback daemon and may open the full window; the reminder popup hides itself when its queue is handled.",
+  "windows": ["panel", "main", "reminder-popup"],
   "remote": {
     "urls": ["http://127.0.0.1:*/*", "http://localhost:*/*"]
   },
@@ -11,7 +11,9 @@
     "allow-quit-now",
     "allow-open-local-path",
     "allow-prepare-dsh-cookies",
+    "allow-hide-reminder-popup",
     "core:window:allow-start-dragging",
-    "core:window:allow-toggle-maximize"
+    "core:window:allow-toggle-maximize",
+    "dialog:allow-open"
   ]
 }

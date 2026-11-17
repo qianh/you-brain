@@ -22,3 +22,8 @@ commands.allow = ["open_local_path"]
 identifier = "allow-prepare-dsh-cookies"
 description = "Lets the Web UI remove obsolete loopback dsh login cookies before embedding a new session."
 commands.allow = ["prepare_dsh_cookies"]
+
+[[permission]]
+identifier = "allow-hide-reminder-popup"
+description = "Lets the reminder popup hide itself once its queue is handled."
+commands.allow = ["hide_reminder_popup"]

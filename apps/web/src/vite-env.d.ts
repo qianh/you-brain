@@ -9,6 +9,14 @@ interface TauriNamespace {
   core?: {
     invoke?: (command: string, args?: Record<string, unknown>) => Promise<unknown>;
   };
+  dialog?: {
+    open?: (options?: {
+      directory?: boolean;
+      multiple?: boolean;
+      title?: string;
+      defaultPath?: string;
+    }) => Promise<string | string[] | null>;
+  };
 }
 
 interface YouBrainBootstrap {

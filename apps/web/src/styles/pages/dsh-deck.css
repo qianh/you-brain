@@ -212,7 +212,7 @@
 }
 .deck-tty7-float-item.is-error { color: var(--danger); }
 
-/* 整屏终端：盖住整个窗口（含应用顶栏 z-index 30），低于弹出层 50、对话框 60、提示 70。 */
+/* 整屏终端：盖住整个窗口（含应用顶栏 z-index 30），低于对话框 60、弹出层 65、提示 70。 */
 .deck-term-screen {
   position: fixed;
   inset: 0;

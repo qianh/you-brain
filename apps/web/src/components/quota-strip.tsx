@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import { Tooltip } from "./tooltip.js";
 import type { Language } from "../lib/format.js";
-import { minutesAgo, resetIn, shortWindowLabel, type QuotaCardView } from "../pages/panel/quota.js";
+import { minutesAgo, resetIn, shortWindowLabel, tokenCount, type QuotaCardView } from "../pages/panel/quota.js";
 
 /** How long each model stays in the top bar before the next one. */
 export const QUOTA_ROTATE_MS = 5_000;
@@ -68,6 +68,9 @@ export function QuotaStrip({
                 {shortWindowLabel(window.name)} {Math.round(window.used)}%
               </span>
             ))}
+            {card.tokens !== undefined ? (
+              <span className="quota-strip-window">7d {tokenCount(card.tokens.sevenDays.total)}</span>
+            ) : null}
           </span>
         </Tooltip>
       ) : null}

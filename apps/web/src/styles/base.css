@@ -203,6 +203,9 @@ h3 {
 .text-link:hover { text-decoration: underline; }
 
 .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; font-size: var(--fs-base); }
+.field-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.field-row .field-control { flex: 1; min-width: 0; }
+.field-row .btn { flex: none; }
 .field small, .field-label { color: var(--text-3); font-size: var(--fs-sm); }
 .field-label { font-weight: 600; color: var(--text-2); }
 

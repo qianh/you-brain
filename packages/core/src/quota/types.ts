@@ -17,15 +17,44 @@ export interface QuotaAccount {
   plan: string | null;
   active: boolean;
   windows: QuotaWindow[];
-  /** When these windows were read. Older than the view's `readAt` when the account is `stale`. */
+  /**
+   * When these numbers were true as far as magpie knows. Often older than the last read:
+   * magpie caches, and Claude Code's numbers come from its local file. The UI marks an
+   * account stale when this falls too far behind, not when the read merely succeeded.
+   */
   readAt: string;
   /** The latest read had no numbers for this account, so these are kept from an earlier one. */
   stale: boolean;
 }
 
+/** Token totals one agent has pushed through its routes over one span. */
+export interface QuotaTokens {
+  calls: number;
+  /** Request tokens as sent upstream. */
+  input: number;
+  /** Completion tokens. */
+  output: number;
+  /** Cache-read tokens; large for long sessions. */
+  cacheRead: number;
+  /** Input + output + cache read, the number shown. */
+  total: number;
+}
+
+/** One agent's token consumption over the three spans the panel shows, in display order. */
+export interface QuotaTokenUsage {
+  /** Since local midnight. */
+  today: QuotaTokens;
+  /** Since local midnight two days ago, three calendar days including today. */
+  threeDays: QuotaTokens;
+  /** Since local midnight six days ago, seven calendar days including today. */
+  sevenDays: QuotaTokens;
+}
+
 export interface QuotaView {
   accounts: QuotaAccount[];
-  /** When the numbers were read; null until the first successful read. */
+  /** Token usage per agent over the three spans; empty when magpie's request log is missing. */
+  tokens: Record<string, QuotaTokenUsage>;
+  /** When the last successful refresh ran; null until then. */
   readAt: string | null;
   /** The last refresh failed, so `accounts` are from an earlier read. */
   stale: boolean;

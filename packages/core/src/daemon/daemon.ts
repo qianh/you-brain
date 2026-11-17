@@ -136,7 +136,13 @@ import {
   type ReminderReplyRecord,
 } from "../reminders/replies.js";
 import { dueRemindersForDevice, reminderActions } from "../reminders/run.js";
-import { QuotaService, readMagpieAccounts } from "../quota/index.js";
+import {
+  QuotaService,
+  readClaudeAccessToken,
+  readClaudeUsage,
+  readMagpieAccounts,
+  readMagpieUsageLog,
+} from "../quota/index.js";
 import {
   RECALL_FRESH_MS,
   RECALL_HISTORY_CHARS,
@@ -895,6 +901,8 @@ export class YouBrainDaemon {
   readonly #recall: RecallService = this.#createRecall();
   readonly #quota: QuotaService = new QuotaService({
     read: () => readMagpieAccounts({ env: this.#env, homeDir: this.#homeDir, signal: this.#abort.signal }),
+    readTokens: () => readMagpieUsageLog({ env: this.#env, homeDir: this.#homeDir }),
+    readClaudeLive: () => readClaudeAccessToken().then((token) => readClaudeUsage(token, this.#abort.signal)),
     nowMs: () => this.#clock.nowMs(),
   });
   /**

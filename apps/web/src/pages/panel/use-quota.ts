@@ -27,7 +27,7 @@ export function useQuota(): { quota: QuotaView | null; cards: QuotaCardView[]; n
     return () => clearInterval(timer);
   }, [reload, loaded]);
   const cards = useMemo(
-    () => quotaCards(quota?.accounts ?? [], status?.captures, nowMs, language),
+    () => quotaCards(quota, status?.captures, nowMs, language),
     [quota, status?.captures, nowMs, language],
   );
   return { quota, cards, nowMs, reload };

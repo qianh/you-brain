@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import type { DeckTty7SessionsResponse } from "@you-brain/core/http/types.js";
 
-import { IconButton } from "../components/button.js";
+import { Button, IconButton } from "../components/button.js";
 import { Icon } from "../components/icons.js";
 import { InlineRename, type InlineRenameHandle } from "../components/inline-rename.js";
 import { Toggle } from "../components/toggle.js";
@@ -367,6 +367,20 @@ export function DeckTty7NewForm({ view, sessions, projectLabel, reload, onStarte
     () => [...new Set(sessions.map((session) => session.cwd).filter((dir) => dir !== ""))].sort(),
     [sessions],
   );
+  const chooseCwd = async (): Promise<void> => {
+    const open = window.__TAURI__?.dialog?.open;
+    if (!open) return;
+    try {
+      const picked = await open({ directory: true, multiple: false, title: t("deckTty7ChooseProjectPath") });
+      const dir = typeof picked === "string" ? picked : Array.isArray(picked) ? picked[0] : null;
+      if (dir) {
+        setCwd(dir);
+        setWorkspace(workspaceOf(dir));
+      }
+    } catch {
+      // 用户取消或对话框打不开:保持输入框原样。
+    }
+  };
 
   useEffect(() => {
     const form = formRef.current;
@@ -399,7 +413,7 @@ export function DeckTty7NewForm({ view, sessions, projectLabel, reload, onStarte
   return (
     <form ref={formRef} className="deck-tty7-new" onSubmit={(event) => void start(event)}>
       {projectLabel !== null && <strong>{t("deckTty7NewInProject", { name: projectLabel })}</strong>}
-      <label className="field">
+      <div className="field">
         <span className="field-label">{t("deckTty7Path")}</span>
         {projectLabel !== null && dirs.length > 1 ? (
           <select
@@ -414,21 +428,26 @@ export function DeckTty7NewForm({ view, sessions, projectLabel, reload, onStarte
             <option value="">{t("deckTty7ChooseProjectPath")}</option>
             {dirs.map((dir) => <option key={dir} value={dir}>{dir}</option>)}
           </select>
-        ) : <input
-          name="cwd"
-          className="field-control"
-          list="deck-tty7-dirs"
-          value={cwd}
-          onChange={(event) => setCwd(event.target.value)}
-          placeholder="/Users/…/project"
-          spellCheck={false}
-        />}
+        ) : <div className="field-row">
+          <input
+            name="cwd"
+            className="field-control"
+            list="deck-tty7-dirs"
+            value={cwd}
+            onChange={(event) => setCwd(event.target.value)}
+            placeholder="/Users/…/project"
+            spellCheck={false}
+          />
+          <Button variant="secondary" size="sm" onClick={() => void chooseCwd()}>
+            {t("deckTty7Browse")}
+          </Button>
+        </div>}
         <datalist id="deck-tty7-dirs">
           {knownDirs.map((dir) => (
             <option key={dir} value={dir} />
           ))}
         </datalist>
-      </label>
+      </div>
       <label className="field">
         <span className="field-label">{t("deckTty7Harness")}</span>
         <select name="harness" className="field-control" value={harness} onChange={(event) => setHarness(event.target.value)}>

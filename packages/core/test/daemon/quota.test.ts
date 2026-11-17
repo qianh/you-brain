@@ -1,11 +1,12 @@
-import { chmod, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "bun:test";
 
 import { startDaemon, type YouBrainDaemon } from "../../src/daemon/daemon.js";
+import { tokenWindowCutoffs } from "../../src/quota/usage-log.js";
 import type { QuotaView } from "../../src/quota/types.js";
-import { makeDaemonDirs, testClock } from "./helpers.js";
+import { CLOCK_START, makeDaemonDirs, testClock } from "./helpers.js";
 
 const started: YouBrainDaemon[] = [];
 const roots: string[] = [];
@@ -25,6 +26,19 @@ const OUTPUT = JSON.stringify([
   },
 ]);
 
+/** Request-log fixture built from the test clock, so bucketing holds in any timezone. */
+async function writeUsageLog(homeDir: string): Promise<void> {
+  const cuts = tokenWindowCutoffs(CLOCK_START.getTime());
+  const row = (t: number, tokens: [number, number, number]): string =>
+    JSON.stringify({ t: new Date(t).toISOString(), agent: "codex", in: tokens[0], out: tokens[1], cache_read: tokens[2] });
+  const dir = join(homeDir, ".config", "magpie");
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(dir, "usage.jsonl"),
+    `${[row(cuts.today + 3_600_000, [100, 10, 1000]), row(cuts.threeDays + 3_600_000, [200, 20, 2000]), row(cuts.sevenDays + 3_600_000, [300, 30, 3000])].join("\n")}\n`,
+  );
+}
+
 async function boot(magpie: string | null): Promise<YouBrainDaemon> {
   const dirs = await makeDaemonDirs("you-brain-quota-");
   roots.push(dirs.root);
@@ -34,6 +48,7 @@ async function boot(magpie: string | null): Promise<YouBrainDaemon> {
     await writeFile(bin, `#!/bin/sh\n${magpie}\n`);
     await chmod(bin, 0o755);
   }
+  await writeUsageLog(dirs.homeDir);
   const daemon = await startDaemon({
     homeDir: dirs.homeDir,
     platform: "darwin",
@@ -71,7 +86,7 @@ describe("GET /api/quota", () => {
   it("answers at once with nothing, then serves what magpie printed, without the email", async () => {
     const daemon = await boot(`sleep 0.2; echo '2026/11/16 plugin: host starts'; echo '${OUTPUT}'`);
     const first = await quota(daemon);
-    expect(first).toEqual({ accounts: [], readAt: null, stale: false });
+    expect(first).toEqual({ accounts: [], tokens: {}, readAt: null, stale: false });
     const view = await untilRead(daemon);
     expect(view.accounts.map(({ id: _id, readAt: _readAt, ...rest }) => rest)).toEqual([
       {
@@ -82,6 +97,9 @@ describe("GET /api/quota", () => {
         stale: false,
       },
     ]);
+    expect(view.tokens.codex?.today).toEqual({ calls: 1, input: 100, output: 10, cacheRead: 1000, total: 1110 });
+    expect(view.tokens.codex?.threeDays).toEqual({ calls: 2, input: 300, output: 30, cacheRead: 3000, total: 3330 });
+    expect(view.tokens.codex?.sevenDays).toEqual({ calls: 3, input: 600, output: 60, cacheRead: 6000, total: 6660 });
     expect(JSON.stringify(view)).not.toContain("example.com");
   });
 
@@ -89,13 +107,13 @@ describe("GET /api/quota", () => {
     const daemon = await boot(null);
     await quota(daemon);
     await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(await quota(daemon)).toEqual({ accounts: [], readAt: null, stale: false });
+    expect(await quota(daemon)).toEqual({ accounts: [], tokens: {}, readAt: null, stale: false });
   });
 
   it("is an empty list when magpie exits with an error", async () => {
     const daemon = await boot("echo boom >&2; exit 3");
     await quota(daemon);
     await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(await quota(daemon)).toEqual({ accounts: [], readAt: null, stale: false });
+    expect(await quota(daemon)).toEqual({ accounts: [], tokens: {}, readAt: null, stale: false });
   });
 });

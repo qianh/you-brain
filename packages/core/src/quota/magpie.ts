@@ -27,11 +27,15 @@ export async function readMagpieAccounts(input: {
   homeDir: string;
   signal?: AbortSignal;
 }): Promise<string> {
+  return runMagpie(["accounts", "--json"], input);
+}
+
+async function runMagpie(args: readonly string[], input: { env: NodeJS.ProcessEnv; homeDir: string; signal?: AbortSignal }): Promise<string> {
   const bin = locateMagpie(input);
   if (bin === null) throw new Error("没有找到 magpie");
   const result = await runCliProcess({
     bin,
-    args: ["accounts", "--json"],
+    args: [...args],
     cwd: tmpdir(),
     timeoutMs: MAGPIE_TIMEOUT_MS,
     env: input.env,

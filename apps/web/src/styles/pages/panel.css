@@ -190,3 +190,11 @@
 }
 .quota-pct { width: 3.2em; color: var(--text); text-align: right; }
 .quota-reset { width: 5.5em; text-align: right; }
+.quota-balance {
+  flex: 1;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}

@@ -2,7 +2,8 @@
 
 .popover, .menu {
   position: fixed;
-  z-index: 50;
+  /* 对话框（.scrim 60）之上：Select 等弹出层常开在弹框里，低一格会被面板整体盖住。 */
+  z-index: 65;
   min-width: 180px;
   max-width: min(440px, calc(100vw - 24px));
   padding: var(--sp-1);
