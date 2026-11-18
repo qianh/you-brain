@@ -7,6 +7,7 @@ import {
   parseDigestDetail,
   reminderFailureMessage,
   reminderFirstLine,
+  reminderToTaskInput,
   snoozeUntil,
 } from "../../src/pages/reminders/model.js";
 // 契约:卡片按 core 拼出的早报句式解析,core 改了文案这里会先红。
@@ -113,5 +114,28 @@ describe("parseDigest / parseDigestDetail", () => {
       suggestions: ["货代产品能力评估"],
     });
     expect(parseDigestDetail("别的格式")).toBeNull();
+  });
+});
+
+describe("reminderToTaskInput", () => {
+  test("builds a follow-up TODO with topic prefix, optional user note, and unassigned projectId", () => {
+    const task = reminderToTaskInput(
+      { text: "11月16日定过先发布a15ea16，确认API更新后再预检。", topicName: "法务合同系统" },
+      "等下午发版窗口一起做",
+    );
+    expect(task).toEqual({
+      title: "[法务合同系统] 11月16日定过先发布a15ea16，确认API更新后再预检。",
+      description: "备注：等下午发版窗口一起做\n\n来源：记忆提醒 · 话题「法务合同系统」",
+      projectId: null,
+      priority: 2,
+    });
+  });
+
+  test("avoids duplicating topicName when already in text and truncates oversized titles safely", () => {
+    const long = "法务合同系统：" + "需要核对".repeat(60);
+    const task = reminderToTaskInput({ text: long, topicName: "法务合同系统" });
+    expect(task.title.startsWith("法务合同系统：")).toBe(true);
+    expect(task.title.length).toBeLessThanOrEqual(180);
+    expect(task.description).toContain(long);
   });
 });

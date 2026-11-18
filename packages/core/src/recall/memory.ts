@@ -4,8 +4,10 @@ import { resolveMergedTopic } from "../topics/zones.js";
 import {
   RECALL_CONCLUSIONS,
   RECALL_HISTORY_CANDIDATES,
+  RECALL_RECENT_FACTS,
   RECALL_RECENT_MS,
   RECALL_TODOS,
+  type RecallFactItem,
   type RecallMemory,
   type RecallMemoryItem,
 } from "./types.js";
@@ -120,9 +122,13 @@ export function buildRecallMemory(input: {
       sessionKey: todo.sessionKey,
     });
   }
-  const conclusions = newestFirst(
-    book.conclusions.filter((item) => isOld(item.sessionKey) && inTopic(item.topicId)),
-  ).slice(0, RECALL_CONCLUSIONS);
+  const allTopicConclusions = newestFirst(
+    book.conclusions.filter((item) => inTopic(item.topicId)),
+  );
+  const conclusions = allTopicConclusions
+    .filter((item) => isOld(item.sessionKey))
+    .slice(0, RECALL_CONCLUSIONS);
+  const includedConclusionIds = new Set(conclusions.map((item) => item.conclusionId));
   for (const conclusion of conclusions) {
     items.push({
       id: `conclusion:${conclusion.conclusionId}`,
@@ -133,6 +139,29 @@ export function buildRecallMemory(input: {
     });
   }
   if (items.length === 0) return null;
+
+  // Collect non-citable verification facts so the model can tell when an open todo or old
+  // conclusion has already been completed or superseded:
+  // 1) Recent conclusions (<12h or current session) excluded from `items`.
+  // 2) Later conclusions from the same session as any candidate open todo that fell outside top-10.
+  const earliestTodoBySession = new Map<string, string>();
+  for (const todo of todos) {
+    const prev = earliestTodoBySession.get(todo.sessionKey);
+    if (prev === undefined || todo.ts < prev) earliestTodoBySession.set(todo.sessionKey, todo.ts);
+  }
+  const recentFacts: RecallFactItem[] = [];
+  for (const item of allTopicConclusions) {
+    if (recentFacts.length >= RECALL_RECENT_FACTS) break;
+    if (includedConclusionIds.has(item.conclusionId)) continue;
+    const isRecent = !isOld(item.sessionKey);
+    const todoTs = earliestTodoBySession.get(item.sessionKey);
+    const followsCandidateTodo = todoTs !== undefined && item.ts >= todoTs;
+    if (!isRecent && !followsCandidateTodo) continue;
+    recentFacts.push({
+      day: dayOf(item.ts, timeZone),
+      text: item.text,
+    });
+  }
 
   let last: string | null = null;
   for (const session of book.sessions) {
@@ -146,5 +175,6 @@ export function buildRecallMemory(input: {
     summary: topic.summary,
     lastActiveDay: last === null ? null : dayOf(last, timeZone),
     items,
+    ...(recentFacts.length > 0 ? { recentFacts } : {}),
   };
 }

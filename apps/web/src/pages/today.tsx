@@ -11,12 +11,14 @@ import { MemoryTabs } from "./memory-tabs.js";
 import { Segmented } from "../components/segmented.js";
 import { SkeletonRow, SkeletonStat } from "../components/skeleton.js";
 import { StatBlock, StatGrid } from "../components/stat.js";
+import { useToast } from "../components/toast.js";
 import { useDelayed } from "../components/use-delayed.js";
 import { useRelativeTime } from "../components/use-relative-time.js";
 import { driveState, type DriveInput } from "../lib/drive-state.js";
 import { settingsHref, topicHref } from "../lib/route.js";
 import { useRoute } from "../router.js";
 import { ReminderList } from "./reminders/list.js";
+import { isRecallReminder, reminderToTaskInput } from "./reminders/model.js";
 import { isUnreachableError } from "./status/logic.js";
 import { TodayGroups } from "./today/groups.js";
 import { StartGuide } from "./today/guide.js";
@@ -40,6 +42,7 @@ const REMINDERS_PREVIEW = 2;
 export function TodayPage() {
   const { t, language, today, devices, timeZone, topics, status, reminders, error, loading, reload, reminderAction, client } = useDaemon();
   const { navigate } = useRoute();
+  const { push } = useToast();
   // The session blocks point at the list further down this page.
   const sessionsRef = useRef<HTMLDivElement | null>(null);
   // Reminders stack above the sessions; a dozen of them would push today's topics off
@@ -207,6 +210,17 @@ export function TodayPage() {
                     t={t}
                     onAction={reminderAction}
                     onOpenTopic={(topicId, session) => navigate(topicHref(topicZone(topics, topicId), topicId, session))}
+                    onAddTodo={async (reminder) => {
+                      await client.createTask(reminderToTaskInput(reminder));
+                      if (isRecallReminder(reminder)) {
+                        await client.reminderReply(reminder.reminderId, t("popupTodoReplyNote"));
+                        await reload("today");
+                      } else {
+                        await reminderAction(reminder.reminderId, "done");
+                      }
+                      window.dispatchEvent(new CustomEvent("you-brain-refresh"));
+                      push({ message: t("reminderAddedTodo"), tone: "success" });
+                    }}
                     loadDetail={(reminderId) => client.reminderDetail(reminderId).then((result) => result.detail)}
                   />
                 </div>

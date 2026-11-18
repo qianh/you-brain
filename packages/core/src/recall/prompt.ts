@@ -5,21 +5,48 @@ import {
   RECALL_TEXT_MAX,
   RECALL_USER_CHARS,
   type RecallDecision,
+  type RecallDialogueTurn,
   type RecallHistoryItem,
   type RecallMemory,
   type RecallReplyItem,
 } from "./types.js";
 
-export const RECALL_SYSTEM_PROMPT = `你是 you-brain 的记忆提醒器。用户正在和某个 AI 助手对话，下面是他最近的发言，以及他以前在同一个话题里留下的记忆、旧会话片段和他自己回复过的提醒。判断这些材料里有没有一条，现在提一句对他有用。只输出一个 JSON 对象，不要 Markdown，不要解释。
+const INJECTED_BOILERPLATE_PATTERNS = [
+  /# AGENTS\.md instructions[^\n]*\n+\s*<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/giu,
+  /<INSTRUCTIONS>[\s\S]*?<\/INSTRUCTIONS>/giu,
+  /<environment_context>[\s\S]*?<\/environment_context>/giu,
+  /<permissions instructions>[\s\S]*?<\/permissions instructions>/giu,
+  /<collaboration_mode>[\s\S]*?<\/collaboration_mode>/giu,
+  /<system-reminder>[\s\S]*?<\/system-reminder>/giu,
+];
+
+/**
+ * Strips CLI-injected instruction/context blocks (e.g. Codex AGENTS.md wrappers) from a turn
+ * so topic matching and the recall prompt only see what the user or assistant actually said.
+ */
+export function stripRecallBoilerplate(text: string): string {
+  let cleaned = text;
+  for (const pattern of INJECTED_BOILERPLATE_PATTERNS) {
+    cleaned = cleaned.replace(pattern, "");
+  }
+  return cleaned.trim();
+}
+
+export const RECALL_SYSTEM_PROMPT = `你是 you-brain 的记忆提醒器。用户正在和某个 AI 助手对话，下面是他最近的发言、当前会话助手的回复、他以前在同一个话题里留下的记忆、近期进展事实、旧会话片段和他自己回复过的提醒。请严格核对这些材料里有没有一条**未过时、未重复、且对眼下这一步真正重要**的信息需要现在提一句。只输出一个 JSON 对象，不要 Markdown，不要解释。
 
 规则：
-1. 默认不说。大多数时候输出 {"say": false}。
-2. 只有下面这类情况才说：提醒——有件没做完的事和他现在正在做的直接相关，或他现在的做法和以前定过的决定相反，或有个期限快到了；提示——他以前做过、找过或卡住过同一件相关的事，记忆或旧会话里有现成的线索（怎么解决的、材料在哪、当时定过什么）；建议——旧会话或记忆明确指向一个比他眼下做法更好的下一步。
-3. 他这次发言里已经提到的事不说。只是同属一个话题、和眼下的事没有直接关系的不说。他自己已经回复处理过的旧事不再提。
-4. 要说时只挑一条，basisId 填那条材料的 id，必须是输入里给出的 id（记忆项、历史会话片段都行）。
-5. grade 只有两个取值：important 表示不提会造成损失或返工，比如正要做的事和以前定过的决定相反，或者有个期限快到了；normal 表示提了有帮助，不提也没有损失。拿不准就填 normal。
-6. text 是对他说的一句中文口语，不超过 60 字，不换行，写清是哪件事并带上那条材料的日期（几月几日）。不写统计，不写「该话题还有 N 项待办」这类句子，不编造输入里没有的事实。
-7. JSON 键名保持英文。`;
+1. 宁缺毋滥，默认不说。大多数时候输出 {"say": false}。不是同属一个话题或有一条开放待办就要提醒。
+2. 先核对是否已过时或刚做完（命中任意一条必须输出 {"say": false}）：
+   - 对照「近期进展与后续结论」和「当前会话助手最近回复」，如果某条旧待办或旧决定后来已被完成、已打出新包/新提交、已被新方案替代，说明那条旧待办没及时关闭，属于已过时，绝不能再提。
+   - 如果用户当前发言已经在推进同一动作（如正在重新打包、部署、核查同一个对象），或助手在当前会话里已经给出了处理结果，绝不能马后炮提醒「这件还没做完」（除非旧记忆里有一条他眼下正违背的前置约束或红线）。
+   - 他这次发言里已经提到的事不说；他自己回复处理过的旧事不再提。
+3. 再核对对当前会话的重要性（只有会实质改变他眼下动作时才说）：
+   - 防踩坑/防返工（grade = "important"）：他正要做的事与之前定下的决定/红线相反、漏掉了必须先满足的前置条件（如先发接口再跑预检、严禁写生产库等），或有明确期限快到了，不提会造成损失或返工。
+   - 直接可复用的关键线索（grade = "normal"）：他眼下正卡在某个具体问题或正在权衡方案，记忆或旧会话里有现成的解法、关键路径、配置口径或排雷结论，提一句能帮他少走弯路。
+   - 单纯顺带留下的陈旧待办、细枝末节（如旧 UI 样式微调）、或只是同属一个大话题但与眼下这一步无直接因果关系的事项，一律输出 {"say": false}。
+4. 要说时只挑一条，basisId 只能填「记忆」或「历史会话片段」里带方括号给出的 id（严禁引用「近期进展与后续结论」或当前会话内容）。
+5. text 是对他说的一句自然中文口语，不超过 60 字，不换行，写清是哪件事并带上那条材料的日期（几月几日）。不写统计，不写「该话题还有 N 项待办」这类套话，不编造输入里没有的事实。
+6. JSON 键名保持英文。`;
 
 export const RECALL_JSON_SCHEMA = {
   type: "object",
@@ -60,19 +87,31 @@ function fitUserTurns(turns: readonly string[]): string[] {
   return kept.reverse();
 }
 
+const MAX_RECENT_ASSISTANT_TURNS = 3;
+const ASSISTANT_TURN_CHARS = 360;
+
 export function buildRecallPrompt(input: {
   memory: RecallMemory;
   userTurns: readonly string[];
   today: string;
   history?: readonly RecallHistoryItem[];
   replies?: readonly RecallReplyItem[];
+  dialogue?: readonly RecallDialogueTurn[];
 }): { system: string; user: string } {
   const { memory } = input;
   const items = memory.items
     .map((item) => `[${item.id}] ${item.day ?? "-"} ${oneLine(item.text, RECALL_ITEM_CHARS)}`)
     .join("\n");
+  const factLines = (memory.recentFacts ?? [])
+    .map((fact) => `- ${fact.day ?? "-"} ${oneLine(fact.text, RECALL_ITEM_CHARS)}`)
+    .join("\n");
   const replyLines = (input.replies ?? [])
     .map((reply) => `- ${reply.day ?? "-"} 他回复过：${oneLine(reply.text, RECALL_ITEM_CHARS)}`)
+    .join("\n");
+  const assistantLines = (input.dialogue ?? [])
+    .filter((turn) => turn.role === "assistant" && turn.text.trim() !== "")
+    .slice(-MAX_RECENT_ASSISTANT_TURNS)
+    .map((turn) => `- ${oneLine(tail(turn.text, ASSISTANT_TURN_CHARS), ASSISTANT_TURN_CHARS)}`)
     .join("\n");
   const history = (input.history ?? [])
     .map((item) => {
@@ -80,7 +119,8 @@ export function buildRecallPrompt(input: {
       return `${head}\n${tail(item.text, RECALL_HISTORY_CHARS)}`;
     })
     .join("\n\n");
-  const turns = fitUserTurns(input.userTurns);
+  const cleanedUserTurns = input.userTurns.map(stripRecallBoilerplate).filter((t) => t !== "");
+  const turns = fitUserTurns(cleanedUserTurns);
   const user = [
     `今天：${input.today}`,
     `话题：${oneLine(memory.name, RECALL_ITEM_CHARS)}`,
@@ -89,6 +129,9 @@ export function buildRecallPrompt(input: {
     "",
     "## 记忆",
     items,
+    factLines === ""
+      ? ""
+      : "\n## 近期进展与后续结论（仅用于核对上面记忆是否已过时或已完成，不可作为 basisId 引用）\n" + factLines,
     replyLines === "" ? "" : "\n他最近对提醒的回复（已处理，不要再提）：\n" + replyLines,
     "",
     "## 历史会话片段",
@@ -96,6 +139,9 @@ export function buildRecallPrompt(input: {
     "",
     "## 他最近的发言",
     turns.length === 0 ? "（无）" : turns.join("\n\n"),
+    assistantLines === ""
+      ? ""
+      : "\n## 当前会话助手最近回复（仅用于核对事情是否已在当前对话做完，不可引用）\n" + assistantLines,
     "",
     "## 输出 JSON schema",
     JSON.stringify(RECALL_JSON_SCHEMA),

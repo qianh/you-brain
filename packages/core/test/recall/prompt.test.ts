@@ -4,6 +4,7 @@ import {
   RECALL_USER_CHARS,
   buildRecallPrompt,
   parseRecallDecision,
+  stripRecallBoilerplate,
   type RecallHistoryItem,
   type RecallMemory,
 } from "../../src/recall/index.js";
@@ -118,5 +119,30 @@ describe("buildRecallPrompt", () => {
     const { user } = buildRecallPrompt({ memory, userTurns: ["第一句"], today: "2026-11-16" });
     expect(user).toContain("## 历史会话片段\n（无）");
     expect(user).not.toContain("他回复过");
+  });
+
+  it("剥离 Codex 注入的 AGENTS.md 块，并展示近期进展与当前会话助手回复供过时核对", () => {
+    const rawTurn = `# AGENTS.md instructions for /tmp/repo\n\n<INSTRUCTIONS>\n长篇编码准则\n</INSTRUCTIONS>\n帮我重新打一个新包`;
+    expect(stripRecallBoilerplate(rawTurn)).toBe("帮我重新打一个新包");
+
+    const withFacts: RecallMemory = {
+      ...memory,
+      recentFacts: [{ day: "2026-11-18", text: "新包 contract-compare-20261118.zip 已生成" }],
+    };
+    const { user } = buildRecallPrompt({
+      memory: withFacts,
+      userTurns: [rawTurn, "默认包也是最新的吗"],
+      today: "2026-11-18",
+      dialogue: [
+        { role: "user", text: "帮我重新打一个新包" },
+        { role: "assistant", text: "最新包已重打为 contract-compare-20261118.zip" },
+      ],
+    });
+    expect(user).not.toContain("长篇编码准则");
+    expect(user).toContain("帮我重新打一个新包");
+    expect(user).toContain("近期进展与后续结论");
+    expect(user).toContain("新包 contract-compare-20261118.zip 已生成");
+    expect(user).toContain("当前会话助手最近回复");
+    expect(user).toContain("最新包已重打为 contract-compare-20261118.zip");
   });
 });

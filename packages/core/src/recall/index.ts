@@ -9,6 +9,7 @@ export {
   RECALL_SYSTEM_PROMPT,
   buildRecallPrompt,
   parseRecallDecision,
+  stripRecallBoilerplate,
 } from "./prompt.js";
 export * from "./types.js";
 export { RECALL_CONSIDERED_CURSOR, RecallService } from "./service.js";

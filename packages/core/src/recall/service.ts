@@ -7,13 +7,19 @@ import { decideRecallDelivery, recallReminderId } from "./delivery.js";
 import type { RecallLogEntry } from "./log.js";
 import { matchRecallTopic } from "./match.js";
 import { historyCandidates, buildRecallMemory } from "./memory.js";
-import { RECALL_JSON_SCHEMA, buildRecallPrompt, parseRecallDecision } from "./prompt.js";
+import {
+  RECALL_JSON_SCHEMA,
+  buildRecallPrompt,
+  parseRecallDecision,
+  stripRecallBoilerplate,
+} from "./prompt.js";
 import {
   RECALL_KIND,
   RECALL_REPLY_KEEP_MS,
   RECALL_REPLIES,
   RECALL_RETRY_DELAYS_MS,
   RECALL_USER_CHARS,
+  type RecallDialogueTurn,
   type RecallHistoryItem,
   type RecallReplyItem,
 } from "./types.js";
@@ -50,6 +56,7 @@ interface RecallTask {
   sessionKey: string;
   topicId: string;
   userTurns: readonly string[];
+  dialogue?: readonly RecallDialogueTurn[] | undefined;
   dueAt: number;
   failures: number;
 }
@@ -79,7 +86,11 @@ export class RecallService {
     return this.#queue.length;
   }
 
-  consider(input: { sessionKey: string; userTurns: readonly string[] }): void {
+  consider(input: {
+    sessionKey: string;
+    userTurns: readonly string[];
+    dialogue?: readonly RecallDialogueTurn[] | undefined;
+  }): void {
     try {
       this.#consider(input);
     } catch {
@@ -101,18 +112,23 @@ export class RecallService {
     }
   }
 
-  #consider(input: { sessionKey: string; userTurns: readonly string[] }): void {
-    const { sessionKey, userTurns } = input;
+  #consider(input: {
+    sessionKey: string;
+    userTurns: readonly string[];
+    dialogue?: readonly RecallDialogueTurn[] | undefined;
+  }): void {
+    const cleanedTurns = input.userTurns.map(stripRecallBoilerplate).filter((text) => text !== "");
+    const { sessionKey, dialogue } = input;
     const previous = this.#turnCounts.get(sessionKey);
-    if (userTurns.length === 0 || (previous !== undefined && userTurns.length <= previous)) return;
-    this.#turnCounts.set(sessionKey, userTurns.length);
+    if (cleanedTurns.length === 0 || (previous !== undefined && cleanedTurns.length <= previous)) return;
+    this.#turnCounts.set(sessionKey, cleanedTurns.length);
     const now = this.#ports.nowMs();
 
     const book = this.#ports.book();
     const assigned = book.sessions.find((session) => session.sessionKey === sessionKey)?.topicId ?? null;
     const topicId = matchRecallTopic({
       assignedTopicId: assigned,
-      userText: userTurns.slice(-MATCH_TURNS).join("\n").slice(-RECALL_USER_CHARS),
+      userText: cleanedTurns.slice(-MATCH_TURNS).join("\n").slice(-RECALL_USER_CHARS),
       topics: this.#ports.candidateTopics(),
       book,
     });
@@ -127,7 +143,8 @@ export class RecallService {
     if (this.#isConsidered(sessionKey, topicId)) return;
     const queued = this.#queue.find((task) => task.sessionKey === sessionKey && task.topicId === topicId);
     if (queued) {
-      queued.userTurns = userTurns;
+      queued.userTurns = cleanedTurns;
+      queued.dialogue = dialogue;
       return;
     }
     const memory = buildRecallMemory({
@@ -142,7 +159,7 @@ export class RecallService {
       this.#log({ sessionKey, topicId, outcome: "no-memory" });
       return;
     }
-    this.#queue.push({ sessionKey, topicId, userTurns, dueAt: now, failures: 0 });
+    this.#queue.push({ sessionKey, topicId, userTurns: cleanedTurns, dialogue, dueAt: now, failures: 0 });
   }
 
   async #run(task: RecallTask): Promise<void> {
@@ -172,6 +189,7 @@ export class RecallService {
         today: localDayKey(new Date(this.#ports.nowMs()), this.#ports.timeZone()),
         ...(history.length > 0 ? { history } : {}),
         ...(replies.length > 0 ? { replies } : {}),
+        ...(task.dialogue && task.dialogue.length > 0 ? { dialogue: task.dialogue } : {}),
       });
       const raw = await llm.complete({
         system: prompt.system,

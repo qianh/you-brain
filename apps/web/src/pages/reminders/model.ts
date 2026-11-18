@@ -1,3 +1,5 @@
+import type { TaskCreateInput } from "@you-brain/core/tasks/types.js";
+
 export const SNOOZE_DAYS = {
   tomorrow: 1,
   threeDays: 3,
@@ -124,6 +126,45 @@ export function snoozeUntil(now: Date, timeZone: string, days: number): string {
 
 export function snoozeChoiceUntil(now: Date, timeZone: string, choice: SnoozeChoice): string {
   return snoozeUntil(now, timeZone, SNOOZE_DAYS[choice]);
+}
+
+const TODO_TITLE_MAX = 180;
+
+/**
+ * Converts a reminder (plus optional user note) into a follow-up `/todos` item.
+ * `projectId` defaults to `null` so it records for follow-up without auto-dispatching T3.
+ */
+export function reminderToTaskInput(
+  reminder: { text: string; topicName?: string | null },
+  note?: string,
+): TaskCreateInput {
+  const fullText = reminder.text.trim();
+  const lines = fullText
+    .replaceAll("\r\n", "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  const headline = (lines[0] ?? fullText).replace(/\s+/gu, " ").trim() || "记忆提醒跟进";
+  const topic = reminder.topicName?.trim() ?? "";
+  const rawTitle = topic && !headline.includes(topic) ? `[${topic}] ${headline}` : headline;
+  const title = rawTitle.length <= TODO_TITLE_MAX ? rawTitle : `${rawTitle.slice(0, TODO_TITLE_MAX - 1)}…`;
+
+  const descParts: string[] = [];
+  if (lines.length > 1 || rawTitle.length > TODO_TITLE_MAX) {
+    descParts.push(fullText);
+  }
+  const cleanNote = note?.trim() ?? "";
+  if (cleanNote !== "") {
+    descParts.push(`备注：${cleanNote}`);
+  }
+  descParts.push(topic ? `来源：记忆提醒 · 话题「${topic}」` : "来源：记忆提醒");
+
+  return {
+    title,
+    description: descParts.join("\n\n").slice(0, 20_000),
+    projectId: null,
+    priority: 2,
+  };
 }
 
 function zoneOffsetMinutes(timeZone: string, now: Date): number {

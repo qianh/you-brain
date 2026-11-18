@@ -29,6 +29,8 @@ const SNOOZE_LABEL: Record<SnoozeChoice, MessageKey> = {
   nextWeek: "reminderSnoozeNextWeek",
 };
 
+type PendingKind = ReminderActionName | "todo";
+
 export function ReminderList({
   reminders,
   layout,
@@ -36,6 +38,7 @@ export function ReminderList({
   t,
   onAction,
   onOpenTopic,
+  onAddTodo,
   loadDetail,
 }: {
   reminders: readonly ReminderView[];
@@ -45,17 +48,31 @@ export function ReminderList({
   onAction: (reminderId: string, action: ReminderActionName, until?: string) => Promise<void>;
   /** 打开话题;提醒记着出处会话时一并传入,由页面定位到那段会话。 */
   onOpenTopic: (topicId: string, sessionKey: string | null) => void;
+  /** 快速把提醒内容转入 /todos 跟进。 */
+  onAddTodo?: ((reminder: ReminderView) => Promise<void>) | undefined;
   /** 取提醒被截短的原文;不传就不显示「查看详情」。 */
   loadDetail?: ((reminderId: string) => Promise<string | null>) | undefined;
 }) {
   const { push } = useToast();
-  const [pending, setPending] = useState<{ id: string; action: ReminderActionName } | null>(null);
+  const [pending, setPending] = useState<{ id: string; action: PendingKind } | null>(null);
 
   const run = async (reminderId: string, action: ReminderActionName, until?: string): Promise<void> => {
     if (pending) return;
     setPending({ id: reminderId, action });
     try {
       await onAction(reminderId, action, until);
+    } catch (error) {
+      push({ message: reminderFailureMessage(error, t("actionFailed")), tone: "danger" });
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const runAddTodo = async (reminder: ReminderView): Promise<void> => {
+    if (pending || !onAddTodo) return;
+    setPending({ id: reminder.reminderId, action: "todo" });
+    try {
+      await onAddTodo(reminder);
     } catch (error) {
       push({ message: reminderFailureMessage(error, t("actionFailed")), tone: "danger" });
     } finally {
@@ -76,6 +93,7 @@ export function ReminderList({
           t={t}
           onAction={(action, until) => void run(reminder.reminderId, action, until)}
           onOpenTopic={onOpenTopic}
+          {...(onAddTodo ? { onAddTodo: () => void runAddTodo(reminder) } : {})}
           loadDetail={loadDetail}
         />
       ))}
@@ -87,11 +105,12 @@ type CardProps = {
   reminder: ReminderView;
   layout: "today" | "panel";
   timeZone: string;
-  busy: ReminderActionName | null;
+  busy: PendingKind | null;
   locked: boolean;
   t: Translate;
   onAction: (action: ReminderActionName, until?: string) => void;
   onOpenTopic: (topicId: string, sessionKey: string | null) => void;
+  onAddTodo?: (() => void) | undefined;
   loadDetail?: ((reminderId: string) => Promise<string | null>) | undefined;
 };
 
@@ -211,6 +230,7 @@ function PlainReminderCard({
   t,
   onAction,
   onOpenTopic,
+  onAddTodo,
   loadDetail,
 }: CardProps) {
   const [open, setOpen] = useState(false);
@@ -343,13 +363,25 @@ function PlainReminderCard({
               {t("reminderMore")}
             </Button>
           }
-          items={panelItems(reminder, t, snooze, onAction, onOpenTopic)}
+          items={panelItems(reminder, t, snooze, onAction, onOpenTopic, onAddTodo)}
         />
       </>
     );
   } else {
     action = (
       <>
+        {onAddTodo ? (
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={<Icon name="plus" size={13} />}
+            loading={busy === "todo"}
+            disabled={locked}
+            onClick={onAddTodo}
+          >
+            {t("reminderAddTodo")}
+          </Button>
+        ) : null}
         <Button
           size="sm"
           variant="secondary"
@@ -429,8 +461,10 @@ function panelItems(
   snooze: (choice: SnoozeChoice) => void,
   onAction: (action: ReminderActionName, until?: string) => void,
   onOpenTopic: (topicId: string, sessionKey: string | null) => void,
+  onAddTodo?: (() => void) | undefined,
 ): MenuItem[] {
   const items: MenuItem[] = [
+    ...(onAddTodo ? [{ id: "todo", label: t("reminderAddTodo"), onSelect: onAddTodo }] : []),
     { id: "done", label: t("reminderDone"), onSelect: () => onAction("done") },
     ...snoozeItems(t, snooze),
     { id: "mute", label: t("reminderMute"), onSelect: () => onAction("mute") },

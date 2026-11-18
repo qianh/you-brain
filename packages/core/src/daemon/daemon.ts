@@ -151,6 +151,8 @@ import {
   RecallService,
   createRecallLog,
   recallHistoryId,
+  stripRecallBoilerplate,
+  type RecallDialogueTurn,
   type RecallHistoryItem,
   type RecallLogEntry,
 } from "../recall/index.js";
@@ -2114,11 +2116,16 @@ export class YouBrainDaemon {
           if (!this.#recallEnabled()) return;
           const session = await this.#materialize(live);
           if (!session) return;
-          const userTurns = session.turns
-            .filter((turn) => turn.role === "user")
-            .map((turn) => turn.text.trim())
-            .filter((text) => text !== "");
-          this.#recall.consider({ sessionKey: key, userTurns });
+          const dialogue: RecallDialogueTurn[] = [];
+          const userTurns: string[] = [];
+          for (const turn of session.turns) {
+            if (turn.role !== "user" && turn.role !== "assistant") continue;
+            const cleaned = stripRecallBoilerplate(turn.text);
+            if (cleaned === "") continue;
+            dialogue.push({ role: turn.role, text: cleaned });
+            if (turn.role === "user") userTurns.push(cleaned);
+          }
+          this.#recall.consider({ sessionKey: key, userTurns, dialogue });
         })
         .catch(() => {
           // Reading for recall is optional; capture carries on.
@@ -2154,7 +2161,7 @@ export class YouBrainDaemon {
             if (!session) continue;
             const turns = session.turns
               .filter((turn) => turn.role === "user")
-              .map((turn) => turn.text.trim())
+              .map((turn) => stripRecallBoilerplate(turn.text))
               .filter((text) => text !== "");
             if (turns.length === 0) continue;
             const at = updated[key] ?? session.updatedAt;
@@ -2512,11 +2519,17 @@ export class YouBrainDaemon {
         this.#canProcessWebSessions() &&
         this.#recentEnough(updatedAt, this.#clock.nowMs())
       ) {
-        const userTurns = (parseWebSession(text)?.turns ?? [])
-          .filter((turn) => turn.role === "user")
-          .map((turn) => turn.text.trim())
-          .filter((turnText) => turnText !== "");
-        this.#recall.consider({ sessionKey, userTurns });
+        const parsedTurns = parseWebSession(text)?.turns ?? [];
+        const dialogue: RecallDialogueTurn[] = [];
+        const userTurns: string[] = [];
+        for (const turn of parsedTurns) {
+          if (turn.role !== "user" && turn.role !== "assistant") continue;
+          const cleaned = stripRecallBoilerplate(turn.text);
+          if (cleaned === "") continue;
+          dialogue.push({ role: turn.role, text: cleaned });
+          if (turn.role === "user") userTurns.push(cleaned);
+        }
+        this.#recall.consider({ sessionKey, userTurns, dialogue });
       }
     } catch {
       // Skip a malformed inbox file and keep pulling.

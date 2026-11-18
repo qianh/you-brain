@@ -125,4 +125,21 @@ describe("ReminderCard", () => {
     const html = card(topic, "today", "reactivate");
     expect(html).toContain('aria-busy="true"');
   });
+
+  test("renders 加入 TODO button on today when onAddTodo is provided", () => {
+    const html = renderToStaticMarkup(
+      <ReminderCard
+        reminder={{ ...topic, kind: "recall", topicName: "发布流程" }}
+        layout="today"
+        timeZone="Asia/Shanghai"
+        busy={null}
+        locked={false}
+        t={t}
+        onAction={() => undefined}
+        onOpenTopic={() => undefined}
+        onAddTodo={() => undefined}
+      />,
+    );
+    expect(html).toContain("加入 TODO");
+  });
 });

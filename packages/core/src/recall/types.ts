@@ -11,6 +11,7 @@ export const RECALL_TEXT_MAX = 60;
 /** Below this text-match score a session is not taken to belong to any topic. */
 export const RECALL_MIN_SCORE = 0.25;
 export const RECALL_CONCLUSIONS = 10;
+export const RECALL_RECENT_FACTS = 12;
 export const RECALL_TODOS = 20;
 export const RECALL_ITEM_CHARS = 300;
 export const RECALL_TOPIC_COOLDOWN_MS = 24 * 60 * 60_000;
@@ -53,6 +54,23 @@ export interface RecallMemoryItem {
   sessionKey: string | null;
 }
 
+/**
+ * Non-citable recent or follow-up facts in the same topic (e.g. conclusions from the
+ * current session, recent <12h sessions, or later conclusions in the same session as an
+ * open todo). Shown to the model ONLY to verify whether an older memory item is already
+ * completed or superseded.
+ */
+export interface RecallFactItem {
+  day: string | null;
+  text: string;
+}
+
+/** One dialogue turn from the current session, for judging whether an item was just handled. */
+export interface RecallDialogueTurn {
+  role: "user" | "assistant";
+  text: string;
+}
+
 export interface RecallMemory {
   topicId: string;
   name: string;
@@ -60,6 +78,7 @@ export interface RecallMemory {
   /** Last day another session touched this topic. */
   lastActiveDay: string | null;
   items: RecallMemoryItem[];
+  recentFacts?: readonly RecallFactItem[];
 }
 
 export type RecallDecision =

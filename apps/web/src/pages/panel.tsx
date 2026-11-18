@@ -24,6 +24,7 @@ import type { QuotaTokenUsage } from "@you-brain/core/http/types.js";
 import { useQuota } from "./panel/use-quota.js";
 import { openAppPath } from "./panel/open.js";
 import { ReminderList } from "./reminders/list.js";
+import { isRecallReminder, reminderToTaskInput } from "./reminders/model.js";
 import { isUnreachableError } from "./status/logic.js";
 
 export function panelCapsuleKind(input: {
@@ -173,6 +174,16 @@ export function PanelPage() {
                   t={t}
                   onAction={reminderAction}
                   onOpenTopic={(topicId, session) => openMain(topicHref(topicZone(topics, topicId), topicId, session))}
+                  onAddTodo={async (reminder) => {
+                    await client.createTask(reminderToTaskInput(reminder));
+                    if (isRecallReminder(reminder)) {
+                      await client.reminderReply(reminder.reminderId, t("popupTodoReplyNote"));
+                      await reload("today");
+                    } else {
+                      await reminderAction(reminder.reminderId, "done");
+                    }
+                    push({ message: t("reminderAddedTodo"), tone: "success" });
+                  }}
                   loadDetail={(reminderId) => client.reminderDetail(reminderId).then((result) => result.detail)}
                 />
               </div>

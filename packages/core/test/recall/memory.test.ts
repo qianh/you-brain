@@ -80,4 +80,43 @@ describe("buildRecallMemory", () => {
     expect(build(recallBook(), "topic-c")).toBeNull();
     expect(build(recallBook(), "topic-none")).toBeNull();
   });
+
+  it("把近 12 小时内及候选待办同会话后续结论放入 recentFacts 供过时核对，但不进可引用 items", () => {
+    const TWIN = sessionKey(8);
+    const OTHER_OLD = sessionKey(5);
+    const extras = Array.from({ length: 12 }, (_, index) =>
+      event(
+        "conclusion.added",
+        { conclusionId: `con-noise-${index}`, topicId: "topic-a", text: `其他结论${index}`, sessionKey: OTHER_OLD },
+        `2026-11-15T0${index % 10}:00:00.000Z`,
+      ),
+    );
+    const book = recallBook([
+      // OLD session had todo-1 at 2026-11-13T02:00:00Z; later in the SAME session at 08:00Z it finished packaging!
+      event(
+        "conclusion.added",
+        { conclusionId: "con-same-session-later", topicId: "topic-a", text: "当天下午已完成重新打包", sessionKey: OLD },
+        "2026-11-13T08:00:00.000Z",
+      ),
+      ...extras,
+      // Current/recent session also just generated a fresh conclusion!
+      event(
+        "conclusion.added",
+        { conclusionId: "con-current-done", topicId: "topic-a", text: "刚刚生成了最新包 20261118.zip", sessionKey: TWIN },
+        "2026-11-16T02:02:00.000Z",
+      ),
+    ]);
+    const recent = new Date(NOW - 60_000).toISOString();
+    const memory = build(book, "topic-a", {
+      ...updated,
+      [OTHER_OLD]: "2026-11-15T01:00:00.000Z",
+      [TWIN]: recent,
+    });
+    const itemIds = memory?.items.map((item) => item.id) ?? [];
+    expect(itemIds).not.toContain("conclusion:con-current-done");
+    expect(itemIds).not.toContain("conclusion:con-same-session-later");
+    const factTexts = memory?.recentFacts?.map((f) => f.text) ?? [];
+    expect(factTexts).toContain("刚刚生成了最新包 20261118.zip");
+    expect(factTexts).toContain("当天下午已完成重新打包");
+  });
 });
