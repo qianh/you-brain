@@ -30,6 +30,75 @@ export function reminderFirstLine(text: string): { line: string; more: boolean }
   return { line: normalized.slice(0, index), more: true };
 }
 
+/**
+ * 晨间摘要正文是 core 按固定句式拼的(packages/core/src/reminders/text.ts digestText),
+ * 第一条结论为了系统通知被截成二十几个字。卡片上只取数字和建议跟进的话题,结论原文走详情。
+ * 句式认不出(旧格式或改过文案)时返回 null,卡片退回原文显示。
+ */
+export interface DigestSummary {
+  conclusions: number;
+  todos: number;
+  suggestions: string[];
+}
+
+export function parseDigest(text: string): DigestSummary | null {
+  let conclusions: number | undefined;
+  let todos: number | undefined;
+  let suggestions: string[] = [];
+  for (const raw of text.replaceAll("\r\n", "\n").split("\n")) {
+    const line = raw.trim();
+    if (line === "") continue;
+    const many = /^昨日结论 (\d+) 条：/u.exec(line);
+    const todo = /^未完成待办 (\d+) 件。$/u.exec(line);
+    if (line === "昨日没有新结论。") conclusions = 0;
+    else if (many) conclusions = Number(many[1]);
+    else if (line.startsWith("昨日结论：")) conclusions = 1;
+    else if (line === "没有未完成的待办。") todos = 0;
+    else if (todo) todos = Number(todo[1]);
+    else if (line === "今天没有特别建议跟进的话题。") suggestions = [];
+    else if (line.startsWith("建议跟进：")) suggestions = splitNames(line.slice("建议跟进：".length));
+    else return null;
+  }
+  if (conclusions === undefined || todos === undefined) return null;
+  return { conclusions, todos, suggestions };
+}
+
+/** 详情接口返回的结论全文(packages/core/src/reminders/detail.ts),拆成列表项。 */
+export interface DigestDetail {
+  conclusions: Array<{ text: string; topic: string | null }>;
+  note: string | null;
+  suggestions: string[];
+}
+
+export function parseDigestDetail(detail: string): DigestDetail | null {
+  const conclusions: DigestDetail["conclusions"] = [];
+  const suggestions: string[] = [];
+  let note: string | null = null;
+  for (const raw of detail.replaceAll("\r\n", "\n").split("\n")) {
+    const line = raw.trim();
+    if (line === "" || line === "建议跟进" || line === "昨日没有新结论。" || /^昨日结论（\d+ 条）$/u.test(line)) continue;
+    const item = /^\d+\. (.*)$/u.exec(line);
+    if (item) {
+      const body = item[1] ?? "";
+      const cut = body.lastIndexOf("  —— ");
+      conclusions.push(
+        cut < 0 ? { text: body, topic: null } : { text: body.slice(0, cut).trim(), topic: body.slice(cut + 5).trim() || null },
+      );
+    } else if (line.startsWith("· ")) suggestions.push(line.slice(2).trim());
+    else if (line.startsWith("……")) note = line.slice(2).trim();
+    else return null;
+  }
+  return { conclusions, note, suggestions };
+}
+
+function splitNames(value: string): string[] {
+  return value
+    .replace(/。$/u, "")
+    .split("、")
+    .map((name) => name.trim())
+    .filter((name) => name !== "");
+}
+
 export function reminderFailureMessage(error: unknown, fallback: string): string {
   if (error instanceof Error && error.message.trim() !== "") return error.message;
   return fallback;

@@ -11,9 +11,12 @@ import type { MessageKey } from "../../i18n/messages.js";
 import {
   isDigestReminder,
   isRecallReminder,
+  parseDigest,
+  parseDigestDetail,
   reminderFailureMessage,
   reminderFirstLine,
   snoozeChoiceUntil,
+  type DigestSummary,
   type ReminderActionName,
   type SnoozeChoice,
 } from "./model.js";
@@ -80,17 +83,7 @@ export function ReminderList({
   );
 }
 
-export function ReminderCard({
-  reminder,
-  layout,
-  timeZone,
-  busy,
-  locked,
-  t,
-  onAction,
-  onOpenTopic,
-  loadDetail,
-}: {
+type CardProps = {
   reminder: ReminderView;
   layout: "today" | "panel";
   timeZone: string;
@@ -100,7 +93,126 @@ export function ReminderCard({
   onAction: (action: ReminderActionName, until?: string) => void;
   onOpenTopic: (topicId: string, sessionKey: string | null) => void;
   loadDetail?: ((reminderId: string) => Promise<string | null>) | undefined;
-}) {
+};
+
+export function ReminderCard(props: CardProps) {
+  const summary = props.reminder.kind === "morning_digest" ? parseDigest(props.reminder.text) : null;
+  return summary ? <DigestCard {...props} summary={summary} /> : <PlainReminderCard {...props} />;
+}
+
+/**
+ * 晨间摘要:正文里被截短的第一条结论对阅读没有帮助,卡片只放两个数字和建议跟进的话题,
+ * 结论全文按需从详情接口取来,逐条列出并标出所在话题。按钮统一放在底栏。
+ */
+function DigestCard({ reminder, busy, locked, t, onAction, loadDetail, summary }: CardProps & { summary: DigestSummary }) {
+  const [detail, setDetail] = useState<string | null | undefined>(undefined);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const parsed = detail ? parseDigestDetail(detail) : null;
+  const canDetail = loadDetail !== undefined && summary.conclusions > 0 && detail !== null;
+  const toggleDetail = (): void => {
+    if (detailOpen) {
+      setDetailOpen(false);
+      return;
+    }
+    if (detail !== undefined || loadDetail === undefined) {
+      setDetailOpen(true);
+      return;
+    }
+    setDetailLoading(true);
+    void loadDetail(reminder.reminderId)
+      .then((text) => {
+        setDetail(text);
+        setDetailOpen(text !== null);
+      })
+      .catch(() => setDetail(null))
+      .finally(() => setDetailLoading(false));
+  };
+  // 详情里有话题全名,取到后替换掉正文里被截短的名字。
+  const suggestions = parsed && parsed.suggestions.length > 0 ? parsed.suggestions : summary.suggestions;
+
+  const footer = (
+    <>
+      {canDetail ? (
+        <span className="reminder-links">
+          <button
+            type="button"
+            className="reminder-expand"
+            aria-expanded={detailOpen}
+            disabled={detailLoading}
+            onClick={toggleDetail}
+          >
+            {detailOpen
+              ? t("digestHideConclusions")
+              : detailLoading
+                ? `${t("digestViewConclusions")}…`
+                : t("digestViewConclusions")}
+          </button>
+        </span>
+      ) : null}
+      <Button size="sm" variant="ghost" loading={busy === "ignore"} disabled={locked} onClick={() => onAction("ignore")}>
+        {t("reminderIgnoreRead")}
+      </Button>
+    </>
+  );
+
+  return (
+    <Banner tone="info" className="reminder-banner digest-banner" action={footer} actionBelow>
+      <span className="digest-title">{t("digestTitle")}</span>
+      <span className="digest-stats">
+        <span className="digest-stat">
+          <span className="digest-stat-value">{summary.conclusions}</span>
+          <span className="digest-stat-label">{t("digestConclusions")}</span>
+        </span>
+        <span className="digest-stat">
+          <span className="digest-stat-value">{summary.todos}</span>
+          <span className="digest-stat-label">{t("digestTodos")}</span>
+        </span>
+      </span>
+      {suggestions.length > 0 ? (
+        <span className="digest-follow">
+          <span className="digest-label">{t("digestFollow")}</span>
+          <span className="digest-chips">
+            {suggestions.map((name) => (
+              <span key={name} className="digest-chip" title={name}>
+                {name}
+              </span>
+            ))}
+          </span>
+        </span>
+      ) : null}
+      {detailOpen && detail ? (
+        parsed ? (
+          <span className="digest-detail">
+            <ol className="digest-list">
+              {parsed.conclusions.map((item, index) => (
+                <li key={index}>
+                  <span className="digest-item-text">{item.text}</span>
+                  {item.topic ? <span className="digest-item-topic">{item.topic}</span> : null}
+                </li>
+              ))}
+            </ol>
+            {parsed.note ? <span className="digest-note">{parsed.note}</span> : null}
+          </span>
+        ) : (
+          <div className="reminder-detail">{detail}</div>
+        )
+      ) : null}
+    </Banner>
+  );
+}
+
+function PlainReminderCard({
+  reminder,
+  layout,
+  timeZone,
+  busy,
+  locked,
+  t,
+  onAction,
+  onOpenTopic,
+  loadDetail,
+}: CardProps) {
   const [open, setOpen] = useState(false);
   // 正文为通知被截短了(「…」结尾)时,点「查看详情」现取原文。undefined = 还没取过。
   const [detail, setDetail] = useState<string | null | undefined>(undefined);
@@ -147,6 +259,35 @@ export function ReminderCard({
     onAction("snooze", snoozeChoiceUntil(new Date(), timeZone, choice));
   };
 
+  // 展开/收起和查看详情排成一行;托盘里展开时整行挪到底栏,和按钮并排(链接靠左、按钮靠右)。
+  const links =
+    canExpand || canDetail ? (
+      <span className="reminder-links">
+        {canExpand ? (
+          <button
+            type="button"
+            className="reminder-expand"
+            aria-expanded={open}
+            onClick={() => setOpen((value) => !value)}
+          >
+            {open ? t("reminderCollapse") : t("reminderExpand")}
+          </button>
+        ) : null}
+        {canDetail ? (
+          <button
+            type="button"
+            className="reminder-expand"
+            aria-expanded={detailOpen}
+            disabled={detailLoading}
+            onClick={toggleDetail}
+          >
+            {detailOpen ? t("reminderDetailHide") : detailLoading ? `${t("reminderDetail")}…` : t("reminderDetail")}
+          </button>
+        ) : null}
+      </span>
+    ) : null;
+  const linksInFooter = layout === "panel" && open;
+
   const copy = (
     <>
       <span ref={copyRef} className={panelClamp ? "reminder-copy is-clamped" : "reminder-copy"}>
@@ -158,27 +299,7 @@ export function ReminderCard({
           {t("reminderReplyLabel")}：“{reminder.reply}”
         </span>
       ) : null}
-      {canExpand ? (
-        <button
-          type="button"
-          className="reminder-expand"
-          aria-expanded={open}
-          onClick={() => setOpen((value) => !value)}
-        >
-          {open ? t("reminderCollapse") : t("reminderExpand")}
-        </button>
-      ) : null}
-      {canDetail ? (
-        <button
-          type="button"
-          className="reminder-expand reminder-detail-toggle"
-          aria-expanded={detailOpen}
-          disabled={detailLoading}
-          onClick={toggleDetail}
-        >
-          {detailOpen ? t("reminderDetailHide") : detailLoading ? `${t("reminderDetail")}…` : t("reminderDetail")}
-        </button>
-      ) : null}
+      {linksInFooter ? null : links}
       {detailOpen && detail ? <div className="reminder-detail">{detail}</div> : null}
     </>
   );
@@ -269,7 +390,21 @@ export function ReminderCard({
   }
 
   return (
-    <Banner tone="info" className="reminder-banner" action={action} actionBelow={layout === "panel" && open}>
+    <Banner
+      tone="info"
+      className="reminder-banner"
+      action={
+        linksInFooter && links ? (
+          <>
+            {links}
+            {action}
+          </>
+        ) : (
+          action
+        )
+      }
+      actionBelow={linksInFooter}
+    >
       {copy}
     </Banner>
   );

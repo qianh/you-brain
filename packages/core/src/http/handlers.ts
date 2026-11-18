@@ -17,6 +17,7 @@ import {
 } from "../consolidate/execute.js";
 import { YouBrainError } from "../domain/errors.js";
 import { UiPrefsLimitError, type UiPrefsPatch } from "../ui-prefs/store.js";
+import { MuseError } from "../deck/muse/sdk/errors.js";
 import { TaskError } from "../tasks/service.js";
 import { TaskActionSchema, TaskCreateSchema, TaskUpdateSchema } from "../tasks/schema.js";
 import { probeT3Web } from "../deck/t3/probe.js";
@@ -72,6 +73,8 @@ import {
   DeckBridgeRepliesBodySchema,
   DeckBridgeSendBodySchema,
   DeckDshLoginBodySchema,
+  DeckMuseActionBodySchema,
+  DeckMuseSendBodySchema,
   DeckTty7DeleteBodySchema,
   UiPrefsPatchBodySchema,
   DeckTty7RenameBodySchema,
@@ -142,6 +145,7 @@ export class HttpError extends Error {
 
 export function errorResponse(error: unknown): Response {
   if (error instanceof TaskError) return apiError(error.status, "TASK_REJECTED", error.message);
+  if (error instanceof MuseError) return apiError(400, "MUSE_ERROR", error.message);
   if (error instanceof HttpError) return apiError(error.status, error.code, error.message);
   if (error instanceof z.ZodError) {
     return apiError(400, "INVALID_INPUT", error.message);
@@ -474,6 +478,100 @@ export async function handleApi(
   }
   if (path === "/api/deck/t3") {
     return method(request, "GET", async () => json(await probeT3Web(url.searchParams.get("url") ?? "")));
+  }
+  if (path === "/api/deck/muse") {
+    return method(request, "GET", async () => {
+      const port = deck(context);
+      if (!port.museOverview) notSupported();
+      return json(await port.museOverview());
+    });
+  }
+  if (path === "/api/deck/muse/session") {
+    return method(request, "GET", async () => {
+      const port = deck(context);
+      if (!port.museSession) notSupported();
+      const id = url.searchParams.get("id") ?? undefined;
+      const found = await port.museSession(id);
+      if (!found) return apiError(404, "NOT_FOUND", "找不到该 Muse 会话");
+      return json(found);
+    });
+  }
+  if (path === "/api/deck/muse/action") {
+    return method(request, "POST", async () => {
+      const port = deck(context);
+      if (!port.museAction) notSupported();
+      const body = DeckMuseActionBodySchema.parse(await readJson(request));
+      return json(await port.museAction(body));
+    });
+  }
+  if (path === "/api/deck/muse/send") {
+    return method(request, "POST", async () => {
+      const port = deck(context);
+      if (!port.museSend) notSupported();
+      const body = DeckMuseSendBodySchema.parse(await readJson(request));
+      return json(await port.museSend(body));
+    });
+  }
+  if (path === "/api/deck/muse/stream") {
+    return method(request, "GET", async () => {
+      const port = deck(context);
+      if (!port.museSubscribe || !port.museOverview) notSupported();
+      const initial = await port.museOverview();
+      const subscribe = port.museSubscribe.bind(port);
+      const encoder = new TextEncoder();
+      let unsubscribe = (): void => undefined;
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          let closed = false;
+          const finish = (): void => {
+            if (closed) return;
+            closed = true;
+            unsubscribe();
+            if (heartbeat !== undefined) clearInterval(heartbeat);
+            try {
+              controller.close();
+            } catch {
+              // Consumer already disconnected.
+            }
+          };
+          const push = (payload: unknown): void => {
+            try {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+            } catch {
+              finish();
+            }
+          };
+          unsubscribe = subscribe((ev) => push(ev));
+          push({ type: "overview", overview: initial });
+          heartbeat = setInterval(() => {
+            try {
+              controller.enqueue(encoder.encode(": ping\n\n"));
+            } catch {
+              finish();
+            }
+          }, 20_000);
+          heartbeat.unref?.();
+          if (request.signal.aborted) {
+            finish();
+            return;
+          }
+          request.signal.addEventListener("abort", finish, { once: true });
+        },
+        cancel() {
+          unsubscribe();
+          if (heartbeat !== undefined) clearInterval(heartbeat);
+        },
+      });
+      return new Response(stream, {
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache, no-transform",
+          connection: "keep-alive",
+          "x-accel-buffering": "no",
+        },
+      });
+    });
   }
   if (path === "/api/status") return method(request, "GET", () => status(context));
   if (path === "/api/quota") return method(request, "GET", () => json(context.deps.quota?.() ?? EMPTY_QUOTA));

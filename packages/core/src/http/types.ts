@@ -1217,6 +1217,58 @@ export interface DeckDshLoginResponse {
   providers: import("../deck/dsh/login.js").DshLoginView[];
 }
 
+// ---- Muse 会话桥：指挥台嵌入 Muse SDK 会话（主对话同步 + 独立子会话） ----
+
+export type DeckMuseOverviewResponse = import("../deck/muse/types.js").DeckMuseOverview;
+export type DeckMuseSessionResponse = import("../deck/muse/types.js").DeckMuseSessionDetail;
+export type DeckMuseActionResponse = import("../deck/muse/types.js").DeckMuseActionResult;
+export type DeckMuseSendResponse = import("../deck/muse/types.js").DeckMuseSendResult;
+export type DeckMuseStreamEvent = import("../deck/muse/types.js").DeckMuseStreamEvent;
+
+export const DeckMuseActionBodySchema = z.discriminatedUnion("action", [
+  z.object({
+    action: z.literal("pair-start"),
+    sdkToken: z.string().trim().max(200).optional(),
+    probe: z.boolean().optional(),
+  }).strict(),
+  z.object({ action: z.literal("pair-cancel") }).strict(),
+  z.object({ action: z.literal("pair-import") }).strict(),
+  z.object({ action: z.literal("unpair") }).strict(),
+  z.object({ action: z.literal("reconnect") }).strict(),
+  z.object({ action: z.literal("select-vm"), vmId: z.string().trim().min(1).max(200).nullable() }).strict(),
+  z.object({ action: z.literal("session-create"), title: z.string().trim().max(80).optional() }).strict(),
+  z.object({
+    action: z.literal("session-rename"),
+    id: z.string().trim().min(1).max(200),
+    title: z.string().trim().min(1).max(80),
+  }).strict(),
+  z.object({ action: z.literal("session-delete"), id: z.string().trim().min(1).max(200) }).strict(),
+  z.object({ action: z.literal("turn-cancel"), sessionId: z.string().trim().min(1).max(200) }).strict(),
+]);
+
+export type DeckMuseActionBody = z.infer<typeof DeckMuseActionBodySchema>;
+
+export const DeckMuseSendBodySchema = z
+  .object({
+    sessionId: z.string().trim().min(1).max(200),
+    text: z.string().max(64_000),
+    images: z
+      .array(
+        z
+          .object({
+            filename: z.string().trim().min(1).max(260),
+            mimeType: z.enum(["image/jpeg", "image/png", "image/gif", "image/webp"]),
+            dataBase64: z.string().min(4).max(3_000_000),
+          })
+          .strict(),
+      )
+      .max(6)
+      .optional(),
+  })
+  .strict();
+
+export type DeckMuseSendBody = z.infer<typeof DeckMuseSendBodySchema>;
+
 
 /** PUT /api/ui-prefs 的请求体。长度限制由存储层判断，超限返回 413 而不是 400。 */
 export const UiPrefsPatchBodySchema = z

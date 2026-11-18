@@ -73,6 +73,13 @@ import type {
   OAuthClientPublic,
   OAuthClientPutBody,
   DeckDshWebResponse,
+  DeckMuseActionBody,
+  DeckMuseActionResponse,
+  DeckMuseOverviewResponse,
+  DeckMuseSendBody,
+  DeckMuseSendResponse,
+  DeckMuseSessionResponse,
+  DeckMuseStreamEvent,
   DeckT3WebResponse,
   DeckTty7PasteImageResponse,
   DeckTty7ScreenResponse,
@@ -195,6 +202,14 @@ export interface BrowserDaemon
   /** 指挥台。 */
   deckDsh(retry?: boolean): Promise<DeckDshWebResponse>;
   deckT3(url: string): Promise<DeckT3WebResponse>;
+  deckMuse(): Promise<DeckMuseOverviewResponse>;
+  deckMuseSession(id?: string): Promise<DeckMuseSessionResponse>;
+  deckMuseAction(body: DeckMuseActionBody): Promise<DeckMuseActionResponse>;
+  deckMuseSend(body: DeckMuseSendBody): Promise<DeckMuseSendResponse>;
+  deckMuseStream(
+    listener: (event: DeckMuseStreamEvent) => void,
+    options?: { signal?: AbortSignal },
+  ): Promise<void>;
   /** tty7 会话桥：列会话、看屏幕、发指令、新开会话；粘贴图片落盘换路径。 */
   deckTty7Sessions(): Promise<DeckTty7SessionsResponse>;
   deckTty7Delete(pane: number): Promise<{ ok: true }>;
@@ -367,6 +382,18 @@ export function createBrowserDaemon(options?: {
     deckDsh: (retry?: boolean) =>
       request<DeckDshWebResponse>("GET", retry === true ? "/api/deck/dsh?retry=1" : "/api/deck/dsh"),
     deckT3: (url: string) => request<DeckT3WebResponse>("GET", `/api/deck/t3?url=${encodeURIComponent(url)}`),
+    deckMuse: () => request<DeckMuseOverviewResponse>("GET", "/api/deck/muse"),
+    deckMuseSession: (id?: string) =>
+      request<DeckMuseSessionResponse>(
+        "GET",
+        id === undefined ? "/api/deck/muse/session" : `/api/deck/muse/session?id=${encodeURIComponent(id)}`,
+      ),
+    deckMuseAction: (body: DeckMuseActionBody) =>
+      request<DeckMuseActionResponse>("POST", "/api/deck/muse/action", body),
+    deckMuseSend: (body: DeckMuseSendBody) =>
+      request<DeckMuseSendResponse>("POST", "/api/deck/muse/send", body),
+    deckMuseStream: (listener, streamOptions) =>
+      readMuseEvents(fetchImpl, token, listener, streamOptions?.signal),
     deckTty7Sessions: () => request<DeckTty7SessionsResponse>("GET", "/api/deck/tty7/sessions"),
     deckTty7Delete: (pane: number) => request<{ ok: true }>("POST", "/api/deck/tty7/delete", { pane }),
     deckTty7Rename: (pane: number, name: string) => request<{ ok: true }>("POST", "/api/deck/tty7/rename", { pane, name }),
@@ -548,5 +575,59 @@ function safeParse(text: string): unknown {
     return JSON.parse(text) as unknown;
   } catch {
     return null;
+  }
+}
+
+async function readMuseEvents(
+  fetchImpl: typeof fetch,
+  token: string,
+  listener: (event: DeckMuseStreamEvent) => void,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  const response = await fetchImpl("/api/deck/muse/stream", {
+    credentials: "omit",
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: "text/event-stream",
+    },
+    ...(signal ? { signal } : {}),
+  });
+  if (!response.ok || !response.body) {
+    const text = await response.text();
+    const parsed = text === "" ? null : safeParse(text);
+    const errorBody = asError(parsed);
+    throw new BrowserDaemonError(
+      response.status,
+      errorBody?.code ?? "HTTP_ERROR",
+      errorBody?.message ?? (response.statusText || "Muse 实时连接失败"),
+    );
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (!signal?.aborted) {
+      const chunk = await reader.read();
+      if (chunk.done) return;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      const parsed = drainSse(buffer);
+      buffer = parsed.rest;
+      for (const frame of parsed.frames) {
+        const value = safeParse(frame.data);
+        if (
+          value !== null &&
+          typeof value === "object" &&
+          "type" in value &&
+          (value.type === "overview" || value.type === "session")
+        ) {
+          listener(value as DeckMuseStreamEvent);
+        }
+      }
+    }
+  } catch (error) {
+    if (signal?.aborted) return;
+    throw error;
+  } finally {
+    await reader.cancel().catch(() => undefined);
   }
 }

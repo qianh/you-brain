@@ -5,6 +5,7 @@ import type { DshLoginProviderId, DshLoginView } from "./dsh/login.js";
 import { DshRuntime, type DshRuntimeOptions } from "./dsh/runtime.js";
 import type { DshWebState } from "./dsh/web.js";
 import { ActivityMonitor } from "./activity.js";
+import { MuseDeckRuntime } from "./muse/runtime.js";
 import { SessionNoticeWatcher, type SessionNoticeList } from "./session-notices.js";
 import { Tty7 } from "./tty7.js";
 import {
@@ -68,10 +69,16 @@ export class DeckService {
   readonly notices: SessionNoticeWatcher;
   /** 终端活动监视：没有 hooks 状态的会话（任意 AI CLI、普通脚本）按进程活动判断是否在执行。 */
   readonly activity: ActivityMonitor;
+  /** Muse SDK 会话桥：配对、主对话同步与独立子会话。 */
+  readonly muse: MuseDeckRuntime;
 
   constructor(options: DeckServiceOptions) {
     this.#options = options;
     this.tty7 = options.tty7 ?? new Tty7({ env: options.env });
+    this.muse = new MuseDeckRuntime({
+      dataDir: options.dataDir,
+      homeDir: options.homeDir,
+    });
     this.notices = new SessionNoticeWatcher({
       sessions: () => this.tty7.sessions(),
       subscribe: (onLine) => this.tty7.events(onLine),
@@ -102,6 +109,7 @@ export class DeckService {
     this.#stopped = true;
     this.notices.stop();
     this.activity.stop();
+    this.muse.stop();
     void this.#dsh.close().catch(() => undefined);
   }
 

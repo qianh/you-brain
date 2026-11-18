@@ -13,8 +13,9 @@ import { terminalReferenceMessage, type TerminalReference } from "../lib/termina
 import { DeckTerminalScreen } from "./deck-terminal-screen.js";
 import { EMPTY_TABS, hideScreen, openTab, pruneTabs, type TerminalTabs } from "./deck-terminal-tabs.js";
 import { DeckTty7Panel } from "./deck-tty7.js";
-import { initialDeckView, useTty7Sessions, waitingCount } from "./deck-tty7-sessions.js";
+import { initialDeckView, useTty7Sessions, waitingCount, type DeckViewId } from "./deck-tty7-sessions.js";
 import { DeckT3Panel } from "./deck-t3.js";
+import { DeckMusePanel } from "./deck-muse.js";
 
 type DshWebView =
   | { state: "stopped" }
@@ -25,15 +26,19 @@ type DshWebView =
 const POLL_MS = 1_000;
 const TTY7_OPEN_KEY = "you-brain.deck.tty7-open";
 const DECK_VIEW_KEY = "you-brain.deck.view";
-const DECK_VIEWS = [{ value: "t3", label: "T3" }, { value: "dsh", label: "DSH" }];
+const DECK_VIEWS = [
+  { value: "t3", label: "T3" },
+  { value: "dsh", label: "DSH" },
+  { value: "muse", label: "Muse" },
+];
 
 /**
- * 指挥台：左边切换 DSH / T3，右边共用可收起的 tty7 会话面板（ADR-0004）。
+ * 指挥台：左边切换 T3 / DSH / Muse，右边共用可收起的 tty7 会话面板（ADR-0004）。
  */
 export function DshDeckPage() {
   const { client, t } = useDaemon();
   const pageActive = usePageActive();
-  const [activePage, setActivePage] = useState<"dsh" | "t3">(() => {
+  const [activePage, setActivePage] = useState<DeckViewId>(() => {
     try { return initialDeckView(prefs.getItem(DECK_VIEW_KEY)); } catch { return initialDeckView(null); }
   });
   const sessions = useTty7Sessions();
@@ -44,6 +49,9 @@ export function DshDeckPage() {
   const [t3Visited, setT3Visited] = useState(activePage === "t3");
   const [t3SettingsOpen, setT3SettingsOpen] = useState(false);
   const [t3ReloadVersion, setT3ReloadVersion] = useState(0);
+  const [museVisited, setMuseVisited] = useState(activePage === "muse");
+  const [museSettingsOpen, setMuseSettingsOpen] = useState(false);
+  const [museReconnectVersion, setMuseReconnectVersion] = useState(0);
   const [view, setView] = useState<DshWebView>({ state: "starting" });
   const [attempt, setAttempt] = useState(0);
   const frame = useRef<HTMLIFrameElement>(null);
@@ -142,9 +150,10 @@ export function DshDeckPage() {
   };
 
   const switchPage = (next: string): void => {
-    if (next !== "dsh" && next !== "t3") return;
+    if (next !== "dsh" && next !== "t3" && next !== "muse") return;
     setActivePage(next);
     if (next === "t3") setT3Visited(true);
+    if (next === "muse") setMuseVisited(true);
     try { prefs.setItem(DECK_VIEW_KEY, next); } catch { /* 本次切换仍可用。 */ }
   };
 
@@ -178,7 +187,7 @@ export function DshDeckPage() {
     );
   }
 
-  // 两个页面保留挂载，切换只隐藏；tty7 面板独立于页面和连接状态。
+  // 三个页面保留挂载，切换只隐藏；tty7 面板独立于页面和连接状态。
   return (
     <Page>
       <div className="dsh-deck">
@@ -190,6 +199,11 @@ export function DshDeckPage() {
                 <>
                   <Button size="sm" variant="ghost" icon={<Icon name="settings" />} onClick={() => setT3SettingsOpen(true)}>{t("dshDeckT3Settings")}</Button>
                   <IconButton label={t("dshDeckT3Refresh")} onClick={() => setT3ReloadVersion((value) => value + 1)}><Icon name="refresh" /></IconButton>
+                </>
+              ) : activePage === "muse" ? (
+                <>
+                  <Button size="sm" variant="ghost" icon={<Icon name="settings" />} onClick={() => setMuseSettingsOpen(true)}>{t("deckMuseSettings")}</Button>
+                  <IconButton label={t("deckMuseReconnect")} onClick={() => setMuseReconnectVersion((value) => value + 1)}><Icon name="refresh" /></IconButton>
                 </>
               ) : null}
               <IconButton
@@ -208,6 +222,16 @@ export function DshDeckPage() {
           <div className="dsh-deck-view" role="region" aria-label={t("dshDeckFrameTitle")} hidden={activePage !== "dsh"}>{main}</div>
           <div className="dsh-deck-view" role="region" aria-label={t("dshDeckT3FrameTitle")} hidden={activePage !== "t3"}>
             {t3Visited ? <DeckT3Panel reloadVersion={t3ReloadVersion} settingsOpen={t3SettingsOpen} onSettingsChange={setT3SettingsOpen} onReload={() => setT3ReloadVersion((value) => value + 1)} /> : null}
+          </div>
+          <div className="dsh-deck-view" role="region" aria-label={t("deckMuseFrameTitle")} hidden={activePage !== "muse"}>
+            {museVisited ? (
+              <DeckMusePanel
+                active={activePage === "muse"}
+                reconnectVersion={museReconnectVersion}
+                settingsOpen={museSettingsOpen}
+                onSettingsChange={setMuseSettingsOpen}
+              />
+            ) : null}
           </div>
         </div>
         {tty7Open ? (

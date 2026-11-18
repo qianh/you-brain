@@ -77,6 +77,24 @@ await rm(staging, { recursive: true, force: true });
 await cp(join(built, "you-brain"), join(binaries, "you-brain"));
 await run(["chmod", "755", join(binaries, "you-brain")]);
 
+const appPlist = join(app, "Contents", "Info.plist");
+await run([
+  "plutil",
+  "-replace",
+  "NSBluetoothAlwaysUsageDescription",
+  "-string",
+  "用于在指挥台通过蓝牙发现并绑定你的 Muse 个人助手。",
+  appPlist,
+]);
+await run([
+  "plutil",
+  "-replace",
+  "NSBluetoothPeripheralUsageDescription",
+  "-string",
+  "用于在配对期间将当前 Mac 广播为 Muse 设备。",
+  appPlist,
+]);
+
 await run(["codesign", "--force", "--deep", "--sign", "-", app]);
 await run(["codesign", "--verify", "--deep", "--strict", app]);
 console.log(JSON.stringify({ app, triple, signed: "ad-hoc" }));

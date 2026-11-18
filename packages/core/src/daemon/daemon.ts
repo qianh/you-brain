@@ -3807,6 +3807,11 @@ export class YouBrainDaemon {
       tty7PasteImage: async (data, contentType) => ({
         path: await deck.tty7.saveImagePaste(data, contentType),
       }),
+      museOverview: () => deck.muse.overview(),
+      museSession: (id) => deck.muse.session(id),
+      museAction: (body) => deck.muse.action(body),
+      museSend: (body) => deck.muse.send(body),
+      museSubscribe: (listener) => deck.muse.subscribeStream(listener),
     };
   }
 

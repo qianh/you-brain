@@ -77,7 +77,7 @@ export async function startDaemonHttp(
       const trace = options.trace;
       // The event stream stays open for the whole session; as a traced span it would
       // overlap everything.
-      if (trace === undefined || url.pathname === "/api/events") {
+      if (trace === undefined || url.pathname === "/api/events" || url.pathname === "/api/deck/muse/stream") {
         return dispatch(request, token, options.staticDir, context);
       }
       return trace(`http ${url.pathname}`, async () => dispatch(request, token, options.staticDir, context));

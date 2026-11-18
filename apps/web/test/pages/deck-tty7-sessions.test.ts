@@ -17,9 +17,10 @@ describe("deck-tty7-sessions", () => {
     expect(sessionTitle(make({ pane: 7 }))).toBe("%7");
   });
 
-  it("initialDeckView 首次使用默认 T3", () => {
+  it("initialDeckView 首次使用默认 T3，记住 dsh 或 muse", () => {
     expect(initialDeckView(null)).toBe("t3");
     expect(initialDeckView("dsh")).toBe("dsh");
+    expect(initialDeckView("muse")).toBe("muse");
     expect(initialDeckView("t3")).toBe("t3");
   });
 

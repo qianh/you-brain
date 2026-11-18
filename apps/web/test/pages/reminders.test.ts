@@ -3,10 +3,14 @@ import { describe, expect, test } from "bun:test";
 import {
   isDigestReminder,
   isRecallReminder,
+  parseDigest,
+  parseDigestDetail,
   reminderFailureMessage,
   reminderFirstLine,
   snoozeUntil,
 } from "../../src/pages/reminders/model.js";
+// 契约:卡片按 core 拼出的早报句式解析,core 改了文案这里会先红。
+import { digestText } from "../../../../packages/core/src/reminders/text.js";
 
 describe("snoozeUntil", () => {
   test("uses 09:00 on the local calendar day", () => {
@@ -63,5 +67,51 @@ describe("recall reminders", () => {
   test("a recall reminder carries a topic, so it keeps the topic actions", () => {
     expect(isDigestReminder({ kind: "recall", topicId: "topic-1" })).toBe(false);
     expect(isDigestReminder({ kind: "recall_quiet", topicId: "topic-1" })).toBe(false);
+  });
+});
+
+describe("parseDigest / parseDigestDetail", () => {
+  test("reads counts and follow-up names from the text core writes, dropping the clipped first conclusion", () => {
+    const text = digestText({
+      conclusions: ["等待8分钟阻塞监测数据的后台命令已完成，退出码为0；本次没有异常", "第二条"],
+      openTodoCount: 727,
+      suggestions: ["ChatGPT订阅计费", "货代产品能力", "海运运价预测"],
+    });
+    expect(parseDigest(text)).toEqual({
+      conclusions: 2,
+      todos: 727,
+      suggestions: ["ChatGPT订阅计费", "货代产品能力", "海运运价预测"],
+    });
+    expect(parseDigest(digestText({ conclusions: ["一条"], openTodoCount: 0, suggestions: [] }))).toEqual({
+      conclusions: 1,
+      todos: 0,
+      suggestions: [],
+    });
+    expect(parseDigest(digestText({ conclusions: [], openTodoCount: 3, suggestions: [] }))?.conclusions).toBe(0);
+  });
+
+  test("returns null for text it does not recognise, so the card falls back to the raw text", () => {
+    expect(parseDigest("早报\n昨天有 4 段会话。")).toBeNull();
+  });
+
+  test("splits the detail into conclusions with their topics and full follow-up names", () => {
+    const detail = [
+      "昨日结论（61 条）",
+      "1. 后台命令已完成，退出码为 0  —— 阻塞监测",
+      "2. 没有话题的结论",
+      "……还有 1 条较早的结论,在话题册里查看。",
+      "",
+      "建议跟进",
+      "· 货代产品能力评估",
+    ].join("\n");
+    expect(parseDigestDetail(detail)).toEqual({
+      conclusions: [
+        { text: "后台命令已完成，退出码为 0", topic: "阻塞监测" },
+        { text: "没有话题的结论", topic: null },
+      ],
+      note: "还有 1 条较早的结论,在话题册里查看。",
+      suggestions: ["货代产品能力评估"],
+    });
+    expect(parseDigestDetail("别的格式")).toBeNull();
   });
 });

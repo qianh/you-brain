@@ -88,7 +88,20 @@
   cursor: pointer;
 }
 .reminder-expand:hover { text-decoration: underline; }
-.reminder-detail-toggle { display: block; margin-top: 4px; }
+.reminder-expand:disabled { cursor: default; opacity: .6; text-decoration: none; }
+.reminder-links {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-top: 2px;
+}
+/* 托盘里展开时链接挪到底栏:链接靠左,按钮靠右,和正文之间留一道细分隔。 */
+.reminder-banner.actions-below { row-gap: var(--sp-2); }
+.reminder-banner.actions-below .banner-actions {
+  padding-top: var(--sp-2);
+  border-top: 1px solid color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.reminder-banner.actions-below .reminder-links { margin: 0 auto 0 0; padding-left: calc(16px + var(--sp-2)); }
 .reminder-detail {
   margin-top: 6px;
   padding: 8px 10px;
@@ -119,3 +132,117 @@
   border-color: color-mix(in srgb, var(--danger) 20%, transparent);
 }
 .banner.danger .banner-icon, .banner-bad .banner-icon { color: var(--danger); }
+
+/*
+ * 晨间摘要:标题 → 两个数字 → 建议跟进的话题胶囊 → (按需)结论列表 → 底栏。
+ * 每块之间拉开间距,数字单独放大,读的时候一眼先看到量,再看要跟进什么。
+ */
+.digest-banner .banner-text {
+  align-items: stretch;
+  gap: var(--sp-3);
+}
+.digest-title {
+  font-weight: 600;
+  color: var(--text);
+}
+.digest-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2);
+}
+.digest-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-tile);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+}
+.digest-stat-value {
+  font-size: var(--fs-xl);
+  line-height: var(--lh-xl);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.digest-stat-label {
+  font-size: var(--fs-sm);
+  line-height: var(--lh-sm);
+  color: var(--text-2);
+}
+.digest-follow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.digest-label {
+  font-size: var(--fs-sm);
+  line-height: var(--lh-sm);
+  color: var(--text-2);
+}
+.digest-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.digest-chip {
+  max-width: 100%;
+  padding: 2px 8px;
+  border-radius: var(--r-chip);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
+  font-size: var(--fs-base);
+  line-height: var(--lh-base);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.digest-detail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  max-height: 320px;
+  overflow-y: auto;
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--r-tile);
+  background: color-mix(in srgb, var(--surface) 70%, transparent);
+}
+.digest-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: digest;
+}
+.digest-list li {
+  counter-increment: digest;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2) 0 var(--sp-2) 22px;
+  font-size: var(--fs-base);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.digest-list li + li { border-top: 1px solid var(--border); }
+.digest-list li::before {
+  content: counter(digest);
+  position: absolute;
+  left: 0;
+  top: var(--sp-2);
+  min-width: 16px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.6;
+}
+.digest-item-text { color: var(--text); }
+.digest-item-topic {
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-sm);
+}
+.digest-note {
+  padding-bottom: var(--sp-2);
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+}

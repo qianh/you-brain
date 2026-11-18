@@ -81,6 +81,13 @@ import type {
   DeckDshLoginBody,
   DeckDshLoginResponse,
   DeckDshWebResponse,
+  DeckMuseActionBody,
+  DeckMuseActionResponse,
+  DeckMuseOverviewResponse,
+  DeckMuseSendBody,
+  DeckMuseSendResponse,
+  DeckMuseSessionResponse,
+  DeckMuseStreamEvent,
   DeckNoticesResponse,
   DeckTty7RenameBody,
   DeckTty7ViewingBody,
@@ -225,4 +232,10 @@ export interface DeckHttpPort {
   tty7Start(body: DeckTty7StartBody): Promise<DeckTty7StartResponse>;
   tty7PasteImage(data: Uint8Array, contentType: string): Promise<DeckTty7PasteImageResponse>;
   tty7Terminal?(pane: number, size: TerminalSize, events: Tty7TerminalEvents): TerminalConnection;
+  /** Muse SDK 会话桥：可选，旧测试替身可不提供。 */
+  museOverview?(): Promise<DeckMuseOverviewResponse>;
+  museSession?(id?: string): Promise<DeckMuseSessionResponse | null>;
+  museAction?(body: DeckMuseActionBody): Promise<DeckMuseActionResponse>;
+  museSend?(body: DeckMuseSendBody): Promise<DeckMuseSendResponse>;
+  museSubscribe?(listener: (event: DeckMuseStreamEvent) => void): () => void;
 }

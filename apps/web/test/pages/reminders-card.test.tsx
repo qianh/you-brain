@@ -83,6 +83,24 @@ describe("ReminderCard", () => {
     expect(panel).not.toContain("重新激活");
   });
 
+  test("a real morning digest shows the counts and follow-up topics, not the clipped first conclusion", () => {
+    const real: ReminderView = {
+      ...digest,
+      text: "昨日结论 384 条：等待8分钟阻塞监测数据的后台命令已完成，退出码为0；本…\n未完成待办 727 件。\n建议跟进：ChatGPT订阅计费、货代产品能力、海运运价预测。",
+    };
+    for (const layout of ["today", "panel"] as const) {
+      const html = card(real, layout);
+      expect(html).toContain("digest-banner");
+      expect(html).toContain(">384<");
+      expect(html).toContain(">727<");
+      expect(html).toContain("货代产品能力");
+      expect(html).not.toContain("本…");
+      expect(html).not.toContain("展开");
+      expect(html).toContain("忽略（已读）");
+      expect(html).toContain("actions-below");
+    }
+  });
+
   test("today and panel share one reminder row style (alignment comes from the row height, not a one-line special case)", () => {
     const multi: ReminderView = { ...topic, text: "第一行\n第二行" };
     for (const html of [card(topic, "panel"), card(multi, "panel"), card(topic, "today"), card(multi, "today")]) {

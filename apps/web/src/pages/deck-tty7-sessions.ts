@@ -26,9 +26,12 @@ export function sessionTitle(session: Session): string {
   return session.tabLabel ?? (session.cwd === "" ? `%${session.pane}` : baseName(session.cwd));
 }
 
-/** 指挥台首次使用默认 T3；只有明确记着 dsh 才回到 DSH。 */
-export function initialDeckView(stored: string | null): "dsh" | "t3" {
-  return stored === "dsh" ? "dsh" : "t3";
+export type DeckViewId = "dsh" | "t3" | "muse";
+
+/** 指挥台首次使用默认 T3；明确记着 dsh 或 muse 时回到上次停留页。 */
+export function initialDeckView(stored: string | null): DeckViewId {
+  if (stored === "dsh" || stored === "muse") return stored;
+  return "t3";
 }
 
 /**
