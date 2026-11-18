@@ -267,11 +267,13 @@ interface RawTab { id: string; name: string | null; label: string | null; agent:
 /** `tty7 procs` 里一个进程（只取判断是否在执行用得到的字段）。 */
 interface RawProc { pid: number; depth: number; foreground: boolean; cpu_ns: number }
 
+export type Tty7ActivityValue = Tty7AgentStatus | { status: Tty7AgentStatus; message?: string | null } | null;
+
 export class Tty7 {
   readonly #options: Tty7Options;
   #runner: Tty7Runner | null;
   /** 没有 hooks 状态的会话，状态改由终端活动判断（见 activity.ts）；daemon 启动监视时接上。 */
-  #activity: ((pane: number) => Tty7AgentStatus | null) | null = null;
+  #activity: ((pane: number) => Tty7ActivityValue) | null = null;
 
   constructor(options: Tty7Options = {}) {
     this.#options = options;
@@ -375,7 +377,7 @@ export class Tty7 {
     return raw.workspaces.map((item) => ({ id: item.id, name: item.name ?? item.id.slice(0, 8), attached: item.attached !== null }));
   }
 
-  setActivity(provider: ((pane: number) => Tty7AgentStatus | null) | null): void {
+  setActivity(provider: ((pane: number) => Tty7ActivityValue) | null): void {
     this.#activity = provider;
   }
 
@@ -423,6 +425,10 @@ export class Tty7 {
           const tab = tabs.get(pane.tab);
           const agent = agents.get(pane.pane);
           const status = agent?.state?.status;
+          const hasHookStatus = status !== undefined && AGENT_STATUSES.includes(status);
+          const derived = !hasHookStatus && !pane.hibernated ? (activity?.(pane.pane) ?? null) : null;
+          const derivedStatus = typeof derived === "string" ? derived : (derived?.status ?? null);
+          const derivedMessage = typeof derived === "object" && derived !== null ? (derived.message ?? null) : null;
           return {
             pane: pane.pane,
             workspaceId: pane.workspace,
@@ -432,13 +438,8 @@ export class Tty7 {
             agent: agent?.agent ?? tab?.agent ?? null,
             cwd: pane.cwd ?? "",
             hibernated: pane.hibernated,
-            status:
-              status !== undefined && AGENT_STATUSES.includes(status)
-                ? (status as Tty7AgentStatus)
-                : pane.hibernated
-                  ? null
-                  : (activity?.(pane.pane) ?? null),
-            statusMessage: agent?.state?.message ?? null,
+            status: hasHookStatus ? (status as Tty7AgentStatus) : derivedStatus,
+            statusMessage: agent?.state?.message ?? derivedMessage,
             model: agent?.state?.readout?.model ?? null,
           };
         });

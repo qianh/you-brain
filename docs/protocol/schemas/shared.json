@@ -438,6 +438,55 @@
       ],
       "type": "object"
     },
+    "consolidateLlm": {
+      "additionalProperties": false,
+      "properties": {
+        "baseUrl": {
+          "anyOf": [
+            {
+              "const": "",
+              "type": "string"
+            },
+            {
+              "format": "uri",
+              "type": "string"
+            }
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "model": {
+          "type": "string"
+        },
+        "provider": {
+          "enum": [
+            "deepseek",
+            "glm",
+            "qwen",
+            "kimi",
+            "openai",
+            "claude",
+            "ollama",
+            "magpie",
+            "custom",
+            "grok-cli",
+            "claude-cli",
+            "codex-cli",
+            "gemini-cli",
+            "opencode-cli"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "enabled",
+        "provider",
+        "model",
+        "baseUrl"
+      ],
+      "type": "object"
+    },
     "drive": {
       "additionalProperties": false,
       "properties": {
@@ -668,6 +717,7 @@
     "drive",
     "capture",
     "llm",
+    "consolidateLlm",
     "refine",
     "topics",
     "reminders",

@@ -1,5 +1,6 @@
-import { parseRefineOutput } from "@you-brain/protocol";
+import { parseRefineOutput, type RefineOutput } from "@you-brain/protocol";
 
+import { isAutomatedBatchSession } from "../adapters/conversation.js";
 import type { LlmBackend } from "../llm/types.js";
 import { defaultRefineIds, refineToEvents } from "./events.js";
 import {
@@ -40,6 +41,20 @@ export async function refineSession(
     };
   }
 
+  const ids = options.ids ?? defaultRefineIds();
+  if (!input.previous && isAutomatedBatchSession(input.messages)) {
+    const batchOutput: RefineOutput = {
+      title: "自动任务批处理",
+      summary: "定时自动批处理任务，不沉淀话题与待办",
+      topic: { action: "none", topicId: "", name: "", aliases: [] },
+      conclusions_added: [],
+      todos_added: [],
+      todos_completed: [],
+    };
+    const events = refineToEvents(input, batchOutput, options.eventFactory, ids);
+    return { status: "refined", output: batchOutput, events };
+  }
+
   const topics = selectCandidateTopics(input.topics, options.historyLimit, {
     query: candidateQuery(input.previous, input.messages),
     currentTopicId: input.previous?.topicId ?? null,
@@ -56,7 +71,6 @@ export async function refineSession(
     messages: fitted.messages,
     truncated: fitted.truncated,
   });
-  const ids = options.ids ?? defaultRefineIds();
   let lastDetail = "模型输出无法校验";
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {

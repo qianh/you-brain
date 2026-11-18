@@ -50,8 +50,24 @@ describe("diffNotices", () => {
       null,
     );
     expect(result).toEqual([
-      { pane: 1, kind: "waiting", title: "账本回测 在等你回复", body: "要删除 3 个重复文件吗？" },
-      { pane: 2, kind: "done", title: "Downloads 已完成", body: "" },
+      {
+        pane: 1,
+        kind: "waiting",
+        sessionName: "账本回测",
+        agent: "Claude",
+        cwd: "/Users/x/dir1",
+        title: "账本回测 在等你回复",
+        body: "要删除 3 个重复文件吗？",
+      },
+      {
+        pane: 2,
+        kind: "done",
+        sessionName: "Downloads",
+        agent: "Claude",
+        cwd: "/Users/x/Downloads",
+        title: "Downloads 已完成",
+        body: "",
+      },
     ]);
   });
 
@@ -257,6 +273,56 @@ describe("SessionNoticeWatcher", () => {
     const before = h.reads();
     await settle(80);
     expect(h.reads()).toBe(before);
+  });
+
+  it("marks notices open on creation, auto-closes stale waiting/replaced notices, keeps done on idle, and supports dismiss", async () => {
+    const h = harness();
+    h.watcher.start();
+    await settle();
+
+    // working -> waiting：open
+    h.set(view([session(1, "waiting", { statusMessage: "继续吗？" })]));
+    h.line();
+    await settle();
+    expect(h.watcher.list().notices).toMatchObject([{ seq: 1, pane: 1, kind: "waiting", status: "open" }]);
+
+    // 用户在 tty7 直接回复，会话变回 working：旧 waiting 自动关成 closed
+    h.set(view([session(1, "working")]));
+    h.line();
+    await settle();
+    expect(h.watcher.list().notices).toMatchObject([{ seq: 1, pane: 1, kind: "waiting", status: "closed" }]);
+
+    // 跑完变成 done：新条目 open；即使过一会儿回落到 null（idle），done 仍保持 open 等用户确认
+    h.set(view([session(1, "done")]));
+    h.line();
+    await settle();
+    expect(h.watcher.list().notices.map((n) => [n.seq, n.status])).toEqual([
+      [1, "closed"],
+      [2, "open"],
+    ]);
+    h.set(view([session(1, null)]));
+    h.line();
+    await settle();
+    expect(h.watcher.list().notices[1]?.status).toBe("open");
+
+    // 弹框确认关闭
+    expect(h.watcher.dismiss({ seq: 2 })).toBe(true);
+    expect(h.watcher.list().notices[1]?.status).toBe("closed");
+    expect(h.watcher.dismiss({ seq: 2 })).toBe(false);
+    h.watcher.stop();
+  });
+
+  it("closes open notices when setViewing focuses that pane", async () => {
+    const h = harness();
+    h.watcher.start();
+    await settle();
+    h.set(view([session(1, "done")]));
+    h.line();
+    await settle();
+    expect(h.watcher.list().notices[0]?.status).toBe("open");
+    h.watcher.setViewing(1);
+    expect(h.watcher.list().notices[0]?.status).toBe("closed");
+    h.watcher.stop();
   });
 });
 

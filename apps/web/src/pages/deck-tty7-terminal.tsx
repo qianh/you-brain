@@ -33,11 +33,16 @@ export function DeckTty7Terminal({
   pane,
   appearance,
   active = true,
+  pendingPaste,
+  onPasteHandled,
 }: {
   pane: number;
   appearance: TerminalAppearance;
   /** 非当前标签时保持连接，只隐藏不卸载。 */
   active?: boolean;
+  /** 由 @ 引用选择器触发的待粘贴文本。 */
+  pendingPaste?: { seq: number; text: string } | null;
+  onPasteHandled?: (seq: number) => void;
 }) {
   const { client, t } = useDaemon();
   const hostRef = useRef<HTMLDivElement>(null);
@@ -47,6 +52,7 @@ export function DeckTty7Terminal({
   const liveRef = useRef<LiveTerminal | null>(null);
   const activeRef = useRef(active);
   activeRef.current = active;
+  const handledPasteRef = useRef(0);
   const [revision, setRevision] = useState(0);
   const [status, setStatus] = useState<Status>("connecting");
   const [focused, setFocused] = useState(false);
@@ -305,6 +311,19 @@ export function DeckTty7Terminal({
     options.lineHeight = lineHeight;
     live.relayout();
   }, [fontFamily, fontSize, lineHeight]);
+
+  useEffect(() => {
+    if (!active || !pendingPaste || status !== "ready") return;
+    if (handledPasteRef.current === pendingPaste.seq) return;
+    const live = liveRef.current;
+    if (live === null) return;
+    handledPasteRef.current = pendingPaste.seq;
+    live.terminal.paste(pendingPaste.text);
+    const seq = pendingPaste.seq;
+    onPasteHandled?.(seq);
+    const frame = requestAnimationFrame(() => live.terminal.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [active, pendingPaste, status, onPasteHandled]);
 
   const connectionText = status === "ready" ? null
     : t(status === "connecting" ? "deckTty7Connecting" : status === "exited" ? "deckTty7Exited" : "deckTty7Disconnected");

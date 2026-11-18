@@ -17,6 +17,7 @@ import { useDaemon } from "../daemon-context.js";
 import { usePageActive } from "../page-active.js";
 import { formatRelative } from "../lib/format.js";
 import { projectTask, TASK_PRIORITY_KEYS, TASK_STATUS_KEYS, taskThreadUrl, visibleTasks } from "./tasks/logic.js";
+import { ProjectPicker, type ProjectChoice } from "./tasks/project-picker.js";
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
@@ -142,18 +143,30 @@ export function TasksPage() {
         {projects.map((item) => {
           const current = projectTask(tasks, item.id);
           const queued = tasks.filter((task) => task.projectId === item.id && task.status === "queued").length;
-          return <section className={`tasks-project${project === item.id ? " is-selected" : ""}`} key={item.id}>
-            <button type="button" className="tasks-project-name" aria-pressed={project === item.id} onClick={() => { setProject(item.id); setTab("tasks"); }}>
-              <span><Icon name="folder" /><strong>{item.name}</strong><span className="tasks-project-queue">{queued}</span></span>
-              <small title={item.cwd}>{item.cwd}</small>
+          // 卡片固定三段:头部(名称+路径+排队数)、正文(当前任务/待领取/空闲,固定两行高)、底栏(状态+按钮),高度一致。
+          return <section className={`tasks-project${project === item.id ? " is-selected" : ""}${item.enabled ? " is-enabled" : ""}`} key={item.id}>
+            <button type="button" className="tasks-project-name" aria-pressed={project === item.id} title={item.cwd} onClick={() => { setProject(item.id); setTab("tasks"); }}>
+              <span className="tasks-project-icon"><Icon name="folder" /></span>
+              <span className="tasks-project-title">
+                <strong>{item.name}</strong>
+                <small>{item.cwd}</small>
+              </span>
+              <span className={`tasks-project-queue${queued > 0 ? " has-items" : ""}`} title={t("tasksProjectQueued", { count: queued })}>{queued}</span>
             </button>
-            <div className="tasks-project-state"><span className={`tasks-indicator${item.enabled ? " is-enabled" : ""}`} />{t(item.enabled ? "tasksEnabled" : "tasksPaused")}</div>
-            {current && <p className={`tasks-project-current is-${current.status}`}>{t(current.status === "review" ? "tasksProjectReview" : current.status === "failed" ? "tasksProjectFailed" : TASK_STATUS_KEYS[current.status])}<span>{current.title}</span></p>}
-            {!current && queued === 0 && <p className="tasks-project-idle">{t("tasksProjectIdle")}</p>}
-            <Button size="sm" variant={item.enabled ? "ghost" : "secondary"} disabled={busy || (!item.enabled && !!board?.connectionError)} title={item.enabled ? t("tasksPauseHint") : undefined} onClick={() => {
-              if (item.enabled) void act({ action: "project", projectId: item.id, enabled: false });
-              else setStarting(item);
-            }} icon={<Icon name={item.enabled ? "minus" : "play"} size={13} />}>{t(item.enabled ? "tasksPause" : "tasksStart")}</Button>
+            <div className="tasks-project-body">
+              {current
+                ? <p className={`tasks-project-current is-${current.status}`}><span className="tasks-project-current-label">{t(current.status === "review" ? "tasksProjectReview" : current.status === "failed" ? "tasksProjectFailed" : TASK_STATUS_KEYS[current.status])}</span><span className="tasks-project-current-title" title={current.title}>{current.title}</span></p>
+                : queued > 0
+                  ? <p className="tasks-project-waiting">{t("tasksProjectQueued", { count: queued })}</p>
+                  : <p className="tasks-project-idle">{t("tasksProjectIdle")}</p>}
+            </div>
+            <div className="tasks-project-foot">
+              <span className="tasks-project-state"><span className={`tasks-indicator${item.enabled ? " is-enabled" : ""}`} />{t(item.enabled ? "tasksEnabled" : "tasksPaused")}</span>
+              <Button size="sm" variant={item.enabled ? "ghost" : "secondary"} disabled={busy || (!item.enabled && !!board?.connectionError)} title={item.enabled ? t("tasksPauseHint") : undefined} onClick={() => {
+                if (item.enabled) void act({ action: "project", projectId: item.id, enabled: false });
+                else setStarting(item);
+              }} icon={<Icon name={item.enabled ? "minus" : "play"} size={13} />}>{t(item.enabled ? "tasksPause" : "tasksStart")}</Button>
+            </div>
           </section>;
         })}
         {pendingBoard && loading && <>
@@ -229,22 +242,20 @@ function TaskEditor({ task, projects, initialProject, busy, onClose, onSave }: {
   const { t } = useDaemon();
   const [title, setTitle] = useState(task?.title ?? "");
   const [description, setDescription] = useState(task?.description ?? "");
-  const [projectId, setProjectId] = useState(task?.projectId ?? (projects.some((item) => item.id === initialProject) ? initialProject : ""));
+  const [project, setProject] = useState<ProjectChoice>({ projectId: task?.projectId ?? (projects.some((item) => item.id === initialProject) ? initialProject : "") });
   const [priority, setPriority] = useState<TaskPriority>(task?.priority ?? 2);
-  const missingProject = projectId !== "" && !projects.some((item) => item.id === projectId);
   const submit = (event: FormEvent): void => {
     event.preventDefault();
-    if (!busy && title.trim()) void onSave({ title: title.trim(), description: description.trim(), projectId: projectId || null, priority });
+    if (busy || !title.trim()) return;
+    const linked = "newProject" in project ? { newProject: project.newProject } : { projectId: project.projectId || null };
+    void onSave({ title: title.trim(), description: description.trim(), ...linked, priority });
   };
   return <Dialog open className="tasks-editor-dialog" onClose={onClose} title={t(task ? "tasksEdit" : "tasksNew")} footer={<><Button variant="ghost" disabled={busy} onClick={onClose}>{t("cancel")}</Button><Button variant="primary" type="submit" form="task-editor" loading={busy} disabled={!title.trim()}>{t(task ? "tasksSave" : "tasksCreate")}</Button></>}>
     <form id="task-editor" className="tasks-form" onSubmit={submit}>
       <label><span>{t("tasksTitle")}</span><Input label={t("tasksTitle")} value={title} maxLength={200} required onChange={(event) => setTitle(event.target.value)} placeholder={t("tasksTitlePlaceholder")} disabled={busy} /></label>
       <label><span>{t("tasksDescription")}</span><Textarea label={t("tasksDescription")} value={description} maxLength={20_000} rows={5} onChange={(event) => setDescription(event.target.value)} placeholder={t("tasksDescriptionPlaceholder")} disabled={busy} /></label>
-      <div className="tasks-form-pair"><div><label>{t("tasksProject")}</label><Select label={t("tasksProject")} value={projectId} onChange={setProjectId} disabled={busy} options={[
-        { value: "", label: t("tasksUnassigned") },
-        ...projects.map((item) => ({ value: item.id, label: `${item.name} · ${item.cwd}` })),
-        ...(missingProject ? [{ value: projectId, label: t("tasksUnknownProject"), disabled: true }] : []),
-      ]} /></div><div><label>{t("tasksPriority")}</label><Select label={t("tasksPriority")} value={String(priority)} onChange={(value) => setPriority(Number(value) as TaskPriority)} disabled={busy} options={TASK_PRIORITY_KEYS.map((key, index) => ({ value: String(index), label: t(key) }))} /></div></div>
+      <div className="tasks-form-pair"><div><label>{t("tasksProject")}</label><ProjectPicker projects={projects} value={project} onChange={setProject} disabled={busy} /></div><div><label>{t("tasksPriority")}</label><Select label={t("tasksPriority")} value={String(priority)} onChange={(value) => setPriority(Number(value) as TaskPriority)} disabled={busy} options={TASK_PRIORITY_KEYS.map((key, index) => ({ value: String(index), label: t(key) }))} /></div></div>
+      {"newProject" in project && <p className="tasks-form-hint" role="status"><Icon name="info" size={13} />{t(project.newProject.cwd ? "tasksProjectWillAdd" : "tasksProjectWillCreate", { name: project.newProject.name })}</p>}
     </form>
   </Dialog>;
 }

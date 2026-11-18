@@ -9,6 +9,7 @@ import { formatDateTime, formatRelative } from "../../lib/format.js";
 import { shouldShowToc, type TocItem } from "../../lib/markdown.js";
 import { PortraitCorrections } from "./corrections.js";
 import { scrollBehavior, snapshotVersion } from "./logic.js";
+import { PortraitProposals } from "./proposals.js";
 
 export function PortraitSide({
   variant,
@@ -21,6 +22,7 @@ export function PortraitSide({
   snapshots,
   onCopyPath,
   onCopyBody,
+  onPortraitChanged,
 }: {
   variant: string;
   toc: readonly TocItem[];
@@ -32,6 +34,7 @@ export function PortraitSide({
   snapshots: readonly PortraitSnapshot[];
   onCopyPath: () => void;
   onCopyBody: () => void;
+  onPortraitChanged?: () => void;
 }) {
   const { t, language, timeZone } = useDaemon();
   const showToc = shouldShowToc(toc);
@@ -91,6 +94,13 @@ export function PortraitSide({
               {t("portraitCopyAll")}
             </Button>
           </section>
+          {variant === "coding" ? (
+            <PortraitProposals
+              onApplied={() => {
+                onPortraitChanged?.();
+              }}
+            />
+          ) : null}
           <PortraitCorrections variant={variant} toc={toc} />
           <section className="portrait-block" aria-label={t("portraitHistory")}>
             <div className="portrait-kicker-row">

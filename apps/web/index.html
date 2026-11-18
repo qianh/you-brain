@@ -10,7 +10,10 @@
       (function () {
         var key = "you-brain-theme";
         var query = new URLSearchParams(location.search).get("theme");
-        var choice = query === "light" || query === "dark" || query === "system" ? query : null;
+        var valid = function (value) {
+          return value === "light" || value === "dark" || value === "system" || value === "dopamine";
+        };
+        var choice = valid(query) ? query : null;
         // daemon 注入的偏好优先；没有注入（开发模式）或没有该键时再读 localStorage。
         var injected = window.__YOU_BRAIN__ && window.__YOU_BRAIN__.prefs;
         try {
@@ -19,13 +22,13 @@
         } catch (error) {
           choice = choice || (injected && injected[key]) || "system";
         }
-        if (choice !== "light" && choice !== "dark" && choice !== "system") choice = "system";
+        if (!valid(choice)) choice = "system";
         var dark =
           choice === "dark" ||
           (choice !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
-        var theme = dark ? "dark" : "light";
+        var theme = choice === "dopamine" ? "dopamine" : dark ? "dark" : "light";
         document.documentElement.dataset.theme = theme;
-        document.documentElement.style.colorScheme = theme;
+        document.documentElement.style.colorScheme = dark ? "dark" : "light";
       })();
     </script>
   </head>

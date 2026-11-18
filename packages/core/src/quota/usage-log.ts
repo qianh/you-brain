@@ -81,7 +81,7 @@ export function parseUsageLog(
     } catch {
       continue;
     }
-    if (!isRecord(row) || typeof row.agent !== "string" || !wanted.has(row.agent)) continue;
+    if (!isRecord(row) || row.rejected === true || typeof row.agent !== "string" || !wanted.has(row.agent)) continue;
     const at = Date.parse(typeof row.t === "string" ? row.t : "");
     if (Number.isNaN(at) || at > cutoffs.today + 86_400_000) continue;
     const input = int(row.in);

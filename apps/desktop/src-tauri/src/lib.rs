@@ -37,9 +37,9 @@ const PANEL_WIDTH: f64 = 380.0;
 const PANEL_HEIGHT: f64 = 560.0;
 const MAIN_WIDTH: f64 = 1100.0;
 const MAIN_HEIGHT: f64 = 760.0;
-/// 记忆提醒弹框：一条正文加一个回复输入框，小而醒目。
+/// 置顶提醒弹框（记忆提醒与终端提醒共用队列）：一条正文/终端快照加一个快捷回复框，小而醒目。
 const POPUP_WIDTH: f64 = 420.0;
-const POPUP_HEIGHT: f64 = 280.0;
+const POPUP_HEIGHT: f64 = 316.0;
 /// 弹框离屏幕顶边的距离，避开 macOS 的菜单栏。
 const POPUP_TOP_INSET: f64 = 64.0;
 const PANEL_GAP: f64 = 6.0;
@@ -510,7 +510,7 @@ fn refresh_status(app: &tauri::AppHandle, data_dir: &std::path::Path) {
     }
 }
 
-/// 终端会话等你回复或已完成时弹系统通知。请求失败时不动位置、不弹，下次刷新再取。
+/// 终端会话等你回复或已完成时：拉起置顶弹框并弹系统通知。请求失败时不动位置、不弹，下次刷新再取。
 fn notify_session_notices(app: &tauri::AppHandle, client: &LoopbackClient) {
     let Ok(response) = client.deck_notices() else {
         return;
@@ -525,6 +525,10 @@ fn notify_session_notices(app: &tauri::AppHandle, client: &LoopbackClient) {
         *cursor = Some(next);
         selected
     };
+    if selected.is_empty() {
+        return;
+    }
+    show_reminder_popup(app);
     for item in selected {
         notify(app, &item.title, &item.body);
     }
@@ -619,7 +623,7 @@ fn ensure_reminder_popup(app: &tauri::AppHandle, origin: &str) {
 
 fn build_reminder_popup(app: &tauri::AppHandle, url: WebviewUrl) -> tauri::Result<WebviewWindow> {
     let window = WebviewWindowBuilder::new(app, REMINDER_POPUP, url)
-        .title("U-Brain 记忆提醒")
+        .title("U-Brain 提醒")
         .inner_size(POPUP_WIDTH, POPUP_HEIGHT)
         .resizable(false)
         .decorations(false)

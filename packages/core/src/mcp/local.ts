@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+
 import { conversationKey } from "@you-brain/protocol";
 
 import { type SessionSource } from "../domain/session.js";
@@ -6,11 +9,25 @@ import { YouBrainError } from "../domain/errors.js";
 import type { DrivePort } from "../drive/drive-port.js";
 import { readPortraitFile } from "../http/portrait-files.js";
 import { createStoreReaders } from "../http/queries.js";
+import {
+  readNotionDatabaseView,
+  readNotionPageView,
+  readNotionRecentPages,
+} from "../notion/service.js";
+import { NotionIndex } from "../notion/store.js";
 import { portraitCorrectionViews } from "../portrait/corrections.js";
+import { lookupProjectPortrait } from "../portrait/projects-split.js";
+import {
+  listReferenceCandidates,
+  resolveReference,
+  type ReferencePorts,
+} from "../reference/index.js";
 import type { SqliteStore } from "../store/index.js";
 import type {
   ActionResponse,
   PortraitCorrectionResult,
+  ReferenceCandidatesResponse,
+  ReferenceContentView,
   SearchRequest,
   SearchResponse,
   StatusResponse,
@@ -71,6 +88,54 @@ export function createLocalMcpServices(options: LocalMcpOptions): McpServices {
       ...(options.fetch ? { fetch: options.fetch } : {}),
     });
 
+  function withOfflineNotion<T>(run: (index: NotionIndex) => T, fallback: T): T {
+    const dbPath = join(options.dataDir, "notion-index.sqlite");
+    if (!existsSync(dbPath)) return fallback;
+    let index: NotionIndex | undefined;
+    try {
+      index = new NotionIndex(dbPath, { readonly: true });
+      return run(index);
+    } catch {
+      return fallback;
+    } finally {
+      index?.close();
+    }
+  }
+
+  function offlineReferencePorts(): ReferencePorts {
+    const runSearch = options.search.query ?? options.search.search;
+    return {
+      today: () => readers.today(),
+      search: (input) =>
+        runSearch.call(options.search, {
+          query: input.query,
+          limit: input.limit ?? 10,
+          ...(input.sources ? { sources: input.sources } : {}),
+          ...(input.from ? { since: input.from } : {}),
+          ...(input.to ? { until: input.to } : {}),
+        }),
+      sessionContent: (input) =>
+        readInboxSession(options.drive, {
+          source: input.source as SessionSource,
+          ...(input.conversationId !== undefined ? { conversationId: input.conversationId } : {}),
+          ...(input.sessionKey !== undefined ? { sessionKey: input.sessionKey } : {}),
+        }),
+      topics: (query) => readers.topics(query),
+      topic: (topicId) => readers.topic(topicId),
+      notionRecent: (limit) =>
+        Promise.resolve(withOfflineNotion((index) => readNotionRecentPages(index, limit), [])),
+      notionSearch: (query, limit) =>
+        Promise.resolve({
+          query,
+          hits: withOfflineNotion((index) => index.search(query, limit ?? 20), []),
+        }),
+      notionPage: (pageId) =>
+        Promise.resolve(withOfflineNotion((index) => readNotionPageView(index, pageId), null)),
+      notionDatabase: (databaseId) =>
+        Promise.resolve(withOfflineNotion((index) => readNotionDatabaseView(index, databaseId), null)),
+    };
+  }
+
   return {
     searchSessions(input: SearchRequest) {
       const run = options.search.query ?? options.search.search;
@@ -98,6 +163,23 @@ export function createLocalMcpServices(options: LocalMcpOptions): McpServices {
       const portrait = await readPortraitFile(options.portraitDir, variant);
       if (!portrait) {
         throw new YouBrainError("SOURCE_UNAVAILABLE", `数字分身 ${variant} 不存在`);
+      }
+      if (variant === "projects" && input.fullProjects !== true) {
+        const hit = lookupProjectPortrait(portrait.content, input.project);
+        const warnings =
+          input.project && !hit.matched
+            ? [
+                {
+                  code: "PROJECT_NOT_FOUND",
+                  message: `未找到匹配「${input.project}」的项目决定，已返回项目索引`,
+                },
+              ]
+            : [];
+        return {
+          variant: portrait.variant,
+          portrait: hit.portrait,
+          warnings,
+        };
       }
       return {
         variant: portrait.variant,
@@ -151,6 +233,46 @@ export function createLocalMcpServices(options: LocalMcpOptions): McpServices {
       return Promise.resolve({
         corrections: portraitCorrectionViews(events, input.variant),
       });
+    },
+    async searchReferences(input) {
+      const params = new URLSearchParams();
+      if (input.query !== undefined && input.query !== "") params.set("q", input.query);
+      if (input.kinds && input.kinds.length > 0) params.set("kinds", input.kinds.join(","));
+      if (input.limit !== undefined) params.set("limit", String(input.limit));
+      const qs = params.toString();
+      try {
+        return await call<ReferenceCandidatesResponse>(
+          "GET",
+          qs === "" ? "/api/references/candidates" : `/api/references/candidates?${qs}`,
+        );
+      } catch (error) {
+        if (error instanceof DaemonCallError && error.code === "DAEMON_NOT_RUNNING") {
+          const candidates = await listReferenceCandidates(input, offlineReferencePorts());
+          return { candidates };
+        }
+        throw error;
+      }
+    },
+    async getReference(input) {
+      const params = new URLSearchParams();
+      if (input.uri !== undefined) params.set("uri", input.uri);
+      if (input.query !== undefined) params.set("q", input.query);
+      if (input.kind !== undefined) params.set("kind", input.kind);
+      try {
+        const content = await call<ReferenceContentView>(
+          "GET",
+          `/api/references/content?${params.toString()}`,
+        );
+        return { content, candidates: [] };
+      } catch (error) {
+        if (error instanceof DaemonCallError && error.code === "NOT_FOUND") {
+          return { content: null, candidates: [] };
+        }
+        if (error instanceof DaemonCallError && error.code === "DAEMON_NOT_RUNNING") {
+          return resolveReference(input, offlineReferencePorts());
+        }
+        throw error;
+      }
     },
   };
 }

@@ -53,6 +53,13 @@ export function fakeT3(input: { projects: FakeProject[]; threads?: FakeThread[];
     if (state.toolFailure) return failure(state.toolFailure.code, state.toolFailure.message);
     if (state.invalid) return result({ unexpected: true });
     if (name === "t3_project_list") return result({ projects: input.projects, nextCursor: null });
+    if (name === "t3_project_create") {
+      const root = typeof args.workspaceRoot === "string" ? args.workspaceRoot : `/t3-projects/${String(args.title)}`;
+      if (input.projects.some((project) => project.workspaceRoot === root)) return failure("project_exists", "This folder is already a project.");
+      const project: FakeProject = { id: `project-${input.projects.length + 1}`, title: String(args.title), workspaceRoot: root, defaultModelSelection: null };
+      input.projects.push(project);
+      return result({ ...project, createdAt: "2026-11-16T00:00:00.000Z" });
+    }
     if (name === "t3_thread_list") {
       if (typeof args.projectId !== "string") return failure("target_required", "Pass projectId");
       const filter = typeof args.titleContains === "string" ? args.titleContains : "";

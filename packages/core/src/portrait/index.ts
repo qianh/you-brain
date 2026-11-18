@@ -16,6 +16,14 @@ export {
 export { decodePortraitMeta, encodePortraitMeta, type PortraitMeta } from "./meta.js";
 export { globPrefix, globToRegExp, resolveDrivePath } from "./path.js";
 export {
+  lookupProjectPortrait,
+  renderProjectsSplit,
+  syncSplitProjectFiles,
+  type ProjectLookupResult,
+  type RenderedProjectsSplit,
+  type SplitProjectFile,
+} from "./projects-split.js";
+export {
   PortraitService,
   type PortraitConfig,
   type PortraitDocument,

@@ -6,6 +6,14 @@ html, body, #root {
 }
 
 html { background: var(--bg); }
+/* 多巴胺主题:底色上叠三团很淡的彩色光晕,随窗口固定,不抢正文。 */
+html[data-theme="dopamine"] {
+  background-image:
+    radial-gradient(60vw 50vh at 0% 0%, var(--dopamine-glow-1), transparent 70%),
+    radial-gradient(50vw 45vh at 100% 10%, var(--dopamine-glow-2), transparent 70%),
+    radial-gradient(60vw 50vh at 60% 100%, var(--dopamine-glow-3), transparent 70%);
+  background-attachment: fixed;
+}
 
 /* The menu-bar panel is a transparent window; its frame draws the rounded corners. */
 html:has(.panel-page), html:has(.panel-page) body { background: transparent; }

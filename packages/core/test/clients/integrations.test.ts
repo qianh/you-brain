@@ -13,6 +13,7 @@ import {
 import { clientMutation } from "../../src/clients/registry.js";
 import {
   YOU_BRAIN_PORTRAIT_SKILL,
+  YOU_BRAIN_REF_SKILL,
   YOU_BRAIN_SKILL,
 } from "../../src/clients/skill-content.js";
 
@@ -173,7 +174,11 @@ describe("client integrations", () => {
     await applyClientIntegrations({
       homeDir: root,
       plan,
-      selectedIds: ["codex:skill:you-brain", "codex:skill:you-brain-portrait"],
+      selectedIds: [
+        "codex:skill:you-brain",
+        "codex:skill:you-brain-portrait",
+        "codex:skill:you-brain-ref",
+      ],
       managedStatePath: join(root, "state.json"),
     });
     expect(await readFile(join(root, ".codex/skills/you-brain/SKILL.md"), "utf8")).toBe(
@@ -182,6 +187,9 @@ describe("client integrations", () => {
     expect(
       await readFile(join(root, ".codex/skills/you-brain-portrait/SKILL.md"), "utf8"),
     ).toBe(YOU_BRAIN_PORTRAIT_SKILL);
+    expect(
+      await readFile(join(root, ".codex/skills/you-brain-ref/SKILL.md"), "utf8"),
+    ).toBe(YOU_BRAIN_REF_SKILL);
     const repoRoot = join(import.meta.dir, "..", "..", "..", "..");
     expect(await readFile(join(repoRoot, "skills/you-brain/SKILL.md"), "utf8")).toBe(
       YOU_BRAIN_SKILL,
@@ -189,5 +197,54 @@ describe("client integrations", () => {
     expect(
       await readFile(join(repoRoot, "skills/you-brain-portrait/SKILL.md"), "utf8"),
     ).toBe(YOU_BRAIN_PORTRAIT_SKILL);
+    expect(
+      await readFile(join(repoRoot, "skills/you-brain-ref/SKILL.md"), "utf8"),
+    ).toBe(YOU_BRAIN_REF_SKILL);
+  });
+
+  it("removes legacy BrainHub MCP entries when installing you-brain MCP in JSON and TOML", async () => {
+    const root = await home();
+    const { mkdir } = await import("node:fs/promises");
+    await Promise.all([mkdir(join(root, ".cursor")), mkdir(join(root, ".codex"))]);
+    await writeFile(
+      join(root, ".cursor", "mcp.json"),
+      `${JSON.stringify(
+        {
+          mcpServers: {
+            BrainHub: { command: "brainhub", args: ["serve"] },
+            keepMe: { command: "keep" },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    await writeFile(
+      join(root, ".codex", "config.toml"),
+      `[mcp_servers.brainhub]\ncommand = "brainhub"\nargs = ["serve"]\n\n[mcp_servers.keep]\ncommand = "keep"\nargs = []\n`,
+    );
+    const statePath = join(root, "state.json");
+    const plan = await planClientIntegrations({
+      homeDir: root,
+      managedStatePath: statePath,
+      clients: ["cursor", "codex"],
+    });
+    await applyClientIntegrations({
+      homeDir: root,
+      plan,
+      selectedIds: ["cursor:mcp", "codex:mcp"],
+      managedStatePath: statePath,
+    });
+    const cursor = JSON.parse(await readFile(join(root, ".cursor", "mcp.json"), "utf8")) as {
+      mcpServers: Record<string, unknown>;
+    };
+    expect(cursor.mcpServers.BrainHub).toBeUndefined();
+    expect(cursor.mcpServers.keepMe).toEqual({ command: "keep" });
+    expect(cursor.mcpServers["you-brain"]).toEqual({ command: "you-brain", args: ["mcp"] });
+
+    const codexToml = await readFile(join(root, ".codex", "config.toml"), "utf8");
+    expect(codexToml).not.toContain("brainhub");
+    expect(codexToml).toContain("[mcp_servers.keep]");
+    expect(codexToml).toContain("you-brain");
   });
 });

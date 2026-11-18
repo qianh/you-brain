@@ -1,4 +1,4 @@
-import { CAPTURE_SOURCE_IDS, type SharedConfig } from "@you-brain/protocol";
+import type { SharedConfig } from "@you-brain/protocol";
 
 import { Banner } from "../../components/banner.js";
 import { Card, Section } from "../../components/card.js";
@@ -11,6 +11,14 @@ import { toggleMember } from "./logic.js";
 import { NotionSection } from "./notion.js";
 import { SearchKeySection } from "./search-key.js";
 import { WebhookSection } from "./webhook.js";
+
+/** Only CLI tools with a managed global instructions file support auto-injecting coding.md. */
+export const PORTRAIT_INJECTABLE_CLIENTS = [
+  "claude-code",
+  "codex",
+  "grok-build",
+  "gemini-cli",
+] as const;
 
 export function IntegrationsSection({
   draft,
@@ -27,7 +35,7 @@ export function IntegrationsSection({
       <Banner tone="info">{t("cursorHint")}</Banner>
       <Section title={t("codingPortrait")}>
         <Card>
-          {CAPTURE_SOURCE_IDS.map((source) => (
+          {PORTRAIT_INJECTABLE_CLIENTS.map((source) => (
             <Row
               key={source}
               icon={<SourceTile source={source} />}

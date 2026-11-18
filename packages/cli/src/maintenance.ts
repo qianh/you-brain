@@ -17,7 +17,9 @@ import {
   localDayKey,
   readTwinSessions,
   rebuildTwin,
+  reviewCodingProposals,
   reviewProbes,
+  seedCodingTwin,
   twinEvalLog,
   type TwinSessionRow,
 } from "@you-brain/core/consolidate";
@@ -139,8 +141,9 @@ async function openDrivePortrait(timeoutSeconds: number) {
   if (!opened) {
     throw new CliError("打不开 Google Drive：未登录，或当前运行的不是内置官方 OAuth 凭据的构建");
   }
+  const llmConfig = shared.consolidateLlm.enabled ? shared.consolidateLlm : shared.llm;
   const llm = await createLlmBackend({
-    config: shared.llm,
+    config: llmConfig,
     getApiKey: (provider) => getLlmApiKey(provider, { platform, backend: secretBackend }),
     dataDir,
     env: process.env,
@@ -238,6 +241,73 @@ export async function rebuildPortrait(options: { timeoutSeconds: number }): Prom
     `已重建为 v${result.version}：full ${result.sizes.full} 字节，coding ${result.sizes.coding} 字节，projects 最大小节 ${result.sizes.maxSection} 字节，共 ${result.claims} 条主张`,
   );
   for (const warning of result.warnings) console.log(`提示：${warning}`);
+}
+
+/** Review pending coding-rule proposals interactively and merge approved ones into Drive `coding.md`. */
+export async function reviewPortraitProposals(): Promise<void> {
+  const { portrait, day } = await openDrivePortrait(60);
+  if (!portrait.codingProposals) {
+    console.log("当前没有启用编码提案存储。");
+    return;
+  }
+  const pending = await portrait.codingProposals();
+  if (pending.length === 0) {
+    console.log("没有待确认的编码规则提案。");
+    return;
+  }
+  if (!process.stdin.isTTY) {
+    for (const item of pending) {
+      console.log(`${item.id} [${item.section}] (${item.action})\n  ${item.proposedLine}\n  原因：${item.reason}`);
+    }
+    return;
+  }
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const result = await reviewCodingProposals({
+      portrait,
+      day,
+      decide: async (proposal) => {
+        console.log(`\n${proposal.id} · ${proposal.section} · ${proposal.action === "replace" ? "替换已有规则" : "新增规则"}（${proposal.day}）`);
+        if (proposal.targetLine) console.log(`  原规则：${proposal.targetLine}`);
+        console.log(`  新规则：${proposal.proposedLine}`);
+        console.log(`  理  由：${proposal.reason}`);
+        const answer = (
+          await rl.question("操作？[y 合入 / e 修改后合入 / n 忽略删除 / 回车跳过] ")
+        )
+          .trim()
+          .toLowerCase();
+        if (answer === "y") return { action: "approve" };
+        if (answer === "n") return { action: "reject" };
+        if (answer === "e") {
+          const edited = (await rl.question("输入修改后的完整规则行：")).trim();
+          return edited === "" ? { action: "skip" } : { action: "approve", editedLine: edited };
+        }
+        return { action: "skip" };
+      },
+    });
+    console.log(
+      `\n已合入 ${result.approved} 条${result.version ? `（新版本 v${result.version}）` : ""}，忽略 ${result.rejected} 条，剩余 ${result.left} 条待审`,
+    );
+  } finally {
+    rl.close();
+  }
+}
+
+/** Seed Drive `coding.md` from a hand-crafted `AGENTS.md` or `CLAUDE.md` baseline. */
+export async function seedPortraitCoding(options: { fromPath?: string }): Promise<void> {
+  const homeDir = homedir();
+  const candidates = options.fromPath
+    ? [options.fromPath]
+    : [join(homeDir, ".codex", "AGENTS.md"), join(homeDir, ".claude", "CLAUDE.md")];
+  const sourcePath = candidates.find((candidate) => existsSync(candidate));
+  if (!sourcePath) {
+    throw new CliError(`找不到手写编码规范文件：${candidates.join(" 或 ")}`);
+  }
+  const sourceMarkdown = readFileSync(sourcePath, "utf8");
+  const { portrait, day } = await openDrivePortrait(60);
+  const saved = await seedCodingTwin({ portrait, sourceMarkdown, day });
+  console.log(`已从 ${sourcePath} 生成编码分身 v${saved.version}（${saved.bytes} 字节）并同步到 Drive`);
 }
 
 export async function restoreBrainHub(backupDir: string): Promise<void> {

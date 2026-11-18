@@ -93,6 +93,26 @@ describe("daemon requests with a crowded loopback cookie jar", () => {
     expect(captured?.body).toBe(JSON.stringify({ pane: 7, name: "账本" }));
   });
 
+  test("deck notices fetch, dismiss, and bounded screen preview hit authenticated routes", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const client = createBrowserDaemon({
+      token: "synthetic-test-token",
+      fetch: (async (input, init) => {
+        calls.push({ url: String(input), init: init ?? {} });
+        return Response.json({ ok: true, epoch: "e1", latest: 0, notices: [], pane: 7, text: "" });
+      }) as typeof fetch,
+    });
+    await client.deckNotices();
+    await client.deckNoticeDismiss({ seq: 3 });
+    await client.deckTty7Screen(7, 10);
+    expect(calls[0]?.url).toBe("/api/deck/notices");
+    expect(calls[0]?.init.method).toBe("GET");
+    expect(calls[1]?.url).toBe("/api/deck/notices/dismiss");
+    expect(calls[1]?.init.method).toBe("POST");
+    expect(calls[1]?.init.body).toBe(JSON.stringify({ seq: 3 }));
+    expect(calls[2]?.url).toBe("/api/deck/tty7/screen?pane=7&lines=10");
+  });
+
   test("API calls omit cookies while retaining Bearer auth and request bodies", async () => {
     const calls: RequestInit[] = [];
     const client = createBrowserDaemon({
@@ -134,5 +154,51 @@ describe("daemon requests with a crowded loopback cookie jar", () => {
     expect(captured?.credentials).toBe("omit");
     expect(new Headers(captured?.headers).get("authorization")).toBe("Bearer synthetic-test-token");
     expect(events).toEqual([{ id: 1, kind: "ready", at: "2026-11-14T00:00:00Z" }]);
+  });
+
+  test("portrait project filter and coding proposal review hit authenticated routes", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const client = createBrowserDaemon({
+      token: "synthetic-test-token",
+      fetch: (async (input, init) => {
+        calls.push({ url: String(input), init: init ?? {} });
+        return Response.json({ ok: true, proposals: [], version: "v11", variant: "projects", content: "", path: "", updatedAt: null });
+      }) as typeof fetch,
+    });
+    await client.portrait("projects", "you-brain");
+    await client.portraitProposals();
+    await client.reviewPortraitProposal({ id: "prop-1", action: "approve", editedLine: "- **规则**：示例" });
+    expect(calls[0]?.url).toBe("/api/portrait?variant=projects&project=you-brain");
+    expect(calls[1]?.url).toBe("/api/portrait/proposals");
+    expect(calls[1]?.init.method).toBe("GET");
+    expect(calls[2]?.url).toBe("/api/portrait/proposals");
+    expect(calls[2]?.init.method).toBe("POST");
+    expect(JSON.parse(calls[2]!.init.body as string)).toEqual({
+      id: "prop-1",
+      action: "approve",
+      editedLine: "- **规则**：示例",
+    });
+  });
+
+  test("reference candidates, content, and materialize hit authenticated routes", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const client = createBrowserDaemon({
+      token: "synthetic-test-token",
+      fetch: (async (input, init) => {
+        calls.push({ url: String(input), init: init ?? {} });
+        return Response.json({ ok: true, candidates: [], path: "/tmp/ref.md", fileMention: "@/tmp/ref.md" });
+      }) as typeof fetch,
+    });
+    await client.referenceCandidates({ query: "合同", kinds: ["kb", "topic"], limit: 5 });
+    await client.referenceContent({ uri: "u-brain-kb:abc", label: "合同" });
+    await client.materializeReference({ uri: "u-brain-kb:abc", label: "合同" });
+
+    expect(calls[0]?.url).toBe("/api/references/candidates?q=%E5%90%88%E5%90%8C&kinds=kb%2Ctopic&limit=5");
+    expect(calls[0]?.init.method).toBe("GET");
+    expect(calls[1]?.url).toBe("/api/references/content?uri=u-brain-kb%3Aabc&label=%E5%90%88%E5%90%8C");
+    expect(calls[1]?.init.method).toBe("GET");
+    expect(calls[2]?.url).toBe("/api/references/materialize");
+    expect(calls[2]?.init.method).toBe("POST");
+    expect(JSON.parse(calls[2]!.init.body as string)).toEqual({ uri: "u-brain-kb:abc", label: "合同" });
   });
 });

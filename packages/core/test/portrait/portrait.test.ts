@@ -12,6 +12,7 @@ import {
   FilePortraitConsentStore,
   PortraitService,
   decodePortraitMeta,
+  lookupProjectPortrait,
   type PortraitConfig,
   type PortraitStore,
 } from "../../src/portrait/index.js";
@@ -307,6 +308,76 @@ describe("portrait pull", () => {
       expect(updated.updated).toBe(true);
       expect(await readFile(claude, "utf8")).toContain(CLAUDE_CODING_PORTRAIT_LINE);
       expect((await consent.load()).fingerprint).not.toBe("stale-wording");
+    } finally {
+      await cleanup(home, store);
+    }
+  });
+
+  it("inlines coding.md rules into CLI managed blocks while preserving user blocks, and derives split project files", async () => {
+    const { home, drive, store, service } = await fixture();
+    try {
+      service.setConfig({
+        variants: [
+          { id: "full", path: `/brain-hub/${FULL}` },
+          { id: "coding", path: `/${CODING}` },
+          { id: "projects", path: "/digital-twin/JOHN-TWIN-projects.md" },
+        ],
+        snapshotPattern: "/brain-hub/digital-twin/JOHN-DIGITAL-TWIN-v*-*.md",
+      });
+      await mkdir(join(home, ".claude"), { recursive: true });
+      await mkdir(join(home, ".codex"), { recursive: true });
+      await writeFile(
+        join(home, ".codex", "AGENTS.md"),
+        "<!-- CODEGRAPH_START -->\ncodegraph\n<!-- CODEGRAPH_END -->\n\n- rtk proxy\n",
+      );
+      await drive.put({
+        path: CODING,
+        bytes: Buffer.from(
+          "# 数字分身 · 编码\n版本 v4.5.0 · 2026-11-18 · 变更见 changelog\n\n## 行为与范围\n- **最小变更**：只改任务所需代码。\n",
+          "utf8",
+        ),
+        mimeType: "text/markdown",
+      });
+      await drive.put({
+        path: "digital-twin/JOHN-TWIN-projects.md",
+        bytes: Buffer.from(
+          "# 数字分身 · 项目决定\n版本 v4.5.0 · 2026-11-18 · 变更见 changelog\n\n## 法务审批 · 架构\n> repos: legal-ai\n审批走新网关。\n\n## 运价通\n> repos: freight-bot\n运价缓存 5 分钟。\n",
+          "utf8",
+        ),
+        mimeType: "text/markdown",
+      });
+
+      await service.pull();
+      const splitDir = join(home, ".you-brain", "portrait", "projects");
+      const splitFiles = (await readdir(splitDir)).sort();
+      expect(splitFiles).toEqual(["index.md", "法务审批.md", "运价通.md"].sort());
+      const indexText = await readFile(join(splitDir, "index.md"), "utf8");
+      expect(indexText).toContain("repos: `legal-ai`");
+
+      const projectsDoc = await service.getPortrait("projects");
+      expect(lookupProjectPortrait(projectsDoc.portrait).portrait).toBe(indexText);
+      const legalHit = lookupProjectPortrait(projectsDoc.portrait, "/Users/alice/work/legal-ai");
+      expect(legalHit.matched).toBe(true);
+      expect(legalHit.project).toBe("法务审批");
+      expect(legalHit.portrait).toContain("审批走新网关。");
+      expect(legalHit.portrait).not.toContain("运价缓存");
+
+      await service.syncPortraitClients(["claude-code", "codex"]);
+      const codexAgents = await readFile(join(home, ".codex", "AGENTS.md"), "utf8");
+      expect(codexAgents).toContain("<!-- CODEGRAPH_START -->");
+      expect(codexAgents).toContain("- rtk proxy");
+      expect(codexAgents).toContain("## 行为与范围\n- **最小变更**：只改任务所需代码。");
+      expect(codexAgents).not.toContain("版本 v4.5.0");
+      expect(await readFile(join(home, ".claude", "CLAUDE.md"), "utf8")).toContain(
+        "## 行为与范围\n- **最小变更**：只改任务所需代码。",
+      );
+
+      // Unchecking codex removes only the managed block while keeping CODEGRAPH + rtk intact
+      await service.syncPortraitClients(["claude-code"]);
+      const codexAfterUncheck = await readFile(join(home, ".codex", "AGENTS.md"), "utf8");
+      expect(codexAfterUncheck).not.toContain("you-brain:start");
+      expect(codexAfterUncheck).toContain("<!-- CODEGRAPH_START -->");
+      expect(codexAfterUncheck).toContain("- rtk proxy");
     } finally {
       await cleanup(home, store);
     }

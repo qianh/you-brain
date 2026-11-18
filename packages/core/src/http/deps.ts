@@ -6,7 +6,10 @@ import type { TaskHttpPort } from "../tasks/types.js";
 import type { UiPrefs, UiPrefsPatch } from "../ui-prefs/store.js";
 import type { TerminalConnection, TerminalSize, Tty7TerminalEvents } from "../deck/tty7-terminal.js";
 import type {
+  CodingProposalView,
   PortraitCorrectionView,
+  PortraitProposalActionBody,
+  PortraitProposalActionResult,
   PortraitResponse,
   PortraitSnapshot,
   ReminderView,
@@ -88,6 +91,7 @@ import type {
   DeckMuseSendResponse,
   DeckMuseSessionResponse,
   DeckMuseStreamEvent,
+  DeckNoticeDismissBody,
   DeckNoticesResponse,
   DeckTty7RenameBody,
   DeckTty7ViewingBody,
@@ -112,6 +116,8 @@ export interface HttpDeps {
   portrait(variant: string): Promise<PortraitResponse | null>;
   portraitSnapshots(): Promise<PortraitSnapshot[]>;
   portraitCorrections(variant?: string): Promise<PortraitCorrectionView[]>;
+  portraitProposals?(): Promise<CodingProposalView[]>;
+  reviewPortraitProposal?(body: PortraitProposalActionBody): Promise<PortraitProposalActionResult>;
   search(query: SearchRequest): Promise<SearchResponse>;
   /** Load the vector cache and the query model ahead of a likely search. Returns at once. */
   searchWarm?(): void;
@@ -174,8 +180,11 @@ export interface HttpDeps {
   notionTree?(): Promise<NotionTreeView>;
   notionPage?(pageId: string): Promise<NotionPageView | null>;
   notionSearch?(query: string, limit?: number): Promise<NotionSearchView>;
+  notionRecent?(limit?: number): Promise<Array<{ pageId: string; title: string; lastEditedTime: string }>>;
   notionUsers?(): Promise<Array<{ id: string; name: string }>>;
   notionDatabase?(databaseId: string): Promise<NotionDatabaseView | null>;
+  /** 本地输出根目录（~/.you-brain），供物化引用文件写盘。 */
+  outputDir?: string;
   notionAsset?(blockId: string): Promise<NotionAsset | null>;
   notionUpdateBlock?(body: NotionUpdateBlockBody): Promise<NotionPageMutationResult>;
   notionAppendBlock?(body: NotionAppendBlockBody): Promise<NotionPageMutationResult>;
@@ -227,6 +236,7 @@ export interface DeckHttpPort {
   tty7Viewing(body: DeckTty7ViewingBody): Promise<{ ok: true }>;
   /** 终端会话提醒（工作中 → 等你回复/已完成）。 */
   notices(): Promise<DeckNoticesResponse>;
+  noticeDismiss?(body: DeckNoticeDismissBody): Promise<{ ok: true }>;
   tty7Screen(pane: number, lines?: number): Promise<DeckTty7ScreenResponse>;
   tty7Send(body: DeckTty7SendBody): Promise<{ ok: true }>;
   tty7Start(body: DeckTty7StartBody): Promise<DeckTty7StartResponse>;

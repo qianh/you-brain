@@ -1,4 +1,4 @@
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { TodoStatusSchema, TopicStatusSchema } from "@you-brain/protocol";
 import { z } from "zod";
@@ -7,15 +7,25 @@ import {
   SessionSourceSchema,
   type SessionSource,
 } from "../domain/session.js";
+import {
+  listReferenceCandidates,
+  resolveReference,
+  type ReferencePorts,
+} from "../reference/index.js";
 
-import type {
-  ActionResponse,
-  NotionPageView,
-  NotionSearchView,
-  PortraitCorrectionResult,
-  PortraitCorrectionsResponse,
-  PortraitResponse,
-  RemindersResponse,
+import {
+  ReferenceKindSchema,
+  type ActionResponse,
+  type NotionPageView,
+  type NotionSearchView,
+  type PortraitCorrectionResult,
+  type PortraitCorrectionsResponse,
+  type PortraitResponse,
+  type ReferenceCandidateView,
+  type ReferenceCandidatesResponse,
+  type ReferenceContentView,
+  type ReferenceKind,
+  type RemindersResponse,
   SearchRequest,
   SearchResponse,
   TodayResponse,
@@ -72,13 +82,19 @@ export type UpdateTopicInput =
       session_key: string;
     };
 
+export interface GetPortraitMcpInput {
+  variant?: string;
+  project?: string;
+  fullProjects?: boolean;
+}
+
 export interface McpServices {
   searchSessions(input: SearchRequest & { limit?: number }): Promise<SearchResponse>;
   getSession(input: {
     source: SessionSource;
     conversationId: string;
   }): Promise<SessionContent>;
-  getPortrait(input: { variant?: string }): Promise<PortraitContent | PortraitResponse>;
+  getPortrait(input: GetPortraitMcpInput): Promise<PortraitContent | PortraitResponse>;
   hubStatus(): Promise<object>;
   uploadSessions(input: UploadActionInput): Promise<UploadActionResult>;
   getToday(): Promise<TodayResponse>;
@@ -97,6 +113,17 @@ export interface McpServices {
   /** 知识库（Notion，只读）。 */
   notionSearch(input: { query: string; limit?: number }): Promise<NotionSearchView>;
   notionPage(input: { pageId: string }): Promise<NotionPageView>;
+  /** 统一 @ 引用候选与正文读取（可选；未实现时从上方基础服务组装）。 */
+  searchReferences?(input: {
+    query?: string;
+    kinds?: ReferenceKind[];
+    limit?: number;
+  }): Promise<ReferenceCandidatesResponse>;
+  getReference?(input: {
+    uri?: string;
+    query?: string;
+    kind?: ReferenceKind;
+  }): Promise<{ content: ReferenceContentView | null; candidates: ReferenceCandidateView[] }>;
 }
 
 type ToolResult = {
@@ -165,6 +192,54 @@ const UpdateTopicSchema = z.discriminatedUnion("action", [
     session_key: SessionKeySchema,
   }),
 ]);
+
+const KIND_LABELS: Record<ReferenceKind, string> = {
+  tty7: "终端会话",
+  session: "会话",
+  topic: "话题",
+  kb: "知识库",
+};
+
+function buildFallbackReferencePorts(services: McpServices): ReferencePorts {
+  return {
+    today: () => services.getToday(),
+    search: (req) => services.searchSessions(req),
+    sessionContent: async (input) => {
+      const content = await services.getSession({
+        source: input.source as SessionSource,
+        conversationId: input.conversationId ?? input.sessionKey ?? "",
+      });
+      return {
+        source: content.source,
+        conversationId: content.conversationId,
+        content: content.content,
+        updatedAt: content.updatedAt,
+      };
+    },
+    topics: (query) => services.getTopics(query),
+    topic: (topicId) => services.getTopic(topicId).catch(() => null),
+    notionSearch: (query, limit) =>
+      services.notionSearch({ query, ...(limit !== undefined ? { limit } : {}) }),
+    notionPage: (pageId) => services.notionPage({ pageId }).catch(() => null),
+  };
+}
+
+async function runSearchReferences(
+  services: McpServices,
+  input: { query?: string; kinds?: ReferenceKind[]; limit?: number },
+): Promise<ReferenceCandidatesResponse> {
+  if (services.searchReferences) return services.searchReferences(input);
+  const candidates = await listReferenceCandidates(input, buildFallbackReferencePorts(services));
+  return { candidates };
+}
+
+async function runGetReference(
+  services: McpServices,
+  input: { uri?: string; query?: string; kind?: ReferenceKind },
+): Promise<{ content: ReferenceContentView | null; candidates: ReferenceCandidateView[] }> {
+  if (services.getReference) return services.getReference(input);
+  return resolveReference(input, buildFallbackReferencePorts(services));
+}
 
 export function createToolHandlers(services: McpServices) {
   return {
@@ -245,11 +320,15 @@ export function createToolHandlers(services: McpServices) {
     },
     get_portrait: async (input: {
       variant?: string | undefined;
+      project?: string | undefined;
+      full_projects?: boolean | undefined;
     }): Promise<ToolResult> => {
       try {
-        const output = await services.getPortrait(
-          input.variant !== undefined ? { variant: input.variant } : {},
-        );
+        const req: GetPortraitMcpInput = {};
+        if (input.variant !== undefined) req.variant = input.variant;
+        if (input.project !== undefined) req.project = input.project;
+        if (input.full_projects !== undefined) req.fullProjects = input.full_projects;
+        const output = await services.getPortrait(req);
         const portrait =
           "portrait" in output && typeof output.portrait === "string"
             ? output.portrait
@@ -300,23 +379,63 @@ export function createToolHandlers(services: McpServices) {
       }
     },
     get_topics: async (input: {
-      zone?: "active" | "history" | undefined;
+      zone?: "active" | "history" | "all" | undefined;
       status?: z.infer<typeof TopicStatusSchema> | undefined;
+      limit?: number | undefined;
     }): Promise<ToolResult> => {
       try {
         const query: TopicsQuery = {};
-        if (input.zone !== undefined) query.zone = input.zone;
+        const effectiveZone = input.zone ?? "active";
+        if (effectiveZone !== "all") query.zone = effectiveZone;
         if (input.status !== undefined) query.status = input.status;
         const output = await services.getTopics(query);
-        return success(output, JSON.stringify(output, null, 2));
+        const cap = input.limit ?? 50;
+        const sliced =
+          output.topics.length > cap
+            ? {
+                topics: output.topics.slice(0, cap),
+                totalCount: output.topics.length,
+                truncated: true,
+              }
+            : output;
+        return success(sliced, JSON.stringify(sliced, null, 2));
       } catch (error) {
         return failure(error);
       }
     },
-    get_topic: async (input: { topic_id: string }): Promise<ToolResult> => {
+    get_topic: async (input: {
+      topic_id: string;
+      conclusion_limit?: number | undefined;
+      todo_limit?: number | undefined;
+      include_closed_todos?: boolean | undefined;
+      session_limit?: number | undefined;
+    }): Promise<ToolResult> => {
       try {
-        const output = await services.getTopic(input.topic_id);
-        return success(output, JSON.stringify(output, null, 2));
+        const detail = await services.getTopic(input.topic_id);
+        const conclusionLimit = input.conclusion_limit ?? 20;
+        const todoLimit = input.todo_limit ?? 30;
+        const sessionLimit = input.session_limit ?? 15;
+        const includeClosed = input.include_closed_todos === true;
+
+        const sortedConclusions = [...detail.conclusions].sort((a, b) =>
+          b.ts.localeCompare(a.ts) || a.conclusionId.localeCompare(b.conclusionId),
+        );
+        const openTodos = detail.todos.filter((todo) => todo.status === "open");
+        const candidateTodos = includeClosed ? detail.todos : openTodos;
+
+        const capped = {
+          ...detail,
+          conclusions: sortedConclusions.slice(0, conclusionLimit),
+          todos: candidateTodos.slice(0, todoLimit),
+          sessions: detail.sessions.slice(0, sessionLimit),
+          counts: {
+            conclusionsTotal: detail.conclusions.length,
+            openTodosTotal: openTodos.length,
+            todosTotal: detail.todos.length,
+            sessionsTotal: detail.sessions.length,
+          },
+        };
+        return success(capped, JSON.stringify(capped, null, 2));
       } catch (error) {
         return failure(error);
       }
@@ -364,6 +483,64 @@ export function createToolHandlers(services: McpServices) {
           input.variant !== undefined ? { variant: input.variant } : {},
         );
         return success(output, JSON.stringify(output, null, 2));
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    search_references: async (input: {
+      query?: string | undefined;
+      kinds?: ReferenceKind[] | undefined;
+      limit?: number | undefined;
+    }): Promise<ToolResult> => {
+      try {
+        const output = await runSearchReferences(services, {
+          ...(input.query !== undefined ? { query: input.query } : {}),
+          ...(input.kinds !== undefined ? { kinds: input.kinds } : {}),
+          ...(input.limit !== undefined ? { limit: input.limit } : {}),
+        });
+        const text =
+          output.candidates.length === 0
+            ? "没有找到可引用的候选内容。"
+            : output.candidates
+                .map((item) => {
+                  const header = `[${KIND_LABELS[item.kind]}] ${item.label} — ${item.uri} (${item.resourceUri})`;
+                  return item.detail ? `${header}\n  ${item.detail}` : header;
+                })
+                .join("\n");
+        return success(output, text);
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    get_reference: async (input: {
+      uri?: string | undefined;
+      query?: string | undefined;
+      kind?: ReferenceKind | undefined;
+    }): Promise<ToolResult> => {
+      try {
+        const uri = input.uri?.trim() || undefined;
+        const query = input.query?.trim() || undefined;
+        if (uri === undefined && query === undefined) {
+          return failure(Object.assign(new Error("需要提供 uri 或 query"), { code: "INVALID_INPUT" }));
+        }
+        const result = await runGetReference(services, {
+          ...(uri !== undefined ? { uri } : {}),
+          ...(query !== undefined ? { query } : {}),
+          ...(input.kind !== undefined ? { kind: input.kind } : {}),
+        });
+        if (!result.content) {
+          return success(
+            { found: false, candidates: result.candidates },
+            "没有找到匹配的 U-Brain 引用内容。",
+          );
+        }
+        if (result.content.error !== undefined) {
+          return failure(Object.assign(new Error(result.content.error), { code: "SOURCE_UNAVAILABLE" }));
+        }
+        return success(
+          { found: true, reference: result.content, candidates: result.candidates },
+          result.content.wrappedText,
+        );
       } catch (error) {
         return failure(error);
       }
@@ -427,9 +604,12 @@ export function createMcpServer(services: McpServices): McpServer {
   server.registerTool(
     "get_portrait",
     {
-      description: "读取本机数字分身。variant 默认 full，也可以是 coding、projects 或自定义变体",
+      description:
+        "读取本机数字分身。variant 默认 full，也可以是 coding、projects 或自定义变体；variant=\"projects\" 时推荐传 project=\"<仓库目录名或项目名>\" 按需读取单项目口径（省略 project 时返回项目索引）",
       inputSchema: {
         variant: z.string().min(1).optional(),
+        project: z.string().min(1).max(120).optional(),
+        full_projects: z.boolean().optional(),
       },
     },
     handlers.get_portrait,
@@ -464,10 +644,11 @@ export function createMcpServer(services: McpServices): McpServer {
   server.registerTool(
     "get_topics",
     {
-      description: "读取话题列表，可按活跃区、历史区或状态过滤",
+      description: "读取话题列表。zone 默认 active（传 history 查历史区，传 all 查全部），默认最多返回 50 个",
       inputSchema: {
-        zone: z.enum(["active", "history"]).optional(),
+        zone: z.enum(["active", "history", "all"]).optional(),
         status: TopicStatusSchema.optional(),
+        limit: z.number().int().min(1).max(200).optional(),
       },
     },
     handlers.get_topics,
@@ -475,9 +656,14 @@ export function createMcpServer(services: McpServices): McpServer {
   server.registerTool(
     "get_topic",
     {
-      description: "读取一个话题的概要、结论、待办和会话链接",
+      description:
+        "读取一个话题的概要、近期结论、开放待办和会话链接（默认返回最新 20 条结论、30 条开放待办、15 条会话）",
       inputSchema: {
         topic_id: z.string().min(1),
+        conclusion_limit: z.number().int().min(1).max(200).optional(),
+        todo_limit: z.number().int().min(1).max(200).optional(),
+        include_closed_todos: z.boolean().optional(),
+        session_limit: z.number().int().min(1).max(100).optional(),
       },
     },
     handlers.get_topic,
@@ -521,6 +707,75 @@ export function createMcpServer(services: McpServices): McpServer {
       },
     },
     handlers.get_portrait_corrections,
+  );
+  server.registerTool(
+    "search_references",
+    {
+      description:
+        "搜索或列出可 @ 引用的 U-Brain 候选内容（tty7 终端会话、今日与历史会话、话题册、Notion 知识库页面）",
+      inputSchema: {
+        query: z.string().optional(),
+        kinds: z.array(ReferenceKindSchema).optional(),
+        limit: z.number().int().min(1).max(30).optional(),
+      },
+    },
+    handlers.search_references,
+  );
+  server.registerTool(
+    "get_reference",
+    {
+      description:
+        "按 uri（u-brain-... / you-brain://... / %pane）或 @ 引用关键词读取完整引用正文（支持 终端:/会话:/话题:/知识库: 前缀）",
+      inputSchema: {
+        uri: z.string().min(1).optional(),
+        query: z.string().min(1).optional(),
+        kind: ReferenceKindSchema.optional(),
+      },
+    },
+    handlers.get_reference,
+  );
+  server.registerResource(
+    "u-brain-reference",
+    new ResourceTemplate("you-brain://{kind}/{id}", {
+      list: async () => {
+        const res = await runSearchReferences(services, { limit: 8 });
+        return {
+          resources: res.candidates.map((item) => ({
+            uri: item.resourceUri,
+            name: `${KIND_LABELS[item.kind]} · ${item.label}`,
+            ...(item.detail ? { description: item.detail } : {}),
+            mimeType: "text/markdown",
+          })),
+        };
+      },
+      complete: {
+        kind: (value) =>
+          (["tty7", "session", "topic", "kb"] as const).filter((kind) => kind.startsWith(value)),
+      },
+    }),
+    {
+      title: "U-Brain 引用（会话 / 话题 / 知识库 / 终端）",
+      description: "通过 @ 在 AI CLI 中直接引用 U-Brain 的会话、话题册、Notion 知识库页面与终端快照",
+      mimeType: "text/markdown",
+    },
+    async (uri) => {
+      const resolved = await runGetReference(services, { uri: uri.href });
+      if (!resolved.content) {
+        throw new Error(`找不到引用资源：${uri.href}`);
+      }
+      if (resolved.content.error !== undefined) {
+        throw new Error(resolved.content.error);
+      }
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "text/markdown",
+            text: resolved.content.wrappedText,
+          },
+        ],
+      };
+    },
   );
   return server;
 }

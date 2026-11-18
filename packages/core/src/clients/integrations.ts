@@ -74,6 +74,8 @@ export interface IntegrationPlanOptions {
   managedStatePath: string;
   intent?: "install" | "uninstall";
   clients?: readonly CaptureSourceId[];
+  /** Path to local `coding.md` for inline injection; defaults to `<homeDir>/.you-brain/portrait/coding.md`. */
+  codingFilePath?: string;
 }
 
 async function directoryExists(path: string): Promise<boolean> {
@@ -118,13 +120,16 @@ export async function planClientIntegrations(
   const launch = options.launch ?? DEFAULT_MCP_LAUNCH;
   const entry = mcpEntry(launch);
   const wanted = options.clients ? new Set(options.clients) : null;
+  const codingPath =
+    options.codingFilePath ?? join(options.homeDir, ".you-brain", "portrait", "coding.md");
+  const codingMarkdown = intent === "install" ? await readTextIfPresent(codingPath) : null;
   const items: IntegrationPlanItem[] = [];
   for (const client of CLIENT_CATALOG) {
     if (wanted && !wanted.has(client.id)) continue;
     if (!(await clientAvailable(client, options.homeDir, options.run))) continue;
     items.push(
       ...(await planMcp(client, options.homeDir, entry, intent, options.run)),
-      ...(await planPortrait(client, options.homeDir, intent)),
+      ...(await planPortrait(client, options.homeDir, intent, codingMarkdown)),
       ...(await planSkills(client, options.homeDir, intent)),
     );
   }
@@ -203,8 +208,9 @@ async function planPortrait(
   client: (typeof CLIENT_CATALOG)[number],
   homeDir: string,
   intent: "install" | "uninstall",
+  codingMarkdown: string | null,
 ): Promise<IntegrationPlanItem[]> {
-  const body = portraitBody(client);
+  const body = portraitBody(client, codingMarkdown);
   const block = managedBlock(body);
   if (client.portrait.kind === "copy") {
     if (intent === "uninstall") return [];
@@ -319,10 +325,14 @@ export async function applyClientIntegrations(options: {
   selectedIds: readonly string[];
   launch?: CommandSpec;
   managedStatePath: string;
+  codingFilePath?: string;
 }): Promise<{ applied: string[]; skipped: string[] }> {
   const selected = new Set(options.selectedIds);
   const launch = options.launch ?? DEFAULT_MCP_LAUNCH;
   const entry = mcpEntry(launch);
+  const codingPath =
+    options.codingFilePath ?? join(options.homeDir, ".you-brain", "portrait", "coding.md");
+  const codingMarkdown = await readTextIfPresent(codingPath);
   const applied: string[] = [];
   const skipped: string[] = [];
   for (const item of options.plan.items) {
@@ -357,10 +367,11 @@ export async function applyClientIntegrations(options: {
       if (item.action === "remove") {
         await removeManagedBlock({ path, statePath: options.managedStatePath });
       } else {
+        const body = portraitBody(client, codingMarkdown);
         const limit = client.portrait.maxChars;
         if (limit !== undefined) {
           const current = await readTextIfPresent(path);
-          const updated = upsertManagedBlockText(current ?? "", portraitBody(client));
+          const updated = upsertManagedBlockText(current ?? "", body);
           if (updated.length > limit) {
             skipped.push(item.id);
             continue;
@@ -368,7 +379,7 @@ export async function applyClientIntegrations(options: {
         }
         await upsertManagedBlock({
           path,
-          body: portraitBody(client),
+          body,
           statePath: options.managedStatePath,
         });
       }

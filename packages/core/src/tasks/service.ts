@@ -4,7 +4,7 @@ import { TaskActionSchema, TaskCreateSchema, TaskUpdateSchema, type TaskState } 
 import { TaskStore } from "./store.js";
 import type {
   DevelopmentTask, TaskActionInput, TaskAutomationPort, TaskBoard, TaskCreateInput,
-  TaskGitPort, TaskHttpPort, TaskProject, TaskReview, TaskUpdateInput,
+  TaskGitPort, TaskHttpPort, TaskNewProject, TaskProject, TaskReview, TaskUpdateInput,
 } from "./types.js";
 
 export class TaskError extends Error {
@@ -21,12 +21,15 @@ export interface TaskServiceOptions {
   id?: () => string;
   onChange?: () => void;
   pollMs?: number;
+  /** 按项目 cwd 返回该仓库已锁定的项目决定摘要（< 3KB），供派发时注入。 */
+  projectContext?: (cwd: string) => Promise<string | null> | string | null;
   /** 测试注入存储故障；生产使用原子文件写入。 */
   store?: Pick<TaskStore, "read" | "write">;
 }
 
 const ACTIVE = new Set(["preparing", "running", "review", "merging", "failed"]);
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
+const samePath = (a: string, b: string): boolean => a.replace(/\/+$/u, "") === b.replace(/\/+$/u, "");
 
 export function nextProjectTask(tasks: DevelopmentTask[], projectId: string): DevelopmentTask | null {
   if (tasks.some((task) => task.projectId === projectId && ACTIVE.has(task.status))) return null;
@@ -114,11 +117,11 @@ export class TaskService implements TaskHttpPort {
     return this.#serial(async () => {
       const body = TaskCreateSchema.parse(input);
       const state = await this.#load();
-      if (body.projectId) await this.#requireProject(body.projectId);
+      const projectId = await this.#taskProject(body);
       const now = this.#now();
       state.tasks.push({
         id: this.options.id?.() ?? randomUUID(), title: body.title,
-        description: body.description ?? "", projectId: body.projectId ?? null,
+        description: body.description ?? "", projectId: projectId ?? null,
         priority: body.priority ?? 2, status: "queued", createdAt: now, updatedAt: now, run: null,
       });
       await this.#save();
@@ -132,10 +135,10 @@ export class TaskService implements TaskHttpPort {
       const body = TaskUpdateSchema.parse(input);
       const task = await this.#task(body.id);
       if (task.status !== "queued") throw new TaskError(409, "只有待处理的 TODO 可以修改；已开工任务请在 T3 中核对。");
-      if (body.projectId) await this.#requireProject(body.projectId);
+      const projectId = await this.#taskProject(body);
       if (body.title !== undefined) task.title = body.title;
       if (body.description !== undefined) task.description = body.description;
-      if (body.projectId !== undefined) task.projectId = body.projectId;
+      if (projectId !== undefined) task.projectId = projectId;
       if (body.priority !== undefined) task.priority = body.priority;
       await this.#save(task);
       this.poke();
@@ -232,8 +235,11 @@ export class TaskService implements TaskHttpPort {
     // 旧记录在派发前就存了自定的会话编号，沿用它作派发编号。
     const requestId = task.run.requestId ?? task.run.threadId;
     if (!requestId) throw new Error("任务缺少派发编号，请人工检查。");
+    const rawContext = this.options.projectContext
+      ? await Promise.resolve(this.options.projectContext(project.cwd)).catch(() => null)
+      : null;
     const started = await this.options.automation.start({
-      projectId: project.id, title: task.title, prompt: this.#taskPrompt(task),
+      projectId: project.id, title: task.title, prompt: this.#taskPrompt(task, rawContext),
       cwd: task.run.worktreePath, branch: task.run.branch, requestId,
     });
     task.run.requestId = requestId;
@@ -278,10 +284,18 @@ export class TaskService implements TaskHttpPort {
     await this.#save(task);
   }
 
-  #taskPrompt(task: DevelopmentTask): string {
+  #taskPrompt(task: DevelopmentTask, rawProjectContext?: string | null): string {
+    const trimmedContext = (rawProjectContext ?? "").trim();
+    const projectSection =
+      trimmedContext === ""
+        ? ""
+        : `【项目既有口径参考（与仓库当前代码冲突时以代码为准）】\n${
+            trimmedContext.length > 3_000 ? `${trimmedContext.slice(0, 3_000)}…` : trimmedContext
+          }`;
     return [
       "这是 U-Brain TODO 队列派发的单个开发任务。", `任务：${task.title}`, task.description,
       `工作目录：${task.run!.worktreePath}`, `任务分支：${task.run!.branch}`,
+      projectSection,
       "只在这个独立工作树和任务分支完成本任务。先阅读项目规则，保护已有修改。",
       "完成后运行适用检查，并将本任务变更提交到当前任务分支。提交前检查 diff，只提交相关文件，禁止提交 .env、凭证和密钥。",
       "禁止 checkout、修改或合并 develop，禁止 push、部署、删除工作树和分支。人工核对通过后由 U-Brain 合并。",
@@ -314,6 +328,29 @@ export class TaskService implements TaskHttpPort {
       this.#liveProjects.clear();
       return false;
     }
+  }
+
+  /** 解析 TODO 要关联的项目；newProject 时先在 T3 登记，同一文件夹已登记过就直接复用。 */
+  async #taskProject(body: { projectId?: string | null | undefined; newProject?: TaskNewProject | undefined }): Promise<string | null | undefined> {
+    if (!body.newProject) {
+      if (body.projectId) await this.#requireProject(body.projectId);
+      return body.projectId;
+    }
+    if (!(await this.#refreshProjects())) throw new TaskError(503, this.#connectionError ?? "T3 连接失败。");
+    const { name, cwd } = body.newProject;
+    const live = this.#state!.projects.filter((item) => this.#liveProjects.has(item.id));
+    const existing = cwd !== undefined ? live.find((item) => samePath(item.cwd, cwd)) : undefined;
+    if (existing) return existing.id;
+    let created: Omit<TaskProject, "enabled">;
+    try { created = await this.options.automation.createProject({ name, ...(cwd !== undefined ? { cwd } : {}) }); }
+    catch (error) { throw new TaskError(502, `T3 新建项目失败：${message(error)}`); }
+    await this.#refreshProjects();
+    if (!this.#state!.projects.some((item) => item.id === created.id)) {
+      this.#state!.projects.push({ ...created, enabled: false });
+      this.#liveProjects.add(created.id);
+      await this.#save();
+    }
+    return created.id;
   }
 
   async #requireProject(id: string): Promise<TaskProject> {

@@ -1,7 +1,8 @@
 /* Design tokens. Hex and rgb live only in this file. */
 
 :root,
-[data-theme="light"] {
+[data-theme="light"],
+[data-theme="dopamine"] {
   color-scheme: light;
   --bg: #f4f4f6;
   --surface: #ffffff;
@@ -110,6 +111,82 @@
   --shadow-float: 0 6px 18px rgba(0, 0, 0, 0.16);
   --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.04);
   --media-bg: #000000;
+}
+
+/*
+ * 多巴胺:奶油暖底 + 高饱和撞色(热粉、橙、柠檬黄、电光蓝、薄荷绿)。
+ * 继承浅色的全部变量,只覆盖色彩;正文保持深梅色,对比度不低于浅色主题。
+ */
+[data-theme="dopamine"] {
+  --bg: #fff6ea;
+  --surface: #ffffff;
+  --surface-2: #fff0f5;
+  --surface-3: #ffe2ee;
+  --hover: rgba(230, 36, 122, 0.06);
+  --pressed: rgba(230, 36, 122, 0.12);
+  --border: rgba(110, 30, 80, 0.12);
+  --border-strong: rgba(110, 30, 80, 0.24);
+  --text: #26132e;
+  --text-2: #5e4466;
+  --text-3: #8f7894;
+  --accent: #e6247a;
+  --accent-solid: #e6247a;
+  --accent-soft: rgba(230, 36, 122, 0.12);
+  --kn-h1: #c2185b;
+  --kn-h2: #d9480f;
+  --kn-h3: #6d28d9;
+  --kn-h4: #6b5a72;
+  --kn-strong: #e6247a;
+  --kn-em: #0e7490;
+  --kn-link: #2f5bff;
+  --kn-code: #0f8a4f;
+  --kn-quote: #6d28d9;
+  --font-heading: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Helvetica Neue", sans-serif;
+  --success: #12b76a;
+  --success-text: #067647;
+  --success-soft: rgba(18, 183, 106, 0.14);
+  --warn: #ff8a00;
+  --warn-text: #b54708;
+  --warn-soft: rgba(255, 138, 0, 0.15);
+  --danger: #f04438;
+  --danger-text: #b42318;
+  --danger-soft: rgba(240, 68, 56, 0.12);
+  --scrim: rgba(38, 19, 46, 0.4);
+  --shadow-pop: 0 12px 32px rgba(120, 30, 90, 0.16);
+  --shadow-slider: 0 1px 2px rgba(120, 30, 90, 0.1);
+  --shadow-float: 0 6px 18px rgba(120, 30, 90, 0.18);
+  --shadow-card: 0 1px 3px rgba(230, 36, 122, 0.08);
+  --scrollbar: rgba(230, 36, 122, 0.3);
+  --scrollbar-hover: rgba(230, 36, 122, 0.5);
+  --tile-claude: #ff6b35;
+  --tile-claude-ink: #d9480f;
+  --tile-codex: #00b894;
+  --tile-codex-ink: #047857;
+  --tile-grok: #26132e;
+  --tile-grok-ink: #26132e;
+  --tile-cursor: #2f5bff;
+  --tile-cursor-ink: #1d3fd8;
+  --tile-gemini: #8b5cf6;
+  --tile-gemini-ink: #6d28d9;
+  --swatch-1: #ff6b35;
+  --swatch-1-ink: #d9480f;
+  --swatch-2: #00b894;
+  --swatch-2-ink: #047857;
+  --swatch-3: #2f5bff;
+  --swatch-3-ink: #1d3fd8;
+  --swatch-4: #8b5cf6;
+  --swatch-4-ink: #6d28d9;
+  --swatch-5: #ffb400;
+  --swatch-5-ink: #a15c00;
+  --swatch-6: #ff3d8b;
+  --swatch-6-ink: #c2185b;
+  --swatch-7: #22c55e;
+  --swatch-7-ink: #15803d;
+  --swatch-8: #5e4466;
+  --swatch-8-ink: #3d2645;
+  --dopamine-glow-1: rgba(255, 61, 139, 0.10);
+  --dopamine-glow-2: rgba(255, 180, 0, 0.12);
+  --dopamine-glow-3: rgba(47, 91, 255, 0.08);
 }
 
 [data-theme="dark"] {

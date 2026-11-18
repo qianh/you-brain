@@ -16,9 +16,26 @@ const INJECTED_PREFIXES = [
   "<INSTRUCTIONS>",
 ] as const;
 
+const AUTOMATED_BATCH_PATTERNS = [/^只根据\s*\S+\.raw\.txt\s*整理/u] as const;
+
 export function isInjectedPrompt(text: string): boolean {
   const head = text.trimStart();
   return INJECTED_PREFIXES.some((prefix) => head.startsWith(prefix));
+}
+
+export function isAutomatedBatchPrompt(text: string): boolean {
+  const head = text.trim();
+  return head !== "" && AUTOMATED_BATCH_PATTERNS.some((pattern) => pattern.test(head));
+}
+
+/** True when every non-injected user turn in a session is an unattended batch digest prompt. */
+export function isAutomatedBatchSession(
+  turns: ReadonlyArray<{ role: string; text: string }>,
+): boolean {
+  const userTurns = turns.filter(
+    (turn) => turn.role === "user" && turn.text.trim() !== "" && !isInjectedPrompt(turn.text),
+  );
+  return userTurns.length > 0 && userTurns.every((turn) => isAutomatedBatchPrompt(turn.text));
 }
 
 /**

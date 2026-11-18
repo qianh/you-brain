@@ -1,3 +1,5 @@
+import { isReferenceShortcut } from "./deck-reference-logic.js";
+
 /**
  * 整屏终端的标签状态：open 是本次运行里打开过的会话（跨项目），active 是当前显示的那个。
  * active 为 null 表示整屏终端被「返回」收起，但标签还在。
@@ -48,12 +50,12 @@ export function cycleTab(state: TerminalTabs, step: 1 | -1): TerminalTabs {
   return target === undefined ? state : { open: state.open, active: target };
 }
 
-export type TerminalShortcut = "back" | "next" | "previous" | "fontUp" | "fontDown" | "fontReset";
+export type TerminalShortcut = "back" | "next" | "previous" | "fontUp" | "fontDown" | "fontReset" | "reference";
 
 /**
- * 整屏终端只拦这几个按键：⌘⇧D（非 macOS 为 Ctrl+Shift+D）返回，Ctrl+Tab / Ctrl+Shift+Tab 切标签，
- * ⌘= 或 ⌘+ 放大、⌘- 缩小、⌘0 恢复默认字号（非 macOS 用 Ctrl）。
- * 其余按键（包括 Esc）一律返回 null，原样交给 xterm。
+ * 整屏终端只拦这几个按键：⌘⇧D（非 macOS 为 Ctrl+Shift+D）返回，⌘⇧2 / ⌘⇧@ 打开 @ 引用，
+ * Ctrl+Tab / Ctrl+Shift+Tab 切标签，⌘= 或 ⌘+ 放大、⌘- 缩小、⌘0 恢复默认字号（非 macOS 用 Ctrl）。
+ * 其余按键（包括 Esc 与裸 @）一律返回 null，原样交给 xterm。
  */
 export function terminalShortcut(
   event: { key: string; meta: boolean; ctrl: boolean; alt: boolean; shift: boolean },
@@ -61,6 +63,7 @@ export function terminalShortcut(
 ): TerminalShortcut | null {
   if (event.alt) return null;
   if (event.key === "Tab" && event.ctrl && !event.meta) return event.shift ? "previous" : "next";
+  if (isReferenceShortcut(event, mod)) return "reference";
   const modDown = mod === "meta" ? event.meta && !event.ctrl : event.ctrl && !event.meta;
   if (!modDown) return null;
   if (event.shift && event.key.toLowerCase() === "d") return "back";

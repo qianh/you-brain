@@ -3,18 +3,28 @@ import { randomUUID } from "node:crypto";
 import type { Tty7Session, Tty7SessionsView } from "./tty7.js";
 
 /**
- * 终端会话提醒：某个会话的 agent 从「工作中」变成「等你回复」或「已完成」时记一条。
- * 状态来自 tty7 的 agent hooks；没有状态的会话（没装 hooks）不提醒。
- * daemon 只负责产生和保存条目，真正弹系统通知的是桌面壳（它来取 `/api/deck/notices`）。
+ * 终端会话提醒：某个会话从「工作中」变成「等你回复」或「已完成」时记一条。
+ * 状态来自 tty7 的 agent hooks 或终端进程/屏幕活动监测（activity.ts）。
+ * daemon 负责产生、收口过时条目并提供确认关闭接口；桌面壳弹系统通知并拉起置顶弹框。
  */
 export interface SessionNotice {
   /** 从 1 递增；取的一方记住最大的 seq，只处理比它大的。 */
   seq: number;
   pane: number;
   kind: "waiting" | "done";
+  /** open = 待处理（在置顶弹框队列里展示）；closed = 已确认、已跳转或会话状态已推进。 */
+  status: "open" | "closed";
+  sessionName: string;
+  agent: string | null;
+  cwd: string;
   title: string;
   body: string;
   at: string;
+}
+
+export interface SessionNoticeDismissInput {
+  seq?: number | undefined;
+  pane?: number | undefined;
 }
 
 export interface SessionNoticeList {
@@ -43,6 +53,11 @@ export function sessionTitle(session: Pick<Tty7Session, "pane" | "tabLabel" | "c
   return session.tabLabel ?? (session.cwd === "" ? `%${session.pane}` : baseName(session.cwd));
 }
 
+export type SessionNoticeDraft = Pick<
+  SessionNotice,
+  "pane" | "kind" | "sessionName" | "agent" | "cwd" | "title" | "body"
+>;
+
 /**
  * 比较前后两次快照，产生这一轮的提醒。
  * `previous` 为 null 是第一次快照，只建立基线、不提醒（重启后不补弹）。
@@ -52,9 +67,9 @@ export function diffNotices(
   previous: ReadonlyMap<number, string | null> | null,
   sessions: readonly Tty7Session[],
   viewing: number | null,
-): Array<Pick<SessionNotice, "pane" | "kind" | "title" | "body">> {
+): SessionNoticeDraft[] {
   if (previous === null) return [];
-  const result: Array<Pick<SessionNotice, "pane" | "kind" | "title" | "body">> = [];
+  const result: SessionNoticeDraft[] = [];
   for (const session of sessions) {
     if (previous.get(session.pane) !== "working") continue;
     if (session.status !== "waiting" && session.status !== "done") continue;
@@ -63,11 +78,44 @@ export function diffNotices(
     result.push({
       pane: session.pane,
       kind: session.status,
+      sessionName: name,
+      agent: session.agent,
+      cwd: session.cwd,
       title: session.status === "waiting" ? `${name} 在等你回复` : `${name} 已完成`,
       body: session.statusMessage ?? "",
     });
   }
   return result;
+}
+
+/**
+ * 根据最新会话快照收口已过时的待处理提醒，返回是否有状态变化：
+ * - 会话已关闭（不在 sessions 里）→ 关闭
+ * - 用户正在整屏看这个会话（pane === viewing）→ 关闭
+ * - waiting 提醒：会话不再处于 waiting（用户已在终端回复、继续执行或已结束）→ 关闭
+ * - done 提醒：会话重新进入 working（开始了新任务）→ 关闭（停在 done 或 idle 时保留，等用户确认）
+ */
+export function reconcileOpenNotices(
+  notices: SessionNotice[],
+  sessions: readonly Tty7Session[],
+  viewing: number | null,
+): boolean {
+  const byPane = new Map(sessions.map((session) => [session.pane, session]));
+  let changed = false;
+  for (const notice of notices) {
+    if (notice.status !== "open") continue;
+    const current = byPane.get(notice.pane);
+    const stale =
+      current === undefined ||
+      notice.pane === viewing ||
+      (notice.kind === "waiting" && current.status !== "waiting") ||
+      (notice.kind === "done" && current.status === "working");
+    if (stale) {
+      notice.status = "closed";
+      changed = true;
+    }
+  }
+  return changed;
 }
 
 export interface SessionNoticeWatcherOptions {
@@ -130,9 +178,34 @@ export class SessionNoticeWatcher {
     this.#schedule();
   }
 
-  /** 网页上报正在整屏看的会话；null 表示没在看。15 秒不更新自动失效。 */
+  /** 网页上报正在整屏看的会话；null 表示没在看。15 秒不更新自动失效，并立即收口该会话的待处理提醒。 */
   setViewing(pane: number | null): void {
     this.#viewing = pane === null ? null : { pane, at: this.#now() };
+    if (pane !== null) {
+      this.dismiss({ pane });
+    }
+  }
+
+  /** 用户在置顶弹框里确认、忽略或跳转到终端后关闭对应提醒。 */
+  dismiss(input: SessionNoticeDismissInput): boolean {
+    let changed = false;
+    for (const notice of this.#notices) {
+      if (notice.status !== "open") continue;
+      const matchSeq = input.seq !== undefined && notice.seq === input.seq;
+      const matchPane = input.pane !== undefined && notice.pane === input.pane;
+      if (matchSeq || matchPane) {
+        notice.status = "closed";
+        changed = true;
+      }
+    }
+    if (changed) {
+      try {
+        this.#options.onNotice();
+      } catch {
+        // 通知其他部分失败不影响状态更新。
+      }
+    }
+    return changed;
   }
 
   list(): SessionNoticeList {
@@ -177,11 +250,30 @@ export class SessionNoticeWatcher {
       } catch {
         enabled = false;
       }
-      const found = enabled ? diffNotices(this.#snapshot, view.sessions, this.#viewingPane()) : [];
+      const viewing = this.#viewingPane();
+      const reconciled = reconcileOpenNotices(this.#notices, view.sessions, viewing);
+      const found = enabled ? diffNotices(this.#snapshot, view.sessions, viewing) : [];
       this.#snapshot = new Map(view.sessions.map((session) => [session.pane, session.status]));
-      if (found.length === 0) return;
+      if (found.length === 0) {
+        if (reconciled) {
+          try {
+            this.#options.onNotice();
+          } catch {
+            // 通知其他部分失败不影响监视。
+          }
+        }
+        return;
+      }
       const at = new Date(this.#now()).toISOString();
-      for (const item of found) this.#notices.push({ seq: ++this.#seq, ...item, at });
+      const replacedPanes = new Set(found.map((item) => item.pane));
+      for (const existing of this.#notices) {
+        if (existing.status === "open" && replacedPanes.has(existing.pane)) {
+          existing.status = "closed";
+        }
+      }
+      for (const item of found) {
+        this.#notices.push({ seq: ++this.#seq, status: "open", ...item, at });
+      }
       if (this.#notices.length > NOTICES_KEPT) this.#notices.splice(0, this.#notices.length - NOTICES_KEPT);
       try {
         this.#options.onNotice();

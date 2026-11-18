@@ -1,9 +1,10 @@
 //! 终端会话提醒：daemon 把「会话等你回复 / 已完成」记成带序号的条目，
-//! 壳每次刷新时取一次，只弹自己还没弹过的。弹出后不注册点击行为，只负责提醒。
+//! 壳每次刷新时取一次，只处理自己还没弹过的待处理（open）条目：发系统通知并拉起置顶弹框。
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeckNotice {
     pub seq: u64,
+    pub open: bool,
     pub title: String,
     pub body: String,
 }
@@ -56,6 +57,7 @@ pub fn parse_deck_notices(text: &str) -> Result<DeckNotices, ()> {
         };
         notices.push(DeckNotice {
             seq,
+            open: item.get("status").and_then(serde_json::Value::as_str) != Some("closed"),
             title: title.to_string(),
             body: item
                 .get("body")
@@ -88,10 +90,15 @@ pub fn select_notices(
         Some(cursor) if cursor.epoch == response.epoch => response
             .notices
             .iter()
-            .filter(|notice| notice.seq > cursor.seq)
+            .filter(|notice| notice.seq > cursor.seq && notice.open)
             .cloned()
             .collect(),
-        Some(_) => response.notices.clone(),
+        Some(_) => response
+            .notices
+            .iter()
+            .filter(|notice| notice.open)
+            .cloned()
+            .collect(),
     };
     (selected, next)
 }
@@ -103,6 +110,7 @@ mod tests {
     fn notice(seq: u64) -> DeckNotice {
         DeckNotice {
             seq,
+            open: true,
             title: format!("会话 {seq} 已完成"),
             body: String::new(),
         }
@@ -171,10 +179,22 @@ mod tests {
             parsed.notices,
             vec![DeckNotice {
                 seq: 2,
+                open: true,
                 title: "账本 在等你回复".into(),
                 body: "继续吗？".into()
             }]
         );
+    }
+
+    #[test]
+    fn skips_already_closed_notices_when_selecting() {
+        let parsed = parse_deck_notices(
+            r#"{"epoch":"e1","latest":3,"notices":[{"seq":2,"status":"closed","title":"旧的"},{"seq":3,"status":"open","title":"新的"}]}"#,
+        )
+        .unwrap();
+        let (selected, next) = select_notices(Some(&cursor("e1", 1)), &parsed);
+        assert_eq!(selected.iter().map(|n| n.seq).collect::<Vec<_>>(), vec![3]);
+        assert_eq!(next, cursor("e1", 3));
     }
 
     #[test]

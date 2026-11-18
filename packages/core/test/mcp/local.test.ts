@@ -17,6 +17,7 @@ import type { HttpDeps } from "../../src/http/deps.js";
 import { startDaemonHttp } from "../../src/http/server.js";
 import { createLocalMcpServices } from "../../src/mcp/local.js";
 import { createMcpServer } from "../../src/mcp/server.js";
+import { NotionIndex } from "../../src/notion/store.js";
 import { SqliteStore, type TopicRecord } from "../../src/store/index.js";
 
 const NOW = "2026-07-20T12:00:00.000Z";
@@ -71,6 +72,10 @@ describe("local MCP services", () => {
     const portraitDir = join(dataDir, "portrait");
     mkdirSync(portraitDir, { recursive: true });
     writeFileSync(join(portraitDir, "coding.md"), "coding-profile");
+    writeFileSync(
+      join(portraitDir, "projects.md"),
+      "# 数字分身 · 项目决定\n版本 v4.5.0 · 2026-11-18 · 变更见 changelog\n\n## 法务审批\n> repos: legal-ai\n法务走新审批流。\n\n## 运价通\n运价缓存五分钟。\n",
+    );
     const store = new SqliteStore(join(dataDir, "state.sqlite"));
     const drive = new MemoryDrive();
     const events: Array<{ type: string; data: unknown }> = [];
@@ -280,6 +285,18 @@ describe("local MCP services", () => {
       expect(textOf(detail)).toContain(KEY);
       const portrait = await call(services, "get_portrait", { variant: "coding" });
       expect(textOf(portrait)).toBe("coding-profile");
+      const projectsIndex = await call(services, "get_portrait", { variant: "projects" });
+      expect(textOf(projectsIndex)).toContain("# 数字分身 · 项目索引");
+      expect(textOf(projectsIndex)).toContain("legal-ai");
+      expect(textOf(projectsIndex)).not.toContain("运价缓存五分钟");
+      const singleProject = await call(services, "get_portrait", {
+        variant: "projects",
+        project: "legal-ai",
+      });
+      expect(textOf(singleProject)).toContain("法务走新审批流。");
+      expect(textOf(singleProject)).not.toContain("运价缓存五分钟");
+      const defaultTopics = await call(services, "get_topics", {});
+      expect(textOf(defaultTopics)).toContain("设计");
       const missingPortrait = await call(services, "get_portrait", { variant: "brief" });
       expect(missingPortrait.isError).toBe(true);
       expect(textOf(missingPortrait)).toContain("SOURCE_UNAVAILABLE");
@@ -432,6 +449,141 @@ describe("local MCP services", () => {
       const refused = await call(services, "upload_sessions", {});
       expect(refused.isError).toBe(true);
       expect(textOf(refused)).toContain("无法连接");
+    } finally {
+      store.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("search_references and get_reference proxy daemon when running and fall back to offline SQLite + NotionIndex", async () => {
+    const dataDir = directory();
+    const store = new SqliteStore(join(dataDir, "state.sqlite"));
+    const notionIndex = new NotionIndex(join(dataDir, "notion-index.sqlite"));
+    notionIndex.upsertPage({
+      pageId: "kb-offline-1",
+      object: "page",
+      parentKind: "workspace",
+      parentId: null,
+      title: "离线知识库页面",
+      icon: null,
+      coverUrl: null,
+      lastEditedTime: NOW,
+      createdAt: NOW,
+    });
+    notionIndex.replaceBlocks("kb-offline-1", [
+      {
+        blockId: "b1",
+        pageId: "kb-offline-1",
+        parentBlockId: null,
+        idx: 0,
+        model: {
+          id: "b1",
+          kind: "paragraph",
+          segments: [{ text: "这是离线也能读取的知识库正文", href: null, bold: false, italic: false, strikethrough: false, underline: false, code: false, color: "default" }],
+          children: [],
+        },
+      },
+    ]);
+    notionIndex.close();
+
+    store.replaceDerived({
+      topics: [
+        {
+          topicId: "topic-off",
+          name: "离线话题",
+          aliases: [],
+          status: "active",
+          statusBy: "auto",
+          summary: "本地话题摘要",
+          nextStep: "",
+          lastActive: NOW,
+          mergedInto: null,
+          createdTs: NOW,
+          lastUserOpAt: null,
+          lastContentAt: null,
+          userLocked: false,
+        },
+      ],
+      sessions: [],
+      conclusions: [],
+      todos: [],
+      events: [],
+    });
+
+    const services = createLocalMcpServices({
+      store,
+      search: {
+        search: async (input) => ({
+          query: input.query,
+          indexStatus: "fresh",
+          searchMode: "keyword",
+          results: [],
+          warnings: [],
+        }),
+      },
+      drive: new MemoryDrive(),
+      portraitDir: dataDir,
+      dataDir,
+      zone: { timeZone: "UTC", activeLimit: 10, historyDays: 30 },
+    });
+
+    try {
+      // Daemon offline -> falls back to local NotionIndex + SQLite topics
+      const offlineList = await call(services, "search_references", { query: "" });
+      expect(offlineList.isError).not.toBe(true);
+      expect(textOf(offlineList)).toContain("离线知识库页面");
+      expect(textOf(offlineList)).toContain("离线话题");
+
+      const offlineRead = await call(services, "get_reference", { query: "@知识库:离线知识库页面" });
+      expect(offlineRead.isError).not.toBe(true);
+      expect(textOf(offlineRead)).toContain("这是离线也能读取的知识库正文");
+
+      // Daemon online -> proxies to daemon HTTP endpoints (including tty7)
+      const daemon = await startDaemonHttp({
+        dataDir,
+        deps: {
+          today: async () => ({ date: "2026-07-20", timeZone: "UTC", sessions: [] }),
+          search: async (q: { query: string }) => ({ query: q.query, indexStatus: "fresh", searchMode: "keyword", results: [], warnings: [] }),
+          topics: async () => ({ topics: [] }),
+          topic: async () => null,
+          deck: {
+            tty7Sessions: async () => ({
+              available: true,
+              detail: "",
+              workspaces: [{ id: "ws", name: "dev", attached: true }],
+              sessions: [
+                {
+                  pane: 88,
+                  workspaceId: "ws",
+                  workspaceName: "dev",
+                  tabId: "tab",
+                  tabLabel: "在线终端",
+                  agent: "Claude Code",
+                  cwd: "/repo",
+                  hibernated: false,
+                  status: "waiting",
+                  statusMessage: null,
+                  model: null,
+                },
+              ],
+              harnesses: [],
+              appearance: null,
+            }),
+            tty7Screen: async (pane: number) => ({ pane, text: "live terminal text" }),
+          },
+        } as unknown as HttpDeps,
+      });
+      try {
+        const onlineList = await call(services, "search_references", { query: "%88", kinds: ["tty7"] });
+        expect(onlineList.isError).not.toBe(true);
+        expect(textOf(onlineList)).toContain("在线终端 · Claude Code · %88");
+
+        const onlineRead = await call(services, "get_reference", { uri: "%88" });
+        expect(onlineRead.isError).not.toBe(true);
+        expect(textOf(onlineRead)).toContain("live terminal text");
+      } finally {
+        await daemon.stop();
+      }
     } finally {
       store.close();
       rmSync(dataDir, { recursive: true, force: true });

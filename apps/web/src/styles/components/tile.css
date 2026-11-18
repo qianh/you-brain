@@ -14,7 +14,8 @@
   user-select: none;
 }
 
-[data-theme="light"] .tile { background: color-mix(in srgb, var(--tile-color) 12%, transparent); }
+[data-theme="light"] .tile,
+[data-theme="dopamine"] .tile { background: color-mix(in srgb, var(--tile-color) 12%, transparent); }
 
 .tile.sm { width: var(--tile-sm); height: var(--tile-sm); border-radius: 6px; }
 .tile svg { display: block; }

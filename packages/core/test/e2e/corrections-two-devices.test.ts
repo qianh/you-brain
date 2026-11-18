@@ -2,7 +2,11 @@ import { rm } from "node:fs/promises";
 
 import { afterEach, describe, expect, it } from "bun:test";
 
-import { TWIN_CLAIMS_SYSTEM_PROMPT, TWIN_MERGE_SYSTEM_PROMPT } from "../../src/consolidate/index.js";
+import {
+  TODO_REVIEW_SYSTEM_PROMPT,
+  TWIN_CLAIMS_SYSTEM_PROMPT,
+  TWIN_MERGE_SYSTEM_PROMPT,
+} from "../../src/consolidate/index.js";
 import { TWIN_PROBES_SYSTEM_PROMPT } from "../../src/consolidate/prompt.js";
 import { startDaemon, type YouBrainDaemon } from "../../src/daemon/daemon.js";
 import { INTERVALS } from "../../src/daemon/schedule.js";
@@ -51,6 +55,7 @@ describe("portrait corrections across two devices", () => {
             ],
           });
         }
+        if (request.system === TODO_REVIEW_SYSTEM_PROMPT) return JSON.stringify({ items: [] });
         if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT) return JSON.stringify({ claims: [] });
         if (request.system === TWIN_PROBES_SYSTEM_PROMPT) return JSON.stringify({ probes: [] });
         if (request.system.includes("话题概要")) {

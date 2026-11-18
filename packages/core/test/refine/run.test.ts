@@ -357,4 +357,18 @@ describe("refine session", () => {
     );
     expect(user).toContain("GM2港口目录接入");
   });
+
+  it("short-circuits unattended .raw.txt batch digest sessions without calling the model", async () => {
+    const model = backend([]);
+    const result = await refineSession(
+      model,
+      input(["只根据 2026-11-10/1400.raw.txt 整理拼车群日报", "已整理完成"]),
+      { eventFactory: factory(), ids: ids() },
+    );
+    expect(model.calls).toBe(0);
+    expect(result.status).toBe("refined");
+    if (result.status !== "refined") return;
+    expect(result.output.topic.action).toBe("none");
+    expect(result.events.map((event) => event.type)).toEqual(["session.refined"]);
+  });
 });

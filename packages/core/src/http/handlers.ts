@@ -26,6 +26,13 @@ import { acceptActivityAt } from "../reminders/activity.js";
 import { planReminderAction } from "../reminders/action.js";
 import { ChangeHub } from "./hub.js";
 import { assertPortraitVariant } from "./portrait-files.js";
+import { lookupProjectPortrait } from "../portrait/projects-split.js";
+import {
+  listReferenceCandidates,
+  materializeReference,
+  resolveReference,
+  type ReferencePorts,
+} from "../reference/index.js";
 import {
   ActivityBodySchema,
   ConsolidateActionBodySchema,
@@ -59,6 +66,7 @@ import {
   NotionUpdateBlockSchema,
   OAuthClientPutSchema,
   PortraitCorrectionBodySchema,
+  PortraitProposalActionBodySchema,
   ReminderActionBodySchema,
   ReminderReplyBodySchema,
   TodoActionBodySchema,
@@ -79,8 +87,11 @@ import {
   UiPrefsPatchBodySchema,
   DeckTty7RenameBodySchema,
   DeckTty7ViewingBodySchema,
+  DeckNoticeDismissBodySchema,
   DeckTty7SendBodySchema,
   DeckTty7StartBodySchema,
+  ReferenceKindSchema,
+  ReferenceMaterializeBodySchema,
   type ActionResponse,
   type ApiErrorBody,
   type DaemonChangeKind,
@@ -89,6 +100,7 @@ import {
   type LlmTestResult,
   type OAuthClientPublic,
   type PortraitCorrectionResult,
+  type ReferenceKind,
   type SecretStoredResponse,
   type SearchRequest,
   type TopicDetail,
@@ -241,6 +253,11 @@ export async function handleApi(
     if (request.method === "POST") return addPortraitCorrection(request, context);
     return methodNotAllowed("GET, POST");
   }
+  if (path === "/api/portrait/proposals") {
+    if (request.method === "GET") return portraitProposals(context);
+    if (request.method === "POST") return reviewPortraitProposal(request, context);
+    return methodNotAllowed("GET, POST");
+  }
   if (path === "/api/portrait") return method(request, "GET", () => portrait(url, context));
   if (path === "/api/search") return method(request, "GET", () => search(url, context));
   if (path === "/api/search/warm") {
@@ -250,6 +267,11 @@ export async function handleApi(
     });
   }
   if (path === "/api/session-content") return method(request, "GET", () => sessionContent(url, context));
+  if (path === "/api/references/candidates") return method(request, "GET", () => referenceCandidates(url, context));
+  if (path === "/api/references/content") return method(request, "GET", () => referenceContent(url, context));
+  if (path === "/api/references/materialize") {
+    return method(request, "POST", () => referenceMaterialize(request, context));
+  }
   if (path === "/api/llm-models") return method(request, "GET", () => llmModels(url, context));
   if (path === "/api/devices") return method(request, "GET", () => devices(context));
   if (path === "/api/devices/virtual") {
@@ -433,6 +455,14 @@ export async function handleApi(
   }
   if (path === "/api/deck/notices") {
     return method(request, "GET", async () => json(await deck(context).notices()));
+  }
+  if (path === "/api/deck/notices/dismiss") {
+    return method(request, "POST", async () => {
+      const body = DeckNoticeDismissBodySchema.parse(await readJson(request));
+      const port = deck(context);
+      if (!port.noticeDismiss) throw new HttpError(404, "NOT_FOUND", "当前服务不支持关闭会话提醒");
+      return json(await port.noticeDismiss(body));
+    });
   }
   if (path === "/api/deck/tty7/screen") {
     return method(request, "GET", async () => {
@@ -754,6 +784,7 @@ async function mutateTopic(
 
 async function portrait(url: URL, context: ApiContext): Promise<Response> {
   const variant = url.searchParams.get("variant") ?? "full";
+  const projectQuery = url.searchParams.get("project")?.trim() ?? "";
   try {
     assertPortraitVariant(variant);
   } catch (error) {
@@ -764,7 +795,26 @@ async function portrait(url: URL, context: ApiContext): Promise<Response> {
   }
   const portraitFile = await context.deps.portrait(variant);
   if (!portraitFile) return apiError(404, "NOT_FOUND", "数字分身不存在");
+  if (variant === "projects" && projectQuery !== "") {
+    const hit = lookupProjectPortrait(portraitFile.content, projectQuery);
+    return json({ ...portraitFile, content: hit.portrait });
+  }
   return json(portraitFile);
+}
+
+async function portraitProposals(context: ApiContext): Promise<Response> {
+  const proposals = context.deps.portraitProposals ? await context.deps.portraitProposals() : [];
+  return json({ proposals });
+}
+
+async function reviewPortraitProposal(request: Request, context: ApiContext): Promise<Response> {
+  if (!context.deps.reviewPortraitProposal) {
+    throw new HttpError(503, "SOURCE_UNAVAILABLE", "当前没有打开数字分身提案通道");
+  }
+  const body = PortraitProposalActionBodySchema.parse(await readJson(request));
+  const result = await context.deps.reviewPortraitProposal(body);
+  publish(context.hub, ["portrait"]);
+  return json(result);
 }
 
 async function snapshots(context: ApiContext): Promise<Response> {
@@ -878,6 +928,109 @@ async function sessionContent(url: URL, context: ApiContext): Promise<Response> 
       ...(sessionKey !== "" ? { sessionKey } : {}),
     }),
   );
+}
+
+function referencePorts(context: ApiContext): ReferencePorts {
+  const deckPort = context.deps.deck;
+  return {
+    ...(deckPort ? { tty7Sessions: () => deckPort.tty7Sessions(), tty7Screen: (pane, lines) => deckPort.tty7Screen(pane, lines) } : {}),
+    today: () => context.deps.today(),
+    search: (query) => context.deps.search(query),
+    ...(context.deps.sessionContent ? { sessionContent: (input) => context.deps.sessionContent!(input) } : {}),
+    topics: (query) => context.deps.topics(query),
+    topic: (id) => context.deps.topic(id),
+    ...(context.deps.notionSearch ? { notionSearch: (query, limit) => context.deps.notionSearch!(query, limit) } : {}),
+    ...(context.deps.notionRecent ? { notionRecent: (limit) => context.deps.notionRecent!(limit) } : {}),
+    ...(context.deps.notionPage ? { notionPage: (pageId) => context.deps.notionPage!(pageId) } : {}),
+    ...(context.deps.notionDatabase ? { notionDatabase: (databaseId) => context.deps.notionDatabase!(databaseId) } : {}),
+  };
+}
+
+function parseReferenceKinds(raw: string | null): ReferenceKind[] | undefined {
+  if (raw === null || raw.trim() === "") return undefined;
+  const parts = raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (parts.length === 0) return undefined;
+  const parsed = z.array(ReferenceKindSchema).safeParse(parts);
+  if (!parsed.success) {
+    throw new HttpError(400, "INVALID_INPUT", "无效的引用类型，允许：tty7、session、topic、kb");
+  }
+  return parsed.data;
+}
+
+async function referenceCandidates(url: URL, context: ApiContext): Promise<Response> {
+  const query = url.searchParams.get("q") ?? "";
+  const kinds = parseReferenceKinds(url.searchParams.get("kinds"));
+  const limitRaw = url.searchParams.get("limit");
+  let limit: number | undefined;
+  if (limitRaw !== null && limitRaw !== "") {
+    const parsed = SEARCH_LIMIT.safeParse(limitRaw);
+    if (!parsed.success) {
+      throw new HttpError(400, "INVALID_INPUT", "limit 必须是 1 到 50 的整数");
+    }
+    limit = parsed.data;
+  }
+  const candidates = await listReferenceCandidates(
+    {
+      query,
+      ...(kinds !== undefined ? { kinds } : {}),
+      ...(limit !== undefined ? { limit } : {}),
+    },
+    referencePorts(context),
+  );
+  return json({ candidates });
+}
+
+function parseOptionalKind(raw: string | null): ReferenceKind | undefined {
+  if (raw === null || raw.trim() === "") return undefined;
+  const parsed = ReferenceKindSchema.safeParse(raw.trim());
+  if (!parsed.success) {
+    throw new HttpError(400, "INVALID_INPUT", "无效的引用类型，允许：tty7、session、topic、kb");
+  }
+  return parsed.data;
+}
+
+async function referenceContent(url: URL, context: ApiContext): Promise<Response> {
+  const uri = url.searchParams.get("uri")?.trim() || undefined;
+  const kind = parseOptionalKind(url.searchParams.get("kind"));
+  const id = url.searchParams.get("id")?.trim() || undefined;
+  const query = url.searchParams.get("q")?.trim() || undefined;
+  const label = url.searchParams.get("label")?.trim() || undefined;
+  if (uri === undefined && query === undefined && !(kind !== undefined && id !== undefined)) {
+    throw new HttpError(400, "INVALID_INPUT", "缺少 uri、kind+id 或 q");
+  }
+  const resolved = await resolveReference(
+    {
+      ...(uri !== undefined ? { uri } : {}),
+      ...(kind !== undefined ? { kind } : {}),
+      ...(id !== undefined ? { id } : {}),
+      ...(query !== undefined ? { query } : {}),
+      ...(label !== undefined ? { label } : {}),
+    },
+    referencePorts(context),
+  );
+  if (!resolved.content) {
+    return apiError(404, "NOT_FOUND", "找不到匹配的引用内容");
+  }
+  return json(resolved.content);
+}
+
+async function referenceMaterialize(request: Request, context: ApiContext): Promise<Response> {
+  if (!context.deps.outputDir) notSupported();
+  const body = ReferenceMaterializeBodySchema.parse(await readJson(request));
+  const resolved = await resolveReference(body, referencePorts(context));
+  if (!resolved.content) {
+    return apiError(404, "NOT_FOUND", "找不到匹配的引用内容");
+  }
+  if (resolved.content.error !== undefined) {
+    const isInvalid =
+      resolved.content.error.includes("标识") || resolved.content.error.includes("缺少");
+    return apiError(isInvalid ? 400 : 404, isInvalid ? "INVALID_INPUT" : "NOT_FOUND", resolved.content.error);
+  }
+  const materialized = await materializeReference(resolved.content, context.deps.outputDir);
+  return json({ ok: true as const, ...materialized });
 }
 
 /** 供应商的可用模型（设置页的下拉数据源）；网关不可达时由 deps 抛 503。 */

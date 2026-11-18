@@ -3,6 +3,11 @@ import { rm } from "node:fs/promises";
 import { DRIVE_PATHS } from "@you-brain/protocol";
 import { afterEach, describe, expect, it } from "bun:test";
 
+import {
+  TODO_REVIEW_SYSTEM_PROMPT,
+  TWIN_CLAIMS_SYSTEM_PROMPT,
+  TWIN_MERGE_SYSTEM_PROMPT,
+} from "../../src/consolidate/index.js";
 import { startDaemon, type YouBrainDaemon } from "../../src/daemon/daemon.js";
 import { INTERVALS } from "../../src/daemon/schedule.js";
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
@@ -195,7 +200,11 @@ async function startTracked(
     clock,
     drive,
     llm: fakeBackend(async (request) => {
-      if (request.system.includes("数字分身")) return JSON.stringify({ changed: false, portrait: "" });
+      if (request.system === TODO_REVIEW_SYSTEM_PROMPT) return JSON.stringify({ items: [] });
+      if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT) return JSON.stringify({ claims: [] });
+      if (request.system === TWIN_MERGE_SYSTEM_PROMPT) {
+        return JSON.stringify({ bump: "none", changelog: [], edits: [] });
+      }
       if (request.system.includes("话题概要")) {
         return JSON.stringify({ summary: "发布清单已整理", nextStep: "发出去" });
       }

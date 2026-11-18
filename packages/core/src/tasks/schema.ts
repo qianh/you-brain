@@ -5,21 +5,30 @@ const description = z.string().max(20_000);
 const projectId = z.string().min(1).max(200).nullable();
 const priority = z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]);
 const id = z.string().min(1).max(200);
+const newProject = z.object({
+  name: z.string().trim().min(1).max(100),
+  cwd: z.string().trim().min(1).max(4096).refine((value) => value.startsWith("/"), "项目文件夹必须是绝对路径").optional(),
+}).strict();
+const oneProject = (body: { projectId?: string | null | undefined; newProject?: unknown }): boolean =>
+  !(body.newProject !== undefined && body.projectId);
+const oneProjectMessage = { message: "projectId 与 newProject 只能二选一" };
 
 export const TaskCreateSchema = z.object({
   title,
   description: description.optional(),
   projectId: projectId.optional(),
+  newProject: newProject.optional(),
   priority: priority.optional(),
-}).strict();
+}).strict().refine(oneProject, oneProjectMessage);
 
 export const TaskUpdateSchema = z.object({
   id,
   title: title.optional(),
   description: description.optional(),
   projectId: projectId.optional(),
+  newProject: newProject.optional(),
   priority: priority.optional(),
-}).strict();
+}).strict().refine(oneProject, oneProjectMessage);
 
 export const TaskActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("project"), projectId: id, enabled: z.boolean() }).strict(),

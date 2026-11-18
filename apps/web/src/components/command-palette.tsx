@@ -174,6 +174,7 @@ export function CommandPalette({
         { id: "light", label: t("cmdThemeToLight"), icon: "sun", run: () => { setChoice("light"); onClose(); } },
         { id: "dark", label: t("cmdThemeToDark"), icon: "moon", run: () => { setChoice("dark"); onClose(); } },
         { id: "system", label: t("cmdThemeToSystem"), icon: "monitor", run: () => { setChoice("system"); onClose(); } },
+        { id: "dopamine", label: t("cmdThemeToDopamine"), icon: "sparkles", run: () => { setChoice("dopamine"); onClose(); } },
       ];
       for (const action of actions) {
         if (!matches(action.label, q)) continue;

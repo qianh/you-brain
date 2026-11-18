@@ -72,6 +72,12 @@ describe("quotaCards", () => {
     expect(cards[0]?.stale).toBe(false);
   });
 
+  test("shows Codex token card when sessions were captured only via t3-code", () => {
+    const cards = quotaCards(view([], { codex: codexTokens }), captured("t3-code"), NOW, "zh");
+    expect(cards.map((card) => card.agent)).toEqual(["codex"]);
+    expect(cards[0]?.tokens?.today.total).toBe(181528525);
+  });
+
   test("a subscription card carries token spans alongside its windows", () => {
     const cards = quotaCards(view([claude], { claude: codexTokens }), captured("claude-code"), NOW, "zh");
     expect(cards[0]?.tokens?.sevenDays.calls).toBe(3100);

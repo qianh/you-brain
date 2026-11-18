@@ -89,7 +89,13 @@ export function previewJsonMcp(
     if (!current.trim()) return current;
     return removeJsonProperty(current, "mcpServers", serverName);
   }
-  return upsertJsonProperty(current, "mcpServers", serverName, entry);
+  let next = upsertJsonProperty(current, "mcpServers", serverName, entry);
+  if (serverName === MCP_SERVER_NAME) {
+    for (const legacy of brainHubServerNames(next, "json")) {
+      next = removeJsonProperty(next, "mcpServers", legacy);
+    }
+  }
+  return next;
 }
 
 export async function writeJsonMcp(options: {
@@ -119,7 +125,7 @@ export function previewTomlMcp(
 ): string {
   const current = source ?? "";
   if (entry === null) return removeTomlSection(current, "mcp_servers", serverName);
-  return upsertTomlSection(
+  let next = upsertTomlSection(
     current,
     "mcp_servers",
     serverName,
@@ -129,6 +135,12 @@ export function previewTomlMcp(
       args: entry.args,
     }),
   );
+  if (serverName === MCP_SERVER_NAME) {
+    for (const legacy of brainHubServerNames(next, "toml")) {
+      next = removeTomlSection(next, "mcp_servers", legacy);
+    }
+  }
+  return next;
 }
 
 export function tomlHasServer(source: string | null, serverName: string): boolean {

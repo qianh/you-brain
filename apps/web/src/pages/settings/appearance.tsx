@@ -15,7 +15,14 @@ import { useTheme, type ThemeChoice } from "../../theme-context.js";
 import { shortcutGlyph, shortcutParts } from "./logic.js";
 import { SettingRow } from "./setting-row.js";
 
-const THEMES: readonly ThemeChoice[] = ["system", "light", "dark"];
+const THEMES: readonly ThemeChoice[] = ["system", "light", "dark", "dopamine"];
+
+const THEME_LABEL = {
+  system: "themeSystem",
+  light: "themeLight",
+  dark: "themeDark",
+  dopamine: "themeDopamine",
+} as const satisfies Record<ThemeChoice, string>;
 
 export function AppearanceSection({
   draft,
@@ -62,7 +69,7 @@ export function AppearanceSection({
         >
           {THEMES.map((theme) => {
             const selected = choice === theme;
-            const label = theme === "system" ? t("themeSystem") : theme === "light" ? t("themeLight") : t("themeDark");
+            const label = t(THEME_LABEL[theme]);
             return (
               <button
                 key={theme}

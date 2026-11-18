@@ -6,7 +6,11 @@ import { DshRuntime, type DshRuntimeOptions } from "./dsh/runtime.js";
 import type { DshWebState } from "./dsh/web.js";
 import { ActivityMonitor } from "./activity.js";
 import { MuseDeckRuntime } from "./muse/runtime.js";
-import { SessionNoticeWatcher, type SessionNoticeList } from "./session-notices.js";
+import {
+  SessionNoticeWatcher,
+  type SessionNoticeDismissInput,
+  type SessionNoticeList,
+} from "./session-notices.js";
 import { Tty7 } from "./tty7.js";
 import {
   GUI_APPS,
@@ -88,6 +92,7 @@ export class DeckService {
     this.activity = new ActivityMonitor({
       sessions: () => this.tty7.sessions({ withActivity: false }),
       procs: (pane) => this.tty7.procs(pane),
+      screen: (pane) => this.tty7.screen(pane, 10).then((view) => view.text),
       onChange: () => this.notices.poke(),
     });
     this.#dsh =
@@ -129,12 +134,16 @@ export class DeckService {
   /** 开始监视终端会话状态（daemon 启动后调用一次；tty7 没装时什么也不做）。 */
   startNotices(): void {
     this.notices.start();
-    this.tty7.setActivity((pane) => this.activity.status(pane));
+    this.tty7.setActivity((pane) => this.activity.detail(pane));
     this.activity.start();
   }
 
   noticeList(): SessionNoticeList {
     return this.notices.list();
+  }
+
+  dismissNotice(input: SessionNoticeDismissInput): boolean {
+    return this.notices.dismiss(input);
   }
 
   /** 网页上报正在整屏看的会话（null 表示没在看），这个会话的提醒会被跳过。 */

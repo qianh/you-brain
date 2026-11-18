@@ -11,8 +11,8 @@ you-brain 把各设备、各 AI 工具里的会话汇总到用户自己的 Googl
 
 ## 话题
 
-- `get_topics`：列出话题，可按活跃区、历史区或状态过滤。
-- `get_topic`：读取一个话题的概要、结论、待办和相关会话链接。
+- `get_topics`：列出话题（默认返回活跃区 `zone="active"`；需查历史或全部时传 `zone="history"` 或 `zone="all"`）。
+- `get_topic`：读取一个话题的概要、近期结论、开放待办和相关会话链接（默认截断保护，支持 `conclusion_limit`、`todo_limit`、`include_closed_todos`）。
 - `update_topic`：只在用户明确要求时，修改话题状态、完成待办或追加结论。这是写操作，会记入事件日志。
 
 用户问「那个项目进展如何」「还有哪些待办」时，先 `get_topics`，再对相关话题调用 `get_topic`。
@@ -20,6 +20,11 @@ you-brain 把各设备、各 AI 工具里的会话汇总到用户自己的 Googl
 ## 搜索
 
 调用 `search_sessions` 做语义加关键词搜索。用户说「之前讨论过」「上次那个方案」，而今日视图和话题册里没有时使用。需要原文时，用返回的会话引用调用 `get_session`。
+
+## 知识库与 @ 引用
+
+- `search_notion` / `get_notion_page`：在已同步的 Notion 知识库中搜索并读取页面 Markdown 正文。
+- `search_references` / `get_reference`：统一检索并读取可 `@` 引用的终端会话、今日/历史会话、话题与知识库页面（也可使用 `you-brain-ref` 技能或 `you-brain://` MCP 资源；无 MCP 时可用 CLI `you-brain ref`）。
 
 ## 其他
 

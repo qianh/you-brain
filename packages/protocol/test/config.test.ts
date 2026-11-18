@@ -33,6 +33,12 @@ describe("shared config defaults", () => {
     expect(config.capture.sources["gemini-cli"].enabled).toBe(true);
     expect(config.llm).toEqual({ provider: "deepseek", model: "", baseUrl: "" });
     expect(Object.keys(config.llm).sort()).toEqual(["baseUrl", "model", "provider"]);
+    expect(config.consolidateLlm).toEqual({
+      enabled: false,
+      provider: "deepseek",
+      model: "",
+      baseUrl: "",
+    });
     expect(config.portrait.variants.map((variant) => variant.id)).toEqual([
       "full",
       "coding",
@@ -62,6 +68,22 @@ describe("shared config defaults", () => {
       semantic: false,
     });
     expect(parseSharedConfig({ ui: { language: "en" } }).ui.language).toBe("en");
+    expect(parseSharedConfig({ llm: { provider: "magpie" } }).consolidateLlm).toEqual({
+      enabled: false,
+      provider: "deepseek",
+      model: "",
+      baseUrl: "",
+    });
+    expect(
+      parseSharedConfig({
+        consolidateLlm: { enabled: true, provider: "magpie", model: "claude-opus-4-6" },
+      }).consolidateLlm,
+    ).toEqual({
+      enabled: true,
+      provider: "magpie",
+      model: "claude-opus-4-6",
+      baseUrl: "",
+    });
   });
 
   it("returns a fresh object and deep-merges partial input", () => {

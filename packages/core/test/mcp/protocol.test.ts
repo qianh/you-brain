@@ -9,6 +9,7 @@ const TOOLS = [
   "get_notion_page",
   "get_portrait",
   "get_portrait_corrections",
+  "get_reference",
   "get_reminders",
   "get_session",
   "get_today",
@@ -16,6 +17,7 @@ const TOOLS = [
   "get_topics",
   "hub_status",
   "search_notion",
+  "search_references",
   "search_sessions",
   "update_topic",
   "upload_sessions",
@@ -224,6 +226,93 @@ describe("MCP tool handlers", () => {
       ),
     ).toBe(session);
   });
+
+  it("caps get_topics to active by default and truncates get_topic items while exposing total counts", async () => {
+    const runtime = services();
+    let seenTopicsQuery: unknown = null;
+    runtime.getTopics = async (q) => {
+      seenTopicsQuery = q;
+      return {
+        topics: Array.from({ length: 60 }, (_, idx) => ({
+          topicId: `t-${idx}`,
+          name: `话题-${idx}`,
+          aliases: [],
+          status: "active" as const,
+          statusBy: "auto" as const,
+          summary: "",
+          nextStep: "",
+          lastActive: null,
+          zone: "active" as const,
+          createdTs: null,
+          lastUserOpAt: null,
+          userLocked: false,
+          openTodoCount: 0,
+        })),
+      };
+    };
+    runtime.getTopic = async (id) => ({
+      topicId: id,
+      name: "大话题",
+      aliases: [],
+      status: "active",
+      statusBy: "auto",
+      summary: "摘要",
+      nextStep: "",
+      lastActive: null,
+      zone: "active",
+      mergedInto: null,
+      createdTs: null,
+      lastUserOpAt: null,
+      userLocked: false,
+      conclusions: Array.from({ length: 25 }, (_, idx) => ({
+        conclusionId: `c-${idx}`,
+        topicId: id,
+        sessionKey: "ab".repeat(32),
+        text: `结论-${idx}`,
+        ts: `2026-07-20T00:${String(idx).padStart(2, "0")}:00.000Z`,
+      })),
+      todos: [
+        ...Array.from({ length: 35 }, (_, idx) => ({
+          todoId: `open-${idx}`,
+          topicId: id,
+          sessionKey: "ab".repeat(32),
+          text: `待办-${idx}`,
+          status: "open" as const,
+          statusBy: "auto" as const,
+          confidence: 0.9,
+          ts: "2026-07-20T00:00:00.000Z",
+          userLocked: false,
+        })),
+        {
+          todoId: "closed-1",
+          topicId: id,
+          sessionKey: "ab".repeat(32),
+          text: "已完成",
+          status: "done",
+          statusBy: "auto",
+          confidence: 0.9,
+          ts: "2026-07-20T00:00:00.000Z",
+          userLocked: false,
+        },
+      ],
+      sessions: [],
+    });
+    const handlers = createToolHandlers(runtime);
+    const listed = await handlers.get_topics({});
+    expect(seenTopicsQuery).toEqual({ zone: "active" });
+    expect((listed.structuredContent.topics as unknown[]).length).toBe(50);
+    expect(listed.structuredContent.totalCount).toBe(60);
+
+    const detail = await handlers.get_topic({ topic_id: "t-1" });
+    expect((detail.structuredContent.conclusions as unknown[]).length).toBe(20);
+    expect((detail.structuredContent.todos as unknown[]).length).toBe(30);
+    expect(detail.structuredContent.counts).toEqual({
+      conclusionsTotal: 25,
+      openTodosTotal: 35,
+      todosTotal: 36,
+      sessionsTotal: 0,
+    });
+  });
 });
 
 describe("portrait correction tools", () => {
@@ -346,6 +435,38 @@ describe("MCP protocol", () => {
         arguments: { action: "status", topic_id: "topic-1" },
       });
       expect(badUpdate.isError).toBe(true);
+
+      const refs = await client.callTool({
+        name: "search_references",
+        arguments: { query: "roadmap", kinds: ["kb"] },
+      });
+      expect(refs.isError).not.toBe(true);
+      expect(textOf(refs)).toContain("Roadmap");
+      expect(textOf(refs)).toContain("you-brain://kb/");
+
+      const refDoc = await client.callTool({
+        name: "get_reference",
+        arguments: { query: "@知识库:roadmap" },
+      });
+      expect(refDoc.isError).not.toBe(true);
+      expect(textOf(refDoc)).toContain("# Roadmap");
+
+      const badRef = await client.callTool({
+        name: "get_reference",
+        arguments: {},
+      });
+      expect(badRef.isError).toBe(true);
+
+      const templates = await client.listResourceTemplates();
+      expect(templates.resourceTemplates.map((t) => t.uriTemplate)).toContain("you-brain://{kind}/{id}");
+
+      const pageIdB64 = Buffer.from(JSON.stringify({ pageId: "page-1" }), "utf8").toString("base64url");
+      const resourceRead = await client.readResource({ uri: `you-brain://kb/${pageIdB64}` });
+      const firstContent = resourceRead.contents[0];
+      expect(firstContent && "text" in firstContent ? firstContent.text : "").toContain("# Roadmap");
+
+      const listedResources = await client.listResources();
+      expect(Array.isArray(listedResources.resources)).toBe(true);
     } finally {
       await client.close();
       await server.close();

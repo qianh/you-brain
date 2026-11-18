@@ -119,6 +119,11 @@ function renderToday(input: OutputRenderInput, copy: OutputCopy): string {
   return finish(lines);
 }
 
+const TOPIC_OPEN_TODOS_LIMIT = 15;
+const TOPIC_RECENT_CONCLUSIONS_LIMIT = 10;
+const TOPIC_RELATED_SESSIONS_LIMIT = 8;
+const TOPIC_HISTORY_LIMIT = 50;
+
 function renderTopics(
   input: OutputRenderInput,
   copy: OutputCopy,
@@ -139,6 +144,7 @@ function renderTopics(
       openTodos(input, topic.topicId).map((todo) => oneLine(todo.text)),
       copy,
       input.language,
+      TOPIC_OPEN_TODOS_LIMIT,
     );
     pushItems(
       lines,
@@ -148,6 +154,7 @@ function renderTopics(
       ),
       copy,
       input.language,
+      TOPIC_RECENT_CONCLUSIONS_LIMIT,
     );
     pushItems(
       lines,
@@ -155,11 +162,24 @@ function renderTopics(
       relatedSessions(input, topic.topicId).map((session) => sessionItem(session, copy)),
       copy,
       input.language,
+      TOPIC_RELATED_SESSIONS_LIMIT,
     );
   });
   lines.push("", `## ${copy.history}`, "");
   if (history.length === 0) lines.push(copy.noHistory);
-  else for (const topic of history) lines.push(`- ${topic.name || topic.topicId}`);
+  else {
+    for (const topic of history.slice(0, TOPIC_HISTORY_LIMIT)) {
+      lines.push(`- ${topic.name || topic.topicId}`);
+    }
+    if (history.length > TOPIC_HISTORY_LIMIT) {
+      const rest = history.length - TOPIC_HISTORY_LIMIT;
+      lines.push(
+        input.language === "zh"
+          ? `- （另有 ${rest} 个历史话题，可通过 get_topics 传 zone="history" 查看）`
+          : `- (${rest} more history topics; use get_topics with zone="history")`,
+      );
+    }
+  }
   return finish(lines);
 }
 
@@ -179,13 +199,22 @@ function pushItems(
   items: readonly string[],
   copy: OutputCopy,
   language: UiLanguage,
+  limit: number,
 ): void {
   if (items.length === 0) {
     lines.push(field(label, copy.none, language));
     return;
   }
   lines.push(language === "zh" ? `- ${label}：` : `- ${label}:`);
-  for (const item of items) lines.push(`  - ${item}`);
+  for (const item of items.slice(0, limit)) lines.push(`  - ${item}`);
+  if (items.length > limit) {
+    const rest = items.length - limit;
+    lines.push(
+      language === "zh"
+        ? `  - （另有 ${rest} 条，可通过 get_topic 按需查看）`
+        : `  - (${rest} more; use get_topic to inspect)`,
+    );
+  }
 }
 
 function field(label: string, value: string, language: UiLanguage): string {

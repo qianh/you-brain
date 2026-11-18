@@ -67,6 +67,18 @@ export function searchHref(q: string): string {
   return `/search?q=${encodeURIComponent(q)}`;
 }
 
+/** 指挥台地址；带 `pane` 时直达对应 tty7 会话的整屏终端。 */
+export function deckPaneHref(pane: number): string {
+  return `/deck?pane=${encodeURIComponent(String(pane))}`;
+}
+
+export function parseDeckPane(href: string): number | null {
+  const raw = readQuery(href, "pane");
+  if (raw === null || !/^\d+$/u.test(raw)) return null;
+  const parsed = Number(raw);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
 /** 话题页地址;带 `session` 时话题详情会滚到并标出那段会话。 */
 export function topicHref(zone: "active" | "history", id?: string, session?: string | null): string {
   const path = zone === "history" ? "/topics/history" : "/topics";

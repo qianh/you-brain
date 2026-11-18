@@ -167,8 +167,15 @@ describe("parseUsageLog", () => {
     expect(parsed.codex?.sevenDays.calls).toBe(1);
   });
 
-  it("skips junk lines, unknown agents and rows without a timestamp", () => {
-    const text = ["not json", row(cuts.today + 1, "claude"), row(cuts.today + 1, "codex"), JSON.stringify({ agent: "codex", in: 5 }), row(cuts.today + 1, "codex", [-1, 10, 1000])].join("\n");
+  it("skips junk lines, locally rejected rows, unknown agents and rows without a timestamp", () => {
+    const text = [
+      "not json",
+      row(cuts.today + 1, "claude"),
+      JSON.stringify({ t: new Date(cuts.today + 1).toISOString(), agent: "codex", in: 0, out: 0, rejected: true }),
+      row(cuts.today + 1, "codex"),
+      JSON.stringify({ agent: "codex", in: 5 }),
+      row(cuts.today + 1, "codex", [-1, 10, 1000]),
+    ].join("\n");
     const parsed = parseUsageLog(text, ["codex"], cuts);
     expect(Object.keys(parsed)).toEqual(["codex"]);
     expect(parsed.codex?.today).toEqual({ calls: 2, input: 100, output: 20, cacheRead: 2000, total: 2120 });
@@ -287,15 +294,23 @@ describe("QuotaService", () => {
     ].join("\n");
   }
 
-  it("serves token spans under their agent", async () => {
-    const { service } = harness({ reads: [async () => SAMPLE], tokenReads: [async () => usageLog()] });
+  it("serves token spans under their agent and merges t3code into codex", async () => {
+    const cuts = tokenWindowCutoffs(Date.parse("2026-11-16T12:00:00Z"));
+    const t3Row = JSON.stringify({
+      t: new Date(cuts.today + 3_600_000).toISOString(),
+      agent: "t3code",
+      in: 400,
+      out: 40,
+      cache_read: 4000,
+    });
+    const { service } = harness({ reads: [async () => SAMPLE], tokenReads: [async () => `${usageLog()}\n${t3Row}`] });
     await service.refresh();
     const view = service.snapshot();
     expect(Object.keys(view.tokens)).toEqual(["codex"]);
     expect(view.tokens.codex).toEqual({
-      today: { calls: 1, input: 100, output: 10, cacheRead: 1000, total: 1110 },
-      threeDays: { calls: 2, input: 300, output: 30, cacheRead: 3000, total: 3330 },
-      sevenDays: { calls: 3, input: 600, output: 60, cacheRead: 6000, total: 6660 },
+      today: { calls: 2, input: 500, output: 50, cacheRead: 5000, total: 5550 },
+      threeDays: { calls: 3, input: 700, output: 70, cacheRead: 7000, total: 7770 },
+      sevenDays: { calls: 4, input: 1000, output: 100, cacheRead: 10000, total: 11100 },
     });
   });
 

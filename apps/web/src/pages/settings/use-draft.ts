@@ -9,6 +9,7 @@ import { validateSettings } from "../../lib/copy.js";
 import {
   appearanceConfig,
   configSaveBody,
+  isCliProvider,
   isSettingsDirty,
   llmKeyPayload,
 } from "./logic.js";
@@ -71,6 +72,10 @@ export function useSettingsDraft(): SettingsDraftApi {
         timezone: rolesDraft.timezone,
         driveRoot: draft.drive.root,
         baseUrl: draft.llm.baseUrl,
+        consolidateBaseUrl:
+          draft.consolidateLlm.enabled && !isCliProvider(draft.consolidateLlm.provider)
+            ? draft.consolidateLlm.baseUrl
+            : "",
         variants: draft.portrait.variants,
       })
     : [];

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ReminderView } from "@you-brain/core/http/types.js";
+import type { DeckSessionNotice, ReminderView } from "@you-brain/core/http/types.js";
 
 import { createBrowserDaemon, type BrowserDaemon } from "../api/client.js";
 import { Button, IconButton } from "../components/button.js";
@@ -7,14 +7,15 @@ import { BrandMark, Icon } from "../components/icons.js";
 import { Spinner } from "../components/spinner.js";
 import { translate, type MessageKey } from "../i18n/messages.js";
 import type { Language } from "../lib/format.js";
-import { topicHref } from "../lib/route.js";
+import { deckPaneHref, topicHref } from "../lib/route.js";
 import { browserWindowBridge } from "../lib/window.js";
+import { buildPopupQueue, formatTerminalSnippet, type PopupItem } from "./popup-queue.js";
 import { reminderToTaskInput } from "./reminders/model.js";
 
 const POLL_MS = 2_000;
 
-type BusyAction = "reply" | "done" | "todo" | "ignore" | null;
-type SettledAction = "reply" | "done" | "todo" | "ignore" | null;
+type BusyAction = "reply" | "done" | "todo" | "ignore" | "open" | null;
+type SettledAction = "reply" | "done" | "todo" | "ignore" | "terminal_sent" | null;
 
 function formatIssuedTime(iso: string): string {
   const date = new Date(iso);
@@ -23,9 +24,10 @@ function formatIssuedTime(iso: string): string {
 }
 
 /**
- * 记忆提醒弹框（桌面壳的独立小窗，路由 /reminder-popup）。
- * 壳发现新的聊到时提醒就把这个窗口弹到最前；页面自己拉提醒队列，
- * 支持一键加入 TODO、确认知道了、补充回复、跳转查看出处或忽略，没有剩余自动收起。
+ * 置顶提醒弹框（桌面壳的独立小窗，路由 /reminder-popup）：
+ * 统一承载「聊到时记忆提醒」与「tty7 终端会话提醒（等你回复 / 已完成）」。
+ * 页面轮询待处理队列，支持查看终端屏幕尾部快照、直接输入回车发往原终端、一键跳转打开终端，
+ * 或将记忆提醒加入 TODO / 回复 / 确认 / 忽略；队列清空后自动收起。
  */
 export function ReminderPopupPage() {
   const clientRef = useRef<BrowserDaemon | null>(null);
@@ -33,9 +35,10 @@ export function ReminderPopupPage() {
   const client = clientRef.current;
 
   const [language, setLanguage] = useState<Language>("zh");
-  const [queue, setQueue] = useState<ReminderView[] | null>(null);
+  const [queue, setQueue] = useState<PopupItem[] | null>(null);
   const [offline, setOffline] = useState(false);
   const [reply, setReply] = useState("");
+  const [snippet, setSnippet] = useState("");
   const [busy, setBusy] = useState<BusyAction>(null);
   const [settled, setSettled] = useState<SettledAction>(null);
   const [error, setError] = useState<string | null>(null);
@@ -67,27 +70,20 @@ export function ReminderPopupPage() {
   }, []);
 
   const refresh = useCallback(
-    async (options: { withConfig?: boolean } = {}): Promise<ReminderView[]> => {
+    async (options: { withConfig?: boolean } = {}): Promise<PopupItem[]> => {
       try {
-        const listed = await client.reminders();
+        const [listed, deckNotices] = await Promise.all([
+          client.reminders(),
+          client.deckNotices().catch((): { notices: DeckSessionNotice[] } => ({ notices: [] })),
+        ]);
         if (options.withConfig === true) {
           const config = await client.config();
           setLanguage(config.ui.language);
         }
-        const open = listed.reminders
-          .filter((item) => item.kind === "recall" && item.status === "open")
-          .sort((left, right) =>
-            left.issuedAt !== right.issuedAt
-              ? left.issuedAt < right.issuedAt
-                ? 1
-                : -1
-              : left.reminderId < right.reminderId
-                ? 1
-                : -1,
-          );
-        setQueue(open);
+        const merged = buildPopupQueue(listed.reminders, deckNotices.notices);
+        setQueue(merged);
         setOffline(false);
-        return open;
+        return merged;
       } catch {
         setOffline(true);
         return [];
@@ -114,6 +110,41 @@ export function ReminderPopupPage() {
   }, [refresh]);
 
   const current = queue?.[0] ?? null;
+  const activeKey = current?.key ?? null;
+  const lastKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (lastKeyRef.current !== activeKey) {
+      lastKeyRef.current = activeKey;
+      setReply("");
+      setError(null);
+    }
+  }, [activeKey]);
+
+  const terminalPane = current?.type === "terminal" ? current.notice.pane : null;
+  useEffect(() => {
+    if (terminalPane === null) {
+      setSnippet("");
+      return undefined;
+    }
+    let cancelled = false;
+    const pullScreen = async (): Promise<void> => {
+      try {
+        const screen = await client.deckTty7Screen(terminalPane, 10);
+        if (!cancelled) setSnippet(formatTerminalSnippet(screen.text, 4));
+      } catch {
+        if (!cancelled) setSnippet("");
+      }
+    };
+    void pullScreen();
+    const timer = setInterval(() => {
+      if (document.visibilityState === "hidden" || settledRef.current !== null) return;
+      void pullScreen();
+    }, POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [client, terminalPane]);
 
   useEffect(() => {
     if (queue === null || current !== null || offline) return;
@@ -134,7 +165,7 @@ export function ReminderPopupPage() {
     async (done: Exclude<SettledAction, null>): Promise<void> => {
       setReply("");
       setSettled(done);
-      await new Promise<void>((resolve) => setTimeout(resolve, done === "todo" ? 1_350 : 950));
+      await new Promise<void>((resolve) => setTimeout(resolve, done === "todo" ? 1_350 : 850));
       setSettled(null);
       const rest = await refresh();
       if (rest.length === 0) {
@@ -144,86 +175,160 @@ export function ReminderPopupPage() {
     [hideWindow, refresh],
   );
 
-  const sendReply = useCallback(async (): Promise<void> => {
-    if (current === null || busy !== null || reply.trim() === "") return;
-    setBusy("reply");
-    setError(null);
-    try {
-      await client.reminderReply(current.reminderId, reply.trim());
-      await settle("reply");
-    } catch (caught) {
-      setError(caught instanceof Error && caught.message !== "" ? caught.message : t("actionFailed"));
-    } finally {
-      setBusy(null);
-    }
-  }, [busy, client, current, reply, settle, t]);
+  const sendReminderReply = useCallback(
+    async (reminder: ReminderView): Promise<void> => {
+      if (busy !== null || reply.trim() === "") return;
+      setBusy("reply");
+      setError(null);
+      try {
+        await client.reminderReply(reminder.reminderId, reply.trim());
+        await settle("reply");
+      } catch (caught) {
+        setError(caught instanceof Error && caught.message !== "" ? caught.message : t("actionFailed"));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, client, reply, settle, t],
+  );
 
-  const acknowledge = useCallback(async (): Promise<void> => {
-    if (current === null || busy !== null) return;
-    setBusy("done");
-    setError(null);
-    try {
-      await client.reminderAction(current.reminderId, "done");
-      await settle("done");
-    } catch (caught) {
-      setError(caught instanceof Error && caught.message !== "" ? caught.message : t("actionFailed"));
-    } finally {
-      setBusy(null);
-    }
-  }, [busy, client, current, settle, t]);
+  const acknowledgeReminder = useCallback(
+    async (reminder: ReminderView): Promise<void> => {
+      if (busy !== null) return;
+      setBusy("done");
+      setError(null);
+      try {
+        await client.reminderAction(reminder.reminderId, "done");
+        await settle("done");
+      } catch (caught) {
+        setError(caught instanceof Error && caught.message !== "" ? caught.message : t("actionFailed"));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, client, settle, t],
+  );
 
-  const addToTodo = useCallback(async (): Promise<void> => {
-    if (current === null || busy !== null) return;
-    setBusy("todo");
-    setError(null);
-    try {
-      const note = reply.trim();
-      await client.createTask(reminderToTaskInput(current, note));
-      // 同时记录已转入 TODO 并关掉提醒，避免后续同话题再次对同一件事弹窗。
-      await client.reminderReply(current.reminderId, note !== "" ? note : t("popupTodoReplyNote"));
-      await settle("todo");
-    } catch (caught) {
-      setError(caught instanceof Error && caught.message !== "" ? caught.message : t("actionFailed"));
-    } finally {
-      setBusy(null);
-    }
-  }, [busy, client, current, reply, settle, t]);
+  const addToTodo = useCallback(
+    async (reminder: ReminderView): Promise<void> => {
+      if (busy !== null) return;
+      setBusy("todo");
+      setError(null);
+      try {
+        const note = reply.trim();
+        await client.createTask(reminderToTaskInput(reminder, note));
+        // 同时记录已转入 TODO 并关掉提醒，避免后续同话题再次对同一件事弹窗。
+        await client.reminderReply(reminder.reminderId, note !== "" ? note : t("popupTodoReplyNote"));
+        await settle("todo");
+      } catch (caught) {
+        setError(caught instanceof Error && caught.message !== "" ? caught.message : t("actionFailed"));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, client, reply, settle, t],
+  );
 
-  const ignore = useCallback(async (): Promise<void> => {
-    if (current === null || busy !== null) return;
-    setBusy("ignore");
-    setError(null);
-    try {
-      await client.reminderAction(current.reminderId, "ignore");
-      await settle("ignore");
-    } catch (caught) {
-      setError(caught instanceof Error && caught.message !== "" ? caught.message : t("actionFailed"));
-    } finally {
-      setBusy(null);
-    }
-  }, [busy, client, current, settle, t]);
+  const ignoreReminder = useCallback(
+    async (reminder: ReminderView): Promise<void> => {
+      if (busy !== null) return;
+      setBusy("ignore");
+      setError(null);
+      try {
+        await client.reminderAction(reminder.reminderId, "ignore");
+        await settle("ignore");
+      } catch (caught) {
+        setError(caught instanceof Error && caught.message !== "" ? caught.message : t("actionFailed"));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, client, settle, t],
+  );
+
+  const sendTerminalReply = useCallback(
+    async (notice: DeckSessionNotice): Promise<void> => {
+      if (busy !== null || reply.trim() === "") return;
+      setBusy("reply");
+      setError(null);
+      try {
+        await client.deckTty7Send({ pane: notice.pane, text: reply.trim(), enter: true });
+        await client.deckNoticeDismiss({ seq: notice.seq });
+        await settle("terminal_sent");
+      } catch (caught) {
+        setError(caught instanceof Error && caught.message !== "" ? caught.message : t("actionFailed"));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, client, reply, settle, t],
+  );
+
+  const dismissTerminal = useCallback(
+    async (notice: DeckSessionNotice, action: "done" | "ignore"): Promise<void> => {
+      if (busy !== null) return;
+      setBusy(action);
+      setError(null);
+      try {
+        await client.deckNoticeDismiss({ seq: notice.seq });
+        await settle(action);
+      } catch (caught) {
+        setError(caught instanceof Error && caught.message !== "" ? caught.message : t("actionFailed"));
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, client, settle, t],
+  );
+
+  const openTerminalSession = useCallback(
+    async (notice: DeckSessionNotice): Promise<void> => {
+      if (busy !== null) return;
+      setBusy("open");
+      setError(null);
+      try {
+        openMainAt(deckPaneHref(notice.pane));
+        await client.deckNoticeDismiss({ seq: notice.seq }).catch(() => undefined);
+        const rest = await refresh();
+        if (rest.length === 0) {
+          hideWindow();
+        }
+      } finally {
+        setBusy(null);
+      }
+    },
+    [busy, client, hideWindow, openMainAt, refresh],
+  );
 
   const settledMessage =
     settled === "todo"
       ? t("popupTodoAdded")
-      : settled === "reply"
-        ? t("popupReplied")
-        : settled === "done"
-          ? t("popupMarkedDone")
-          : t("popupIgnored");
+      : settled === "terminal_sent"
+        ? t("popupTerminalSent")
+        : settled === "reply"
+          ? t("popupReplied")
+          : settled === "done"
+            ? t("popupMarkedDone")
+            : t("popupIgnored");
 
   const hasReplyText = reply.trim() !== "";
-  const issuedClock = current ? formatIssuedTime(current.issuedAt) : "";
+  const issuedClock = current ? formatIssuedTime(current.at) : "";
+  const tone =
+    current?.type === "terminal"
+      ? current.notice.kind === "waiting"
+        ? "waiting"
+        : "done"
+      : "recall";
 
   return (
-    <div className="popup-page">
+    <div className="popup-page" data-tone={tone}>
       <header className="popup-head" data-tauri-drag-region="">
         <span className="popup-brand" data-tauri-drag-region="">
           <span className="popup-brand-mark">
-            <BrandMark size={15} />
+            {current?.type === "terminal" ? <Icon name="terminal" size={14} /> : <BrandMark size={15} />}
           </span>
           <span className="popup-brand-title" data-tauri-drag-region="">
-            {t("popupTitle")}
+            {current?.type === "terminal" ? t("popupTerminalTitle") : t("popupTitle")}
           </span>
           {queue !== null && queue.length > 1 ? (
             <span className="popup-count">1 / {queue.length}</span>
@@ -240,29 +345,157 @@ export function ReminderPopupPage() {
         </p>
       ) : current === null && queue !== null && !offline ? (
         <p className="popup-state">{t("popupEmpty")}</p>
+      ) : current !== null && current.type === "terminal" ? (
+        <div className="popup-body">
+          <section className="popup-card popup-terminal-card" aria-label={t("popupTerminalTitle")}>
+            <div className="popup-meta">
+              <button
+                type="button"
+                className="popup-topic-link popup-session-link"
+                onClick={() => void openTerminalSession(current.notice)}
+                title={current.notice.cwd || current.notice.sessionName}
+              >
+                <Icon name="terminal" size={11} />
+                <span className="popup-topic-name">
+                  {current.notice.sessionName}
+                  <span className="popup-pane-tag">%{current.notice.pane}</span>
+                  {current.notice.agent ? <span className="popup-agent-tag">· {current.notice.agent}</span> : null}
+                </span>
+                <span className="popup-topic-jump">
+                  {t("popupOpenTerminal")}
+                  <Icon name="external-link" size={10} />
+                </span>
+              </button>
+              <span className="popup-meta-right">
+                <span className="popup-status-pill" data-kind={current.notice.kind}>
+                  {current.notice.kind === "waiting" ? t("popupTerminalWaiting") : t("popupTerminalDone")}
+                </span>
+                {issuedClock ? <time className="popup-time">{issuedClock}</time> : null}
+              </span>
+            </div>
+            <p className="popup-text">
+              {current.notice.body !== "" ? current.notice.body : current.notice.title}
+            </p>
+            {snippet !== "" && snippet.trim() !== current.notice.body.trim() ? (
+              <pre className="popup-term-preview">{snippet}</pre>
+            ) : null}
+          </section>
+
+          {error ? (
+            <p className="popup-error" role="alert">
+              <Icon name="alert-circle" size={13} />
+              <span>{error}</span>
+            </p>
+          ) : null}
+
+          {settled !== null ? (
+            <div className="popup-settled-box" role="status">
+              <span className="popup-settled">
+                <Icon name="check-circle" size={15} />
+                <span>{settledMessage}</span>
+              </span>
+            </div>
+          ) : (
+            <>
+              <textarea
+                className="popup-input"
+                value={reply}
+                placeholder={
+                  current.notice.kind === "waiting"
+                    ? t("popupTerminalWaitingPlaceholder")
+                    : t("popupTerminalDonePlaceholder")
+                }
+                rows={1}
+                disabled={busy !== null}
+                onChange={(event) => setReply(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                    if (reply.trim() !== "") {
+                      void sendTerminalReply(current.notice);
+                    }
+                  }
+                }}
+              />
+              <footer className="popup-actions">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  loading={busy === "ignore"}
+                  disabled={busy !== null}
+                  onClick={() => void dismissTerminal(current.notice, "ignore")}
+                >
+                  {t("popupIgnore")}
+                </Button>
+                <div className="popup-actions-right">
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    className="popup-todo-btn"
+                    icon={<Icon name="external-link" size={13} />}
+                    loading={busy === "open"}
+                    disabled={busy !== null}
+                    onClick={() => void openTerminalSession(current.notice)}
+                  >
+                    {t("popupOpenTerminal")}
+                  </Button>
+                  {hasReplyText ? (
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      icon={<Icon name="corner-down-left" size={13} />}
+                      loading={busy === "reply"}
+                      disabled={busy !== null}
+                      onClick={() => void sendTerminalReply(current.notice)}
+                    >
+                      {t("popupTerminalSend")}
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      icon={<Icon name="check" size={13} />}
+                      loading={busy === "done"}
+                      disabled={busy !== null}
+                      onClick={() => void dismissTerminal(current.notice, "done")}
+                    >
+                      {t("popupDone")}
+                    </Button>
+                  )}
+                </div>
+              </footer>
+            </>
+          )}
+        </div>
       ) : current !== null ? (
         <div className="popup-body">
           <section className="popup-card" aria-label={t("popupTitle")}>
-            {(current.topicName || current.topicId || issuedClock) ? (
+            {(current.reminder.topicName || current.reminder.topicId || issuedClock) ? (
               <div className="popup-meta">
-                {current.topicId ? (
+                {current.reminder.topicId ? (
                   <button
                     type="button"
                     className="popup-topic-link"
-                    onClick={() => openMainAt(topicHref("active", current.topicId ?? "", current.sessionKey ?? null))}
-                    title={t(current.sessionKey ? "reminderViewSource" : "todayViewTopic")}
+                    onClick={() =>
+                      openMainAt(
+                        topicHref("active", current.reminder.topicId ?? "", current.reminder.sessionKey ?? null),
+                      )
+                    }
+                    title={t(current.reminder.sessionKey ? "reminderViewSource" : "todayViewTopic")}
                   >
                     <Icon name="book" size={11} />
-                    <span className="popup-topic-name">{current.topicName || t("todayViewTopic")}</span>
+                    <span className="popup-topic-name">
+                      {current.reminder.topicName || t("todayViewTopic")}
+                    </span>
                     <span className="popup-topic-jump">
-                      {t(current.sessionKey ? "reminderViewSource" : "todayViewTopic")}
+                      {t(current.reminder.sessionKey ? "reminderViewSource" : "todayViewTopic")}
                       <Icon name="external-link" size={10} />
                     </span>
                   </button>
-                ) : current.topicName ? (
+                ) : current.reminder.topicName ? (
                   <span className="popup-topic-chip">
                     <Icon name="book" size={11} />
-                    <span className="popup-topic-name">{current.topicName}</span>
+                    <span className="popup-topic-name">{current.reminder.topicName}</span>
                   </span>
                 ) : (
                   <span />
@@ -270,7 +503,7 @@ export function ReminderPopupPage() {
                 {issuedClock ? <time className="popup-time">{issuedClock}</time> : null}
               </div>
             ) : null}
-            <p className="popup-text">{current.text}</p>
+            <p className="popup-text">{current.reminder.text}</p>
           </section>
 
           {error ? (
@@ -310,7 +543,7 @@ export function ReminderPopupPage() {
                   if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                     event.preventDefault();
                     if (reply.trim() !== "") {
-                      void sendReply();
+                      void sendReminderReply(current.reminder);
                     }
                   }
                 }}
@@ -321,7 +554,7 @@ export function ReminderPopupPage() {
                   variant="ghost"
                   loading={busy === "ignore"}
                   disabled={busy !== null}
-                  onClick={() => void ignore()}
+                  onClick={() => void ignoreReminder(current.reminder)}
                 >
                   {t("popupIgnore")}
                 </Button>
@@ -333,7 +566,7 @@ export function ReminderPopupPage() {
                     icon={<Icon name="plus" size={13} />}
                     loading={busy === "todo"}
                     disabled={busy !== null}
-                    onClick={() => void addToTodo()}
+                    onClick={() => void addToTodo(current.reminder)}
                   >
                     {t("popupAddTodo")}
                   </Button>
@@ -344,7 +577,7 @@ export function ReminderPopupPage() {
                       icon={<Icon name="sparkles" size={13} />}
                       loading={busy === "reply"}
                       disabled={busy !== null}
-                      onClick={() => void sendReply()}
+                      onClick={() => void sendReminderReply(current.reminder)}
                     >
                       {t("popupReplySend")}
                     </Button>
@@ -355,7 +588,7 @@ export function ReminderPopupPage() {
                       icon={<Icon name="check" size={13} />}
                       loading={busy === "done"}
                       disabled={busy !== null}
-                      onClick={() => void acknowledge()}
+                      onClick={() => void acknowledgeReminder(current.reminder)}
                     >
                       {t("popupDone")}
                     </Button>

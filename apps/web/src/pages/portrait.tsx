@@ -18,6 +18,7 @@ import { extractToc, parsePortraitMarkdown } from "../lib/markdown.js";
 import { settingsHref } from "../lib/route.js";
 import { countReadingChars, formatReadingCount, portraitEmptyCopy, writeClipboard } from "./portrait/logic.js";
 import { PortraitMarkdown } from "./portrait/markdown-view.js";
+import { PortraitProposals } from "./portrait/proposals.js";
 import { PortraitSide } from "./portrait/side-panel.js";
 
 const DEFAULT_VARIANTS = [
@@ -180,6 +181,9 @@ export function PortraitPage({ embedded = false }: { embedded?: boolean } = {}) 
                 )
               }
             />
+            {variant === "coding" ? (
+              <PortraitProposals onApplied={() => setAttempt((value) => value + 1)} />
+            ) : null}
           </div>
         ) : null}
         {ready && body && !empty ? (
@@ -202,6 +206,7 @@ export function PortraitPage({ embedded = false }: { embedded?: boolean } = {}) 
               onCopyBody={() => {
                 void copy(body.content, t("portraitCopied"));
               }}
+              onPortraitChanged={() => setAttempt((value) => value + 1)}
             />
           </div>
         ) : null}

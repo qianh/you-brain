@@ -89,7 +89,27 @@ export function clientById(id: CaptureSourceId): ClientCatalogEntry {
   return found;
 }
 
-export function portraitBody(entry: ClientCatalogEntry): string {
+/**
+ * Strip the file title (`# ...`) and version metadata line (`版本 vX.Y.Z ...`) so the
+ * coding rules themselves can be inlined directly inside `<!-- you-brain:start v1 -->`.
+ */
+export function formatInlineCodingBody(codingMarkdown: string | null | undefined): string | null {
+  if (!codingMarkdown) return null;
+  const lines = codingMarkdown.replace(/\r\n/gu, "\n").split("\n");
+  let index = 0;
+  if (lines[index]?.startsWith("# ")) index += 1;
+  if (lines[index] !== undefined && /v\d+\.\d+\.\d+/u.test(lines[index]!)) index += 1;
+  const body = lines
+    .slice(index)
+    .join("\n")
+    .replace(/<!--\s*you-brain:(?:start|end)[^>]*-->/gu, "")
+    .trim();
+  return body === "" ? null : body;
+}
+
+export function portraitBody(entry: ClientCatalogEntry, codingMarkdown?: string | null): string {
+  const inline = formatInlineCodingBody(codingMarkdown);
+  if (inline !== null) return inline;
   if (entry.portrait.kind === "copy" || entry.portrait.body === "instruction") {
     return CODING_PORTRAIT_INSTRUCTION;
   }

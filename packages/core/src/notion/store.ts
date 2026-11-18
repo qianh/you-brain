@@ -95,10 +95,12 @@ CREATE VIRTUAL TABLE IF NOT EXISTS notion_fts USING fts5(
 export class NotionIndex {
   readonly #db: Database;
 
-  constructor(path: string) {
-    this.#db = new Database(path);
-    this.#db.exec("PRAGMA journal_mode = WAL;");
-    this.#db.exec(SCHEMA);
+  constructor(path: string, options?: { readonly?: boolean }) {
+    this.#db = new Database(path, options?.readonly ? { readonly: true } : undefined);
+    if (!options?.readonly) {
+      this.#db.exec("PRAGMA journal_mode = WAL;");
+      this.#db.exec(SCHEMA);
+    }
   }
 
   close(): void {

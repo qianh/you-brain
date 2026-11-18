@@ -39,8 +39,10 @@ describe("portrait correction form", () => {
     expect(correctionStatusParts("applied")).toEqual({ key: "applied", version: "" });
   });
 
-  test("lets only the full variant open the form and clips long text", () => {
+  test("lets the three standard twin layers open the form and clips long text", () => {
     expect(correctionAllowsForm("full")).toBe(true);
+    expect(correctionAllowsForm("coding")).toBe(true);
+    expect(correctionAllowsForm("projects")).toBe(true);
     expect(correctionAllowsForm("brief")).toBe(false);
     const text = "改".repeat(160);
     const clipped = correctionExcerpt(text);

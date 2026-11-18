@@ -32,6 +32,16 @@ describe("T3 TODO automation MCP adapter", () => {
     expect(t3.state.initializes).toBe(2);
   });
 
+  test("registers an existing folder without creating it, or lets T3 create a fresh repository by name", async () => {
+    const { client, t3 } = harness();
+    expect(await client.createProject({ name: " Legal AI ", cwd: "/Users/me/legal-ai" })).toEqual({ id: "project-2", name: "Legal AI", cwd: "/Users/me/legal-ai" });
+    expect(t3.calls.at(-1)?.args).toEqual({ title: "Legal AI", workspaceRoot: "/Users/me/legal-ai", createWorkspaceRootIfMissing: false });
+    expect(await client.createProject({ name: "Fresh" })).toMatchObject({ name: "Fresh", cwd: "/t3-projects/Fresh" });
+    expect(t3.calls.at(-1)?.args).toEqual({ title: "Fresh" });
+    await expect(client.createProject({ name: "Dup", cwd: "/repo" })).rejects.toThrow("T3 拒绝了请求");
+    await expect(client.createProject({ name: "Rel", cwd: "relative/dir" })).rejects.toThrow("绝对路径");
+  });
+
   test("launches into the task worktree with a stable request key and a local thread link", async () => {
     const { client, launches } = harness({ projects: [{ ...project, defaultModelSelection: selection }] });
     const started = await client.start(startInput);

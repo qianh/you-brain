@@ -2,8 +2,15 @@ import { ConflictError } from "../drive/errors.js";
 import type { LlmBackend } from "../llm/types.js";
 import { extractJson } from "../refine/parse.js";
 import {
+  nextCodingProposalNumber,
+  normalizeCodingRuleLine,
+  seedCodingFromMarkdown,
+  type CodingRuleProposal,
+} from "./coding-proposals.js";
+import {
   parseTwinAnswers,
   parseTwinClaims,
+  parseTwinCodingProposals,
   parseTwinEdits,
   parseTwinJudge,
   parseTwinMonthly,
@@ -13,18 +20,21 @@ import {
 } from "./normalize.js";
 import {
   buildTwinClaimsPrompt,
+  buildTwinCodingProposalsPrompt,
   buildTwinEvalAnswerPrompt,
   buildTwinEvalJudgePrompt,
   buildTwinFixPrompt,
   buildTwinMergePrompt,
   buildTwinMonthlyPrompt,
   buildTwinProbesPrompt,
+  buildTwinProjectMergePrompt,
   TWIN_EVAL_GENERIC_PERSONA,
   type TwinPromptCorrection,
 } from "./prompt.js";
 import { shiftDateKey } from "./schedule.js";
 import {
   TWIN_CLAIMS_JSON_SCHEMA,
+  TWIN_CODING_PROPOSALS_JSON_SCHEMA,
   TWIN_EDITS_JSON_SCHEMA,
   TWIN_EVAL_ANSWERS_JSON_SCHEMA,
   TWIN_EVAL_JUDGE_JSON_SCHEMA,
@@ -45,6 +55,8 @@ import {
   bumpVersion,
   changedLayers,
   checkTwin,
+  parseProjectGroups,
+  projectPrefixOfHeading,
   skeletonTwin,
   splitTwin,
   twinBody,
@@ -111,19 +123,116 @@ export const portraitStep: ConsolidationStep = {
         pending: [...earlier.filter((claim) => claim.day >= keepFrom), ...low],
       });
     }
-    const high = claims.filter((claim) => claim.confidence === "high");
-    if (high.length === 0 && corrections.length === 0 && (low.length === 0 || earlier.length === 0)) {
+
+    // 1. Session coding claims become reviewable proposals instead of mutating coding.md directly.
+    const codingClaims = claims.filter((claim) => claim.layer === "coding");
+    const codingEarlier = earlier.filter((claim) => claim.layer === "coding");
+    const shouldProposeCoding =
+      codingClaims.some((claim) => claim.confidence === "high") ||
+      (codingClaims.some((claim) => claim.confidence === "low") && codingEarlier.length > 0);
+    if (shouldProposeCoding && portrait.codingProposals && portrait.saveCodingProposals) {
+      const addedProposals = await proposeCodingRules(ctx.llm, {
+        day: ctx.day,
+        coding: before.coding,
+        portrait,
+        claims: codingClaims,
+        pending: codingEarlier,
+      });
+      if (addedProposals > 0) {
+        await ctx.emit("reminder.issued", {
+          reminderId: `portrait-coding-proposals-${ctx.day}`,
+          kind: "portrait_coding_proposal",
+          topicId: null,
+          text: `编码分身新增 ${addedProposals} 条待确认规则提案，可在数字分身页或运行 you-brain portrait-proposals 审核`,
+        });
+      }
+    }
+
+    // 2. Resident merge: persona claims + explicit full/coding corrections (without sending 60KB projects.md).
+    const personaClaims = claims.filter((claim) => claim.layer === "persona");
+    const personaEarlier = earlier.filter((claim) => claim.layer === "persona");
+    const residentCorrections = corrections.filter((item) => item.variant !== "projects");
+    const codingCorrections = residentCorrections.filter((item) => item.variant === "coding");
+    const shouldMergeResident =
+      personaClaims.some((claim) => claim.confidence === "high") ||
+      (personaClaims.some((claim) => claim.confidence === "low") && personaEarlier.length > 0) ||
+      residentCorrections.length > 0;
+
+    // 3. Per-project local merge: only touched project groups are sent and rewritten.
+    const projectClaims = claims.filter((claim) => claim.layer === "project");
+    const projectEarlier = earlier.filter((claim) => claim.layer === "project");
+    const projectCorrections = corrections.filter((item) => item.variant === "projects");
+    const shouldMergeProjects =
+      projectClaims.some((claim) => claim.confidence === "high") ||
+      (projectClaims.some((claim) => claim.confidence === "low") && projectEarlier.length > 0) ||
+      projectCorrections.length > 0;
+
+    if (!shouldMergeResident && !shouldMergeProjects) {
       ctx.cursors.set(PORTRAIT_TURNS_CURSOR, JSON.stringify(input.cursor));
       return;
     }
 
-    const merged = await mergeOnce(ctx.llm, {
-      day: ctx.day,
-      docs: before,
-      claims,
-      pending: earlier,
-      corrections,
-    });
+    let workingTexts: TwinTexts = before;
+    let combinedBump: VersionBump = "patch";
+    const combinedChangelog: string[] = [];
+    const includedCorrectionIds: string[] = [];
+
+    if (shouldMergeResident) {
+      const residentPrompt = buildTwinMergePrompt({
+        day: ctx.day,
+        docs: { full: workingTexts.full, coding: workingTexts.coding },
+        claims: personaClaims,
+        pending: personaEarlier,
+        corrections: residentCorrections,
+      });
+      const residentUpdate = await completeJson(
+        ctx.llm,
+        residentPrompt,
+        TWIN_EDITS_JSON_SCHEMA,
+        parseTwinEdits,
+      );
+      const allowedEdits =
+        codingCorrections.length > 0
+          ? residentUpdate.edits
+          : residentUpdate.edits.filter((edit) => edit.layer !== "coding");
+      workingTexts = applyEditsWithIndex(workingTexts, allowedEdits);
+      combinedBump = higherBump(combinedBump, residentUpdate.bump);
+      combinedChangelog.push(...residentUpdate.changelog);
+      includedCorrectionIds.push(...residentPrompt.includedCorrectionIds);
+    }
+
+    if (shouldMergeProjects) {
+      const targetProjectsText = selectTargetProjectSections(
+        workingTexts.projects,
+        projectClaims,
+        projectCorrections,
+      );
+      const projectPrompt = buildTwinProjectMergePrompt({
+        day: ctx.day,
+        targetProjectsText,
+        claims: projectClaims,
+        pending: projectEarlier,
+        corrections: projectCorrections,
+      });
+      const projectUpdate = await completeJson(
+        ctx.llm,
+        projectPrompt,
+        TWIN_EDITS_JSON_SCHEMA,
+        parseTwinEdits,
+      );
+      const projectEdits = projectUpdate.edits.filter((edit) => edit.layer === "projects");
+      workingTexts = applyEditsWithIndex(workingTexts, projectEdits);
+      combinedBump = higherBump(combinedBump, projectUpdate.bump);
+      combinedChangelog.push(...projectUpdate.changelog);
+      includedCorrectionIds.push(...projectPrompt.includedCorrectionIds);
+    }
+
+    const merged: MergeResult = {
+      texts: workingTexts,
+      bump: combinedBump,
+      changelog: combinedChangelog.slice(0, 8),
+      includedCorrectionIds,
+    };
     const outcome = await finishTwin(ctx.llm, before, merged.texts, { guardShrink: true });
     if ("skip" in outcome) {
       ctx.warnings.push(outcome.skip);
@@ -688,17 +797,155 @@ async function mergeOnce(llm: LlmBackend, input: MergeInput): Promise<MergeResul
 }
 
 async function fixOnce(llm: LlmBackend, texts: TwinTexts, problems: readonly string[]): Promise<TwinTexts> {
+  const omitLargeProjects =
+    byteSize(texts.projects) > 16_384 && !problems.some((problem) => problem.includes("projects"));
+  const promptDocs = omitLargeProjects ? { ...texts, projects: "" } : texts;
   const update: TwinEditsUpdate = await completeJson(
     llm,
-    buildTwinFixPrompt({ docs: texts, problems }),
+    buildTwinFixPrompt({ docs: promptDocs, problems }),
     TWIN_EDITS_JSON_SCHEMA,
     parseTwinEdits,
   );
-  return withIndex(applyTwinEdits(texts, update.edits));
+  const safeEdits = omitLargeProjects
+    ? update.edits.filter((edit) => edit.layer !== "projects")
+    : update.edits;
+  return applyEditsWithIndex(texts, safeEdits);
+}
+
+function higherBump(left: VersionBump, right: VersionBump): VersionBump {
+  const rankBump = (bump: VersionBump) => (bump === "major" ? 2 : bump === "minor" ? 1 : 0);
+  return rankBump(right) > rankBump(left) ? right : left;
+}
+
+async function proposeCodingRules(
+  llm: LlmBackend,
+  input: {
+    day: string;
+    coding: string;
+    portrait: ConsolidationPortrait;
+    claims: readonly StoredTwinClaim[];
+    pending: readonly StoredTwinClaim[];
+  },
+): Promise<number> {
+  if (!input.portrait.codingProposals || !input.portrait.saveCodingProposals) return 0;
+  const existing = await input.portrait.codingProposals();
+  const prompt = buildTwinCodingProposalsPrompt({
+    day: input.day,
+    coding: input.coding,
+    existingProposals: existing,
+    claims: input.claims,
+    pending: input.pending,
+  });
+  const drafts = await completeJson(
+    llm,
+    prompt,
+    TWIN_CODING_PROPOSALS_JSON_SCHEMA,
+    parseTwinCodingProposals,
+  );
+  if (drafts.length === 0) return 0;
+
+  const seenLines = new Set(existing.map((item) => normalizeCodingRuleLine(item.proposedLine)));
+  let nextNum = nextCodingProposalNumber(existing);
+  const added: CodingRuleProposal[] = [];
+  for (const draft of drafts) {
+    const normalized = normalizeCodingRuleLine(draft.proposedLine);
+    if (seenLines.has(normalized)) continue;
+    seenLines.add(normalized);
+    added.push({
+      id: `cp${String(nextNum++).padStart(2, "0")}`,
+      day: input.day,
+      section: draft.section,
+      action: draft.action,
+      ...(draft.targetLine ? { targetLine: draft.targetLine } : {}),
+      proposedLine: normalized,
+      reason: draft.reason,
+    });
+  }
+  if (added.length === 0) return 0;
+  await input.portrait.saveCodingProposals([...existing, ...added]);
+  return added.length;
+}
+
+function selectTargetProjectSections(
+  projectsText: string,
+  claims: readonly StoredTwinClaim[],
+  corrections: readonly TwinPromptCorrection[],
+): string {
+  if (projectsText.trim() === "") return "";
+  const { groups } = parseProjectGroups(projectsText);
+  const targetNames = new Set<string>();
+  const targetRepos = new Set<string>();
+  for (const claim of claims) {
+    if (claim.project.trim() !== "") targetNames.add(claim.project.trim().toLowerCase());
+    if (claim.repo && claim.repo.trim() !== "") targetRepos.add(claim.repo.trim().toLowerCase());
+  }
+  for (const correction of corrections) {
+    const prefix = projectPrefixOfHeading(correction.section);
+    if (prefix) targetNames.add(prefix.toLowerCase());
+  }
+
+  const matched = groups.filter((group) => {
+    const nameLower = group.name.toLowerCase();
+    if (targetNames.has(nameLower)) return true;
+    if (group.repos.some((repo) => targetRepos.has(repo.toLowerCase()) || targetNames.has(repo.toLowerCase()))) {
+      return true;
+    }
+    return corrections.some((correction) => correction.text.toLowerCase().includes(nameLower));
+  });
+  return matched.flatMap((group) => group.sections.map((section) => section.text)).join("\n\n");
+}
+
+/**
+ * Initialize or replace `coding.md` from a hand-crafted `AGENTS.md` / `CLAUDE.md` file,
+ * checking against the coding twin budget and standard before writing to Drive.
+ */
+export async function seedCodingTwin(input: {
+  portrait: ConsolidationPortrait;
+  sourceMarkdown: string;
+  day: string;
+}): Promise<{ version: string; text: string; bytes: number }> {
+  const files = await input.portrait.read();
+  const before = textsOf(files);
+  const nextVersion = bumpVersion(twinVersion(before), "minor");
+  const seeded = seedCodingFromMarkdown(input.sourceMarkdown, nextVersion, input.day);
+  const candidate: TwinTexts = { ...before, coding: seeded };
+  const check = checkTwin(candidate, new Set(["coding"]));
+  check.blocking.push(...twinStandardProblems("coding", seeded));
+  if (check.blocking.length > 0) {
+    throw new Error(`编码分身基线未通过质量检查：${check.blocking.join("；")}`);
+  }
+  if (check.scanHits.length > 0) {
+    throw new Error(`编码分身基线包含疑似敏感信息：${check.scanHits.join("、")}`);
+  }
+  const entry = [
+    `## v${nextVersion} · ${input.day}`,
+    "- coding：从手写 AGENTS.md / CLAUDE.md 导入四节编码分身基线",
+    `- 体积：full ${check.sizes.full} 字节，coding ${check.sizes.coding} 字节，projects 最大小节 ${check.sizes.maxSection} 字节`,
+  ].join("\n");
+  await input.portrait.save({
+    day: input.day,
+    version: nextVersion,
+    files: [
+      {
+        layer: "coding",
+        text: seeded,
+        previous: files.coding,
+      },
+    ],
+    changelog: entry,
+  });
+  return { version: nextVersion, text: seeded, bytes: check.sizes.coding };
 }
 
 function withIndex(texts: TwinTexts): TwinTexts {
   return { ...texts, coding: withProjectsPointer(texts.coding) };
+}
+
+function applyEditsWithIndex(texts: TwinTexts, edits: readonly { layer: TwinLayer; heading: string; text: string }[]): TwinTexts {
+  const next = applyTwinEdits(texts, edits);
+  return edits.some((edit) => edit.layer === "coding")
+    ? { ...next, coding: withProjectsPointer(next.coding) }
+    : next;
 }
 
 type FinishOutcome =
@@ -993,7 +1240,11 @@ const INJECTED_BLOCKS = [
   /<(command|local-command)-[a-z-]+>[\s\S]*?<\/(command|local-command)-[a-z-]+>/gu,
   /<task-notification>[\s\S]*?<\/task-notification>/gu,
 ];
-const INJECTED_TURNS = [/^This session is being continued/u, /^Caveat: /u];
+const INJECTED_TURNS = [
+  /^This session is being continued/u,
+  /^Caveat: /u,
+  /^只根据\s*\S+\.raw\.txt\s*整理/u,
+];
 
 /** The user's own words: injected context blocks and harness turns drop out. */
 export function cleanUserTurn(raw: string): string {

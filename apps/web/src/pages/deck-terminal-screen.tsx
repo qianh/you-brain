@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { IconButton } from "../components/button.js";
 import { Icon } from "../components/icons.js";
@@ -9,6 +9,7 @@ import { usePageActive } from "../page-active.js";
 import { loadChunk } from "../lib/load-chunk.js";
 import { prefs } from "../lib/prefs.js";
 import { modLabel, shortcutMod } from "../lib/shortcuts.js";
+import { DeckReferencePicker } from "./deck-reference-picker.js";
 import { FONT_MAX, FONT_MIN, FONT_SIZE_KEY, resolveAppearance, stepFontSize } from "./deck-terminal-font.js";
 import { DeckTty7NewForm, DeckTty7SessionList, readGroupColors } from "./deck-tty7-list.js";
 import { baseName, sessionTitle, useSessionRename, type Session, type useTty7Sessions } from "./deck-tty7-sessions.js";
@@ -40,6 +41,12 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
   const [filter, setFilter] = useState("");
   /** 下拉里的新建表单：null 为收起；label 为 null 表示不限项目。 */
   const [creating, setCreating] = useState<{ label: string | null } | null>(null);
+  const [refPickerOpen, setRefPickerOpen] = useState(false);
+  const pasteSeqRef = useRef(0);
+  const [pendingPaste, setPendingPaste] = useState<{ pane: number; seq: number; text: string } | null>(null);
+  const handlePasteHandled = useCallback((seq: number) => {
+    setPendingPaste((current) => (current?.seq === seq ? null : current));
+  }, []);
   const activeTabRef = useRef<HTMLDivElement>(null);
   // 用户调过的字号；null 表示没调过，跟随 tty7。偏好只在改动时写，不在这里反复读。
   const [storedSize, setStoredSize] = useState<string | null>(() => prefs.getItem(FONT_SIZE_KEY));
@@ -71,8 +78,9 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
     setCreating(null);
   };
 
-  // 在捕获阶段处理，只认 terminalShortcut 里的组合；其余按键（含 Esc）原样交给 xterm。
+  // 在捕获阶段处理，只认 terminalShortcut 里的组合；其余按键（含 Esc 与裸 @）原样交给 xterm。
   useEffect(() => {
+    if (!shown) return undefined;
     const onKey = (event: KeyboardEvent): void => {
       const action = terminalShortcut(
         { key: event.key, meta: event.metaKey, ctrl: event.ctrlKey, alt: event.altKey, shift: event.shiftKey },
@@ -82,6 +90,7 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
       event.preventDefault();
       event.stopPropagation();
       if (action === "back") onTabsChange(hideScreen(tabs));
+      else if (action === "reference") setRefPickerOpen(true);
       else if (action === "fontUp") setFontSize(stepFontSize(fontSize, 1));
       else if (action === "fontDown") setFontSize(stepFontSize(fontSize, -1));
       else if (action === "fontReset") resetFontSize();
@@ -89,7 +98,7 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [mod, tabs, onTabsChange, fontSize]);
+  }, [shown, mod, tabs, onTabsChange, fontSize]);
 
   // 告诉 daemon 正在看哪个会话，这个会话完成时不弹通知。窗口失焦、页面隐藏、切到别的菜单或离开时报 null。
   // 失败一律静默：上报不能影响终端使用。
@@ -278,33 +287,44 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
           {menu}
         </Popover>
         {/* 按下时不抢焦点（preventDefault），点完仍可直接在终端里打字。 */}
-        <div className="deck-term-font-slot" role="group" aria-label={t("deckTerminalFontSize")}>
+        <div className="deck-term-bar-right">
           <button
             type="button"
-            className="deck-term-font-btn"
-            aria-label={t("deckTerminalFontSmaller")}
-            title={`${t("deckTerminalFontSmaller")} (${modLabel(mod)}-)`}
-            disabled={fontSize <= FONT_MIN}
+            className="deck-term-ref-btn"
+            title={t("deckRefButtonTitle", { shortcut: `${modLabel(mod)}⇧2` })}
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() => setFontSize(stepFontSize(fontSize, -1))}
-          >A−</button>
-          <button
-            type="button"
-            className="deck-term-font-btn deck-term-font-size"
-            aria-label={t("deckTerminalFontReset", { size: fontSize })}
-            title={`${t("deckTerminalFontReset", { size: fontSize })} (${modLabel(mod)}0)`}
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={resetFontSize}
-          >{fontSize}</button>
-          <button
-            type="button"
-            className="deck-term-font-btn"
-            aria-label={t("deckTerminalFontLarger")}
-            title={`${t("deckTerminalFontLarger")} (${modLabel(mod)}=)`}
-            disabled={fontSize >= FONT_MAX}
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => setFontSize(stepFontSize(fontSize, 1))}
-          >A+</button>
+            onClick={() => setRefPickerOpen(true)}
+          >
+            {t("deckRefButton")}
+          </button>
+          <div className="deck-term-font-slot" role="group" aria-label={t("deckTerminalFontSize")}>
+            <button
+              type="button"
+              className="deck-term-font-btn"
+              aria-label={t("deckTerminalFontSmaller")}
+              title={`${t("deckTerminalFontSmaller")} (${modLabel(mod)}-)`}
+              disabled={fontSize <= FONT_MIN}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => setFontSize(stepFontSize(fontSize, -1))}
+            >A−</button>
+            <button
+              type="button"
+              className="deck-term-font-btn deck-term-font-size"
+              aria-label={t("deckTerminalFontReset", { size: fontSize })}
+              title={`${t("deckTerminalFontReset", { size: fontSize })} (${modLabel(mod)}0)`}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={resetFontSize}
+            >{fontSize}</button>
+            <button
+              type="button"
+              className="deck-term-font-btn"
+              aria-label={t("deckTerminalFontLarger")}
+              title={`${t("deckTerminalFontLarger")} (${modLabel(mod)}=)`}
+              disabled={fontSize >= FONT_MAX}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => setFontSize(stepFontSize(fontSize, 1))}
+            >A+</button>
+          </div>
         </div>
       </div>
       <div className="deck-term-body">
@@ -315,10 +335,23 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
               pane={pane}
               appearance={appearance}
               active={shown && pane === tabs.active}
+              pendingPaste={pendingPaste?.pane === pane ? pendingPaste : null}
+              onPasteHandled={handlePasteHandled}
             />
           ))}
         </Suspense>
       </div>
+      <DeckReferencePicker
+        open={refPickerOpen}
+        mode="terminal"
+        onClose={() => setRefPickerOpen(false)}
+        onInsert={(mentionText) => {
+          if (tabs.active === null) return;
+          pasteSeqRef.current += 1;
+          setPendingPaste({ pane: tabs.active, seq: pasteSeqRef.current, text: mentionText });
+        }}
+        onOpenTerminal={(pane) => onTabsChange(openTab(tabs, pane))}
+      />
     </div>
   );
 }

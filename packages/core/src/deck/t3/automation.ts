@@ -127,6 +127,20 @@ export class T3Automation implements TaskAutomationPort {
     return (await this.#projects()).map((project) => ({ id: project.id, name: project.title, cwd: project.workspaceRoot }));
   }
 
+  /** 有 cwd 时登记本机已有文件夹（不新建目录）；没有时由 T3 按名称新建一个带首次提交的 Git 仓库。 */
+  async createProject(input: Parameters<TaskAutomationPort["createProject"]>[0]): Promise<{ id: string; name: string; cwd: string }> {
+    const name = input.name.trim();
+    if (name === "" || (input.cwd !== undefined && !isAbsolute(input.cwd))) {
+      throw new T3AutomationError("INVALID_INPUT", "新项目需要名称；指定文件夹时必须是绝对路径。");
+    }
+    const created = await this.#call("t3_project_create", {
+      title: name,
+      ...(input.cwd !== undefined ? { workspaceRoot: input.cwd, createWorkspaceRootIfMissing: false } : {}),
+    }, 60_000);
+    if (!isProject(created)) invalidResponse();
+    return { id: created.id, name: created.title, cwd: created.workspaceRoot };
+  }
+
   async start(input: Parameters<TaskAutomationPort["start"]>[0]): Promise<{ threadId: string; threadUrl: string }> {
     if (!isAbsolute(input.cwd) || !input.requestId || input.prompt.trim() === "") {
       throw new T3AutomationError("INVALID_INPUT", "任务必须有工作目录、派发编号和任务说明。");

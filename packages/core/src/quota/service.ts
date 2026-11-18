@@ -1,6 +1,6 @@
 import { ClaudeUsageError, readClaudeAccessToken, readClaudeUsage, type ClaudeUsageWindows } from "./claude-usage.js";
 import { parseMagpieAccounts } from "./parse.js";
-import type { QuotaAccount, QuotaTokenUsage, QuotaView } from "./types.js";
+import type { QuotaAccount, QuotaTokens, QuotaTokenUsage, QuotaView } from "./types.js";
 import { parseUsageLog, tokenWindowCutoffs } from "./usage-log.js";
 
 /** An account whose allowance magpie could not read keeps its last numbers this long. */
@@ -26,8 +26,15 @@ export const CLAUDE_LIVE_BACKOFF_MS = 10 * 60_000;
 /** …but never waiting longer than this. */
 export const CLAUDE_LIVE_BACKOFF_MAX_MS = 60 * 60_000;
 
-/** magpie request-log agent field → the agent's card the token totals are shown under. */
-export const TOKEN_AGENTS: ReadonlyArray<{ name: string; agent: string }> = [{ name: "codex", agent: "codex" }];
+/**
+ * magpie request-log agent field → the agent's card the token totals are shown under.
+ * T3 Code drives the local Codex CLI with `Originator: T3 Code`, so magpie logs those
+ * Codex turns under `t3code` while Claude Code inside T3 stays `claude`.
+ */
+export const TOKEN_AGENTS: ReadonlyArray<{ name: string; agent: string }> = [
+  { name: "codex", agent: "codex" },
+  { name: "t3code", agent: "codex" },
+];
 
 export interface QuotaPorts {
   /** Runs `magpie accounts --json` and returns its stdout. Rejects on any failure. */
@@ -156,16 +163,36 @@ export class QuotaService {
     return this.#claudeLive;
   }
 
-  /** Maps the log's agents onto their card; unmapped ones drop out, a failed read keeps the last copy. */
+  /** Maps the log's agents onto their card, summing multiple entries that share one card. */
   #viewTokens(parsed: Record<string, QuotaTokenUsage> | null): Record<string, QuotaTokenUsage> {
     if (parsed === null) return this.#view.tokens;
     const out: Record<string, QuotaTokenUsage> = {};
     for (const { name, agent } of TOKEN_AGENTS) {
       const tokens = parsed[name];
-      if (tokens) out[agent] = tokens;
+      if (!tokens) continue;
+      const existing = out[agent];
+      out[agent] = existing ? mergeTokenUsage(existing, tokens) : tokens;
     }
     return out;
   }
+}
+
+function sumTokens(left: QuotaTokens, right: QuotaTokens): QuotaTokens {
+  return {
+    calls: left.calls + right.calls,
+    input: left.input + right.input,
+    output: left.output + right.output,
+    cacheRead: left.cacheRead + right.cacheRead,
+    total: left.total + right.total,
+  };
+}
+
+function mergeTokenUsage(left: QuotaTokenUsage, right: QuotaTokenUsage): QuotaTokenUsage {
+  return {
+    today: sumTokens(left.today, right.today),
+    threeDays: sumTokens(left.threeDays, right.threeDays),
+    sevenDays: sumTokens(left.sevenDays, right.sevenDays),
+  };
 }
 
 /** magpie's cached copy of a Claude account, replaced by the live probe when it answers. */

@@ -3,15 +3,15 @@ import type { QuotaAccount, QuotaTokenUsage, QuotaView } from "@you-brain/core/h
 import type { Language } from "../../lib/format.js";
 
 /**
- * magpie's agent id → the session source U-Brain captures it under. Only agents listed
+ * magpie's agent id → the session sources U-Brain captures it under. Only agents listed
  * here can be shown: without a capture source there is no way to tell whether the
- * subscription is in use. Add a row to show another one.
+ * subscription is in use. Codex sessions also run inside T3 Code (`t3-code`).
  */
-export const QUOTA_AGENTS: ReadonlyArray<{ agent: string; source: string; label: string }> = [
-  { agent: "claude", source: "claude-code", label: "Claude Code" },
-  { agent: "codex", source: "codex", label: "Codex" },
-  { agent: "grok", source: "grok-build", label: "Grok" },
-  { agent: "zcode", source: "zcode", label: "ZCode" },
+export const QUOTA_AGENTS: ReadonlyArray<{ agent: string; sources: readonly string[]; label: string }> = [
+  { agent: "claude", sources: ["claude-code"], label: "Claude Code" },
+  { agent: "codex", sources: ["codex", "t3-code"], label: "Codex" },
+  { agent: "grok", sources: ["grok-build"], label: "Grok" },
+  { agent: "zcode", sources: ["zcode"], label: "ZCode" },
 ];
 
 /** A source counts as in use when it captured a session this recently. */
@@ -105,10 +105,13 @@ export function quotaCards(
   const accounts = quota?.accounts ?? [];
   const tokens = quota?.tokens ?? {};
   const cards: QuotaCardView[] = [];
-  for (const { agent, source, label } of QUOTA_AGENTS) {
-    const capture = captures?.find((item) => item.source === source);
-    const last = capture?.lastCaptureAt ? Date.parse(capture.lastCaptureAt) : Number.NaN;
-    if (Number.isNaN(last) || nowMs - last > QUOTA_RECENT_MS) continue;
+  for (const { agent, sources, label } of QUOTA_AGENTS) {
+    const active = sources.some((source) => {
+      const last = captures?.find((item) => item.source === source)?.lastCaptureAt;
+      const at = last ? Date.parse(last) : Number.NaN;
+      return !Number.isNaN(at) && nowMs - at <= QUOTA_RECENT_MS;
+    });
+    if (!active) continue;
     const account = accounts.find((item) => item.agent === agent && item.active && item.windows.length > 0);
     const agentTokens = tokens[agent];
     if (account === undefined && agentTokens === undefined) continue;

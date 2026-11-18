@@ -46,12 +46,20 @@ function sameLlm(left: SharedConfig["llm"], right: SharedConfig["llm"]): boolean
  * local model string.
  */
 export function preferLocalLlm(remote: SharedConfig, local: SharedConfig): SharedConfig {
-  const fallback = createDefaultSharedConfig().llm;
+  const defaults = createDefaultSharedConfig();
+  const fallback = defaults.llm;
+  let next = remote;
   if (sameLlm(remote.llm, fallback) && !sameLlm(local.llm, fallback)) {
-    return { ...remote, llm: { ...local.llm } };
+    next = { ...next, llm: { ...local.llm } };
+  } else if (remote.llm.model.trim() === "" && local.llm.model.trim() !== "") {
+    next = { ...next, llm: { ...local.llm } };
   }
-  if (remote.llm.model.trim() === "" && local.llm.model.trim() !== "") {
-    return { ...remote, llm: { ...local.llm } };
+  const sameConsolidateDefault =
+    !remote.consolidateLlm.enabled && sameLlm(remote.consolidateLlm, defaults.consolidateLlm);
+  const localConsolidateCustomized =
+    local.consolidateLlm.enabled || !sameLlm(local.consolidateLlm, defaults.consolidateLlm);
+  if (sameConsolidateDefault && localConsolidateCustomized) {
+    next = { ...next, consolidateLlm: { ...local.consolidateLlm } };
   }
-  return remote;
+  return next;
 }

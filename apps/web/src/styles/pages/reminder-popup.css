@@ -272,6 +272,101 @@
   border-color: color-mix(in srgb, var(--accent) 42%, transparent);
 }
 
+.popup-page[data-tone="waiting"]::before {
+  background: linear-gradient(
+    90deg,
+    var(--warn) 0%,
+    color-mix(in srgb, var(--warn) 35%, transparent) 100%
+  );
+}
+
+.popup-page[data-tone="done"]::before {
+  background: linear-gradient(
+    90deg,
+    var(--success) 0%,
+    color-mix(in srgb, var(--success) 35%, transparent) 100%
+  );
+}
+
+.popup-page[data-tone="waiting"] .popup-brand-mark {
+  background: var(--warn-soft);
+  color: var(--warn-text);
+}
+
+.popup-page[data-tone="done"] .popup-brand-mark {
+  background: var(--success-soft);
+  color: var(--success-text);
+}
+
+.popup-page[data-tone="waiting"] .popup-terminal-card {
+  border-left-color: var(--warn);
+}
+
+.popup-page[data-tone="done"] .popup-terminal-card {
+  border-left-color: var(--success);
+}
+
+.popup-terminal-card {
+  justify-content: flex-start;
+}
+
+.popup-meta-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.popup-pane-tag {
+  margin-left: 4px;
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  opacity: 0.78;
+}
+
+.popup-agent-tag {
+  margin-left: 4px;
+  color: var(--text-2);
+  font-weight: 400;
+}
+
+.popup-status-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  line-height: 1;
+}
+
+.popup-status-pill[data-kind="waiting"] {
+  background: var(--warn-soft);
+  color: var(--warn-text);
+}
+
+.popup-status-pill[data-kind="done"] {
+  background: var(--success-soft);
+  color: var(--success-text);
+}
+
+.popup-term-preview {
+  margin: 2px 0 0;
+  padding: 6px 8px;
+  max-height: 76px;
+  overflow-y: auto;
+  border-radius: var(--r-chip);
+  background: var(--term-bg);
+  color: var(--term-fg);
+  border: 1px solid var(--term-border);
+  font-family: var(--mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-micro);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .popup-state {
   margin: auto;
   display: flex;

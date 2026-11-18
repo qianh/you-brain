@@ -46,3 +46,27 @@ export type {
   YouBrainErrorCode,
   YouBrainPaths,
 } from "./domain/index.js";
+
+export {
+  DEFAULT_REFERENCE_LIMIT,
+  MAX_REFERENCE_CHARS,
+  REFERENCE_KINDS,
+  REFERENCE_WARNING,
+  TERMINAL_REFERENCE_LINES,
+  decodeReferenceId,
+  encodeReferenceId,
+  formatReferenceMention,
+  formatReferenceUri,
+  formatResourceUri,
+  listReferenceCandidates,
+  materializeReference,
+  parseQueryWithKindPrefix,
+  parseReferenceUri,
+  readReferenceContent,
+  resolveReference,
+  type MaterializedReference,
+  type ReferenceCandidate,
+  type ReferenceContent,
+  type ReferenceKind,
+  type ReferencePorts,
+} from "./reference/index.js";

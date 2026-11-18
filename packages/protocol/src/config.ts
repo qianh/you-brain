@@ -115,6 +115,12 @@ const SharedConfigObjectSchema = z.object({
     model: z.string(),
     baseUrl: z.union([z.literal(""), z.url()]),
   }),
+  consolidateLlm: z.object({
+    enabled: z.boolean(),
+    provider: LlmProviderSchema,
+    model: z.string(),
+    baseUrl: z.union([z.literal(""), z.url()]),
+  }),
   refine: z.object({
     idleMinutes: z.int().positive(),
   }),
@@ -168,6 +174,12 @@ export const DEFAULT_SHARED_CONFIG = {
     redact: true,
   },
   llm: {
+    provider: DEFAULT_LLM_PROVIDER,
+    model: "",
+    baseUrl: "",
+  },
+  consolidateLlm: {
+    enabled: false,
     provider: DEFAULT_LLM_PROVIDER,
     model: "",
     baseUrl: "",

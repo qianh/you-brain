@@ -11,6 +11,9 @@ import {
   type PortraitCorrectionBody,
   type PortraitCorrectionResult,
   type PortraitCorrectionsResponse,
+  type PortraitProposalActionBody,
+  type PortraitProposalActionResult,
+  type PortraitProposalsResponse,
   type PortraitResponse,
   type PortraitSnapshotsResponse,
   type ReminderActionBody,
@@ -76,6 +79,11 @@ import {
   type NotionTestResult,
   type NotionTreeView,
   type NotionUpdateBlockBody,
+  type ReferenceCandidatesResponse,
+  type ReferenceContentView,
+  type ReferenceKind,
+  type ReferenceMaterializeBody,
+  type ReferenceMaterializeResponse,
 } from "./types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 import type { UiPrefs, UiPrefsPatch } from "../ui-prefs/store.js";
@@ -103,10 +111,12 @@ export interface DaemonClient {
   topics(query?: TopicsQuery): Promise<TopicsResponse>;
   topic(id: string): Promise<TopicDetail>;
   updateTopic(id: string, body: TopicMutationBody): Promise<TopicMutationResponse>;
-  portrait(variant?: string): Promise<PortraitResponse>;
+  portrait(variant?: string, project?: string): Promise<PortraitResponse>;
   portraitSnapshots(): Promise<PortraitSnapshotsResponse>;
   portraitCorrections(variant?: string): Promise<PortraitCorrectionsResponse>;
   addPortraitCorrection(input: PortraitCorrectionBody): Promise<PortraitCorrectionResult>;
+  portraitProposals?(): Promise<PortraitProposalsResponse>;
+  reviewPortraitProposal?(body: PortraitProposalActionBody): Promise<PortraitProposalActionResult>;
   search(query: SearchRequest): Promise<SearchResponse>;
   devices(): Promise<DevicesResponse>;
   addVirtualDevice(body: VirtualDeviceCreateBody): Promise<VirtualDeviceResponse>;
@@ -174,6 +184,19 @@ export interface DaemonClient {
   notionMovePage(body: NotionMovePageBody): Promise<NotionArchivePageResult>;
   /** 只拼 URL;二进制由调用方自行 fetch(浏览器同源 / CLI 拿绝对地址)。 */
   notionAssetUrl(blockId: string): string;
+  referenceCandidates(input?: {
+    query?: string;
+    kinds?: readonly ReferenceKind[];
+    limit?: number;
+  }): Promise<ReferenceCandidatesResponse>;
+  referenceContent(input: {
+    uri?: string;
+    kind?: ReferenceKind;
+    id?: string;
+    query?: string;
+    label?: string;
+  }): Promise<ReferenceContentView>;
+  materializeReference(body: ReferenceMaterializeBody): Promise<ReferenceMaterializeResponse>;
   events(
     listener: (event: DaemonEvent) => void,
     options?: { signal?: AbortSignal },
@@ -234,13 +257,13 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     topic: (id) => request("GET", `/api/topics/${encodeURIComponent(id)}`),
     updateTopic: (id, body) =>
       request("POST", `/api/topics/${encodeURIComponent(id)}`, body),
-    portrait: (variant) =>
-      request(
-        "GET",
-        variant === undefined
-          ? "/api/portrait"
-          : `/api/portrait?variant=${encodeURIComponent(variant)}`,
-      ),
+    portrait: (variant, project) => {
+      const params = new URLSearchParams();
+      if (variant !== undefined) params.set("variant", variant);
+      if (project !== undefined && project !== "") params.set("project", project);
+      const qs = params.toString();
+      return request("GET", qs === "" ? "/api/portrait" : `/api/portrait?${qs}`);
+    },
     portraitSnapshots: () => request("GET", "/api/portrait/snapshots"),
     portraitCorrections: (variant) =>
       request(
@@ -250,6 +273,8 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
           : `/api/portrait/corrections?variant=${encodeURIComponent(variant)}`,
       ),
     addPortraitCorrection: (input) => request("POST", "/api/portrait/corrections", input),
+    portraitProposals: () => request("GET", "/api/portrait/proposals"),
+    reviewPortraitProposal: (body) => request("POST", "/api/portrait/proposals", body),
     search: (query) => request("GET", `/api/search${searchString(query)}`),
     devices: () => request("GET", "/api/devices"),
     addVirtualDevice: (body) => request("POST", "/api/devices/virtual", body),
@@ -319,6 +344,15 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     notionMovePage: (body) => request("POST", "/api/actions/notion-move-page", body),
     notionAssetUrl: (blockId) =>
       `${baseUrl}/api/notion/asset?block=${encodeURIComponent(blockId)}`,
+    referenceCandidates: (input) => {
+      const qs = referenceCandidatesQuery(input);
+      return request("GET", qs === "" ? "/api/references/candidates" : `/api/references/candidates?${qs}`);
+    },
+    referenceContent: (input) => {
+      const qs = referenceContentQuery(input);
+      return request("GET", qs === "" ? "/api/references/content" : `/api/references/content?${qs}`);
+    },
+    materializeReference: (body) => request("POST", "/api/references/materialize", body),
     events: (listener, eventOptions) =>
       readEvents(fetchImpl, baseUrl, options.token, listener, eventOptions?.signal),
   };
@@ -341,6 +375,35 @@ function searchString(query: SearchRequest): string {
   if (query.to !== undefined) params.set("to", query.to);
   for (const source of query.sources ?? []) params.append("sources", source);
   return `?${params.toString()}`;
+}
+
+function referenceCandidatesQuery(input?: {
+  query?: string;
+  kinds?: readonly ReferenceKind[];
+  limit?: number;
+}): string {
+  if (!input) return "";
+  const params = new URLSearchParams();
+  if (input.query !== undefined && input.query !== "") params.set("q", input.query);
+  if (input.kinds && input.kinds.length > 0) params.set("kinds", input.kinds.join(","));
+  if (input.limit !== undefined) params.set("limit", String(input.limit));
+  return params.toString();
+}
+
+function referenceContentQuery(input: {
+  uri?: string;
+  kind?: ReferenceKind;
+  id?: string;
+  query?: string;
+  label?: string;
+}): string {
+  const params = new URLSearchParams();
+  if (input.uri !== undefined) params.set("uri", input.uri);
+  if (input.kind !== undefined) params.set("kind", input.kind);
+  if (input.id !== undefined) params.set("id", input.id);
+  if (input.query !== undefined) params.set("q", input.query);
+  if (input.label !== undefined) params.set("label", input.label);
+  return params.toString();
 }
 
 function parseJson(text: string): unknown {

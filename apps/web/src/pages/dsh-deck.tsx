@@ -6,10 +6,16 @@ import { Icon } from "../components/icons.js";
 import { Page } from "../components/page.js";
 import { Segmented } from "../components/segmented.js";
 import { Spinner } from "../components/spinner.js";
+import { useToast } from "../components/toast.js";
 import { useDaemon } from "../daemon-context.js";
+import { parseDeckPane } from "../lib/route.js";
+import { isTextEntry, modLabel, shortcutMod } from "../lib/shortcuts.js";
 import { usePageActive } from "../page-active.js";
+import { useRoute } from "../router.js";
 import { createDshCookiePreparer } from "../lib/dsh-cookies.js";
 import { terminalReferenceMessage, type TerminalReference } from "../lib/terminal-reference.js";
+import { isReferenceShortcut } from "./deck-reference-logic.js";
+import { DeckReferencePicker } from "./deck-reference-picker.js";
 import { DeckTerminalScreen } from "./deck-terminal-screen.js";
 import { EMPTY_TABS, hideScreen, openTab, pruneTabs, type TerminalTabs } from "./deck-terminal-tabs.js";
 import { DeckTty7Panel } from "./deck-tty7.js";
@@ -37,6 +43,8 @@ const DECK_VIEWS = [
  */
 export function DshDeckPage() {
   const { client, t } = useDaemon();
+  const { href, navigate } = useRoute();
+  const { push } = useToast();
   const pageActive = usePageActive();
   const [activePage, setActivePage] = useState<DeckViewId>(() => {
     try { return initialDeckView(prefs.getItem(DECK_VIEW_KEY)); } catch { return initialDeckView(null); }
@@ -46,9 +54,26 @@ export function DshDeckPage() {
   // 整屏终端的标签只在本次运行内有效，不写偏好。
   const [tabs, setTabs] = useState<TerminalTabs>(EMPTY_TABS);
   const openPane = useCallback((pane: number) => setTabs((current) => openTab(current, pane)), []);
+  const requestedPane = parseDeckPane(href);
+  const reloadSessions = sessions.reload;
+  useEffect(() => {
+    if (requestedPane === null || !pageActive) return;
+    navigate("/deck", "replace");
+    void reloadSessions().then((fresh) => {
+      if (fresh === null) return;
+      if (!fresh.available || !fresh.sessions.some((item) => item.pane === requestedPane)) {
+        push({ message: t("deckTty7ReferenceMissing"), tone: "danger" });
+        return;
+      }
+      openPane(requestedPane);
+    });
+  }, [requestedPane, pageActive, navigate, reloadSessions, openPane, push, t]);
   const [t3Visited, setT3Visited] = useState(activePage === "t3");
   const [t3SettingsOpen, setT3SettingsOpen] = useState(false);
   const [t3ReloadVersion, setT3ReloadVersion] = useState(0);
+  const [t3RefPickerOpen, setT3RefPickerOpen] = useState(false);
+  const t3Frame = useRef<HTMLIFrameElement>(null);
+  const mod = shortcutMod(typeof navigator === "undefined" ? "" : navigator.platform);
   const [museVisited, setMuseVisited] = useState(activePage === "muse");
   const [museSettingsOpen, setMuseSettingsOpen] = useState(false);
   const [museReconnectVersion, setMuseReconnectVersion] = useState(0);
@@ -140,6 +165,26 @@ export function DshDeckPage() {
     return () => clearInterval(timer);
   }, [readyUrl, load, pageActive]);
 
+  useEffect(() => {
+    if (!pageActive || activePage !== "t3" || tabs.active !== null) return undefined;
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.isComposing || t3SettingsOpen || t3RefPickerOpen || isTextEntry(event.target)) return;
+      if (
+        !isReferenceShortcut(
+          { key: event.key, meta: event.metaKey, ctrl: event.ctrlKey, alt: event.altKey, shift: event.shiftKey },
+          mod,
+        )
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      setT3RefPickerOpen(true);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pageActive, activePage, tabs.active, mod, t3SettingsOpen, t3RefPickerOpen]);
+
   const toggleTty7 = (open: boolean): void => {
     setTty7Open(open);
     try {
@@ -197,6 +242,14 @@ export function DshDeckPage() {
             <div className="dsh-deck-actions">
               {activePage === "t3" ? (
                 <>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    title={t("deckRefButtonTitle", { shortcut: `${modLabel(mod)}⇧2` })}
+                    onClick={() => setT3RefPickerOpen(true)}
+                  >
+                    {t("deckRefButton")}
+                  </Button>
                   <Button size="sm" variant="ghost" icon={<Icon name="settings" />} onClick={() => setT3SettingsOpen(true)}>{t("dshDeckT3Settings")}</Button>
                   <IconButton label={t("dshDeckT3Refresh")} onClick={() => setT3ReloadVersion((value) => value + 1)}><Icon name="refresh" /></IconButton>
                 </>
@@ -221,7 +274,15 @@ export function DshDeckPage() {
           </div>
           <div className="dsh-deck-view" role="region" aria-label={t("dshDeckFrameTitle")} hidden={activePage !== "dsh"}>{main}</div>
           <div className="dsh-deck-view" role="region" aria-label={t("dshDeckT3FrameTitle")} hidden={activePage !== "t3"}>
-            {t3Visited ? <DeckT3Panel reloadVersion={t3ReloadVersion} settingsOpen={t3SettingsOpen} onSettingsChange={setT3SettingsOpen} onReload={() => setT3ReloadVersion((value) => value + 1)} /> : null}
+            {t3Visited ? (
+              <DeckT3Panel
+                frameRef={t3Frame}
+                reloadVersion={t3ReloadVersion}
+                settingsOpen={t3SettingsOpen}
+                onSettingsChange={setT3SettingsOpen}
+                onReload={() => setT3ReloadVersion((value) => value + 1)}
+              />
+            ) : null}
           </div>
           <div className="dsh-deck-view" role="region" aria-label={t("deckMuseFrameTitle")} hidden={activePage !== "muse"}>
             {museVisited ? (
@@ -247,6 +308,15 @@ export function DshDeckPage() {
           onClose={() => setTabs(hideScreen)}
         />
       ) : null}
+      <DeckReferencePicker
+        open={t3RefPickerOpen}
+        mode="t3"
+        onClose={() => setT3RefPickerOpen(false)}
+        onCopied={() => {
+          requestAnimationFrame(() => t3Frame.current?.focus());
+        }}
+        onOpenTerminal={openPane}
+      />
     </Page>
   );
 }

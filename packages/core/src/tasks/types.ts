@@ -46,10 +46,18 @@ export interface TaskBoard {
   connectionError: string | null;
 }
 
+/** 保存 TODO 时顺带在 T3 登记的新项目：有 cwd 时登记本机已有文件夹，否则由 T3 新建空仓库。 */
+export interface TaskNewProject {
+  name: string;
+  cwd?: string | undefined;
+}
+
 export interface TaskCreateInput {
   title: string;
   description?: string | undefined;
   projectId?: string | null | undefined;
+  /** 与 projectId 互斥。 */
+  newProject?: TaskNewProject | undefined;
   priority?: TaskPriority | undefined;
 }
 
@@ -58,6 +66,8 @@ export interface TaskUpdateInput {
   title?: string | undefined;
   description?: string | undefined;
   projectId?: string | null | undefined;
+  /** 与 projectId 互斥。 */
+  newProject?: TaskNewProject | undefined;
   priority?: TaskPriority | undefined;
 }
 
@@ -92,6 +102,7 @@ export interface TaskGitPort {
 
 export interface TaskAutomationPort {
   projects(): Promise<Array<Omit<TaskProject, "enabled">>>;
+  createProject(input: TaskNewProject): Promise<Omit<TaskProject, "enabled">>;
   start(input: { projectId: string; title: string; prompt: string; cwd: string; branch: string; requestId: string }): Promise<{ threadId: string; threadUrl: string }>;
   inspect(threadId: string): Promise<{ state: "running" | "ready" | "failed"; summary: string; error?: string }>;
   followup(threadId: string, prompt: string, commandId: string): Promise<void>;

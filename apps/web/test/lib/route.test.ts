@@ -2,10 +2,12 @@ import { describe, expect, it, test } from "bun:test";
 
 import {
   MEMORY_NAV,
+  deckPaneHref,
   isMemoryPath,
   isNavActive,
   isPrimaryNavActive,
   memoryHref,
+  parseDeckPane,
   primaryNavTarget,
   parseAppLocation,
   readQuery,
@@ -41,6 +43,12 @@ describe("routes", () => {
     expect(readQuery("/_design?open=palette&pq=话题", "open")).toBe("palette");
     expect(readQuery("/_design?open=palette&pq=话题", "pq")).toBe("话题");
     expect(readQuery("/today", "open")).toBe(null);
+    expect(deckPaneHref(7)).toBe("/deck?pane=7");
+    expect(parseDeckPane("/deck?pane=7")).toBe(7);
+    expect(parseDeckPane("/deck?pane=0")).toBe(0);
+    expect(parseDeckPane("/deck?pane=-1")).toBeNull();
+    expect(parseDeckPane("/deck?pane=abc")).toBeNull();
+    expect(parseDeckPane("/deck")).toBeNull();
   });
 
   test("builds topic links and does not mark history as the active shelf", () => {

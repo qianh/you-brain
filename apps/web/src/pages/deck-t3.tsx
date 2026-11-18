@@ -1,5 +1,5 @@
 import { prefs } from "../lib/prefs.js";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type RefObject } from "react";
 import { DEFAULT_T3_URL, normalizeT3Url, type T3WebState } from "@you-brain/core/deck/t3/index.js";
 
 import { Button } from "../components/button.js";
@@ -26,11 +26,13 @@ export function DeckT3Panel({
   settingsOpen,
   onSettingsChange,
   onReload,
+  frameRef,
 }: {
   reloadVersion: number;
   settingsOpen: boolean;
   onSettingsChange: (open: boolean) => void;
   onReload: () => void;
+  frameRef?: RefObject<HTMLIFrameElement | null>;
 }) {
   const { client, t } = useDaemon();
   const [url, setUrl] = useState(savedUrl);
@@ -70,6 +72,7 @@ export function DeckT3Panel({
     <>
       {view.state === "ready" ? (
         <iframe
+          ref={frameRef}
           className="dsh-frame"
           src={view.url}
           title={t("dshDeckT3FrameTitle")}

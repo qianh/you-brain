@@ -336,6 +336,36 @@ export interface PortraitCorrectionResult {
   correction: PortraitCorrectionView;
 }
 
+export interface CodingProposalView {
+  id: string;
+  day: string;
+  section: string;
+  action: "add" | "replace";
+  targetLine?: string;
+  proposedLine: string;
+  reason: string;
+}
+
+export interface PortraitProposalsResponse {
+  proposals: CodingProposalView[];
+}
+
+export const PortraitProposalActionBodySchema = z
+  .object({
+    id: z.string().min(1),
+    action: z.enum(["approve", "reject"]),
+    editedLine: z.string().max(400).optional(),
+  })
+  .strict();
+
+export type PortraitProposalActionBody = z.infer<typeof PortraitProposalActionBodySchema>;
+
+export interface PortraitProposalActionResult {
+  ok: true;
+  proposals: CodingProposalView[];
+  version: string | null;
+}
+
 export interface SearchRequest {
   query: string;
   limit?: number;
@@ -1188,6 +1218,17 @@ export const DeckTty7RenameBodySchema = z
 /** 网页正在整屏看哪个会话；null 表示没在看。 */
 export const DeckTty7ViewingBodySchema = z.object({ pane: z.number().int().nonnegative().nullable() }).strict();
 
+/** 关闭一条终端会话提醒（按序号或按会话编号）。 */
+export const DeckNoticeDismissBodySchema = z
+  .object({
+    seq: z.number().int().positive().optional(),
+    pane: z.number().int().nonnegative().optional(),
+  })
+  .strict()
+  .refine((body) => body.seq !== undefined || body.pane !== undefined, {
+    message: "需要提供 seq 或 pane",
+  });
+
 export const DeckTty7SendBodySchema = z
   .object({
     pane: z.number().int().nonnegative(),
@@ -1207,7 +1248,9 @@ export const DeckTty7StartBodySchema = z
 
 export type DeckTty7RenameBody = z.infer<typeof DeckTty7RenameBodySchema>;
 export type DeckTty7ViewingBody = z.infer<typeof DeckTty7ViewingBodySchema>;
-/** 终端会话提醒列表；桌面壳按 epoch + seq 取新条目。 */
+export type DeckNoticeDismissBody = z.infer<typeof DeckNoticeDismissBodySchema>;
+/** 终端会话提醒列表；桌面壳按 epoch + seq 取新条目，弹框按 status=open 展示待处理条目。 */
+export type DeckSessionNotice = import("../deck/session-notices.js").SessionNotice;
 export type DeckNoticesResponse = import("../deck/session-notices.js").SessionNoticeList;
 export type DeckTty7SendBody = z.infer<typeof DeckTty7SendBodySchema>;
 export type DeckTty7StartBody = z.infer<typeof DeckTty7StartBodySchema>;
@@ -1277,5 +1320,59 @@ export const UiPrefsPatchBodySchema = z
     remove: z.array(z.string()).optional(),
   })
   .strict();
+
+// ---- 跨端 @ 引用（T3 / 终端 / MCP / Skill 共用） ----
+
+export const ReferenceKindSchema = z.enum(["tty7", "session", "topic", "kb"]);
+export type ReferenceKind = z.infer<typeof ReferenceKindSchema>;
+
+export interface ReferenceCandidateView {
+  kind: ReferenceKind;
+  id: string;
+  uri: string;
+  resourceUri: string;
+  mention: string;
+  label: string;
+  detail: string;
+}
+
+export interface ReferenceCandidatesResponse {
+  candidates: ReferenceCandidateView[];
+}
+
+export interface ReferenceContentView {
+  kind: ReferenceKind;
+  id: string;
+  uri: string;
+  resourceUri: string;
+  label: string;
+  title: string;
+  text: string;
+  wrappedText: string;
+  error?: string;
+  terminal?: { pane: number; workspaceId: string; tabId: string };
+}
+
+export const ReferenceMaterializeBodySchema = z
+  .object({
+    uri: z.string().min(1).max(2_000).optional(),
+    kind: ReferenceKindSchema.optional(),
+    id: z.string().min(1).max(2_000).optional(),
+    query: z.string().min(1).max(500).optional(),
+    label: z.string().max(200).optional(),
+  })
+  .strict()
+  .refine(
+    (value) => value.uri !== undefined || (value.kind !== undefined && value.id !== undefined) || value.query !== undefined,
+    { message: "缺少 uri、kind+id 或 query" },
+  );
+
+export type ReferenceMaterializeBody = z.infer<typeof ReferenceMaterializeBodySchema>;
+
+export interface ReferenceMaterializeResponse extends ReferenceContentView {
+  ok: true;
+  path: string;
+  fileMention: string;
+}
 
 export type { QuotaAccount, QuotaTokens, QuotaTokenUsage, QuotaView, QuotaWindow } from "../quota/types.js";

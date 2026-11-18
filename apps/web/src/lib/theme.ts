@@ -2,8 +2,9 @@ import { prefs } from "./prefs.js";
 
 export const THEME_STORAGE_KEY = "you-brain-theme";
 
-export type ThemeChoice = "system" | "light" | "dark";
-export type ResolvedTheme = "light" | "dark";
+/** 多巴胺是亮底上的高饱和配色,不跟随系统深浅。 */
+export type ThemeChoice = "system" | "light" | "dark" | "dopamine";
+export type ResolvedTheme = "light" | "dark" | "dopamine";
 
 export interface ThemeEnv {
   getItem(key: string): string | null;
@@ -14,7 +15,7 @@ export interface ThemeEnv {
 }
 
 export function parseThemeChoice(value: string | null): ThemeChoice | null {
-  if (value === "system" || value === "light" || value === "dark") return value;
+  if (value === "system" || value === "light" || value === "dark" || value === "dopamine") return value;
   return null;
 }
 
@@ -29,7 +30,7 @@ export function readThemeChoice(env: Pick<ThemeEnv, "getItem" | "setItem" | "sea
 }
 
 export function resolveTheme(choice: ThemeChoice, matchesDark: boolean): ResolvedTheme {
-  if (choice === "light" || choice === "dark") return choice;
+  if (choice !== "system") return choice;
   return matchesDark ? "dark" : "light";
 }
 
@@ -52,7 +53,7 @@ export function browserThemeEnv(): ThemeEnv {
     search: window.location.search,
     apply: (theme) => {
       document.documentElement.dataset.theme = theme;
-      document.documentElement.style.colorScheme = theme;
+      document.documentElement.style.colorScheme = theme === "dark" ? "dark" : "light";
     },
   };
 }

@@ -129,6 +129,14 @@ describe("terminalShortcut", () => {
     expect(terminalShortcut(key("=", { meta: true }), "ctrl")).toBeNull();
   });
 
+  test("⌘⇧2 / ⌘⇧@ 触发 @ 引用，Ctrl+Shift+2（非 macOS）触发 @ 引用，裸 @ 不拦截", () => {
+    expect(terminalShortcut(key("@", { meta: true, shift: true }), "meta")).toBe("reference");
+    expect(terminalShortcut(key("2", { meta: true, shift: true }), "meta")).toBe("reference");
+    expect(terminalShortcut(key("@", { ctrl: true, shift: true }), "ctrl")).toBe("reference");
+    expect(terminalShortcut(key("@"), "meta")).toBeNull();
+    expect(terminalShortcut(key("@", { shift: true }), "meta")).toBeNull();
+  });
+
   test("字号快捷键不吞别的组合：裸 =、-、0，macOS 上的 Ctrl+-，带 Alt、同时按两个修饰键", () => {
     expect(terminalShortcut(key("="), "meta")).toBeNull();
     expect(terminalShortcut(key("-"), "meta")).toBeNull();

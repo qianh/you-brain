@@ -161,7 +161,9 @@ export class DshRuntime {
       return { state: "error", error: base.problem ?? "找不到 Node ≥ 24.9" };
     }
     const dshHome = join(this.#root, "home");
-    await mkdir(join(this.#root, "work"), { recursive: true });
+    const workDir = join(this.#root, "work");
+    await mkdir(workDir, { recursive: true });
+    await this.#ensureWorkAgentsMd(workDir);
     await this.#linkProfileModules(dshHome, "web");
     const node = base.node;
     // daemon 被强杀或崩溃时 DSH 会成孤儿，预加载的监视脚本让它在父进程消失后自行退出。
@@ -274,6 +276,23 @@ export class DshRuntime {
   /** 搜索或模型设置变了：重启 dsh，让它按新补丁和环境重载。dsh 没在运行就什么都不做。 */
   refresh(): void {
     this.#web?.restart();
+  }
+
+  async #ensureWorkAgentsMd(workDir: string): Promise<void> {
+    const target = join(workDir, "AGENTS.md");
+    const existing = await readFile(target, "utf8").catch(() => "");
+    if (existing.trim() !== "") return;
+    const guide = [
+      "# U-Brain 指挥台协作约定",
+      "",
+      "- 默认用中文沟通，先说结论，简洁直接；保护用户已有修改，危险或不可逆操作先经用户明确确认。",
+      "- 当前环境已挂载 `youbrain` MCP 工具：",
+      "  - 涉及用户长期偏好、产品/方案权衡或沟通风格时，调用 `get_portrait`（默认 `full`）。",
+      "  - 涉及具体代码仓库或已有业务项目时，调用 `get_portrait` 传 `variant=\"projects\"` 与 `project=\"<仓库或项目名>\"` 按需获取该项目既有决定。",
+      "  - 涉及近期进展、待办或历史上下文时，优先用 `get_today`、`get_topics`、`get_topic` 或 `search_sessions` 查证后再回答。",
+      "",
+    ].join("\n");
+    await writeFile(target, guide, "utf8").catch(() => undefined);
   }
 
   /**

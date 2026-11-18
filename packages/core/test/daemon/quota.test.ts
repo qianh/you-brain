@@ -29,13 +29,18 @@ const OUTPUT = JSON.stringify([
 /** Request-log fixture built from the test clock, so bucketing holds in any timezone. */
 async function writeUsageLog(homeDir: string): Promise<void> {
   const cuts = tokenWindowCutoffs(CLOCK_START.getTime());
-  const row = (t: number, tokens: [number, number, number]): string =>
-    JSON.stringify({ t: new Date(t).toISOString(), agent: "codex", in: tokens[0], out: tokens[1], cache_read: tokens[2] });
+  const row = (t: number, tokens: [number, number, number], agent = "codex"): string =>
+    JSON.stringify({ t: new Date(t).toISOString(), agent, in: tokens[0], out: tokens[1], cache_read: tokens[2] });
   const dir = join(homeDir, ".config", "magpie");
   await mkdir(dir, { recursive: true });
   await writeFile(
     join(dir, "usage.jsonl"),
-    `${[row(cuts.today + 3_600_000, [100, 10, 1000]), row(cuts.threeDays + 3_600_000, [200, 20, 2000]), row(cuts.sevenDays + 3_600_000, [300, 30, 3000])].join("\n")}\n`,
+    `${[
+      row(cuts.today + 3_600_000, [100, 10, 1000], "codex"),
+      row(cuts.today + 7_200_000, [50, 5, 500], "t3code"),
+      row(cuts.threeDays + 3_600_000, [200, 20, 2000], "codex"),
+      row(cuts.sevenDays + 3_600_000, [300, 30, 3000], "t3code"),
+    ].join("\n")}\n`,
   );
 }
 
@@ -97,9 +102,9 @@ describe("GET /api/quota", () => {
         stale: false,
       },
     ]);
-    expect(view.tokens.codex?.today).toEqual({ calls: 1, input: 100, output: 10, cacheRead: 1000, total: 1110 });
-    expect(view.tokens.codex?.threeDays).toEqual({ calls: 2, input: 300, output: 30, cacheRead: 3000, total: 3330 });
-    expect(view.tokens.codex?.sevenDays).toEqual({ calls: 3, input: 600, output: 60, cacheRead: 6000, total: 6660 });
+    expect(view.tokens.codex?.today).toEqual({ calls: 2, input: 150, output: 15, cacheRead: 1500, total: 1665 });
+    expect(view.tokens.codex?.threeDays).toEqual({ calls: 3, input: 350, output: 35, cacheRead: 3500, total: 3885 });
+    expect(view.tokens.codex?.sevenDays).toEqual({ calls: 4, input: 650, output: 65, cacheRead: 6500, total: 7215 });
     expect(JSON.stringify(view)).not.toContain("example.com");
   });
 

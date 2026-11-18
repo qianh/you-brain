@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 
 import { BrowserDaemonError } from "../../api/client.js";
@@ -6,15 +6,27 @@ import { Button } from "../../components/button.js";
 import { Card, Section } from "../../components/card.js";
 import { Input } from "../../components/input.js";
 import { Select } from "../../components/select.js";
+import { ProviderTile } from "../../components/tile.js";
 import { useToast } from "../../components/toast.js";
 import { Toggle } from "../../components/toggle.js";
 import { useRelativeTime } from "../../components/use-relative-time.js";
 import { useDaemon } from "../../daemon-context.js";
 import type { MessageKey } from "../../i18n/messages.js";
-import { formatDateTime, weekdayName } from "../../lib/format.js";
+import { formatDateTime, LLM_PROVIDER_IDS, providerLabel, weekdayName } from "../../lib/format.js";
 import { consolidateGate, formatConsolidationRun } from "./consolidation-status.js";
-import { isTimeOfDay } from "./logic.js";
+import { isCliProvider, isTimeOfDay, providerOptions } from "./logic.js";
 import { SettingRow } from "./setting-row.js";
+
+function validHttpUrlOrEmpty(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed === "") return true;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 export function ConsolidationSection({
   draft,
@@ -32,6 +44,30 @@ export function ConsolidationSection({
   const { t, language, timeZone, status, roles: savedRoles, client, reload } = useDaemon();
   const { push } = useToast();
   const [running, setRunning] = useState(false);
+  const [gatewayModels, setGatewayModels] = useState<Array<{ id: string; name?: string }> | null>(null);
+  const consolidateMagpie = draft.consolidateLlm.enabled && draft.consolidateLlm.provider === "magpie";
+
+  useEffect(() => {
+    if (!consolidateMagpie) {
+      setGatewayModels(null);
+      return;
+    }
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      client
+        .llmModels({ provider: "magpie", baseUrl: draft.consolidateLlm.baseUrl })
+        .then((view) => {
+          if (!cancelled) setGatewayModels(view.models);
+        })
+        .catch(() => {
+          if (!cancelled) setGatewayModels([]);
+        });
+    }, 500);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [consolidateMagpie, draft.consolidateLlm.baseUrl, client]);
   const finished = status?.consolidation.lastFinishedAt ?? null;
   const relative = useRelativeTime(finished, language, timeZone);
   const absolute = formatDateTime(finished, language, timeZone);
@@ -50,8 +86,20 @@ export function ConsolidationSection({
   const blocked = gate === "ready" ? null : t(gate === "not-main" ? "consolidateNotMain" : "consolidateOff");
   const timeError = issues.includes("invalidTime") ? t("invalidTime") : undefined;
   const zoneError = issues.includes("invalidZone") ? t("invalidZone") : undefined;
+  const baseError = issues.includes("invalidBase") ? t("invalidBase") : undefined;
   const timeProps = (value: string): { error: string } | Record<string, never> =>
     timeError && !isTimeOfDay(value) ? { error: timeError } : {};
+  const consolidateCli = isCliProvider(draft.consolidateLlm.provider);
+  const groups = { local: t("settingsGroupLocal"), api: t("providerGroupApi") };
+  const consolidateProviderOpts = providerOptions(LLM_PROVIDER_IDS).map((option) => {
+    const label = providerLabel(option.value, language);
+    return {
+      value: option.value,
+      label,
+      group: groups[option.group],
+      icon: <ProviderTile provider={option.value} label={label} size="sm" />,
+    };
+  });
 
   async function runNow(): Promise<void> {
     if (running || gate !== "ready") return;
@@ -107,6 +155,101 @@ export function ConsolidationSection({
               onChange={(event) => onRoles({ ...roles, timezone: event.target.value })}
             />
           </SettingRow>
+          <SettingRow title={t("consolidateCustomLlm")} hint={t("consolidateCustomLlmHint")} control="toggle">
+            <Toggle
+              checked={draft.consolidateLlm.enabled}
+              label={t("consolidateCustomLlm")}
+              onChange={(checked) =>
+                onDraft({
+                  ...draft,
+                  consolidateLlm: { ...draft.consolidateLlm, enabled: checked },
+                })
+              }
+            />
+          </SettingRow>
+          {draft.consolidateLlm.enabled ? (
+            <>
+              <SettingRow title={t("provider")} control="select">
+                <span className="settings-provider">
+                  <Select
+                    label={t("provider")}
+                    value={draft.consolidateLlm.provider}
+                    options={consolidateProviderOpts}
+                    onChange={(value) =>
+                      onDraft({
+                        ...draft,
+                        consolidateLlm: {
+                          ...draft.consolidateLlm,
+                          provider: value as SharedConfig["consolidateLlm"]["provider"],
+                        },
+                      })
+                    }
+                  />
+                </span>
+              </SettingRow>
+              <SettingRow
+                title={t("model")}
+                {...(consolidateCli
+                  ? { hint: t("modelBlankHint") }
+                  : consolidateMagpie && (!gatewayModels || gatewayModels.length === 0)
+                    ? { hint: t("magpieModelHint") }
+                    : {})}
+              >
+                {consolidateMagpie && gatewayModels && gatewayModels.length > 0 ? (
+                  <Select
+                    label={t("model")}
+                    value={draft.consolidateLlm.model}
+                    placeholder={t("magpieModelPlaceholder")}
+                    options={[
+                      ...(draft.consolidateLlm.model.trim() !== "" &&
+                      !gatewayModels.some((item) => item.id === draft.consolidateLlm.model)
+                        ? [{ value: draft.consolidateLlm.model, label: draft.consolidateLlm.model }]
+                        : []),
+                      ...gatewayModels.map((item) => ({ value: item.id, label: item.name ?? item.id })),
+                    ]}
+                    onChange={(value) =>
+                      onDraft({
+                        ...draft,
+                        consolidateLlm: { ...draft.consolidateLlm, model: value },
+                      })
+                    }
+                  />
+                ) : (
+                  <Input
+                    label={t("model")}
+                    value={draft.consolidateLlm.model}
+                    spellCheck={false}
+                    onChange={(event) =>
+                      onDraft({
+                        ...draft,
+                        consolidateLlm: { ...draft.consolidateLlm, model: event.target.value },
+                      })
+                    }
+                  />
+                )}
+              </SettingRow>
+              {consolidateCli ? null : (
+                <SettingRow title={t("baseUrl")} hint={t("baseUrlHint")}>
+                  <Input
+                    label={t("baseUrl")}
+                    className="settings-mono"
+                    value={draft.consolidateLlm.baseUrl}
+                    spellCheck={false}
+                    placeholder="https://"
+                    {...(baseError && !validHttpUrlOrEmpty(draft.consolidateLlm.baseUrl)
+                      ? { error: baseError }
+                      : {})}
+                    onChange={(event) =>
+                      onDraft({
+                        ...draft,
+                        consolidateLlm: { ...draft.consolidateLlm, baseUrl: event.target.value },
+                      })
+                    }
+                  />
+                </SettingRow>
+              )}
+            </>
+          ) : null}
           <SettingRow
             title={t("consolidation")}
             control="toggle"

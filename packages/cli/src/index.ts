@@ -40,6 +40,7 @@ import {
   supportedPlatform,
 } from "./env.js";
 import { registerProtocolCommand } from "./protocol-command.js";
+import { registerRefCommand } from "./ref-command.js";
 import {
   applyIntegrations,
   evaluatePortrait,
@@ -47,6 +48,8 @@ import {
   rebuildPortrait,
   restoreBrainHub,
   reviewPortraitProbes,
+  reviewPortraitProposals,
+  seedPortraitCoding,
   uninstall,
 } from "./maintenance.js";
 import { registerServiceCommand } from "./service/command.js";
@@ -239,10 +242,35 @@ program
   .command("portrait")
   .description("数字分身")
   .option("--variant <variant>", "full、coding 或 projects")
-  .action(async (opts: { variant?: string }) => {
+  .option("--project <query>", "查看 projects 里指定仓库或项目的口径")
+  .action(async (opts: { variant?: string; project?: string }) => {
     try {
-      const portrait = await (await connectDaemon()).portrait(opts.variant);
+      const variant = opts.variant ?? (opts.project ? "projects" : undefined);
+      const portrait = await (await connectDaemon()).portrait(variant, opts.project);
       console.log(portrait.content);
+    } catch (error) {
+      fail(error);
+    }
+  });
+
+program
+  .command("portrait-proposals")
+  .description("查看并逐条审核待合入的编码分身规则提案")
+  .action(async () => {
+    try {
+      await reviewPortraitProposals();
+    } catch (error) {
+      fail(error);
+    }
+  });
+
+program
+  .command("portrait-seed-coding")
+  .description("从手写 AGENTS.md 或 CLAUDE.md 导入四节编码分身基线并写回 Drive")
+  .option("--from <path>", "指定源 Markdown 文件路径（默认优先 ~/.codex/AGENTS.md，其次 ~/.claude/CLAUDE.md）")
+  .action(async (opts: { from?: string }) => {
+    try {
+      await seedPortraitCoding(opts.from ? { fromPath: opts.from } : {});
     } catch (error) {
       fail(error);
     }
@@ -418,6 +446,7 @@ brainhub
 
 registerServiceCommand(program);
 registerProtocolCommand(program);
+registerRefCommand(program);
 
 function parseCapabilities(text: string | undefined): DeviceCapability[] | undefined {
   if (text === undefined) return undefined;
@@ -660,6 +689,7 @@ const TOP_COMMANDS = new Set([
   "integrations",
   "brainhub",
   "service",
+  "ref",
   "uninstall",
 ]);
 

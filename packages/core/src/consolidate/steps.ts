@@ -16,11 +16,13 @@ import {
 import type { TopicFilesResult } from "../topic-files/sync.js";
 import { MERGE_SUGGESTIONS_CURSOR } from "./suggestions.js";
 import type { TwinClaim } from "./normalize.js";
+import type { CodingRuleProposal } from "./coding-proposals.js";
 import { portraitEvalStep, portraitMonthlyStep, portraitStep } from "./portrait.js";
 import { sameText } from "./text.js";
+import { todoReviewStep } from "./todo-review.js";
 import type { TwinLayer } from "./twin.js";
 
-export { portraitEvalStep, portraitMonthlyStep, portraitStep };
+export { portraitEvalStep, portraitMonthlyStep, portraitStep, todoReviewStep };
 
 const MAX_ATTEMPTS = 2;
 const TOPIC_CONCURRENCY = 2;
@@ -97,6 +99,10 @@ export interface ConsolidationPortrait {
   snapshots?(): Promise<TwinSnapshotRef[]>;
   /** Read one snapshot by its bare file name. */
   readSnapshot?(file: string): Promise<string | null>;
+  /** Pending coding-rule proposals awaiting user approval. */
+  codingProposals?(): Promise<CodingRuleProposal[]>;
+  /** Replace the pending coding-rule proposals list. */
+  saveCodingProposals?(proposals: readonly CodingRuleProposal[]): Promise<void>;
 }
 
 export interface ConsolidationContext {
@@ -122,6 +128,11 @@ export interface ConsolidationContext {
    * The step then succeeds without writing.
    */
   topicFiles?: () => Promise<TopicFilesResult>;
+  /**
+   * Full user + assistant transcript text for sessions of a topic updated on `day`.
+   * Absent where Drive transcripts are not wired; `todo_review` then succeeds without changes.
+   */
+  topicTranscripts?: (input: { day: string; sessionKeys: readonly string[] }) => Promise<string>;
 }
 
 export interface ConsolidationStep {
@@ -145,6 +156,7 @@ export function resetConsolidationSteps(): void {
 
 export function consolidationSteps(): ConsolidationStep[] {
   return [
+    todoReviewStep,
     topicSummariesStep,
     mergeSuggestionsStep,
     portraitStep,

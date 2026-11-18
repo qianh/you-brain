@@ -47,6 +47,15 @@ describe("theme", () => {
     expect(env.applied).toBe("light");
   });
 
+  test("dopamine is a fixed choice that does not follow the system", () => {
+    const env = memoryEnv("", true);
+    env.setItem(THEME_STORAGE_KEY, "dopamine");
+    expect(readThemeChoice(env)).toBe("dopamine");
+    expect(applyTheme("dopamine", env)).toBe("dopamine");
+    expect(env.applied).toBe("dopamine");
+    expect(readThemeChoice(memoryEnv("?theme=dopamine"))).toBe("dopamine");
+  });
+
   test("ignores an unknown stored value", () => {
     const env = memoryEnv();
     env.setItem(THEME_STORAGE_KEY, "sepia");

@@ -22,6 +22,7 @@ export const TWIN_CLAIMS_JSON_SCHEMA: Record<string, unknown> = {
         properties: {
           layer: { type: "string", enum: ["persona", "coding", "project"] },
           project: { type: "string" },
+          repo: { type: "string" },
           confidence: { type: "string", enum: ["high", "low"] },
           text: { type: "string", minLength: 1 },
         },
@@ -47,6 +48,54 @@ export const TWIN_EDITS_JSON_SCHEMA: Record<string, unknown> = {
           layer: { type: "string", enum: ["full", "coding", "projects"] },
           heading: { type: "string", minLength: 1 },
           text: { type: "string" },
+        },
+      },
+    },
+  },
+};
+
+export const TWIN_CODING_PROPOSALS_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["proposals"],
+  properties: {
+    proposals: {
+      type: "array",
+      maxItems: 6,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["section", "action", "proposedLine", "reason"],
+        properties: {
+          section: {
+            type: "string",
+            enum: ["## 行为与范围", "## 安全与授权", "## 验证与交付", "## 并行与指令优先级"],
+          },
+          action: { type: "string", enum: ["add", "replace"] },
+          targetLine: { type: "string" },
+          proposedLine: { type: "string", minLength: 1 },
+          reason: { type: "string", minLength: 1 },
+        },
+      },
+    },
+  },
+};
+
+export const TODO_REVIEW_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["items"],
+  properties: {
+    items: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["todoId", "verdict", "quote"],
+        properties: {
+          todoId: { type: "string", minLength: 1 },
+          verdict: { type: "string", enum: ["keep", "done", "dropped"] },
+          quote: { type: "string" },
         },
       },
     },

@@ -29,6 +29,7 @@ export interface SettingsDraft {
   timezone: string;
   driveRoot: string;
   baseUrl: string;
+  consolidateBaseUrl?: string;
   variants: readonly { id: string; path: string }[];
 }
 
@@ -67,6 +68,9 @@ export function validateSettings(draft: SettingsDraft): MessageKey[] {
   if (!knownZone(draft.timezone)) issues.push("invalidZone");
   if (draft.driveRoot.trim() === "") issues.push("invalidRoot");
   if (!httpUrlOrEmpty(draft.baseUrl.trim())) issues.push("invalidBase");
+  if (draft.consolidateBaseUrl !== undefined && !httpUrlOrEmpty(draft.consolidateBaseUrl.trim())) {
+    if (!issues.includes("invalidBase")) issues.push("invalidBase");
+  }
   const variantsOk = draft.variants.every(
     (variant) => variant.id.trim() !== "" && variant.path.trim() !== "",
   );

@@ -23,6 +23,7 @@ const ClaimsSchema = z.object({
     z.object({
       layer: z.enum(["persona", "coding", "project"]),
       project: z.string(),
+      repo: z.string().optional(),
       confidence: z.enum(["high", "low"]),
       text: z.string(),
     }),
@@ -37,6 +38,28 @@ const EditsSchema = z.object({
       layer: z.enum(["full", "coding", "projects"]),
       heading: z.string(),
       text: z.string(),
+    }),
+  ),
+});
+
+const CodingProposalsSchema = z.object({
+  proposals: z.array(
+    z.object({
+      section: z.enum(["## 行为与范围", "## 安全与授权", "## 验证与交付", "## 并行与指令优先级"]),
+      action: z.enum(["add", "replace"]),
+      targetLine: z.string().optional(),
+      proposedLine: z.string(),
+      reason: z.string(),
+    }),
+  ),
+});
+
+const TodoReviewSchema = z.object({
+  items: z.array(
+    z.object({
+      todoId: z.string(),
+      verdict: z.enum(["keep", "done", "dropped"]),
+      quote: z.string(),
     }),
   ),
 });
@@ -77,6 +100,7 @@ export interface MergePair {
 export interface TwinClaim {
   layer: "persona" | "coding" | "project";
   project: string;
+  repo?: string;
   confidence: "high" | "low";
   text: string;
 }
@@ -85,6 +109,20 @@ export interface TwinEditsUpdate {
   bump: VersionBump;
   changelog: string[];
   edits: TwinEdit[];
+}
+
+export interface CodingProposalDraft {
+  section: "## 行为与范围" | "## 安全与授权" | "## 验证与交付" | "## 并行与指令优先级";
+  action: "add" | "replace";
+  targetLine?: string;
+  proposedLine: string;
+  reason: string;
+}
+
+export interface TodoReviewItem {
+  todoId: string;
+  verdict: "keep" | "done" | "dropped";
+  quote: string;
 }
 
 export interface TwinProbeDraft {
@@ -101,10 +139,20 @@ export function parseTwinClaims(input: unknown): TwinClaim[] {
   for (const claim of parsed.claims) {
     const text = collapseText(claim.text);
     const project = claim.layer === "project" ? collapseText(claim.project) : "";
+    const repo =
+      claim.layer === "project" && typeof claim.repo === "string"
+        ? collapseText(claim.repo).replace(/[/\\]/gu, "")
+        : "";
     if (text === "" || (claim.layer === "project" && project === "")) continue;
     if (seen.has(text)) continue;
     seen.add(text);
-    claims.push({ layer: claim.layer, project, confidence: claim.confidence, text });
+    claims.push({
+      layer: claim.layer,
+      project,
+      ...(repo !== "" ? { repo } : {}),
+      confidence: claim.confidence,
+      text,
+    });
   }
   return claims;
 }
@@ -123,6 +171,37 @@ export function parseTwinEdits(input: unknown): TwinEditsUpdate {
     changelog: parsed.changelog.map((line) => line.trim().replace(/\s+/gu, " ")).filter((line) => line !== ""),
     edits,
   };
+}
+
+export function parseTwinCodingProposals(input: unknown): CodingProposalDraft[] {
+  const parsed = CodingProposalsSchema.parse(input);
+  const seen = new Set<string>();
+  const out: CodingProposalDraft[] = [];
+  for (const item of parsed.proposals) {
+    const proposedLine = collapseText(item.proposedLine);
+    const reason = collapseText(item.reason);
+    const targetLine = item.targetLine ? collapseText(item.targetLine) : "";
+    if (proposedLine === "" || reason === "") continue;
+    if (seen.has(proposedLine)) continue;
+    seen.add(proposedLine);
+    out.push({
+      section: item.section,
+      action: item.action,
+      ...(targetLine !== "" ? { targetLine } : {}),
+      proposedLine,
+      reason,
+    });
+    if (out.length >= 6) break;
+  }
+  return out;
+}
+
+export function parseTodoReview(input: unknown): TodoReviewItem[] {
+  return TodoReviewSchema.parse(input).items.map((item) => ({
+    todoId: item.todoId.trim(),
+    verdict: item.verdict,
+    quote: collapseText(item.quote),
+  }));
 }
 
 export function parseTwinProbes(input: unknown): TwinProbeDraft[] {

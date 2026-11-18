@@ -3,17 +3,20 @@ export const TWIN_LAYERS = ["full", "coding", "projects"] as const;
 export type TwinLayer = (typeof TWIN_LAYERS)[number];
 
 /** The coding layer is injected into every CLI session as AGENTS.md / CLAUDE.md, so it stays far smaller than `full`. */
-export const TWIN_BUDGET = { full: 12_288, coding: 4_096, section: 4_096 } as const;
+export const TWIN_BUDGET = { full: 12_288, coding: 6_144, section: 4_096 } as const;
 
-/** Where CLIs find the project decisions. Stays a home-relative path so the scan never trips on it. */
-export const PROJECTS_LOCAL_PATH = "~/.you-brain/portrait/projects.md";
-/** The one coding principle the program owns: it points at the projects file instead of listing projects. */
-export const PROJECTS_POINTER_LABEL = "- **项目说明**：";
-export const PROJECTS_POINTER = `${PROJECTS_POINTER_LABEL}在已有的具体项目里工作时，先读 [项目说明](${PROJECTS_LOCAL_PATH}) 里该项目的小节；新项目和简单对话不需要读。`;
-export const CODING_PRINCIPLES_HEADING = "## 核心原则";
+/** Where CLIs find the split project index. Stays a home-relative path so the scan never trips on it. */
+export const PROJECTS_LOCAL_PATH = "~/.you-brain/portrait/projects/index.md";
+/** The one coding principle the program owns: it points at the split projects index instead of listing projects. */
+export const PROJECTS_POINTER_LABEL = "- **项目口径**：";
+const LEGACY_POINTER_LABEL = "- **项目说明**：";
+export const PROJECTS_POINTER = `${PROJECTS_POINTER_LABEL}在已有的具体项目里工作时，先查 [项目索引](${PROJECTS_LOCAL_PATH})（或调 MCP \`get_portrait\` 传 \`variant="projects"\` 与 \`project="<仓库目录名>"\`）读取对应小节；新项目和简单问答不读；与仓库当前代码冲突时以代码为准。`;
+export const CODING_PRINCIPLES_HEADING = "## 行为与范围";
+const LEGACY_CODING_PRINCIPLES_HEADING = "## 核心原则";
 /** The head line older coding layers carried: a list of project names. Dropped when found. */
 const LEGACY_INDEX_PREFIX = "在下列项目里工作时";
 const ANY_VERSION = /v(\d+)\.(\d+)\.(\d+)/u;
+const REPOS_META_LINE = /^>\s*repos\s*[:：]\s*(.+)$/iu;
 
 export const TWIN_TITLES: Record<TwinLayer, string> = {
   full: "# 数字分身 · 人格",
@@ -36,7 +39,12 @@ export const TWIN_SKELETON: Record<TwinLayer, readonly string[]> = {
     "## 10. 世界观与品味",
     "## 11. 生活",
   ],
-  coding: [CODING_PRINCIPLES_HEADING, "## 默认与红线"],
+  coding: [
+    CODING_PRINCIPLES_HEADING,
+    "## 安全与授权",
+    "## 验证与交付",
+    "## 并行与指令优先级",
+  ],
   projects: [],
 };
 
@@ -62,6 +70,14 @@ export interface TwinSection {
 export interface TwinDocument {
   /** Lines before the first `## ` heading, without the trailing newline. */
   head: string;
+  sections: TwinSection[];
+}
+
+export interface ProjectTwinGroup {
+  /** Canonical project prefix before ` · `, e.g. `法务审批` or `you-brain`. */
+  name: string;
+  /** Repository directory / package names mapped via `> repos: a, b`. */
+  repos: string[];
   sections: TwinSection[];
 }
 
@@ -109,7 +125,105 @@ function trimEndLines(value: string): string {
   return value.replace(/\s+$/u, "");
 }
 
-/** Apply section edits in order. Unknown headings append; empty text deletes. */
+/** Extract the project prefix `A` from `## A` or `## A · B`. */
+export function projectPrefixOfHeading(heading: string): string {
+  const raw = heading.replace(/^##\s+/u, "").trim();
+  const part = raw.split(/\s*·\s*/u)[0]?.trim() ?? "";
+  return part || raw;
+}
+
+function cleanRepoToken(token: string): string {
+  return token
+    .trim()
+    .replace(/^[`"'[\]()]+|[`"'[\]()]+$/gu, "")
+    .trim();
+}
+
+export function parseReposLine(line: string): string[] | null {
+  const match = REPOS_META_LINE.exec(line.trim());
+  if (!match) return null;
+  const raw = match[1] ?? "";
+  const seen = new Set<string>();
+  const repos: string[] = [];
+  for (const part of raw.split(/[,，、\s]+/gu)) {
+    const repo = cleanRepoToken(part);
+    if (!repo || repo.includes("/") || repo.includes("\\")) continue;
+    const lower = repo.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    repos.push(repo);
+  }
+  return repos;
+}
+
+/**
+ * Group `projects.md` sections by project prefix, merging any `> repos:` lines per group.
+ * Preserves first-seen order of project groups and relative order of sub-sections within each group.
+ */
+export function parseProjectGroups(projectsText: string): {
+  head: string;
+  groups: ProjectTwinGroup[];
+} {
+  const doc = splitTwin(projectsText);
+  const byKey = new Map<string, ProjectTwinGroup>();
+  const groups: ProjectTwinGroup[] = [];
+
+  for (const section of doc.sections) {
+    const name = projectPrefixOfHeading(section.heading);
+    if (!name) continue;
+    const key = name.toLowerCase();
+    let group = byKey.get(key);
+    if (!group) {
+      group = { name, repos: [], sections: [] };
+      byKey.set(key, group);
+      groups.push(group);
+    }
+    const lines = section.text.split("\n");
+    const kept: string[] = [lines[0] ?? section.heading];
+    for (const line of lines.slice(1)) {
+      const repos = parseReposLine(line);
+      if (repos !== null) {
+        for (const repo of repos) {
+          if (!group.repos.some((existing) => existing.toLowerCase() === repo.toLowerCase())) {
+            group.repos.push(repo);
+          }
+        }
+        continue;
+      }
+      kept.push(line);
+    }
+    const cleaned = trimEndLines(kept.join("\n"));
+    group.sections.push({ heading: section.heading, text: cleaned });
+  }
+
+  // Re-attach canonical `> repos: ...` line onto the first section of each group that has repos.
+  for (const group of groups) {
+    if (group.repos.length === 0 || group.sections.length === 0) continue;
+    const first = group.sections[0]!;
+    const [headingLine = first.heading, ...rest] = first.text.split("\n");
+    while (rest[0]?.trim() === "") rest.shift();
+    const meta = `> repos: ${group.repos.join(", ")}`;
+    group.sections[0] = {
+      heading: first.heading,
+      text: trimEndLines([headingLine, meta, ...rest].join("\n")),
+    };
+  }
+
+  return { head: doc.head, groups };
+}
+
+/**
+ * Ensure all sub-sections of the same project sit contiguously and carry a single canonical
+ * `> repos:` metadata line on the first section when repos are mapped.
+ */
+export function normalizeProjectsTwin(projectsText: string): string {
+  if (projectsText.trim() === "") return projectsText;
+  const { head, groups } = parseProjectGroups(projectsText);
+  const sections = groups.flatMap((group) => group.sections);
+  return joinTwin({ head, sections });
+}
+
+/** Apply section edits in order. Unknown headings append; empty text deletes; projects stay grouped. */
 export function applyTwinEdits(texts: TwinTexts, edits: readonly TwinEdit[]): TwinTexts {
   const docs = {
     full: splitTwin(texts.full),
@@ -130,10 +244,12 @@ export function applyTwinEdits(texts: TwinTexts, edits: readonly TwinEdit[]): Tw
     else doc.sections.push(next);
     doc.sections = doc.sections.filter((section) => section === next || section.heading !== next.heading);
   }
+  const rawProjects = joinTwin(docs.projects);
+  const touchedProjects = edits.some((edit) => edit.layer === "projects");
   return {
     full: joinTwin(docs.full),
     coding: joinTwin(docs.coding),
-    projects: joinTwin(docs.projects),
+    projects: touchedProjects ? normalizeProjectsTwin(rawProjects) : rawProjects,
   };
 }
 
@@ -209,10 +325,15 @@ function splitHead(head: string): { title: string | null; version: string | null
   return { title, version, rest: lines };
 }
 
+export function isProjectsPointerLine(line: string): boolean {
+  const trimmed = line.trim();
+  return trimmed.startsWith(PROJECTS_POINTER_LABEL) || trimmed.startsWith(LEGACY_POINTER_LABEL);
+}
+
 /**
- * Make sure the first principle under "核心原则" is the pointer to the projects file.
- * Replaces an older copy, drops the legacy project-name index from the head, and
- * creates the section when the coding layer has none.
+ * Make sure the first rule under the coding entry section is the pointer to the projects index.
+ * Replaces an older copy, drops the legacy project-name index from the head, preserves legacy
+ * `## 核心原则` documents without adding an extra heading, and creates `## 行为与范围` when empty.
  */
 export function withProjectsPointer(coding: string): string {
   const doc = splitTwin(coding);
@@ -225,18 +346,22 @@ export function withProjectsPointer(coding: string): string {
     heading: section.heading,
     text: section.text
       .split("\n")
-      .filter((line) => !line.startsWith(PROJECTS_POINTER_LABEL))
+      .filter((line) => !isProjectsPointerLine(line))
       .join("\n"),
   }));
-  const index = sections.findIndex((section) => section.heading === CODING_PRINCIPLES_HEADING);
+  let index = sections.findIndex((section) => section.heading === CODING_PRINCIPLES_HEADING);
+  if (index < 0) {
+    index = sections.findIndex((section) => section.heading === LEGACY_CODING_PRINCIPLES_HEADING);
+  }
   if (index < 0) {
     sections.unshift({
       heading: CODING_PRINCIPLES_HEADING,
       text: `${CODING_PRINCIPLES_HEADING}\n${PROJECTS_POINTER}`,
     });
   } else {
-    const [heading = CODING_PRINCIPLES_HEADING, ...body] = (sections[index]?.text ?? "").split("\n");
-    sections[index] = { heading: CODING_PRINCIPLES_HEADING, text: [heading, PROJECTS_POINTER, ...body].join("\n") };
+    const targetHeading = sections[index]?.heading ?? CODING_PRINCIPLES_HEADING;
+    const [heading = targetHeading, ...body] = (sections[index]?.text ?? "").split("\n");
+    sections[index] = { heading: targetHeading, text: [heading, PROJECTS_POINTER, ...body].join("\n") };
   }
   return joinTwin({ head: lines.join("\n"), sections });
 }

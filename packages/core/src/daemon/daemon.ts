@@ -51,6 +51,7 @@ import {
   YouBrainError,
   assertSupportedPlatform,
   loadLocalConfig,
+  portraitFile,
   writeLocalConfig,
   type DeviceRole,
   type LocalConfig,
@@ -117,10 +118,12 @@ import {
   mergeSuggestionLines,
   parseMergeSuggestions,
   planTopicReorganization,
+  readTopicTranscripts,
   readTwinSessions,
   reorganizeEvents,
   reorganizeTopics,
   ReorganizeJob,
+  reviewCodingProposals,
   type ReorganizeEvent,
   readConsolidateLease,
   writeConsolidateLease,
@@ -178,8 +181,9 @@ import {
   type WebhookFetch,
 } from "../webhook/index.js";
 
-import { CodingInjection } from "../portrait/injection.js";
+import { CodingInjection, portraitConsentIds } from "../portrait/injection.js";
 import { FilePortraitConsentStore, portraitConsentPath } from "../portrait/consent.js";
+import { lookupProjectPortrait } from "../portrait/projects-split.js";
 import { PortraitService } from "../portrait/service.js";
 import {
   createRefineEventFactory,
@@ -766,8 +770,10 @@ export class YouBrainDaemon {
   #uploader: UploadService | null = null;
   #portrait: PortraitService | null = null;
   #coding: CodingInjection | null = null;
+  #consent: FilePortraitConsentStore | null = null;
   #output: OutputService | null = null;
   #llm: LlmBackend | null = null;
+  #consolidateLlm: LlmBackend | null = null;
   readonly #reorganizeJob = new ReorganizeJob({ now: () => this.#clock.now().toISOString() });
   #llmWarning: LlmSetupWarning | null = null;
   #llmOverride: LlmBackend | null | undefined;
@@ -917,7 +923,7 @@ export class YouBrainDaemon {
   readonly #quota: QuotaService = new QuotaService({
     read: () => readMagpieAccounts({ env: this.#env, homeDir: this.#homeDir, signal: this.#abort.signal }),
     readTokens: () => readMagpieUsageLog({ env: this.#env, homeDir: this.#homeDir }),
-    readClaudeLive: () => readClaudeAccessToken().then((token) => readClaudeUsage(token, this.#abort.signal)),
+    readClaudeLive: () => readClaudeAccessToken(this.#env).then((token) => readClaudeUsage(token, this.#abort.signal)),
     nowMs: () => this.#clock.nowMs(),
   });
   /**
@@ -1006,15 +1012,18 @@ export class YouBrainDaemon {
     );
     this.#armWebhookWindow();
     const consent = new FilePortraitConsentStore(portraitConsentPath(this.#paths.dataDir));
+    this.#consent = consent;
     const managedStatePath = join(this.#paths.dataDir, "managed-blocks.json");
     this.#coding = new CodingInjection({
       homeDir: this.#homeDir,
       managedStatePath,
       consent,
       codingPath: () => this.#codingVariantPath(),
+      codingFilePath: portraitFile(this.#paths, "coding"),
     });
     if (this.#llmOverride !== undefined) {
       this.#llm = this.#llmOverride;
+      this.#consolidateLlm = this.#llmOverride;
       this.#llmKnown = true;
     }
     await log.time("mountOutput", () => {
@@ -1104,8 +1113,10 @@ export class YouBrainDaemon {
     if (!this.#llmKnown) {
       try {
         this.#llm = await log.time("createLlm", () => this.#createLlm());
+        this.#consolidateLlm = await this.#createConsolidateLlm();
       } catch {
         this.#llm = null;
+        this.#consolidateLlm = null;
       }
       this.#llmKnown = true;
     }
@@ -2841,6 +2852,7 @@ export class YouBrainDaemon {
     removedDevices?: string[];
   }): Promise<void> {
     if (update.shared) {
+      const prevPortraitClients = this.#shared.integrations.codingPortraitClients;
       this.#shared = preferLocalLlm(update.shared, this.#shared);
       this.#clearCliStall();
       await writeJsonFile(join(this.#paths.dataDir, "shared.json"), this.#shared);
@@ -2850,9 +2862,21 @@ export class YouBrainDaemon {
         variants: this.#shared.portrait.variants,
         snapshotPattern: this.#shared.portrait.snapshotPattern,
       });
-      if (this.#llmOverride === undefined) this.#llm = await this.#createLlm();
+      if (this.#llmOverride === undefined) {
+        this.#llm = await this.#createLlm();
+        this.#consolidateLlm = await this.#createConsolidateLlm();
+      }
       await this.#rewatch();
-      await this.#ensureCoding();
+      if (
+        JSON.stringify(prevPortraitClients) !==
+        JSON.stringify(this.#shared.integrations.codingPortraitClients)
+      ) {
+        await this.#coding
+          ?.syncSelectedClients(this.#shared.integrations.codingPortraitClients)
+          .catch(() => undefined);
+      } else {
+        await this.#ensureCoding();
+      }
       await this.#mountSearch();
     }
     if (update.roles) {
@@ -3038,6 +3062,29 @@ export class YouBrainDaemon {
     this.#zone.historyDays = this.#shared.topics.historyDays;
   }
 
+  async #createConsolidateLlm(): Promise<LlmBackend | null> {
+    if (this.#llmOverride !== undefined) return this.#llmOverride;
+    if (!this.#shared.consolidateLlm.enabled) return null;
+    try {
+      return await createLlmBackend({
+        config: this.#shared.consolidateLlm,
+        getApiKey: (provider) =>
+          getLlmApiKey(provider, {
+            platform: this.#platform,
+            backend: this.#secretBackend,
+          }),
+        dataDir: this.#paths.dataDir,
+        env: this.#env,
+        homeDir: this.#homeDir,
+        ...(this.#options.llmTimeoutMs === undefined
+          ? {}
+          : { timeoutMs: this.#options.llmTimeoutMs }),
+      });
+    } catch {
+      return null;
+    }
+  }
+
   async #createLlm(): Promise<LlmBackend | null> {
     try {
       const backend = await createLlmBackend({
@@ -3098,9 +3145,11 @@ export class YouBrainDaemon {
     if (
       this.#llmOverride === undefined &&
       this.#llmKnown &&
-      body.provider === this.#shared.llm.provider
+      (body.provider === this.#shared.llm.provider ||
+        (this.#shared.consolidateLlm.enabled && body.provider === this.#shared.consolidateLlm.provider))
     ) {
       this.#llm = await this.#createLlm();
+      this.#consolidateLlm = await this.#createConsolidateLlm();
       this.#statusChanged(this.#clock.now().toISOString());
     }
     // magpie 的 Key 有无决定指挥台路由要不要带凭据：让 dsh 重新生成补丁。
@@ -3450,6 +3499,12 @@ export class YouBrainDaemon {
         git: new TaskGit({ dataDir: this.#paths.dataDir, env: this.#env }),
         now: () => this.#clock.now(),
         onChange: () => this.changes.publish("deck", this.#clock.now().toISOString()),
+        projectContext: async (cwd) => {
+          const doc = await readPortraitFile(this.#paths.portraitDir, "projects").catch(() => null);
+          if (!doc?.content) return null;
+          const hit = lookupProjectPortrait(doc.content, cwd);
+          return hit.matched ? hit.portrait : null;
+        },
       });
       this.#tasks.start();
     }
@@ -3472,6 +3527,35 @@ export class YouBrainDaemon {
           store.listEventsByType(["portrait.correction", "portrait.correction_applied"]),
           variant,
         ),
+      portraitProposals: async () => {
+        const runtime = this.#portraitRuntime();
+        if (!("portrait" in runtime) || !runtime.portrait.codingProposals) return [];
+        return runtime.portrait.codingProposals();
+      },
+      reviewPortraitProposal: async (body) => {
+        const runtime = this.#portraitRuntime();
+        if (!("portrait" in runtime) || !runtime.portrait.codingProposals) {
+          throw new HttpError(503, "SOURCE_UNAVAILABLE", "Drive 未就绪，无法处理编码提案");
+        }
+        const day = localDayKey(this.#clock.now(), this.#roles.timezone);
+        const existing = await runtime.portrait.codingProposals();
+        if (!existing.some((item) => item.id === body.id)) {
+          throw new HttpError(404, "NOT_FOUND", `找不到提案 ${body.id}`);
+        }
+        const reviewed = await reviewCodingProposals({
+          portrait: runtime.portrait,
+          day,
+          decide: async (proposal) => {
+            if (proposal.id !== body.id) return { action: "skip" };
+            if (body.action === "reject") return { action: "reject" };
+            return body.editedLine !== undefined
+              ? { action: "approve", editedLine: body.editedLine }
+              : { action: "approve" };
+          },
+        });
+        const remaining = await runtime.portrait.codingProposals();
+        return { ok: true, proposals: remaining, version: reviewed.version };
+      },
       search: (query) => this.#searchLocal(query),
       searchWarm: () => {
         void this.#search?.warm().catch(() => undefined);
@@ -3578,9 +3662,11 @@ export class YouBrainDaemon {
         const hits = this.#requireNotion().search(query, limit ?? 20);
         return Promise.resolve({ query, hits });
       },
+      notionRecent: (limit) => Promise.resolve(this.#notion ? this.#notion.recentPages(limit) : []),
       notionUsers: () => this.#requireNotion().users(),
       notionDatabase: (databaseId) =>
         Promise.resolve(this.#requireNotion().databaseView(databaseId)),
+      outputDir: this.#paths.outputDir,
       notionAsset: (blockId) => this.#requireNotion().asset(blockId),
       notionUpdateBlock: async (body) => ({
         page: await this.#requireNotion().updateBlock(
@@ -3810,6 +3896,10 @@ export class YouBrainDaemon {
         return { ok: true };
       },
       notices: async () => deck.noticeList(),
+      noticeDismiss: async (body) => {
+        deck.dismissNotice(body);
+        return { ok: true };
+      },
       tty7Terminal: (pane, size, events) => deck.tty7.openTerminal(pane, size, events),
       tty7Screen: (pane, lines) => deck.tty7.screen(pane, lines),
       tty7Send: async (body) => {
@@ -3866,6 +3956,7 @@ export class YouBrainDaemon {
 
   async #writeConfig(config: SharedConfig): Promise<void> {
     const previousLlm = this.#shared.llm;
+    const previousPortraitClients = this.#shared.integrations.codingPortraitClients;
     this.#shared = config;
     this.#clearCliStall();
     await writeJsonFile(join(this.#paths.dataDir, "shared.json"), config);
@@ -3875,11 +3966,23 @@ export class YouBrainDaemon {
       variants: config.portrait.variants,
       snapshotPattern: config.portrait.snapshotPattern,
     });
-    if (this.#llmOverride === undefined) this.#llm = await this.#createLlm();
+    if (this.#llmOverride === undefined) {
+      this.#llm = await this.#createLlm();
+      this.#consolidateLlm = await this.#createConsolidateLlm();
+    }
     // 模型选择变了：指挥台的补丁和环境层凭据要跟着重新生成（如 magpie 网关路由）。
     if (JSON.stringify(previousLlm) !== JSON.stringify(config.llm)) this.#deck?.refresh();
     await this.#rewatch();
-    await this.#ensureCoding();
+    if (
+      JSON.stringify(previousPortraitClients) !==
+      JSON.stringify(config.integrations.codingPortraitClients)
+    ) {
+      await this.#coding
+        ?.syncSelectedClients(config.integrations.codingPortraitClients)
+        .catch(() => undefined);
+    } else {
+      await this.#ensureCoding();
+    }
     await this.#mountSearch();
     if (this.#sync) this.#sharedPush.submit(config);
     this.#statusChanged(this.#clock.now().toISOString());
@@ -4143,6 +4246,8 @@ export class YouBrainDaemon {
 
   async #consolidate(options: { manual: boolean; force: boolean }) {
     const store = this.#store;
+    const effectiveLlm =
+      (this.#shared.consolidateLlm.enabled ? this.#consolidateLlm : null) ?? this.#llm;
     const outcome = await executeConsolidation(
       {
         deviceId: this.#local.deviceId,
@@ -4150,9 +4255,9 @@ export class YouBrainDaemon {
         enabled: this.#roles.consolidation.enabled,
         time: this.#roles.consolidation.time,
         timeZone: this.#roles.timezone,
-        hasLlm: this.#llm !== null,
+        hasLlm: effectiveLlm !== null,
         hasDrive: this.#drive !== null,
-        llm: this.#llm,
+        llm: effectiveLlm,
         activeLimit: this.#shared.topics.activeLimit,
         historyDays: this.#shared.topics.historyDays,
         clock: this.#clock,
@@ -4166,6 +4271,7 @@ export class YouBrainDaemon {
         },
         ...this.#portraitRuntime(),
         topicFiles: () => this.#writeTopicFiles(),
+        topicTranscripts: ({ day, sessionKeys }) => this.#topicTranscripts(day, sessionKeys),
         readLease: async () => {
           if (!this.#drive) return null;
           return readConsolidateLease(this.#drive, (message) => {
@@ -4225,6 +4331,19 @@ export class YouBrainDaemon {
     const store = this.#store;
     if (!drive || !store) return [];
     return readTwinSessions({ drive, sessions: store.listSessions(), timeZone: this.#roles.timezone, day });
+  }
+
+  async #topicTranscripts(day: string, sessionKeys: readonly string[]): Promise<string> {
+    const drive = this.#drive;
+    const store = this.#store;
+    if (!drive || !store) return "";
+    return readTopicTranscripts({
+      drive,
+      sessions: store.listSessions(),
+      sessionKeys,
+      timeZone: this.#roles.timezone,
+      day,
+    });
   }
 
   #consolidationView() {
@@ -4289,6 +4408,14 @@ export class YouBrainDaemon {
 
   async #ensureCoding(): Promise<void> {
     try {
+      const configured = this.#shared.integrations.codingPortraitClients;
+      if (configured.length > 0 && this.#consent) {
+        const current = await this.#consent.load();
+        if (portraitConsentIds(current.itemIds).length === 0) {
+          await this.#coding?.syncSelectedClients(configured);
+          return;
+        }
+      }
       await this.#coding?.ensureApplied();
     } catch {
       // A corrupt consent file must not stop the daemon.

@@ -132,6 +132,7 @@ describe("consolidation across two devices", () => {
       });
       expect(forced.ok).toBe(true);
       expect(forced.steps.map((step) => step.id)).toEqual([
+        "todo_review",
         "topic_summaries",
         "merge_suggestions",
         "portrait",

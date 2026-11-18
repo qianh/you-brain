@@ -8,6 +8,7 @@ import { classifyPortraitCorrections } from "../portrait/corrections.js";
 import type { PortraitConfig, PortraitService } from "../portrait/service.js";
 import { resolveDrivePath } from "../portrait/path.js";
 import { parseWebSession } from "../web-sessions/parse.js";
+import type { CodingRuleProposal } from "./coding-proposals.js";
 import { localDayKey, shiftDateKey } from "./schedule.js";
 import type {
   ConsolidationPortrait,
@@ -16,6 +17,7 @@ import type {
   TwinProbe,
   TwinSnapshotRef,
 } from "./steps.js";
+import { TODO_REVIEW_TRANSCRIPT_CHARS, fitTranscriptTail } from "./todo-review.js";
 import { TWIN_LAYERS, type TwinLayer } from "./twin.js";
 
 const MARKDOWN = "text/markdown";
@@ -168,6 +170,12 @@ export function createDrivePortrait(source: DrivePortraitSource): ConsolidationP
       const object = await source.drive.readPath(posix.join(directory, file));
       return object ? object.bytes.toString("utf8") : null;
     },
+    async codingProposals() {
+      return readJsonl(source.drive, paths().proposals, parseCodingProposal);
+    },
+    async saveCodingProposals(proposals) {
+      await writeJsonl(source.drive, paths().proposals, proposals);
+    },
   };
 }
 
@@ -236,6 +244,51 @@ export async function readTwinSessions(input: {
   return sessions;
 }
 
+/**
+ * Full user + assistant transcript text for sessions of a topic updated on `day`,
+ * tail-capped to `TODO_REVIEW_TRANSCRIPT_CHARS` for nightly todo verification.
+ */
+export async function readTopicTranscripts(input: {
+  drive: DrivePort;
+  sessions: readonly TwinSessionRow[];
+  sessionKeys: readonly string[];
+  timeZone: string;
+  day: string;
+}): Promise<string> {
+  if (input.sessionKeys.length === 0) return "";
+  const allowed = new Set(input.sessionKeys);
+  const rows = input.sessions
+    .filter(
+      (session) =>
+        allowed.has(session.sessionKey) &&
+        session.fileId !== null &&
+        session.updatedAt !== null &&
+        localDayKey(new Date(session.updatedAt), input.timeZone) === input.day,
+    )
+    .sort((left, right) => (left.updatedAt ?? "").localeCompare(right.updatedAt ?? ""));
+  if (rows.length === 0) return "";
+
+  const blocks: string[] = [];
+  for (let start = 0; start < rows.length; start += SESSION_READ_CONCURRENCY) {
+    const batch = rows.slice(start, start + SESSION_READ_CONCURRENCY);
+    const objects = await Promise.all(
+      batch.map((session) =>
+        session.fileId === null ? null : input.drive.read(session.fileId).catch(() => null),
+      ),
+    );
+    batch.forEach((session, index) => {
+      const object = objects[index];
+      const parsed = object ? parseWebSession(object.bytes.toString("utf8")) : null;
+      if (!parsed || parsed.turns.length === 0) return;
+      const formatted = parsed.turns
+        .map((turn) => `[${turn.role}]\n${turn.text}`)
+        .join("\n\n");
+      blocks.push(`### ${session.title || session.sessionKey}\n${formatted}`);
+    });
+  }
+  return fitTranscriptTail(blocks.join("\n\n"), TODO_REVIEW_TRANSCRIPT_CHARS);
+}
+
 export function pendingCorrections(
   events: readonly Event[],
 ): Array<{ correctionId: string; variant: string; section: string; text: string }> {
@@ -275,6 +328,7 @@ interface TwinPaths {
   changelog: string;
   probes: string;
   pendingProbes: string;
+  proposals: string;
 }
 
 /** Layer paths come from config, falling back to the defaults. Side files sit next to `full`. */
@@ -297,6 +351,7 @@ function twinPaths(source: DrivePortraitSource): TwinPaths {
     changelog: posix.join(base, "changelog-latest.md"),
     probes: posix.join(base, "eval", "probes.jsonl"),
     pendingProbes: posix.join(base, "eval", "pending-probes.jsonl"),
+    proposals: posix.join(base, "proposals", "coding-pending.jsonl"),
   };
 }
 
@@ -374,9 +429,36 @@ function parseClaim(value: unknown): StoredTwinClaim | null {
   return {
     layer,
     project: typeof row.project === "string" ? row.project : "",
+    ...(typeof row.repo === "string" && row.repo.trim() !== "" ? { repo: row.repo.trim() } : {}),
     confidence,
     text: row.text,
     day: row.day,
+  };
+}
+
+function parseCodingProposal(value: unknown): CodingRuleProposal | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  if (
+    typeof row.id !== "string" ||
+    typeof row.day !== "string" ||
+    typeof row.section !== "string" ||
+    (row.action !== "add" && row.action !== "replace") ||
+    typeof row.proposedLine !== "string" ||
+    typeof row.reason !== "string"
+  ) {
+    return null;
+  }
+  return {
+    id: row.id,
+    day: row.day,
+    section: row.section,
+    action: row.action,
+    ...(typeof row.targetLine === "string" && row.targetLine.trim() !== ""
+      ? { targetLine: row.targetLine }
+      : {}),
+    proposedLine: row.proposedLine,
+    reason: row.reason,
   };
 }
 

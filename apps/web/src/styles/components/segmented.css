@@ -24,7 +24,8 @@
   pointer-events: none;
 }
 
-[data-theme="light"] .segmented-thumb {
+[data-theme="light"] .segmented-thumb,
+[data-theme="dopamine"] .segmented-thumb {
   background: var(--surface);
   border: 1px solid var(--border);
   box-shadow: var(--shadow-slider);

@@ -245,4 +245,67 @@ describe("portrait files", () => {
       rmSync(portraitDir, { recursive: true, force: true });
     }
   });
+
+  it("handles GET/POST /api/portrait/proposals and ?project= filter on GET /api/portrait", async () => {
+    const { handleApi } = await import("../../src/http/handlers.js");
+    const { ChangeHub } = await import("../../src/http/hub.js");
+    const hub = new ChangeHub();
+    let pending = [
+      {
+        id: "cp01",
+        day: "2026-11-18",
+        section: "## 验证与交付",
+        action: "add" as const,
+        proposedLine: "- **变更验证**：跑完测试再交付。",
+        reason: "测试门禁",
+      },
+    ];
+    const ctx = {
+      hub,
+      createId: () => "id-1",
+      deps: {
+        portrait: async (variant: string) =>
+          variant === "projects"
+            ? {
+                variant: "projects",
+                content:
+                  "# 数字分身 · 项目决定\n版本 v4.5.0 · 2026-11-18 · 变更见 changelog\n\n## 法务审批\n> repos: legal-ai\n法务审批口径。\n\n## 运价通\n运价口径。\n",
+                path: "/tmp/projects.md",
+                updatedAt: null,
+              }
+            : null,
+        portraitProposals: async () => pending,
+        reviewPortraitProposal: async (body: { id: string; action: "approve" | "reject" }) => {
+          pending = pending.filter((p) => p.id !== body.id);
+          return { ok: true as const, proposals: pending, version: body.action === "approve" ? "4.6.0" : null };
+        },
+      } as never,
+    };
+
+    const filteredRes = await handleApi(
+      new Request("http://127.0.0.1/api/portrait?variant=projects&project=legal-ai"),
+      new URL("http://127.0.0.1/api/portrait?variant=projects&project=legal-ai"),
+      ctx,
+    );
+    const filteredBody = (await filteredRes.json()) as { content: string };
+    expect(filteredBody.content).toContain("法务审批口径。");
+    expect(filteredBody.content).not.toContain("运价口径。");
+
+    const listRes = await handleApi(
+      new Request("http://127.0.0.1/api/portrait/proposals"),
+      new URL("http://127.0.0.1/api/portrait/proposals"),
+      ctx,
+    );
+    expect(await listRes.json()).toEqual({ proposals: pending });
+
+    const approveRes = await handleApi(
+      new Request("http://127.0.0.1/api/portrait/proposals", {
+        method: "POST",
+        body: JSON.stringify({ id: "cp01", action: "approve" }),
+      }),
+      new URL("http://127.0.0.1/api/portrait/proposals"),
+      ctx,
+    );
+    expect(await approveRes.json()).toEqual({ ok: true, proposals: [], version: "4.6.0" });
+  });
 });

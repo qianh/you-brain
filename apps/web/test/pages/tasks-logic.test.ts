@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { DevelopmentTask } from "../../../../packages/core/src/tasks/types.js";
-import { projectTask, taskThreadUrl, visibleTasks } from "../../src/pages/tasks/logic.js";
+import { folderName, projectPickerRows, projectTask, taskThreadUrl, visibleTasks } from "../../src/pages/tasks/logic.js";
 
 function task(id: string, patch: Partial<DevelopmentTask> = {}): DevelopmentTask {
   return { id, title: id, description: "", priority: 2, projectId: "one", status: "queued", createdAt: "2026-11-16T00:00:00Z", updatedAt: "2026-11-16T00:00:00Z", run: null, ...patch };
@@ -25,5 +25,21 @@ describe("TODO queue presentation", () => {
     expect(taskThreadUrl("http://127.0.0.1:3773/thread/task-id")).toBe("http://127.0.0.1:3773/thread/task-id");
     expect(taskThreadUrl("https://[::1]:3773/thread/task-id")).toBe("https://[::1]:3773/thread/task-id");
     for (const url of ["javascript:alert(1)", "file:///tmp/task", "https://example.com/thread", "http://user:pass@localhost:3773/thread", "not-a-url", null]) expect(taskThreadUrl(url)).toBeNull();
+  });
+
+  test("project picker searches by name, offers a new project for unknown names and hides paths unless names clash", () => {
+    const projects = [
+      { id: "a", name: "legal-ai", cwd: "/Users/me/Dzg/ai/legal-ai", enabled: false },
+      { id: "b", name: "you-brain", cwd: "/Users/me/John/ai/you-brain", enabled: false },
+      { id: "c", name: "you-brain", cwd: "/Users/me/Work/you-brain/", enabled: false },
+      { id: "d", name: "chat-legal", cwd: "/x/chat-legal", enabled: false },
+    ];
+    expect(projectPickerRows(projects, "", true).map((row) => row.kind)).toEqual(["none", "project", "project", "project", "project", "folder"]);
+    expect(projectPickerRows(projects, "  LEGAL", false).map((row) => row.kind === "project" ? row.project.id : row.kind)).toEqual(["a", "d", "create"]);
+    expect(projectPickerRows(projects, "Legal-AI", false).some((row) => row.kind === "create")).toBe(false);
+    expect(projectPickerRows(projects, "you", false).flatMap((row) => row.kind === "project" ? [row.hint] : [])).toEqual(["ai", "Work"]);
+    expect(projectPickerRows(projects, "legal", false).flatMap((row) => row.kind === "project" ? [row.hint] : [])).toEqual([null, null]);
+    expect(projectPickerRows([], " New App ", false)).toEqual([{ kind: "create", name: "New App" }]);
+    expect(folderName("/Users/me/new-app/")).toBe("new-app");
   });
 });

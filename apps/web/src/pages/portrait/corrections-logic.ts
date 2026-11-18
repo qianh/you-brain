@@ -29,7 +29,7 @@ export function correctionHint(consolidationEnabled: boolean): "on" | "off" {
 }
 
 export function correctionAllowsForm(variant: string): boolean {
-  return variant === "full";
+  return variant === "full" || variant === "coding" || variant === "projects";
 }
 
 export function correctionStatusParts(

@@ -64,6 +64,8 @@ describe("uncollectedNotes", () => {
 describe("validateSettings", () => {
   test("accepts the product defaults", () => {
     expect(validateSettings(validDraft)).toEqual([]);
+    expect(validateSettings({ ...validDraft, consolidateBaseUrl: "https://api.deepseek.com" })).toEqual([]);
+    expect(validateSettings({ ...validDraft, consolidateBaseUrl: "not-a-url" })).toEqual(["invalidBase"]);
   });
 
   test("reports each broken field", () => {

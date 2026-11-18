@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 
 import {
   MERGE_SUGGESTIONS_CURSOR,
+  TODO_REVIEW_CURSOR,
   TOPIC_SUMMARY_JSON_SCHEMA,
   consolidationSteps,
   mergeSuggestionsStep,
@@ -11,6 +12,7 @@ import {
   registerConsolidationStep,
   resetConsolidationSteps,
   runConsolidation,
+  todoReviewStep,
   topicSummariesStep,
   type ConsolidationStep,
 } from "../../src/consolidate/index.js";
@@ -64,6 +66,7 @@ async function settle(options: {
   now?: string;
   zone?: { activeLimit: number; historyDays: number };
   cursors?: { get(key: string): string | null; set(key: string, value: string): void };
+  topicTranscripts?: (input: { day: string; sessionKeys: readonly string[] }) => Promise<string>;
 }) {
   const events = [...options.events];
   const requests: LlmCompleteRequest[] = [];
@@ -83,6 +86,7 @@ async function settle(options: {
     },
     cursors,
     steps: options.steps ?? [topicSummariesStep],
+    ...(options.topicTranscripts ? { topicTranscripts: options.topicTranscripts } : {}),
   });
   return { result, events, requests, cursors };
 }
@@ -416,6 +420,7 @@ describe("merge suggestions", () => {
     });
     expect(result.ok).toBe(false);
     expect(result.steps.map((step) => step.id)).toEqual([
+      "todo_review",
       "topic_summaries",
       "merge_suggestions",
       "portrait",
@@ -423,11 +428,12 @@ describe("merge suggestions", () => {
       "portrait_monthly",
       "topic_files",
     ]);
-    expect(result.steps[1]?.ok).toBe(true);
-    expect(result.steps[2]).toEqual({ id: "portrait", ok: false, error: "依赖步骤失败" });
-    expect(result.steps[3]).toEqual({ id: "portrait_eval", ok: false, error: "依赖步骤失败" });
-    expect(result.steps[4]).toEqual({ id: "portrait_monthly", ok: false, error: "依赖步骤失败" });
-    expect(result.steps[5]).toEqual({ id: "topic_files", ok: false, error: "依赖步骤失败" });
+    expect(result.steps[0]?.ok).toBe(true);
+    expect(result.steps[2]?.ok).toBe(true);
+    expect(result.steps[3]).toEqual({ id: "portrait", ok: false, error: "依赖步骤失败" });
+    expect(result.steps[4]).toEqual({ id: "portrait_eval", ok: false, error: "依赖步骤失败" });
+    expect(result.steps[5]).toEqual({ id: "portrait_monthly", ok: false, error: "依赖步骤失败" });
+    expect(result.steps[6]).toEqual({ id: "topic_files", ok: false, error: "依赖步骤失败" });
     expect(rewritten(events, "a")).toEqual([]);
     expect(JSON.parse(cursors.get(MERGE_SUGGESTIONS_CURSOR) ?? "").pairs).toEqual([
       { fromTopicId: "a", intoTopicId: "b", reason: "同一件事" },
@@ -502,6 +508,7 @@ describe("step runner", () => {
       },
     });
     expect(consolidationSteps().map((step) => step.id)).toEqual([
+      "todo_review",
       "topic_summaries",
       "merge_suggestions",
       "portrait",
@@ -519,6 +526,7 @@ describe("step runner", () => {
     expect(result.ok).toBe(true);
     resetConsolidationSteps();
     expect(consolidationSteps().map((step) => step.id)).toEqual([
+      "todo_review",
       "topic_summaries",
       "merge_suggestions",
       "portrait",
@@ -526,6 +534,47 @@ describe("step runner", () => {
       "portrait_monthly",
       "topic_files",
     ]);
+  });
+});
+
+describe("todo review", () => {
+  it("closes done and dropped todos only when a verbatim quote matches the transcript, and skips locked todos", async () => {
+    const sessionA = key(11);
+    const { result, events, cursors } = await settle({
+      events: [
+        ...topic("a", "法务审批", sessionA),
+        conclusion("c-a", "a", sessionA),
+        ev("todo.added", { todoId: "t-done", topicId: "a", text: "补齐回归测试", sessionKey: sessionA, confidence: 0.9 }, DAY_BEFORE),
+        ev("todo.added", { todoId: "t-drop", topicId: "a", text: "接旧版同步开关", sessionKey: sessionA, confidence: 0.9 }, DAY_BEFORE),
+        ev("todo.added", { todoId: "t-fake", topicId: "a", text: "升级数据库实例", sessionKey: sessionA, confidence: 0.9 }, DAY_BEFORE),
+        ev("todo.added", { todoId: "t-keep", topicId: "a", text: "灰度验证线上流量", sessionKey: sessionA, confidence: 0.9 }, DAY_BEFORE),
+        ev("todo.added", { todoId: "t-lock", topicId: "a", text: "用户锁定的待办", sessionKey: sessionA, confidence: 0.9 }, DAY_BEFORE),
+        ev("todo.status_changed", { todoId: "t-lock", status: "open", by: "user" }, DAY_BEFORE),
+      ],
+      updated: { [sessionA]: DAY_OF },
+      steps: [todoReviewStep],
+      topicTranscripts: async () =>
+        "[user]\n旧版同步开关已经取消不做了，回归测试跑完吗？\n\n[assistant]\n补齐回归测试已经全部跑通并通过。",
+      complete: () =>
+        JSON.stringify({
+          items: [
+            { todoId: "t-done", verdict: "done", quote: "补齐回归测试已经全部跑通并通过" },
+            { todoId: "t-drop", verdict: "dropped", quote: "旧版同步开关已经取消不做了" },
+            { todoId: "t-fake", verdict: "done", quote: "数据库实例刚刚已经升级完毕" },
+            { todoId: "t-keep", verdict: "keep", quote: "" },
+            { todoId: "t-lock", verdict: "done", quote: "补齐回归测试已经全部跑通并通过" },
+          ],
+        }),
+    });
+    expect(result.ok).toBe(true);
+    const closed = events
+      .filter((event) => event.type === "todo.status_changed" && event.data.by === "auto")
+      .map((event) => (event.type === "todo.status_changed" ? { id: event.data.todoId, status: event.data.status } : null));
+    expect(closed).toEqual([
+      { id: "t-done", status: "done" },
+      { id: "t-drop", status: "dropped" },
+    ]);
+    expect(JSON.parse(cursors.get(TODO_REVIEW_CURSOR) ?? "{}").closed).toHaveLength(2);
   });
 });
 

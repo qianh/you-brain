@@ -8,6 +8,9 @@ import type {
   PortraitCorrectionBody,
   PortraitCorrectionResult,
   PortraitCorrectionsResponse,
+  PortraitProposalActionBody,
+  PortraitProposalActionResult,
+  PortraitProposalsResponse,
   PortraitResponse,
   PortraitSnapshotsResponse,
   ReminderView,
@@ -80,6 +83,8 @@ import type {
   DeckMuseSendResponse,
   DeckMuseSessionResponse,
   DeckMuseStreamEvent,
+  DeckNoticeDismissBody,
+  DeckNoticesResponse,
   DeckT3WebResponse,
   DeckTty7PasteImageResponse,
   DeckTty7ScreenResponse,
@@ -89,6 +94,11 @@ import type {
   DeckTty7StartResponse,
   DeckTerminalSize,
   LlmModelsView,
+  ReferenceCandidatesResponse,
+  ReferenceContentView,
+  ReferenceKind,
+  ReferenceMaterializeBody,
+  ReferenceMaterializeResponse,
 } from "@you-brain/core/http/types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 
@@ -129,7 +139,11 @@ export interface BrowserDaemon
     | "planTopicReorganization"
     | "topicReorganizeStatus"
     | "applyTopicReorganization"
+    | "portraitProposals"
+    | "reviewPortraitProposal"
   > {
+  portraitProposals(): Promise<PortraitProposalsResponse>;
+  reviewPortraitProposal(body: PortraitProposalActionBody): Promise<PortraitProposalActionResult>;
   planTopicReorganization(body?: { refresh?: boolean }): Promise<TopicReorganizeStatus>;
   topicReorganizeStatus(): Promise<TopicReorganizeStatus>;
   applyTopicReorganization(body: TopicReorganizeApplyBody): Promise<TopicReorganizeResult>;
@@ -216,7 +230,9 @@ export interface BrowserDaemon
   deckTty7Rename(pane: number, name: string): Promise<{ ok: true }>;
   /** 告诉 daemon 正在整屏看哪个会话（null 表示没在看），这个会话的完成提醒会被跳过。 */
   deckTty7Viewing(pane: number | null): Promise<{ ok: true }>;
-  deckTty7Screen(pane: number): Promise<DeckTty7ScreenResponse>;
+  deckNotices(): Promise<DeckNoticesResponse>;
+  deckNoticeDismiss(body: DeckNoticeDismissBody): Promise<{ ok: true }>;
+  deckTty7Screen(pane: number, lines?: number): Promise<DeckTty7ScreenResponse>;
   deckTty7Send(body: DeckTty7SendBody): Promise<{ ok: true }>;
   deckTty7Start(body: DeckTty7StartBody): Promise<DeckTty7StartResponse>;
   deckTty7PasteImage(data: Blob): Promise<DeckTty7PasteImageResponse>;
@@ -293,11 +309,13 @@ export function createBrowserDaemon(options?: {
     topic: (id) => request<TopicDetail>("GET", `/api/topics/${encodeURIComponent(id)}`),
     updateTopic: (id, body) =>
       request<TopicMutationResponse>("POST", `/api/topics/${encodeURIComponent(id)}`, body),
-    portrait: (variant) =>
-      request<PortraitResponse>(
-        "GET",
-        variant === undefined ? "/api/portrait" : `/api/portrait?variant=${encodeURIComponent(variant)}`,
-      ),
+    portrait: (variant, project) => {
+      const params = new URLSearchParams();
+      if (variant !== undefined) params.set("variant", variant);
+      if (project !== undefined && project !== "") params.set("project", project);
+      const qs = params.toString();
+      return request<PortraitResponse>("GET", qs === "" ? "/api/portrait" : `/api/portrait?${qs}`);
+    },
     portraitSnapshots: () => request<PortraitSnapshotsResponse>("GET", "/api/portrait/snapshots"),
     portraitCorrections: (variant) =>
       request<PortraitCorrectionsResponse>(
@@ -308,6 +326,9 @@ export function createBrowserDaemon(options?: {
       ),
     addPortraitCorrection: (input: PortraitCorrectionBody) =>
       request<PortraitCorrectionResult>("POST", "/api/portrait/corrections", input),
+    portraitProposals: () => request<PortraitProposalsResponse>("GET", "/api/portrait/proposals"),
+    reviewPortraitProposal: (body: PortraitProposalActionBody) =>
+      request<PortraitProposalActionResult>("POST", "/api/portrait/proposals", body),
     search: (query) => request<SearchResponse>("GET", `/api/search${searchString(query)}`),
     devices: () => request<DevicesResponse>("GET", "/api/devices"),
     addVirtualDevice: (body: VirtualDeviceCreateBody) =>
@@ -398,7 +419,14 @@ export function createBrowserDaemon(options?: {
     deckTty7Delete: (pane: number) => request<{ ok: true }>("POST", "/api/deck/tty7/delete", { pane }),
     deckTty7Rename: (pane: number, name: string) => request<{ ok: true }>("POST", "/api/deck/tty7/rename", { pane, name }),
     deckTty7Viewing: (pane: number | null) => request<{ ok: true }>("POST", "/api/deck/tty7/viewing", { pane }),
-    deckTty7Screen: (pane: number) => request<DeckTty7ScreenResponse>("GET", `/api/deck/tty7/screen?pane=${pane}`),
+    deckNotices: () => request<DeckNoticesResponse>("GET", "/api/deck/notices"),
+    deckNoticeDismiss: (body: DeckNoticeDismissBody) =>
+      request<{ ok: true }>("POST", "/api/deck/notices/dismiss", body),
+    deckTty7Screen: (pane: number, lines?: number) =>
+      request<DeckTty7ScreenResponse>(
+        "GET",
+        `/api/deck/tty7/screen?pane=${pane}${lines === undefined ? "" : `&lines=${lines}`}`,
+      ),
     deckTty7Send: (body: DeckTty7SendBody) => request<{ ok: true }>("POST", "/api/deck/tty7/send", body),
     deckTty7Start: (body: DeckTty7StartBody) => request<DeckTty7StartResponse>("POST", "/api/deck/tty7/start", body),
     deckTty7PasteImage: (data: Blob) => request<DeckTty7PasteImageResponse>("POST", "/api/deck/tty7/paste-image", data),
@@ -463,6 +491,32 @@ export function createBrowserDaemon(options?: {
     notionArchivePage: (body: NotionArchivePageBody) =>
       request<NotionArchivePageResult>("POST", "/api/actions/notion-archive-page", body),
     notionAssetUrl: (blockId: string) => `/api/notion/asset?block=${encodeURIComponent(blockId)}`,
+    referenceCandidates: (input?: {
+      query?: string;
+      kinds?: readonly ReferenceKind[];
+      limit?: number;
+    }) => {
+      const qs = referenceCandidatesQuery(input);
+      return request<ReferenceCandidatesResponse>(
+        "GET",
+        qs === "" ? "/api/references/candidates" : `/api/references/candidates?${qs}`,
+      );
+    },
+    referenceContent: (input: {
+      uri?: string;
+      kind?: ReferenceKind;
+      id?: string;
+      query?: string;
+      label?: string;
+    }) => {
+      const qs = referenceContentQuery(input);
+      return request<ReferenceContentView>(
+        "GET",
+        qs === "" ? "/api/references/content" : `/api/references/content?${qs}`,
+      );
+    },
+    materializeReference: (body: ReferenceMaterializeBody) =>
+      request<ReferenceMaterializeResponse>("POST", "/api/references/materialize", body),
   };
 }
 
@@ -483,6 +537,35 @@ function searchString(query: SearchRequest): string {
   if (query.to !== undefined) params.set("to", query.to);
   for (const source of query.sources ?? []) params.append("sources", source);
   return `?${params.toString()}`;
+}
+
+function referenceCandidatesQuery(input?: {
+  query?: string;
+  kinds?: readonly ReferenceKind[];
+  limit?: number;
+}): string {
+  if (!input) return "";
+  const params = new URLSearchParams();
+  if (input.query !== undefined && input.query !== "") params.set("q", input.query);
+  if (input.kinds && input.kinds.length > 0) params.set("kinds", input.kinds.join(","));
+  if (input.limit !== undefined) params.set("limit", String(input.limit));
+  return params.toString();
+}
+
+function referenceContentQuery(input: {
+  uri?: string;
+  kind?: ReferenceKind;
+  id?: string;
+  query?: string;
+  label?: string;
+}): string {
+  const params = new URLSearchParams();
+  if (input.uri !== undefined) params.set("uri", input.uri);
+  if (input.kind !== undefined) params.set("kind", input.kind);
+  if (input.id !== undefined) params.set("id", input.id);
+  if (input.query !== undefined) params.set("q", input.query);
+  if (input.label !== undefined) params.set("label", input.label);
+  return params.toString();
 }
 
 function parseJson(text: string): unknown {

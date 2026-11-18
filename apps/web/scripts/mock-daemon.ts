@@ -59,6 +59,16 @@ const mockTaskBoard: TaskBoard = {
   ],
 };
 
+/** 演示「新建项目」：只加到内存看板，不连接 T3。 */
+function mockNewProject(input: { name: string; cwd?: string | undefined }): string {
+  const cwd = input.cwd ?? `/demo/${input.name}`;
+  const existing = mockTaskBoard.projects.find((project) => project.cwd === cwd);
+  if (existing) return existing.id;
+  const id = `demo-${crypto.randomUUID()}`;
+  mockTaskBoard.projects.push({ id, name: input.name, cwd, enabled: false });
+  return id;
+}
+
 function simulateNextTask(projectId: string): void {
   if (!mockTaskBoard.projects.find((project) => project.id === projectId)?.enabled) return;
   if (mockTaskBoard.tasks.some((task) => task.projectId === projectId && task.status !== "queued" && task.status !== "done")) return;
@@ -1199,7 +1209,8 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
     if (request.method === "GET") return json(mockTaskBoard);
     if (request.method === "POST") {
       const input = await request.json() as TaskCreateInput;
-      const task: DevelopmentTask = { id: `demo-${crypto.randomUUID()}`, title: input.title, description: input.description ?? "", projectId: input.projectId ?? null, priority: input.priority ?? 2, status: "queued", run: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      const projectId = input.newProject ? mockNewProject(input.newProject) : input.projectId ?? null;
+      const task: DevelopmentTask = { id: `demo-${crypto.randomUUID()}`, title: input.title, description: input.description ?? "", projectId, priority: input.priority ?? 2, status: "queued", run: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
       mockTaskBoard.tasks.push(task);
       if (task.projectId) simulateNextTask(task.projectId);
       return json(mockTaskBoard);
@@ -1209,7 +1220,8 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
       const task = mockTaskBoard.tasks.find((task) => task.id === input.id);
       if (!task) return fail(404, "NOT_FOUND", "演示任务不存在");
       if (task.status !== "queued") return fail(409, "INVALID_STATE", "只能编辑待处理任务");
-      Object.assign(task, input, { updatedAt: new Date().toISOString() });
+      const { newProject, ...patch } = input;
+      Object.assign(task, patch, newProject ? { projectId: mockNewProject(newProject) } : {}, { updatedAt: new Date().toISOString() });
       return json(mockTaskBoard);
     }
     return fail(405, "METHOD_NOT_ALLOWED", "请求方法不支持");
@@ -1290,6 +1302,12 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
     return json({ corrections: correctionViews(variant) });
   }
   if (path === "/api/portrait/corrections" && request.method === "POST") return addCorrection(request);
+  if (path === "/api/portrait/proposals" && request.method === "GET") {
+    return json({ proposals: [] });
+  }
+  if (path === "/api/portrait/proposals" && request.method === "POST") {
+    return json({ ok: true, proposals: [], version: null });
+  }
   if (path === "/api/portrait" && request.method === "GET") {
     const variant = url.searchParams.get("variant") ?? "full";
     const content = portraits[variant];
@@ -1549,6 +1567,95 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
     accountEmail = "";
     publish("status");
     return json({ ok: true, message: "已退出，本机数据已备份。后台正在重启，请稍后重新登录并选择账号" });
+  }
+  if (path === "/api/references/candidates" && request.method === "GET") {
+    const q = (url.searchParams.get("q") ?? "").trim().toLowerCase();
+    const kindsParam = url.searchParams.get("kinds");
+    const allowedKinds = kindsParam
+      ? new Set(kindsParam.split(",").map((item) => item.trim()).filter(Boolean))
+      : null;
+    const allCandidates = [
+      ...sessions.slice(0, 4).map((session) => {
+        const id = Buffer.from(JSON.stringify({ source: session.source, sessionKey: session.sessionKey }), "utf8").toString("base64url");
+        const label = session.title || "(未命名会话)";
+        return {
+          kind: "session" as const,
+          id,
+          uri: `u-brain-session:${id}`,
+          resourceUri: `you-brain://session/${id}`,
+          mention: `@[${label}](u-brain-session:${id})`,
+          label,
+          detail: session.summary,
+        };
+      }),
+      ...topics.filter((topic) => topic.mergedInto === null).slice(0, 4).map((topic) => {
+        const id = Buffer.from(JSON.stringify({ topicId: topic.topicId }), "utf8").toString("base64url");
+        return {
+          kind: "topic" as const,
+          id,
+          uri: `u-brain-topic:${id}`,
+          resourceUri: `you-brain://topic/${id}`,
+          mention: `@[${topic.name}](u-brain-topic:${id})`,
+          label: topic.name,
+          detail: topic.summary,
+        };
+      }),
+      ...[{ pageId: "mock-kb-1", label: "影之刃零攻略.md", detail: "最近编辑 · 2026-11-18" }].map((page) => {
+        const id = Buffer.from(JSON.stringify({ pageId: page.pageId }), "utf8").toString("base64url");
+        return {
+          kind: "kb" as const,
+          id,
+          uri: `u-brain-kb:${id}`,
+          resourceUri: `you-brain://kb/${id}`,
+          mention: `@[${page.label}](u-brain-kb:${id})`,
+          label: page.label,
+          detail: page.detail,
+        };
+      }),
+    ];
+    const filtered = allCandidates.filter((item) =>
+      (allowedKinds === null || allowedKinds.has(item.kind)) &&
+      (q === "" || item.label.toLowerCase().includes(q) || item.detail.toLowerCase().includes(q)),
+    );
+    return json({ candidates: filtered });
+  }
+  if (path === "/api/references/content" && request.method === "GET") {
+    const uri = url.searchParams.get("uri") ?? "";
+    const label = url.searchParams.get("label") ?? (url.searchParams.get("q") || "模拟引用");
+    const kind = (url.searchParams.get("kind") as "tty7" | "session" | "topic" | "kb" | null) ?? "session";
+    const id = url.searchParams.get("id") ?? "mock";
+    const text = "这是演示模式下的引用正文快照。";
+    return json({
+      kind,
+      id,
+      uri: uri || `u-brain-${kind}:${id}`,
+      resourceUri: `you-brain://${kind}/${id}`,
+      label,
+      title: label,
+      text,
+      wrappedText: `## 引用的 U-Brain 内容\n\n### @${label}\n\n${text}`,
+    });
+  }
+  if (path === "/api/references/materialize" && request.method === "POST") {
+    const body = (await request.json().catch(() => ({}))) as { uri?: string; label?: string; kind?: string; id?: string };
+    const label = body.label || "模拟引用";
+    const kind = (body.kind as "tty7" | "session" | "topic" | "kb" | undefined) ?? "session";
+    const id = body.id || "mock";
+    const filePath = `/tmp/you-brain-mock/references/${kind}-mock.md`;
+    const text = "这是演示模式下的引用正文快照。";
+    return json({
+      ok: true,
+      kind,
+      id,
+      uri: body.uri || `u-brain-${kind}:${id}`,
+      resourceUri: `you-brain://${kind}/${id}`,
+      label,
+      title: label,
+      text,
+      wrappedText: `## 引用的 U-Brain 内容\n\n### @${label}\n\n${text}`,
+      path: filePath,
+      fileMention: `@${filePath}`,
+    });
   }
   const topicMatch = /^\/api\/topics\/([^/]+)$/u.exec(path);
   if (topicMatch) {

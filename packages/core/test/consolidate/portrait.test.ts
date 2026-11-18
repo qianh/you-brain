@@ -10,23 +10,31 @@ import {
   PORTRAIT_EVAL_CURSOR,
   PORTRAIT_MONTHLY_CURSOR,
   PORTRAIT_TURNS_CURSOR,
+  PROJECTS_POINTER,
   TWIN_CLAIMS_JSON_SCHEMA,
   TWIN_CLAIMS_SYSTEM_PROMPT,
+  TWIN_CODING_PROPOSALS_JSON_SCHEMA,
+  TWIN_CODING_PROPOSALS_SYSTEM_PROMPT,
   TWIN_EDITS_JSON_SCHEMA,
   TWIN_MERGE_SYSTEM_PROMPT,
+  TWIN_PROJECT_MERGE_SYSTEM_PROMPT,
   applyTwinEdits,
   changedLayers,
   checkTwin,
   cleanUserTurn,
   createDrivePortrait,
   fillSnapshotPattern,
+  normalizeProjectsTwin,
   pendingCorrections,
   portraitEvalStep,
   portraitMonthlyStep,
   portraitStep,
   rebuildTwin,
+  reviewCodingProposals,
   reviewProbes,
   runConsolidation,
+  seedCodingFromMarkdown,
+  seedCodingTwin,
   twinVersion,
   withHeader,
   withProjectsPointer,
@@ -66,8 +74,8 @@ const PENDING_PROBES = "digital-twin/eval/pending-probes.jsonl";
 const VERSION_LINE = "版本 v2.0.0 · 2026-10-20 · 变更见 changelog";
 
 const FULL_TEXT = `# 数字分身 · 人格\n${VERSION_LINE}\n\n## 1. 一句话\n先问再做。\n\n## 3. 价值排序\n${"可靠优先。".repeat(20)}\n`;
-const POINTER = "- **项目说明**：在已有的具体项目里工作时，先读 [项目说明](~/.you-brain/portrait/projects.md) 里该项目的小节；新项目和简单对话不需要读。";
-const CODING_TEXT = `# 数字分身 · 编码\n${VERSION_LINE}\n\n## 核心原则\n${POINTER}\n\n## 1. 授权与边界\n提问不等于授权改代码。\n\n## 5. 技术栈默认\n${"Python 用 uv。".repeat(10)}\n`;
+const POINTER = PROJECTS_POINTER;
+const CODING_TEXT = `# 数字分身 · 编码\n${VERSION_LINE}\n\n## 核心原则\n${POINTER}\n\n## 1. 授权与边界\n${"提问不等于授权改代码。".repeat(15)}\n\n## 5. 技术栈默认\n${"Python 用 uv。".repeat(20)}\n`;
 const PROJECTS_TEXT = `# 数字分身 · 项目决定\n${VERSION_LINE}\n\n## 甲\n甲的口径。\n`;
 
 const homes: string[] = [];
@@ -158,7 +166,9 @@ function correction(id: string, variant = "full", text = "把语气改短"): Eve
 
 interface Replies {
   claims?: unknown;
+  codingProposals?: unknown;
   merge?: unknown;
+  projectMerge?: unknown;
   fix?: unknown;
   probes?: unknown;
   answers?: unknown;
@@ -171,7 +181,13 @@ function model(replies: Replies) {
   return (request: LlmCompleteRequest): string => {
     const pick = (value: unknown) => (typeof value === "string" ? value : JSON.stringify(value));
     if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT) return pick(replies.claims ?? { claims: [] });
+    if (request.system === TWIN_CODING_PROPOSALS_SYSTEM_PROMPT) {
+      return pick(replies.codingProposals ?? { proposals: [] });
+    }
     if (request.system === TWIN_MERGE_SYSTEM_PROMPT) return pick(replies.merge ?? noEdits);
+    if (request.system === TWIN_PROJECT_MERGE_SYSTEM_PROMPT) {
+      return pick(replies.projectMerge ?? replies.merge ?? noEdits);
+    }
     if (request.system === TWIN_FIX_SYSTEM_PROMPT) return pick(replies.fix ?? noEdits);
     if (request.system === TWIN_PROBES_SYSTEM_PROMPT) return pick(replies.probes ?? { probes: [] });
     if (request.system === TWIN_EVAL_ANSWER_SYSTEM_PROMPT || request.system === TWIN_EVAL_BLANK_SYSTEM_PROMPT) {
@@ -316,9 +332,15 @@ describe("twin documents", () => {
 
   it("creates the principles section when the coding layer has none", () => {
     const coding = withProjectsPointer(CODING_TEXT.replace(`## 核心原则\n${POINTER}\n\n`, ""));
-    expect(coding).toContain("## 核心原则\n- **项目说明**：");
-    expect(coding.indexOf("## 核心原则")).toBeLessThan(coding.indexOf("## 1. 授权与边界"));
+    expect(coding).toContain("## 行为与范围\n- **项目口径**：");
+    expect(coding.indexOf("## 行为与范围")).toBeLessThan(coding.indexOf("## 1. 授权与边界"));
     expect(coding).not.toContain("对应的小节：甲");
+  });
+
+  it("groups split project sections contiguously and normalizes repos metadata", () => {
+    const messy = `# 数字分身 · 项目决定\n${VERSION_LINE}\n\n## 甲 · 架构\n> repos: repo-a\n甲架构。\n\n## 乙\n乙口径。\n\n## 甲 · 接口\n> repos: repo-b\n甲接口。\n`;
+    const normalized = normalizeProjectsTwin(messy);
+    expect(normalized).toContain("## 甲 · 架构\n> repos: repo-a, repo-b\n甲架构。\n\n## 甲 · 接口\n甲接口。\n\n## 乙\n乙口径。\n");
   });
 
   it("ignores the version line when deciding what changed", () => {
@@ -353,10 +375,11 @@ describe("twin documents", () => {
     ]);
   });
 
-  it("drops injected context from user turns", () => {
+  it("drops injected context and automated raw batch digests from user turns", () => {
     expect(cleanUserTurn("先别改<system-reminder>注入</system-reminder> 代码")).toBe("先别改 代码");
     expect(cleanUserTurn("This session is being continued from a previous conversation")).toBe("");
     expect(cleanUserTurn("<command-name>/x</command-name>")).toBe("");
+    expect(cleanUserTurn("只根据 2026-11-10/1400.raw.txt 整理拼车群日报")).toBe("");
   });
 
   it("fills the snapshot pattern and rejects the wrong number of stars", () => {
@@ -416,62 +439,142 @@ describe("portrait consolidation", () => {
     expect(box.requests).toEqual([]);
   });
 
-  it("extracts claims, merges a coding rule, bumps the shared version and notifies", async () => {
+  it("routes session coding claims to pending proposals while merging persona claims, then applies approved proposals", async () => {
     const box = await world();
     await seedTwin(box);
     box.sessions = [
       {
         sessionKey: "s1",
         title: "修 bug",
-        turns: ["以后都先跑测试再交付<system-reminder>注入内容</system-reminder>", "我喜欢短回复"],
+        turns: ["以后都先跑测试再交付<system-reminder>注入内容</system-reminder>", "我一律先查证再动手", "我喜欢短回复"],
       },
     ];
-    const result = await run(box, model({ claims: { claims: [highCoding, lowPersona] }, merge: codingEdit }));
+    const highPersona = { layer: "persona", project: "", confidence: "high", text: "先查证再动手。" };
+    const personaEdit = {
+      bump: "minor",
+      changelog: ["full · 1 一句话：改为先查证再动手"],
+      edits: [{ layer: "full", heading: "## 1. 一句话", text: "## 1. 一句话\n先查证再动手。" }],
+    };
+    const result = await run(
+      box,
+      model({
+        claims: { claims: [highPersona, highCoding, lowPersona] },
+        codingProposals: {
+          proposals: [
+            {
+              section: "## 验证与交付",
+              action: "add",
+              proposedLine: "- **变更验证**：修改后先跑适用测试再交付。",
+              reason: "用户要求交付前跑测试",
+            },
+          ],
+        },
+        merge: personaEdit,
+      }),
+    );
     expect(result.ok).toBe(true);
     expect(result.warnings).toEqual([]);
     expect(box.requests.map((request) => request.system)).toEqual([
       TWIN_CLAIMS_SYSTEM_PROMPT,
+      TWIN_CODING_PROPOSALS_SYSTEM_PROMPT,
       TWIN_MERGE_SYSTEM_PROMPT,
     ]);
     expect(box.requests[0]?.jsonSchema).toEqual(TWIN_CLAIMS_JSON_SCHEMA);
     expect(box.requests[0]?.user).toContain("以后都先跑测试再交付");
     expect(box.requests[0]?.user).not.toContain("注入内容");
     expect(box.requests[0]?.user).toContain("甲");
-    expect(box.requests[1]?.jsonSchema).toEqual(TWIN_EDITS_JSON_SCHEMA);
+    expect(box.requests[1]?.jsonSchema).toEqual(TWIN_CODING_PROPOSALS_JSON_SCHEMA);
     expect(box.requests[1]?.user).toContain(CODING_TEXT);
     expect(box.requests[1]?.user).toContain("[coding high 2026-10-23] 以后都先跑测试再交付。");
+    expect(box.requests[2]?.jsonSchema).toEqual(TWIN_EDITS_JSON_SCHEMA);
+    expect(box.requests[2]?.user).not.toContain(PROJECTS_TEXT);
 
-    const coding = await textAt(box.drive, CODING);
-    expect(coding?.split("\n")[1]).toBe(`版本 v2.1.0 · ${LOCAL_DAY} · 变更见 changelog`);
-    expect(coding).toContain("交付前先跑测试。");
-    expect(coding).toContain(POINTER);
-    expect(coding).not.toContain("对应的小节");
-    expect(await textAt(box.drive, FULL)).toBe(FULL_TEXT);
+    // coding.md is NOT mutated until the user approves the proposal!
+    expect(await textAt(box.drive, CODING)).toBe(CODING_TEXT);
+    const full = await textAt(box.drive, FULL);
+    expect(full?.split("\n")[1]).toBe(`版本 v2.1.0 · ${LOCAL_DAY} · 变更见 changelog`);
+    expect(full).toContain("先查证再动手。");
     expect(await textAt(box.drive, PROJECTS)).toBe(PROJECTS_TEXT);
-    expect(await textAt(box.drive, `digital-twin/consolidate-backup/JOHN-TWIN-coding-${LOCAL_DAY}.md`)).toBe(
-      CODING_TEXT,
+    expect(await textAt(box.drive, `digital-twin/consolidate-backup/JOHN-DIGITAL-TWIN-latest-${LOCAL_DAY}.md`)).toBe(
+      FULL_TEXT,
     );
-    expect(await textAt(box.drive, `digital-twin/JOHN-DIGITAL-TWIN-v2.1.0-${LOCAL_DAY}.md`)).toBeNull();
     expect(await textAt(box.drive, CHANGELOG)).toStartWith(
-      `# 数字分身变更记录\n\n## v2.1.0 · ${LOCAL_DAY}\n- coding · 1 授权与边界：新增先跑测试\n- 体积：`,
+      `# 数字分身变更记录\n\n## v2.1.0 · ${LOCAL_DAY}\n- full · 1 一句话：改为先查证再动手\n- 体积：`,
     );
     expect(jsonl(await textAt(box.drive, CLAIMS))).toEqual([
+      { ...highPersona, day: LOCAL_DAY },
       { ...highCoding, day: LOCAL_DAY },
       { ...lowPersona, day: LOCAL_DAY },
     ]);
     expect(jsonl(await textAt(box.drive, PENDING))).toEqual([{ ...lowPersona, day: LOCAL_DAY }]);
+    expect(jsonl(await textAt(box.drive, "digital-twin/proposals/coding-pending.jsonl"))).toEqual([
+      {
+        id: "cp01",
+        day: LOCAL_DAY,
+        section: "## 验证与交付",
+        action: "add",
+        proposedLine: "- **变更验证**：修改后先跑适用测试再交付。",
+        reason: "用户要求交付前跑测试",
+      },
+    ]);
+    expect(reminders(box.events).map((item) => item.kind)).toEqual([
+      "portrait_coding_proposal",
+      "portrait_updated",
+    ]);
+    expect(JSON.parse(box.cursors.get(PORTRAIT_TURNS_CURSOR) ?? "{}")).toEqual({ s1: 3 });
+
+    // Approving cp01 merges it into coding.md and clears coding-pending.jsonl
+    const reviewed = await reviewCodingProposals({
+      portrait: box.portrait,
+      day: LOCAL_DAY,
+      decide: async () => ({ action: "approve" }),
+    });
+    expect(reviewed).toEqual({ approved: 1, rejected: 0, left: 0, version: "2.2.0" });
+    const codingAfter = await textAt(box.drive, CODING);
+    expect(codingAfter).toContain("- **变更验证**：修改后先跑适用测试再交付。");
+    expect(codingAfter).toContain(POINTER);
     const paths = platformPaths({ platform: "darwin", homeDir: box.home, env: { YOU_BRAIN_HOME: box.home } });
-    expect(await readFile(portraitFile(paths, "coding"), "utf8")).toBe(coding ?? "");
-    expect(reminders(box.events)).toHaveLength(1);
-    expect(reminders(box.events)[0]?.kind).toBe("portrait_updated");
-    expect(reminders(box.events)[0]?.text).toStartWith("数字分身更新到 v2.1.0：coding · 1 授权与边界");
-    expect(reminders(box.events)[0]?.text).toContain("https://drive.google.com/file/d/");
-    expect(JSON.parse(box.cursors.get(PORTRAIT_TURNS_CURSOR) ?? "{}")).toEqual({ s1: 2 });
+    expect(await readFile(portraitFile(paths, "coding"), "utf8")).toBe(codingAfter ?? "");
+    expect(jsonl(await textAt(box.drive, "digital-twin/proposals/coding-pending.jsonl"))).toEqual([]);
 
     box.requests.length = 0;
     const again = await run(box, model({ merge: codingEdit }));
     expect(again.ok).toBe(true);
     expect(box.requests).toEqual([]);
+  });
+
+  it("merges only the touched project group during project consolidation without sending unrelated projects", async () => {
+    const box = await world();
+    const bigProjects = `# 数字分身 · 项目决定\n${VERSION_LINE}\n\n## 甲 · 架构\n> repos: legal-ai\n旧数据源用 A。\n\n## 无关大项目\n${"无关口径。".repeat(80)}\n`;
+    await seedTwin(box, { full: FULL_TEXT, coding: CODING_TEXT, projects: bigProjects });
+    box.sessions = [{ sessionKey: "s1", title: "法务", turns: ["legal-ai 数据源改成 B，废弃 A"] }];
+    const result = await run(
+      box,
+      model({
+        claims: {
+          claims: [
+            { layer: "project", project: "甲", repo: "legal-ai", confidence: "high", text: "数据源改为 B，不再用 A。" },
+          ],
+        },
+        projectMerge: {
+          bump: "minor",
+          changelog: ["projects · 甲：更新数据源为 B"],
+          edits: [{ layer: "projects", heading: "## 甲 · 架构", text: "## 甲 · 架构\n> repos: legal-ai\n数据源改为 B。" }],
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    expect(box.requests.map((request) => request.system)).toEqual([
+      TWIN_CLAIMS_SYSTEM_PROMPT,
+      TWIN_PROJECT_MERGE_SYSTEM_PROMPT,
+    ]);
+    expect(box.requests[1]?.user).toContain("## 甲 · 架构");
+    expect(box.requests[1]?.user).toContain("repo:legal-ai");
+    expect(box.requests[1]?.user).not.toContain("无关大项目");
+    const updatedProjects = await textAt(box.drive, PROJECTS);
+    expect(updatedProjects).toContain("## 甲 · 架构\n> repos: legal-ai\n数据源改为 B。");
+    expect(updatedProjects).not.toContain("旧数据源用 A");
+    expect(updatedProjects).toContain("## 无关大项目");
   });
 
   it("writes a full snapshot and stays quiet when only projects change", async () => {
@@ -676,7 +779,13 @@ describe("twin quality standard", () => {
       )
       .join("\n");
   const codingWith = (principles = `${POINTER}\n- **先证据**：先读代码再给方案。`) =>
-    `${head("# 数字分身 · 编码")}${section("## 核心原则", principles)}\n${section("## 默认与红线", "- 技术栈：默认 Python。")}`;
+    [
+      head("# 数字分身 · 编码").trimEnd(),
+      section("## 行为与范围", principles).trimEnd(),
+      section("## 安全与授权", "- **提交授权**：仅在用户要求时执行 commit 或 push。").trimEnd(),
+      section("## 验证与交付", "- **变更验证**：修改后运行适用的测试与类型检查。").trimEnd(),
+      section("## 并行与指令优先级", "- **指令优先级**：用户明确要求优先于通用建议。"),
+    ].join("\n\n");
 
   it("accepts a layer that follows the standard", () => {
     expect(twinStandardProblems("full", fullWith())).toEqual([]);
@@ -684,7 +793,7 @@ describe("twin quality standard", () => {
     expect(twinStandardProblems("projects", "任意内容")).toEqual([]);
   });
 
-  it("rejects a changed skeleton, over-long lists and lines, and loose semicolons", () => {
+  it("rejects a changed skeleton, over-long lists and lines, loose semicolons, and project leaks", () => {
     expect(twinStandardProblems("full", FULL_TEXT)[0]).toContain("小节要固定为");
     const crowded = [
       "技术正确优先于对话舒服。",
@@ -699,7 +808,55 @@ describe("twin quality standard", () => {
     ]);
     expect(twinStandardProblems("full", fullWith({ "## 9. 红线": "长".repeat(111) }))[0]).toContain("最多 110 字");
     expect(twinStandardProblems("full", fullWith({ "## 9. 红线": "甲；乙；丙；丁。" }))[0]).toContain("分号");
-    expect(twinStandardProblems("coding", codingWith(`${POINTER}\n先证据，没有主题。`))[0]).toContain("**主题**");
+    expect(twinStandardProblems("full", fullWith({ "## 9. 红线": "空值展示「待补录」。" }))[0]).toContain("产品文案口径");
+    expect(twinStandardProblems("coding", codingWith(`${POINTER}\n先证据，没有主题。`))[0]).toContain("**短标题**");
+    expect(twinStandardProblems("coding", codingWith(`${POINTER}\n- **配置中心**：优先走 Apollo 和 XXL-JOB。`))[0]).toContain(
+      "Apollo",
+    );
+  });
+
+  it("seeds a compliant 4-section coding twin from hand-crafted AGENTS.md while stripping local tools", async () => {
+    const handCrafted = [
+      "# AGENTS.md",
+      "",
+      "## 行为准则",
+      "1. 问 ≠ 做，行动请求 = 授权。 按动词判断执行与分析。",
+      "2. 保护用户修改。 不覆盖用户已有的未提交修改。",
+      "3. 危险操作需授权。 删除数据或部署需明确授权。",
+      "",
+      "## Git",
+      "- 仅在用户要求时 commit / push。",
+      "",
+      "## 沟通与交付",
+      "- 默认用中文，先说结论。",
+      "",
+      "## 指令与上下文",
+      "- 用户明确要求优先于通用建议。",
+      "",
+      "## 并行协作",
+      "- 仅当子任务相互独立时交给子代理。",
+      "",
+      "## 验证与完成",
+      "- 修改后运行适用的测试、lint、typecheck 或 build。",
+      "",
+      "## 本机工具",
+      "<!-- CODEGRAPH_START -->",
+      "- 使用 codegraph_explore。",
+      "<!-- CODEGRAPH_END -->",
+      "- 执行命令前读取 /Users/alice/.codex/RTK.md，使用 rtk 前缀。",
+    ].join("\n");
+    const seeded = seedCodingFromMarkdown(handCrafted, "3.0.0", LOCAL_DAY);
+    expect(twinStandardProblems("coding", seeded)).toEqual([]);
+    expect(seeded).not.toContain("codegraph");
+    expect(seeded).not.toContain("rtk");
+    expect(seeded).not.toContain("/Users/alice");
+    expect(seeded).toContain("- **问≠做，行动请求=授权**：");
+
+    const box = await world();
+    await seedTwin(box);
+    const saved = await seedCodingTwin({ portrait: box.portrait, sourceMarkdown: handCrafted, day: LOCAL_DAY });
+    expect(saved.version).toBe("2.1.0");
+    expect(await textAt(box.drive, CODING)).toBe(saved.text);
   });
 
   it("counts quote samples apart and exempts them from the line rules", () => {
@@ -1077,7 +1234,7 @@ describe("portrait rebuild", () => {
     const fixRequests = box.requests.filter((request) => request.system === TWIN_FIX_SYSTEM_PROMPT);
     expect(fixRequests).toHaveLength(3);
     expect(fixRequests[0]?.user).toContain("- coding ## 3. 实现原则：");
-    expect(fixRequests[0]?.user).toContain("超过 4096 字节预算，要压到 3600 字节以内");
+    expect(fixRequests[0]?.user).toContain("超过 6144 字节预算，要压到 5500 字节以内");
     expect(lines.filter((line) => line.startsWith("收尾修正第"))).toHaveLength(2);
     expect(await textAt(box.drive, CODING)).toContain("## 3. 实现原则\n交付前先跑测试。");
   });

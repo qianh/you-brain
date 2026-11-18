@@ -27,11 +27,17 @@ async function setup() {
   let online = true;
   let projectCwd = "/repo/one";
   let failDoneWrite = false;
+  const created: Array<{ id: string; name: string; cwd: string }> = [];
   const store = new TaskStore(join(dir, "tasks", "board.json"));
   const automation: TaskAutomationPort = {
     async projects() {
       if (!online) throw new Error("T3 offline");
-      return [{ id: "one", name: "One", cwd: projectCwd }, { id: "two", name: "Two", cwd: "/repo/two" }];
+      return [{ id: "one", name: "One", cwd: projectCwd }, { id: "two", name: "Two", cwd: "/repo/two" }, ...created];
+    },
+    async createProject(input) {
+      const project = { id: `new-${created.length + 1}`, name: input.name, cwd: input.cwd ?? `/t3/${input.name}` };
+      created.push(project);
+      return project;
     },
     async start(input) {
       starts.push(input);
@@ -79,7 +85,7 @@ async function setup() {
     return (await board()).tasks.find((task) => task.id === current.id)!;
   };
   return {
-    dir, service, starts, merges, states, followups, board, ready, options,
+    dir, service, starts, merges, states, followups, board, ready, options, created,
     setStartFailure(value: boolean) { startFailure = value; },
     setFollowupFailure(value: boolean) { followupFailure = value; },
     setOnline(value: boolean) { online = value; },
@@ -105,6 +111,22 @@ describe("T3 TODO serial queue", () => {
     await f.service.tick();
     expect(f.starts).toHaveLength(1);
     expect((await f.board()).tasks[0]?.status).toBe("queued");
+  }));
+
+  test("a TODO can register a new T3 project; a folder already in T3 is reused instead", () => fixture(async (f) => {
+    let board = await f.service.create({ title: "new repo", newProject: { name: "Fresh" } });
+    expect(f.created).toEqual([{ id: "new-1", name: "Fresh", cwd: "/t3/Fresh" }]);
+    expect(board.tasks[0]?.projectId).toBe("new-1");
+    expect(board.projects.find((item) => item.id === "new-1")?.enabled).toBe(false);
+    board = await f.service.create({ title: "existing folder", newProject: { name: "whatever", cwd: "/repo/two/" } });
+    expect(f.created).toHaveLength(1);
+    expect(board.tasks[1]?.projectId).toBe("two");
+    board = await f.service.update({ id: board.tasks[1]!.id, newProject: { name: "Legal", cwd: "/repo/legal" } });
+    expect(board.tasks[1]?.projectId).toBe("new-2");
+    await expect(f.service.create({ title: "both", projectId: "one", newProject: { name: "X" } })).rejects.toThrow("二选一");
+    f.setOnline(false);
+    await expect(f.service.create({ title: "offline", newProject: { name: "Y" } })).rejects.toThrow("T3 offline");
+    expect(f.created).toHaveLength(2);
   }));
 
   test("same-millisecond tasks retain arrival order even when UUID order differs", () => fixture(async (f) => {

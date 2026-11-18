@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 
+import { SECRETS_FILE_ENV } from "../auth/secret-store-factory.js";
 import { MAGPIE_TIMEOUT_MS } from "./magpie.js";
 
 /**
@@ -25,7 +26,10 @@ export interface ClaudeUsageWindows {
  * missing or unreadable. The token is returned to the caller only — it never lands in
  * a log, an error message, or a stored file.
  */
-export function readClaudeAccessToken(): Promise<string> {
+export function readClaudeAccessToken(env: NodeJS.ProcessEnv = process.env): Promise<string> {
+  if (env[SECRETS_FILE_ENV]?.trim()) {
+    return Promise.reject(new Error("没有找到 Claude Code 的钥匙串凭据"));
+  }
   return new Promise((resolve, reject) => {
     execFile(
       "security",

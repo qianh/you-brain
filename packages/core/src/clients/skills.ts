@@ -36,19 +36,40 @@ export async function installYouBrainSkill(
 ): Promise<"installed" | "preserved"> {
   await mkdir(skillRoot(client, homeDir), { recursive: true });
   const dir = skillDir(client, homeDir, name);
+  const content = YOU_BRAIN_SKILL_BODIES[name];
+  const file = join(dir, "SKILL.md");
+  const marker = join(dir, markerName);
   try {
     await mkdir(dir);
+    await writeFile(file, content, { flag: "wx" });
+    await writeFile(marker, JSON.stringify({ owner: "you-brain", content }), { flag: "wx" });
+    return "installed";
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") return "preserved";
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+
+  if (!(await statIfPresent(dir))?.isDirectory()) return "preserved";
+  const markerStat = await statIfPresent(marker);
+  if (!markerStat?.isFile()) return "preserved";
+  let ownership: { owner?: unknown; content?: unknown };
+  try {
+    ownership = JSON.parse(await readFile(marker, "utf8")) as typeof ownership;
+  } catch (error) {
+    if (error instanceof SyntaxError) return "preserved";
     throw error;
   }
-  const content = YOU_BRAIN_SKILL_BODIES[name];
-  await writeFile(join(dir, "SKILL.md"), content, { flag: "wx" });
-  await writeFile(
-    join(dir, markerName),
-    JSON.stringify({ owner: "you-brain", content }),
-    { flag: "wx" },
-  );
+  if (!ownership || ownership.owner !== "you-brain" || typeof ownership.content !== "string") {
+    return "preserved";
+  }
+  const fileStat = await statIfPresent(file);
+  if (fileStat) {
+    if (!fileStat.isFile()) return "preserved";
+    const current = await readFile(file, "utf8");
+    if (current !== ownership.content) return "preserved";
+    if (current === content) return "installed";
+  }
+  await writeFile(file, content, "utf8");
+  await writeFile(marker, JSON.stringify({ owner: "you-brain", content }), "utf8");
   return "installed";
 }
 

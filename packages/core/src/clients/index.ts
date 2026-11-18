@@ -6,6 +6,7 @@ export {
   GROK_INSTRUCTION_LIMIT,
   MCP_SERVER_NAME,
   clientById,
+  formatInlineCodingBody,
   portraitBody,
   type ClientCatalogEntry,
   type CommandSpec,
@@ -53,6 +54,7 @@ export {
 } from "./skills.js";
 export {
   YOU_BRAIN_PORTRAIT_SKILL,
+  YOU_BRAIN_REF_SKILL,
   YOU_BRAIN_SKILL,
   YOU_BRAIN_SKILL_BODIES,
   YOU_BRAIN_SKILL_NAMES,

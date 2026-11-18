@@ -503,6 +503,73 @@ describe("local markdown output", () => {
     expect(rendered.topics).toContain("- 做完了");
   });
 
+  it("caps open todos, recent conclusions, and sessions per active topic in TOPICS.md", () => {
+    const now = new Date(NOW);
+    const recent = "2026-10-18T01:00:00.000Z";
+    const rendered = renderLocalMarkdown({
+      now,
+      timeZone: "Asia/Shanghai",
+      language: "zh",
+      activeLimit: 5,
+      historyDays: 30,
+      topics: [
+        {
+          topicId: "heavy",
+          name: "大项目",
+          aliases: [],
+          status: "active",
+          statusBy: "auto",
+          summary: "摘要",
+          nextStep: "",
+          lastActive: recent,
+          mergedInto: null,
+          createdTs: recent,
+          lastUserOpAt: null,
+          lastContentAt: null,
+          userLocked: false,
+        },
+      ],
+      sessions: Array.from({ length: 12 }, (_, idx) => ({
+        sessionKey: sessionKey(idx + 20),
+        source: "codex" as const,
+        device: DEVICE,
+        fileId: null,
+        title: `会话-${idx + 1}`,
+        summary: "",
+        startedAt: recent,
+        updatedAt: recent,
+        msgCount: 1,
+        refinedUpTo: 1,
+        topicId: "heavy",
+      })),
+      todaySessions: [],
+      conclusions: Array.from({ length: 14 }, (_, idx) => ({
+        conclusionId: `c-${String(idx + 1).padStart(2, "0")}`,
+        topicId: "heavy",
+        sessionKey: sessionKey(20),
+        text: `结论-${idx + 1}`,
+        ts: recent,
+      })),
+      todos: Array.from({ length: 18 }, (_, idx) => ({
+        todoId: `t-${String(idx + 1).padStart(2, "0")}`,
+        topicId: "heavy",
+        sessionKey: sessionKey(20),
+        text: `待办-${idx + 1}`,
+        status: "open" as const,
+        statusBy: "auto" as const,
+        confidence: 0.9,
+        ts: recent,
+        userLocked: false,
+      })),
+      devices: [],
+      reminders: [],
+    });
+    expect(rendered.topics).toContain("（另有 3 条，可通过 get_topic 按需查看）");
+    expect(rendered.topics).toContain("（另有 4 条，可通过 get_topic 按需查看）");
+    expect(rendered.topics).not.toContain("待办-18");
+    expect(rendered.topics).not.toContain("结论-14");
+  });
+
   it("debounces for 10 seconds and skips a rewrite when the markdown is unchanged", async () => {
     const root = await home();
     const paths = pathsFor(root);

@@ -239,36 +239,16 @@ export class NotionService {
   }
 
   async page(pageId: string): Promise<NotionPageView | null> {
-    const index = this.#openIndex();
-    const pages = index.listPages();
-    const meta = pages.find((page) => page.pageId === pageId);
-    if (!meta) return null;
-    const blocks = index.pageBlocks(pageId);
-    const isRow = meta.parentKind === "database";
-    let properties: Record<string, string> | undefined;
-    if (isRow && meta.parentId) {
-      const database = index.database(meta.parentId);
-      const row = database?.rows.find((candidate) => candidate.rowPageId === pageId);
-      if (row) {
-        properties = flattenCells(row.cells);
-      }
-    }
-    const dbView = isRow && meta.parentId ? this.databaseView(meta.parentId) : null;
-    return {
-      id: pageId,
-      title: meta.title === "" ? "未命名" : meta.title,
-      icon: meta.icon,
-      coverUrl: meta.coverUrl,
-      lastEditedTime: meta.lastEditedTime,
-      blocks,
-      markdown: blocksToMarkdown(blocks),
-      ...(properties ? { properties } : {}),
-      ...(dbView ? { database: { id: dbView.databaseId, columns: dbView.columns } } : {}),
-    };
+    return readNotionPageView(this.#openIndex(), pageId);
   }
 
   search(query: string, limit = 20) {
     return this.#openIndex().search(query, limit);
+  }
+
+  /** 最近编辑的知识库页面（供 @ 引用空搜索时展示）。 */
+  recentPages(limit = 8): Array<{ pageId: string; title: string; lastEditedTime: string }> {
+    return readNotionRecentPages(this.#openIndex(), limit);
   }
 
   database(databaseId: string) {
@@ -277,27 +257,7 @@ export class NotionService {
 
   /** Database rendered for the knowledge base view: ordered columns + text cells. */
   databaseView(databaseId: string): NotionDatabaseView | null {
-    const db = this.#openIndex().database(databaseId);
-    if (!db) return null;
-    const schema = db.schema as Record<string, Record<string, unknown>>;
-    const columns = Object.entries(schema).map(([name, def]) => {
-      const type = String(def.type ?? "unknown");
-      const options = (def[type] as { options?: Array<{ name?: unknown }> } | undefined)?.options;
-      return {
-        name,
-        type,
-        ...(Array.isArray(options) ? { options: options.map((option) => String(option.name ?? "")).filter((option) => option !== "") } : {}),
-      };
-    });
-    const rows = db.rows.map((row) => {
-      const cells = columns.map((column) => ({
-        name: column.name,
-        type: column.type,
-        text: propertyValueText(row.cells[column.name]),
-      }));
-      return { id: row.rowPageId, title: row.title, icon: row.icon, cells };
-    });
-    return { databaseId: db.databaseId, title: db.title, columns, rows };
+    return readNotionDatabaseView(this.#openIndex(), databaseId);
   }
 
   /** Resolve a block's file URL for the asset proxy. Notion-hosted URLs only. */
@@ -1791,4 +1751,81 @@ export function stubTitle(stub: NotionPageStub, raw?: Record<string, unknown>): 
   if (stub.title !== "") return stub.title;
   if (raw) return titleOfPage(raw);
   return "未命名";
+}
+
+export function readNotionRecentPages(
+  index: NotionIndex,
+  limit = 8,
+): Array<{ pageId: string; title: string; lastEditedTime: string }> {
+  const cap = Math.max(0, Math.floor(limit));
+  if (cap === 0) return [];
+  return [...index.listPages()]
+    .sort(
+      (left, right) =>
+        right.lastEditedTime.localeCompare(left.lastEditedTime) ||
+        left.pageId.localeCompare(right.pageId),
+    )
+    .slice(0, cap)
+    .map((page) => ({
+      pageId: page.pageId,
+      title: page.title === "" ? "未命名" : page.title,
+      lastEditedTime: page.lastEditedTime,
+    }));
+}
+
+export function readNotionDatabaseView(
+  index: NotionIndex,
+  databaseId: string,
+): NotionDatabaseView | null {
+  const db = index.database(databaseId);
+  if (!db) return null;
+  const schema = db.schema as Record<string, Record<string, unknown>>;
+  const columns = Object.entries(schema).map(([name, def]) => {
+    const type = String(def.type ?? "unknown");
+    const options = (def[type] as { options?: Array<{ name?: unknown }> } | undefined)?.options;
+    return {
+      name,
+      type,
+      ...(Array.isArray(options)
+        ? { options: options.map((option) => String(option.name ?? "")).filter((option) => option !== "") }
+        : {}),
+    };
+  });
+  const rows = db.rows.map((row) => {
+    const cells = columns.map((column) => ({
+      name: column.name,
+      type: column.type,
+      text: propertyValueText(row.cells[column.name]),
+    }));
+    return { id: row.rowPageId, title: row.title, icon: row.icon, cells };
+  });
+  return { databaseId: db.databaseId, title: db.title, columns, rows };
+}
+
+export function readNotionPageView(index: NotionIndex, pageId: string): NotionPageView | null {
+  const pages = index.listPages();
+  const meta = pages.find((page) => page.pageId === pageId);
+  if (!meta) return null;
+  const blocks = index.pageBlocks(pageId);
+  const isRow = meta.parentKind === "database";
+  let properties: Record<string, string> | undefined;
+  if (isRow && meta.parentId) {
+    const database = index.database(meta.parentId);
+    const row = database?.rows.find((candidate) => candidate.rowPageId === pageId);
+    if (row) {
+      properties = flattenCells(row.cells);
+    }
+  }
+  const dbView = isRow && meta.parentId ? readNotionDatabaseView(index, meta.parentId) : null;
+  return {
+    id: pageId,
+    title: meta.title === "" ? "未命名" : meta.title,
+    icon: meta.icon,
+    coverUrl: meta.coverUrl,
+    lastEditedTime: meta.lastEditedTime,
+    blocks,
+    markdown: blocksToMarkdown(blocks),
+    ...(properties ? { properties } : {}),
+    ...(dbView ? { database: { id: dbView.databaseId, columns: dbView.columns } } : {}),
+  };
 }

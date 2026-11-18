@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { basename } from "node:path";
 
+import type { CaptureSourceId } from "@you-brain/protocol";
+
 import { writeFileAtomic } from "../domain/atomic.js";
 import { YouBrainError } from "../domain/errors.js";
 import type { YouBrainPaths } from "../domain/paths.js";
@@ -12,6 +14,7 @@ import type { PortraitConsentStore } from "./consent.js";
 import { CodingInjection, type InjectionSyncResult } from "./injection.js";
 import { decodePortraitMeta, encodePortraitMeta } from "./meta.js";
 import { globPrefix, globToRegExp, resolveDrivePath } from "./path.js";
+import { syncSplitProjectFiles } from "./projects-split.js";
 
 export interface PortraitVariantConfig {
   id: string;
@@ -108,6 +111,7 @@ export class PortraitService {
             managedStatePath: options.managedStatePath,
             consent: options.consent,
             codingPath: () => this.#codingPath(),
+            codingFilePath: portraitFile(this.#paths, "coding"),
           })
         : null;
   }
@@ -174,6 +178,11 @@ export class PortraitService {
     return this.#injection.reconcile();
   }
 
+  syncPortraitClients(clients: readonly CaptureSourceId[]): Promise<InjectionSyncResult> {
+    if (!this.#injection) return Promise.resolve(idleInjection());
+    return this.#injection.syncSelectedClients(clients);
+  }
+
   async #pullVariant(variant: PortraitVariantConfig): Promise<PortraitVariantResult> {
     const drivePath = resolveDrivePath(variant.path, this.#driveRoot);
     const localPath = portraitFile(this.#paths, variant.id);
@@ -198,6 +207,9 @@ export class PortraitService {
         stored.path === localPath,
     );
     if (!contentSame) await writeFileAtomic(localPath, object.bytes);
+    if (variant.id === "projects") {
+      await syncSplitProjectFiles(this.#paths.portraitDir, object.bytes.toString("utf8"));
+    }
     if (!metaSame) {
       this.#store.upsertPortrait({
         variant: variant.id,
