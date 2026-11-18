@@ -772,6 +772,7 @@ export class MuseDeckRuntime {
     controller: AbortController;
   }): Promise<void> {
     const { sessionId, isMain, localUserMessageId, userMessage, text, attachments, controller } = params;
+    let failure: string | undefined;
     try {
       const client = await this.#ensureConnected();
       if (isMain) {
@@ -782,11 +783,21 @@ export class MuseDeckRuntime {
         await this.#runOwnedSideTurn(client, sessionId, text, attachments, controller);
       }
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       if (!controller.signal.aborted) {
-        const message = error instanceof Error ? error.message : String(error);
         this.#sessionErrors.set(sessionId, message);
+        failure = message;
+      } else {
+        failure = "已停止";
       }
     } finally {
+      // 主对话的 local: 消息会在 ack 后换成服务端 id；一轮结束仍未替换说明没送达，
+      // 持久化标出来，免得历史同步时被当成"发送中"一直钉在末尾。
+      if (isMain) {
+        await this.#store
+          .markUndelivered(sessionId, localUserMessageId, `未送达：${failure ?? "未收到 Muse 确认"}`)
+          .catch(() => false);
+      }
       if (this.#activeTurns.get(sessionId)?.controller === controller) {
         this.#activeTurns.delete(sessionId);
       }
@@ -852,7 +863,7 @@ export class MuseDeckRuntime {
           for (const id of acknowledgementIds(ack)) this.#rememberLocalUserId(id);
           await this.#store.upsertMessage(
             MAIN_MUSE_SESSION_ID,
-            { ...userMessage, id: `msg:${ack.messageId}` },
+            { ...userMessage, id: `msg:${ack.messageId}`, error: undefined },
             { replaceId: localUserMessageId },
           );
           if (!sendDecided) {
@@ -928,7 +939,7 @@ export class MuseDeckRuntime {
       await this.#store.markInitializedOnServer(sessionId);
       await this.#store.upsertMessage(
         sessionId,
-        { ...userMessage, id: `msg:${ack.messageId}` },
+        { ...userMessage, id: `msg:${ack.messageId}`, error: undefined },
         { replaceId: localUserMessageId },
       );
 

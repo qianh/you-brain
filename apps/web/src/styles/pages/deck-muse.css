@@ -704,6 +704,10 @@
   color: var(--text-3);
 }
 
+.muse-msg-error {
+  color: var(--danger-text);
+}
+
 .muse-origin-tag {
   padding: 1px 6px;
   border-radius: 999px;

@@ -109,6 +109,54 @@ describe("MuseChatStore", () => {
     expect(after?.title).toBe("帮我整理今天下午的会议纪要");
     expect(after?.messages.length).toBe(1);
   });
+
+  it("pins only in-flight local messages to the end; undelivered ones sort by time", async () => {
+    const dir = await makeTempDir();
+    const store = new MuseChatStore(join(dir, "chats.json"));
+    const local = (id: string, at: string) => ({
+      id: `local:${id}`,
+      role: "user" as const,
+      text: id,
+      createdAt: at,
+      done: true,
+      origin: "local" as const,
+    });
+    await store.upsertMessage(MAIN_MUSE_SESSION_ID, local("failed", "2026-11-18T09:11:00.000Z"));
+    await store.upsertMessage(MAIN_MUSE_SESSION_ID, local("sending", "2026-11-18T09:30:00.000Z"));
+    expect(await store.markUndelivered(MAIN_MUSE_SESSION_ID, "local:failed", "发送失败")).toBe(true);
+    expect(await store.markUndelivered(MAIN_MUSE_SESSION_ID, "local:missing", "发送失败")).toBe(false);
+
+    await store.mergeMainHistory([
+      { id: "msg:a", role: "assistant", text: "a", createdAt: "2026-11-18T09:00:00.000Z", done: true },
+      { id: "msg:b", role: "assistant", text: "b", createdAt: "2026-11-18T15:00:00.000Z", done: true },
+    ]);
+    const main = await store.getSession(MAIN_MUSE_SESSION_ID);
+    expect(main?.messages.map((m) => m.id)).toEqual(["msg:a", "local:failed", "msg:b", "local:sending"]);
+    expect(main?.messages[1]?.error).toBe("发送失败");
+  });
+
+  it("marks main-chat local messages left over from a previous run as undelivered on load", async () => {
+    const dir = await makeTempDir();
+    const file = join(dir, "chats.json");
+    const store = new MuseChatStore(file);
+    const side = await store.createSideSession();
+    const message = {
+      id: "local:x",
+      role: "user" as const,
+      text: "hi",
+      createdAt: "2026-11-18T09:11:00.000Z",
+      done: true,
+    };
+    await store.upsertMessage(MAIN_MUSE_SESSION_ID, message);
+    await store.upsertMessage(side.id, message);
+    await store.flush();
+
+    const reloaded = new MuseChatStore(file);
+    const main = await reloaded.getSession(MAIN_MUSE_SESSION_ID);
+    expect(main?.messages[0]?.error).toBeTruthy();
+    const sideAfter = await reloaded.getSession(side.id);
+    expect(sideAfter?.messages[0]?.error).toBeUndefined();
+  });
 });
 
 describe("MuseDeckRuntime", () => {
@@ -443,6 +491,88 @@ describe("MuseDeckRuntime", () => {
       const finalMain = await runtime.session(MAIN_MUSE_SESSION_ID);
       expect(finalMain?.busy).toBe(false);
       expect(finalMain?.messages.at(-1)?.text).toBe("这是主对话无父 ID 的实时回复！");
+    } finally {
+      runtime.stop();
+    }
+  });
+
+  it("marks a Main Chat message as undelivered when sendMessage fails, so it no longer sticks to the end", async () => {
+    const dir = await makeTempDir();
+    const museDir = join(dir, "deck", "muse");
+    await writeDummyCredentials(museDir);
+
+    let history: Array<{ messageId: string; role: "user" | "assistant"; text: string; occurredAtMs: number }> = [];
+    const fakeClient: MuseClientLike = {
+      closed: false,
+      vm: { id: "vm-1", name: "My Muse VM", url: "wss://hatch.metaaivm.com", isDefault: true },
+      vms: [{ id: "vm-1", name: "My Muse VM", url: "wss://hatch.metaaivm.com", isDefault: true }],
+      onDisconnect: () => () => {},
+      close: () => {},
+      fetchHistory: async () => history,
+      sendMessage: async () => {
+        throw new Error("网络断开");
+      },
+      subscribe: async (options) => {
+        let wake: (() => void) | undefined;
+        let closed = false;
+        options?.signal?.addEventListener("abort", () => {
+          closed = true;
+          wake?.();
+        });
+        return {
+          close: () => {
+            closed = true;
+            wake?.();
+          },
+          async *[Symbol.asyncIterator]() {
+            while (!closed) await new Promise<void>((r) => { wake = r; });
+          },
+        };
+      },
+      chat: async function* () {},
+    };
+
+    const runtime = new MuseDeckRuntime({
+      dataDir: dir,
+      homeDir: dir,
+      platform: "darwin",
+      connectClient: async () => fakeClient,
+    });
+
+    try {
+      await runtime.action({ action: "reconnect" });
+      await runtime.send({ sessionId: MAIN_MUSE_SESSION_ID, text: "这条发不出去" });
+      for (let i = 0; i < 40; i++) {
+        const s = await runtime.session(MAIN_MUSE_SESSION_ID);
+        if (!s?.busy) break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      const failed = (await runtime.session(MAIN_MUSE_SESSION_ID))?.messages.at(-1);
+      expect(failed?.id.startsWith("local:")).toBe(true);
+      expect(failed?.error).toContain("网络断开");
+
+      history = [
+        { messageId: "later-1", role: "assistant", text: "之后的回复", occurredAtMs: Date.now() + 60_000 },
+      ];
+      runtime.stop();
+      const again = new MuseDeckRuntime({
+        dataDir: dir,
+        homeDir: dir,
+        platform: "darwin",
+        connectClient: async () => fakeClient,
+      });
+      try {
+        await again.action({ action: "reconnect" });
+        for (let i = 0; i < 40; i++) {
+          const s = await again.session(MAIN_MUSE_SESSION_ID);
+          if (s?.messages.some((m) => m.id === "msg:later-1")) break;
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        const ids = (await again.session(MAIN_MUSE_SESSION_ID))?.messages.map((m) => m.id) ?? [];
+        expect(ids.at(-1)).toBe("msg:later-1");
+      } finally {
+        again.stop();
+      }
     } finally {
       runtime.stop();
     }

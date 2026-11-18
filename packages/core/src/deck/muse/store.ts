@@ -9,6 +9,12 @@ const MAX_MESSAGES_PER_SESSION = 250;
 const MAX_SESSIONS = 100;
 /** Keep inline image previews only when reasonably compact so chats.json stays fast. */
 const MAX_INLINE_PREVIEW_CHARS = 360_000;
+/** Main Chat 里 `local:` 消息只在本进程发送中才有意义；重启后仍是 `local:` 说明从未收到送达确认。 */
+const STALE_LOCAL_ERROR = "未送达：应用重启前未收到 Muse 确认";
+
+function isLocalId(id: string): boolean {
+  return id.startsWith("local:");
+}
 
 export interface StoredMuseSession {
   id: string;
@@ -115,7 +121,7 @@ export class MuseChatStore {
         if (hasMain) continue;
         hasMain = true;
       }
-      const messages = Array.isArray(entry.messages)
+      const parsedMessages = Array.isArray(entry.messages)
         ? entry.messages.filter(
             (m): m is DeckMuseMessage =>
               !!m &&
@@ -125,6 +131,12 @@ export class MuseChatStore {
               typeof m.text === "string",
           )
         : [];
+      const messages =
+        kind === "main"
+          ? parsedMessages.map((m) =>
+              isLocalId(m.id) && !m.error ? { ...m, error: STALE_LOCAL_ERROR } : m,
+            )
+          : parsedMessages;
       sessions.push({
         id,
         kind,
@@ -287,6 +299,18 @@ export class MuseChatStore {
     return structuredClone(target);
   }
 
+  /** 发送未拿到 ack 时，把仍是 `local:` 的用户消息标成未送达；消息已被替换或不存在时返回 false。 */
+  async markUndelivered(sessionId: string, messageId: string, error: string): Promise<boolean> {
+    if (!isLocalId(messageId)) return false;
+    const data = await this.#ensureLoaded();
+    const target = data.sessions.find((s) => s.id === sessionId);
+    const message = target?.messages.find((m) => m.id === messageId);
+    if (!message) return false;
+    message.error = error;
+    await this.#scheduleSave();
+    return true;
+  }
+
   async flush(): Promise<void> {
     await this.#scheduleSave();
   }
@@ -300,7 +324,7 @@ export class MuseChatStore {
     const inFlightLocal: DeckMuseMessage[] = [];
     const byId = new Map<string, DeckMuseMessage>();
     for (const msg of main.messages) {
-      if (msg.id.startsWith("local:")) {
+      if (isLocalId(msg.id) && !msg.error) {
         inFlightLocal.push(msg);
       } else {
         byId.set(msg.id, msg);

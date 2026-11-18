@@ -902,6 +902,7 @@ export function DeckMusePanel({
                         <span className="muse-origin-tag">{t("deckMuseFromApp")}</span>
                       ) : null}
                       <time dateTime={msg.createdAt}>{formatClockTime(msg.createdAt)}</time>
+                      {msg.error ? <span className="muse-msg-error">{msg.error}</span> : null}
                     </div>
                   </article>
                 ) : (
