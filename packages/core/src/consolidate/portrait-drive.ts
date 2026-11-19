@@ -203,24 +203,58 @@ export interface TwinSessionRow {
   title: string;
   fileId: string | null;
   updatedAt: string | null;
+  msgCount?: number;
+  refinedUpTo?: number;
+  topicId?: string | null;
 }
 
-/** The user's own turns for sessions last updated on or after the day before `day`, oldest session first. */
+const TWIN_CATCHUP_DAYS = 7;
+
+/** True when refine already examined the whole session and classified it as `action = "none"` noise. */
+function isRefinedNoiseSession(session: TwinSessionRow): boolean {
+  if (session.refinedUpTo === undefined || session.refinedUpTo <= 0) return false;
+  if (session.topicId === undefined || session.topicId !== null) return false;
+  const knownTurns = Math.max(session.msgCount ?? 0, session.refinedUpTo);
+  return session.refinedUpTo >= knownTurns;
+}
+
+function hasUnreadTwinTurns(
+  session: TwinSessionRow,
+  seenTurns: Readonly<Record<string, number>>,
+): boolean {
+  const seen = seenTurns[session.sessionKey];
+  if (seen === undefined) return true;
+  const knownTurns = Math.max(session.msgCount ?? 0, session.refinedUpTo ?? 0);
+  return knownTurns > 0 && seen < knownTurns;
+}
+
+/**
+ * The user's own turns for sessions last updated on or after the day before `day` (plus any
+ * sessions in the past 7 days that still have unread turns past `seenTurns`), oldest session first.
+ */
 export async function readTwinSessions(input: {
   drive: DrivePort;
   sessions: readonly TwinSessionRow[];
   timeZone: string;
   day: string;
+  seenTurns?: Readonly<Record<string, number>>;
 }): Promise<Array<{ sessionKey: string; title: string; turns: string[] }>> {
   // A 03:00 run would miss yesterday's evening without the extra day; the turn cursor skips repeats.
-  const since = shiftDateKey(input.day, -1);
+  // When `seenTurns` is provided, unread turns from the past week also catch up instead of starving.
+  const sinceRecent = shiftDateKey(input.day, -1);
+  const sinceCatchUp = shiftDateKey(input.day, -(TWIN_CATCHUP_DAYS - 1));
   const rows = input.sessions
-    .filter(
-      (session) =>
-        session.fileId !== null &&
-        session.updatedAt !== null &&
-        localDayKey(new Date(session.updatedAt), input.timeZone) >= since,
-    )
+    .filter((session) => {
+      if (session.fileId === null || session.updatedAt === null) return false;
+      if (isRefinedNoiseSession(session)) return false;
+      const sessionDay = localDayKey(new Date(session.updatedAt), input.timeZone);
+      if (sessionDay >= sinceRecent) return true;
+      return (
+        input.seenTurns !== undefined &&
+        sessionDay >= sinceCatchUp &&
+        hasUnreadTwinTurns(session, input.seenTurns)
+      );
+    })
     .sort((left, right) => (left.updatedAt ?? "").localeCompare(right.updatedAt ?? ""));
   const sessions: Array<{ sessionKey: string; title: string; turns: string[] }> = [];
   for (let start = 0; start < rows.length; start += SESSION_READ_CONCURRENCY) {

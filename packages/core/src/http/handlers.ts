@@ -66,6 +66,7 @@ import {
   NotionUpdateBlockSchema,
   OAuthClientPutSchema,
   PortraitCorrectionBodySchema,
+  PortraitProbeActionBodySchema,
   PortraitProposalActionBodySchema,
   ReminderActionBodySchema,
   ReminderReplyBodySchema,
@@ -256,6 +257,11 @@ export async function handleApi(
   if (path === "/api/portrait/proposals") {
     if (request.method === "GET") return portraitProposals(context);
     if (request.method === "POST") return reviewPortraitProposal(request, context);
+    return methodNotAllowed("GET, POST");
+  }
+  if (path === "/api/portrait/probes") {
+    if (request.method === "GET") return portraitProbes(context);
+    if (request.method === "POST") return reviewPortraitProbe(request, context);
     return methodNotAllowed("GET, POST");
   }
   if (path === "/api/portrait") return method(request, "GET", () => portrait(url, context));
@@ -813,6 +819,21 @@ async function reviewPortraitProposal(request: Request, context: ApiContext): Pr
   }
   const body = PortraitProposalActionBodySchema.parse(await readJson(request));
   const result = await context.deps.reviewPortraitProposal(body);
+  publish(context.hub, ["portrait"]);
+  return json(result);
+}
+
+async function portraitProbes(context: ApiContext): Promise<Response> {
+  const probes = context.deps.portraitProbes ? await context.deps.portraitProbes() : [];
+  return json({ probes });
+}
+
+async function reviewPortraitProbe(request: Request, context: ApiContext): Promise<Response> {
+  if (!context.deps.reviewPortraitProbe) {
+    throw new HttpError(503, "SOURCE_UNAVAILABLE", "当前没有打开评测题审核通道");
+  }
+  const body = PortraitProbeActionBodySchema.parse(await readJson(request));
+  const result = await context.deps.reviewPortraitProbe(body);
   publish(context.hub, ["portrait"]);
   return json(result);
 }

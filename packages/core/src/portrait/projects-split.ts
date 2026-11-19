@@ -143,6 +143,27 @@ export async function syncSplitProjectFiles(
 }
 
 /**
+ * Reconcile `~/.you-brain/portrait/projects/` from an existing local `projects.md` if present.
+ * Safe to call on startup or offline before Drive pulls run.
+ */
+export async function syncSplitProjectFilesFromLocal(portraitDir: string): Promise<{
+  synced: boolean;
+  dir: string;
+  indexPath: string;
+  written: number;
+  removed: number;
+}> {
+  const dir = join(portraitDir, "projects");
+  const indexPath = join(dir, "index.md");
+  const localProjects = await readOptionalUtf8(join(portraitDir, "projects.md"));
+  if (localProjects === null) {
+    return { synced: false, dir, indexPath, written: 0, removed: 0 };
+  }
+  const res = await syncSplitProjectFiles(portraitDir, localProjects);
+  return { synced: true, ...res };
+}
+
+/**
  * Look up a single project's decisions by repo directory name, project prefix, or path.
  * When `query` is omitted, returns the compact `index.md` overview instead of the full master file.
  */

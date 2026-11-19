@@ -22,7 +22,12 @@ function takeTail(text: string, count: number): string {
 
 export interface FittedMessages {
   messages: RefineMessage[];
+  /** Number of input messages consumed by this batch (advances `refinedUpTo`). */
+  consumed: number;
+  /** True when a single oversized message had to be clipped to fit the budget. */
   truncated: boolean;
+  /** True when later messages remain after `consumed` for the next refine pass. */
+  hasMore: boolean;
 }
 
 function joinedLength(messages: readonly RefineMessage[]): number {
@@ -37,28 +42,49 @@ function joinedLength(messages: readonly RefineMessage[]): number {
 }
 
 /**
- * Keep the newest new-messages that fit the character budget.
- * Whole earliest messages are dropped first. A single remaining message
- * that is still too long keeps its tail. refinedUpTo still advances past
- * the dropped prefix: the next run only sees messages after this batch.
+ * Take the earliest new messages in chronological order that fit `budget`.
+ *
+ * Advancing forward in batches ensures early architecture decisions and conclusions
+ * are refined first rather than dropped; remaining messages stay above `refinedUpTo`
+ * so the next pass refines them with this batch's output as `previous`.
+ * When the very first message alone exceeds `budget`, its tail is kept and `consumed`
+ * is still 1 so `refinedUpTo` never stalls.
  */
 export function fitRefineMessages(
   messages: readonly RefineMessage[],
   budget = DEFAULT_REFINE_CHAR_BUDGET,
 ): FittedMessages {
-  if (messages.length === 0) return { messages: [], truncated: false };
-  if (budget <= 0) return { messages: [], truncated: true };
-  const kept = [...messages];
-  while (kept.length > 1 && joinedLength(kept) > budget) kept.shift();
-  const only = kept[0];
-  if (kept.length === 1 && only && charCount(messageBlock(only)) > budget) {
-    const room = Math.max(0, budget - charCount(`[${only.role}]\n`));
+  if (messages.length === 0) {
+    return { messages: [], consumed: 0, truncated: false, hasMore: false };
+  }
+  if (budget <= 0) {
+    return { messages: [], consumed: 0, truncated: true, hasMore: true };
+  }
+  const first = messages[0]!;
+  if (charCount(messageBlock(first)) > budget) {
+    const room = Math.max(0, budget - charCount(`[${first.role}]\n`));
     return {
-      messages: [{ role: only.role, text: takeTail(only.text, room) }],
+      messages: [{ role: first.role, text: takeTail(first.text, room) }],
+      consumed: 1,
       truncated: true,
+      hasMore: messages.length > 1,
     };
   }
-  return { messages: kept, truncated: kept.length !== messages.length };
+  const kept: RefineMessage[] = [first];
+  let total = charCount(messageBlock(first));
+  for (let index = 1; index < messages.length; index += 1) {
+    const next = messages[index]!;
+    const extra = 2 + charCount(messageBlock(next));
+    if (total + extra > budget) break;
+    kept.push(next);
+    total += extra;
+  }
+  return {
+    messages: kept,
+    consumed: kept.length,
+    truncated: false,
+    hasMore: kept.length < messages.length,
+  };
 }
 
 function historyRank(topics: readonly CandidateTopic[]): CandidateTopic[] {

@@ -268,7 +268,8 @@ describe("web session processor", () => {
         expect(refinedCount(device.dirs)).toBe(0);
         const failed = await readStatus(device.daemon);
         expect(failed.refine.pending).toBe(1);
-        expect(failed.refine.lastError).toContain("model down");
+        // 第一次失败交给自动重试，状态页不标红。
+        expect(failed.refine.lastError).toBeNull();
         expect(failed.web.pending).toBe(1);
         await clock.advance(500);
         expect(prompts).toHaveLength(1);
@@ -282,6 +283,51 @@ describe("web session processor", () => {
         expect(recovered.refine.pending).toBe(0);
         expect(recovered.web.pending).toBe(0);
         expect(sessionRow(device.dirs, "flaky")?.summary).toContain("重试成功");
+      });
+    },
+    { timeout: 120_000 },
+  );
+
+  test(
+    "refine failures show on the status page only after repeated attempts",
+    async () => {
+      await using(async (box) => {
+        const clock = new ManualDaemonClock(CLOCK_START);
+        const drive = new MemoryDrive({ now: () => clock.now() });
+        const prompts: string[] = [];
+        const device = await startDevice(
+          box,
+          clock,
+          drive,
+          "device-a",
+          fakeBackend(async (request) => {
+            prompts.push(request.user);
+            throw new Error("model down");
+          }),
+        );
+        await assignMain(device.daemon);
+        await putMarkdown(
+          drive,
+          "inbox/web-chrome/down.md",
+          sessionMarkdown({
+            conversationId: "down",
+            updatedAt: ago(10),
+            turnCount: 1,
+            body: "## User\nstill failing\n",
+          }),
+        );
+
+        await clock.advance(60_000);
+        expect(prompts).toHaveLength(1);
+        expect((await readStatus(device.daemon)).refine.lastError).toBeNull();
+        await clock.advance(60_000);
+        expect(prompts).toHaveLength(2);
+        expect((await readStatus(device.daemon)).refine.lastError).toBeNull();
+        await clock.advance(60_000);
+        expect(prompts).toHaveLength(3);
+        const status = await readStatus(device.daemon);
+        expect(status.refine.pending).toBe(1);
+        expect(status.refine.lastError).toContain("model down");
       });
     },
     { timeout: 120_000 },

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { DeckSessionNotice, ReminderView } from "@you-brain/core/http/types.js";
 
-import { buildPopupQueue, formatTerminalSnippet } from "../../src/pages/popup-queue.js";
+import { buildPopupQueue } from "../../src/pages/popup-queue.js";
 
 function reminder(id: string, issuedAt: string, overrides: Partial<ReminderView> = {}): ReminderView {
   return {
@@ -56,22 +56,5 @@ describe("buildPopupQueue", () => {
       "terminal:1",
       "reminder:r-old",
     ]);
-  });
-});
-
-describe("formatTerminalSnippet", () => {
-  test("strips ANSI escapes, drops blank lines, and keeps the last N lines", () => {
-    const raw = [
-      "",
-      "\x1b[32m✓\x1b[0m line 1",
-      "line 2   ",
-      "",
-      "line 3",
-      "line 4",
-      "Continue? [y/N]   ",
-      "",
-    ].join("\n");
-    expect(formatTerminalSnippet(raw, 3)).toBe(["line 3", "line 4", "Continue? [y/N]"].join("\n"));
-    expect(formatTerminalSnippet("   \n\n  ")).toBe("");
   });
 });

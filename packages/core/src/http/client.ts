@@ -11,6 +11,9 @@ import {
   type PortraitCorrectionBody,
   type PortraitCorrectionResult,
   type PortraitCorrectionsResponse,
+  type PortraitProbeActionBody,
+  type PortraitProbeActionResult,
+  type PortraitProbesResponse,
   type PortraitProposalActionBody,
   type PortraitProposalActionResult,
   type PortraitProposalsResponse,
@@ -117,6 +120,8 @@ export interface DaemonClient {
   addPortraitCorrection(input: PortraitCorrectionBody): Promise<PortraitCorrectionResult>;
   portraitProposals?(): Promise<PortraitProposalsResponse>;
   reviewPortraitProposal?(body: PortraitProposalActionBody): Promise<PortraitProposalActionResult>;
+  portraitProbes?(): Promise<PortraitProbesResponse>;
+  reviewPortraitProbe?(body: PortraitProbeActionBody): Promise<PortraitProbeActionResult>;
   search(query: SearchRequest): Promise<SearchResponse>;
   devices(): Promise<DevicesResponse>;
   addVirtualDevice(body: VirtualDeviceCreateBody): Promise<VirtualDeviceResponse>;
@@ -275,6 +280,8 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     addPortraitCorrection: (input) => request("POST", "/api/portrait/corrections", input),
     portraitProposals: () => request("GET", "/api/portrait/proposals"),
     reviewPortraitProposal: (body) => request("POST", "/api/portrait/proposals", body),
+    portraitProbes: () => request("GET", "/api/portrait/probes"),
+    reviewPortraitProbe: (body) => request("POST", "/api/portrait/probes", body),
     search: (query) => request("GET", `/api/search${searchString(query)}`),
     devices: () => request("GET", "/api/devices"),
     addVirtualDevice: (body) => request("POST", "/api/devices/virtual", body),

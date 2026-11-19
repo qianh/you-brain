@@ -105,6 +105,7 @@ import {
   isCliProvider,
   LlmRequestError,
   LlmRetryQueue,
+  type LlmRetryStatus,
   type LlmBackend,
   type LlmSetupWarning,
 } from "../llm/index.js";
@@ -117,13 +118,16 @@ import {
   executeConsolidation,
   mergeSuggestionLines,
   parseMergeSuggestions,
+  parseTurnCursor,
   planTopicReorganization,
+  PORTRAIT_TURNS_CURSOR,
   readTopicTranscripts,
   readTwinSessions,
   reorganizeEvents,
   reorganizeTopics,
   ReorganizeJob,
   reviewCodingProposals,
+  reviewProbes,
   type ReorganizeEvent,
   readConsolidateLease,
   writeConsolidateLease,
@@ -183,7 +187,7 @@ import {
 
 import { CodingInjection, portraitConsentIds } from "../portrait/injection.js";
 import { FilePortraitConsentStore, portraitConsentPath } from "../portrait/consent.js";
-import { lookupProjectPortrait } from "../portrait/projects-split.js";
+import { lookupProjectPortrait, syncSplitProjectFilesFromLocal } from "../portrait/projects-split.js";
 import { PortraitService } from "../portrait/service.js";
 import {
   createRefineEventFactory,
@@ -288,6 +292,7 @@ import type { SecretStore } from "../auth/index.js";
 
 const APP_VERSION = "0.1.0";
 const BACKFILL_CURSOR = "capture.backfill";
+const PORTRAIT_PULLED_AT_CURSOR = "portrait.pulled_at";
 /** A stuck Drive read must not hold `/api/status` longer than the shell's read timeout. */
 const STATUS_DRIVE_WAIT_MS = 1_000;
 /** `/api/status` 聚合是秒级操作;这个窗口内的重复调用共享同一份结果。 */
@@ -306,6 +311,14 @@ const INBOX_READ_CONCURRENCY = 8;
  * gets turned into topics and portrait material.
  */
 const REFINE_BACKFILL_WINDOW_DAYS = 7;
+/** HTTP 后端提炼单次调用的超时（后端默认 60 秒对长会话不够）。 */
+const REFINE_HTTP_TIMEOUT_MS = 180_000;
+/** 提炼连续失败这么多次才在状态页报错；之前的失败交给自动重试。 */
+const REFINE_ERROR_MIN_ATTEMPTS = 3;
+
+function isPersistentRefineFailure(job: LlmRetryStatus): boolean {
+  return job.exhausted || !job.retryable || job.attempts >= REFINE_ERROR_MIN_ATTEMPTS;
+}
 
 /** 传给记忆判断的回复条数上限；服务侧再按时效过滤并截到 RECALL_REPLIES。 */
 const RECALL_REPLY_PORT_LIMIT = 20;
@@ -1052,7 +1065,13 @@ export class YouBrainDaemon {
     this.#lastWebSessions = startedAt;
     this.#lastRefineBackfill = startedAt;
     this.#bootedAtMs = startedAt;
-    this.#lastPortrait = startedAt;
+    const savedPortraitAt = Number(this.#store.getCursor(PORTRAIT_PULLED_AT_CURSOR));
+    this.#lastPortrait =
+      Number.isFinite(savedPortraitAt) && savedPortraitAt > 0
+        ? savedPortraitAt
+        : this.#store.getPortrait("full") !== null
+          ? null
+          : startedAt;
     this.#lastSearch = startedAt;
     this.#lastVector = startedAt;
     this.#started = true;
@@ -1520,13 +1539,19 @@ export class YouBrainDaemon {
       this.#portrait &&
       (this.#portraitSoon || intervalDue(this.#lastPortrait, now, INTERVALS.portraitMs))
     ) {
+      let pulledOk = false;
       try {
         await this.#traced("portrait", () => this.#portrait!.pull());
+        pulledOk = true;
       } catch {
         // A missing twin file is not fatal.
       }
       this.#portraitSoon = false;
-      this.#lastPortrait = this.#clock.nowMs();
+      const pulledAt = this.#clock.nowMs();
+      this.#lastPortrait = pulledAt;
+      if (pulledOk) {
+        this.#store?.setCursor(PORTRAIT_PULLED_AT_CURSOR, String(pulledAt));
+      }
     }
     if (this.#search) {
       if (this.#searchTextDue(now)) {
@@ -1782,6 +1807,7 @@ export class YouBrainDaemon {
             startSeq: 1,
           }),
           ids: defaultRefineIds(this.#clock.nowMs()),
+          ...this.#refineTimeout(),
         },
       );
       if (result.status === "skipped") {
@@ -1810,6 +1836,16 @@ export class YouBrainDaemon {
       this.#retry.fail(input.key, input.key, error);
       this.#statusChanged(this.#clock.now().toISOString());
     }
+  }
+
+  /**
+   * 提炼要按 JSON Schema 输出整段结构，长会话经网关常超过 HTTP 后端默认的 60 秒。
+   * CLI 后端有自己更长的默认值，不覆盖；测试显式设了 llmTimeoutMs 时以它为准。
+   */
+  #refineTimeout(): { timeoutMs?: number } {
+    if (this.#options.llmTimeoutMs !== undefined) return {};
+    if (isCliProvider(this.#shared.llm.provider)) return {};
+    return { timeoutMs: REFINE_HTTP_TIMEOUT_MS };
   }
 
   #canProcessWebSessions(): boolean {
@@ -3556,6 +3592,50 @@ export class YouBrainDaemon {
         const remaining = await runtime.portrait.codingProposals();
         return { ok: true, proposals: remaining, version: reviewed.version };
       },
+      portraitProbes: async () => {
+        const runtime = this.#portraitRuntime();
+        if (!("portrait" in runtime)) return [];
+        const pending = await runtime.portrait.pendingProbes();
+        return pending.map(({ id, layer, situation, expect, day }) => ({
+          id,
+          layer,
+          situation,
+          expect,
+          ...(day === undefined ? {} : { day }),
+        }));
+      },
+      reviewPortraitProbe: async (body) => {
+        const runtime = this.#portraitRuntime();
+        if (!("portrait" in runtime)) {
+          throw new HttpError(503, "SOURCE_UNAVAILABLE", "Drive 未就绪，无法处理待审评测题");
+        }
+        const existing = await runtime.portrait.pendingProbes();
+        if (!existing.some((item) => item.id === body.id)) {
+          throw new HttpError(404, "NOT_FOUND", `找不到待审评测题 ${body.id}`);
+        }
+        await reviewProbes({
+          portrait: runtime.portrait,
+          decide: async (probe) => {
+            if (probe.id !== body.id) return null;
+            return body.action === "keep";
+          },
+        });
+        const [remaining, scored] = await Promise.all([
+          runtime.portrait.pendingProbes(),
+          runtime.portrait.probes(),
+        ]);
+        return {
+          ok: true,
+          probes: remaining.map(({ id, layer, situation, expect, day }) => ({
+            id,
+            layer,
+            situation,
+            expect,
+            ...(day === undefined ? {} : { day }),
+          })),
+          scoredTotal: scored.length,
+        };
+      },
       search: (query) => this.#searchLocal(query),
       searchWarm: () => {
         void this.#search?.warm().catch(() => undefined);
@@ -3863,6 +3943,7 @@ export class YouBrainDaemon {
         getSearchKey(provider, { platform: this.#platform, backend: this.#secretBackend }),
       noticesEnabled: async () => (await this.#uiPrefsStore().read())[TERMINAL_NOTIFY_PREF_KEY] !== "0",
       onNotices: () => this.changes.publish("deck", this.#clock.now().toISOString()),
+      noticeLlm: async () => this.#llm,
     };
   }
 
@@ -4215,7 +4296,8 @@ export class YouBrainDaemon {
       search,
       refine: {
         pending: pending.length,
-        lastError: pending[0]?.reason ?? null,
+        // 偶发失败会自动重试，不必标红；重试几次仍失败或已放弃时才报错。
+        lastError: pending.find(isPersistentRefineFailure)?.reason ?? null,
       },
       capture: { parsed: this.#lastScanParsed },
       captures: this.#captureRows(),
@@ -4330,7 +4412,14 @@ export class YouBrainDaemon {
     const drive = this.#drive;
     const store = this.#store;
     if (!drive || !store) return [];
-    return readTwinSessions({ drive, sessions: store.listSessions(), timeZone: this.#roles.timezone, day });
+    const seenTurns = parseTurnCursor(store.getCursor(PORTRAIT_TURNS_CURSOR));
+    return readTwinSessions({
+      drive,
+      sessions: store.listSessions(),
+      timeZone: this.#roles.timezone,
+      day,
+      seenTurns,
+    });
   }
 
   async #topicTranscripts(day: string, sessionKeys: readonly string[]): Promise<string> {
@@ -4407,6 +4496,9 @@ export class YouBrainDaemon {
   }
 
   async #ensureCoding(): Promise<void> {
+    if (this.#paths) {
+      await syncSplitProjectFilesFromLocal(this.#paths.portraitDir).catch(() => undefined);
+    }
     try {
       const configured = this.#shared.integrations.codingPortraitClients;
       if (configured.length > 0 && this.#consent) {

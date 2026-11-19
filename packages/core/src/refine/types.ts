@@ -80,6 +80,8 @@ export interface RefineSessionOptions {
   /** Character budget for new messages. The earliest text is dropped first. */
   charBudget?: number;
   historyLimit?: number;
+  /** 单次模型调用的超时；不传时用后端自己的默认值。 */
+  timeoutMs?: number;
 }
 
 export interface RefineCompleted {

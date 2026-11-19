@@ -99,6 +99,19 @@ const clean: RefineOutput = {
 };
 
 describe("refine session", () => {
+  it("passes the refine timeout to the model call", async () => {
+    const model = backend([JSON.stringify(clean)]);
+    const seen: Array<number | undefined> = [];
+    const original = model.complete.bind(model);
+    model.complete = async (request) => {
+      seen.push(request.timeoutMs);
+      return original(request);
+    };
+    await refineSession(model, input(), { eventFactory: factory(), ids: ids(), timeoutMs: 180_000 });
+    await refineSession(backend([JSON.stringify(clean)]), input(), { eventFactory: factory(), ids: ids() });
+    expect(seen).toEqual([180_000]);
+  });
+
   it("turns a fixed model response into a fixed event sequence", async () => {
     const model = backend([JSON.stringify(clean)]);
     const result = await refineSession(model, input(), {
@@ -370,5 +383,43 @@ describe("refine session", () => {
     if (result.status !== "refined") return;
     expect(result.output.topic.action).toBe("none");
     expect(result.events.map((event) => event.type)).toEqual(["session.refined"]);
+  });
+
+  it("advances refinedUpTo only by the messages fitted in the current budget", async () => {
+    const model = backend([JSON.stringify(clean)]);
+    const result = await refineSession(
+      model,
+      {
+        ...input(["甲".repeat(30), "乙".repeat(50), "丙".repeat(20)]),
+        refinedUpTo: 2,
+      },
+      { eventFactory: factory(), ids: ids(), charBudget: 45 },
+    );
+    expect(result.status).toBe("refined");
+    if (result.status !== "refined") return;
+    expect(result.events[0]?.data).toMatchObject({ refinedUpTo: 3 });
+  });
+
+  it("short-circuits built-in CLI slash control sessions and scheduled raw-log digests without calling the model", async () => {
+    const model = backend([]);
+    const slash = await refineSession(
+      model,
+      input(["<command-message>clear</command-message>\n<command-name>/clear</command-name>", ""]),
+      { eventFactory: factory(), ids: ids() },
+    );
+    expect(model.calls).toBe(0);
+    expect(slash.status).toBe("refined");
+    if (slash.status !== "refined") return;
+    expect(slash.output.topic.action).toBe("none");
+
+    const digest = await refineSession(
+      model,
+      input(["只根据指定时段的 raw 文本分析，不调用 wechat-cli，不读其他聊天，只覆盖写入该时段对应的 Markdown。", "已写入"]),
+      { eventFactory: factory(), ids: ids() },
+    );
+    expect(model.calls).toBe(0);
+    expect(digest.status).toBe("refined");
+    if (digest.status !== "refined") return;
+    expect(digest.output.topic.action).toBe("none");
   });
 });

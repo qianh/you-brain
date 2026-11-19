@@ -19,6 +19,7 @@ export {
   lookupProjectPortrait,
   renderProjectsSplit,
   syncSplitProjectFiles,
+  syncSplitProjectFilesFromLocal,
   type ProjectLookupResult,
   type RenderedProjectsSplit,
   type SplitProjectFile,

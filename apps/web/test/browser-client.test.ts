@@ -168,6 +168,8 @@ describe("daemon requests with a crowded loopback cookie jar", () => {
     await client.portrait("projects", "you-brain");
     await client.portraitProposals();
     await client.reviewPortraitProposal({ id: "prop-1", action: "approve", editedLine: "- **规则**：示例" });
+    await client.portraitProbes();
+    await client.reviewPortraitProbe({ id: "p08", action: "keep" });
     expect(calls[0]?.url).toBe("/api/portrait?variant=projects&project=you-brain");
     expect(calls[1]?.url).toBe("/api/portrait/proposals");
     expect(calls[1]?.init.method).toBe("GET");
@@ -177,6 +179,14 @@ describe("daemon requests with a crowded loopback cookie jar", () => {
       id: "prop-1",
       action: "approve",
       editedLine: "- **规则**：示例",
+    });
+    expect(calls[3]?.url).toBe("/api/portrait/probes");
+    expect(calls[3]?.init.method).toBe("GET");
+    expect(calls[4]?.url).toBe("/api/portrait/probes");
+    expect(calls[4]?.init.method).toBe("POST");
+    expect(JSON.parse(calls[4]!.init.body as string)).toEqual({
+      id: "p08",
+      action: "keep",
     });
   });
 

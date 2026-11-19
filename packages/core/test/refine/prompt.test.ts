@@ -58,25 +58,28 @@ describe("refine prompt input", () => {
     expect(prompt.user).not.toContain("更早的新增消息已因长度截断");
   });
 
-  it("drops the earliest new messages once the character budget is exceeded", () => {
+  it("takes the earliest new messages that fit the budget and leaves the rest for the next pass", () => {
     const messages = [
-      { role: "user", text: "甲".repeat(50) },
+      { role: "user", text: "甲".repeat(30) },
       { role: "assistant", text: "乙".repeat(50) },
       { role: "user", text: "丙".repeat(20) },
     ];
-    const fitted = fitRefineMessages(messages, 40);
-    expect(fitted.truncated).toBe(true);
-    expect(fitted.messages.map((message) => message.text[0])).toEqual(["丙"]);
+    const fitted = fitRefineMessages(messages, 45);
+    expect(fitted.truncated).toBe(false);
+    expect(fitted.hasMore).toBe(true);
+    expect(fitted.consumed).toBe(1);
+    expect(fitted.messages.map((message) => message.text[0])).toEqual(["甲"]);
     const prompt = buildRefinePrompt({
       previous: null,
       topics: [],
       openTodos: [],
       messages: fitted.messages,
       truncated: fitted.truncated,
+      hasMore: fitted.hasMore,
     });
-    expect(prompt.user).toContain("更早的新增消息已因长度截断");
-    expect(prompt.user).toContain("丙");
-    expect(prompt.user).not.toContain("甲");
+    expect(prompt.user).toContain("后续消息将在下一轮继续提炼");
+    expect(prompt.user).toContain("甲");
+    expect(prompt.user).not.toContain("丙");
     expect(prompt.user).toContain("首次提炼");
   });
 

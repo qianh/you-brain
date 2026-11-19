@@ -148,12 +148,14 @@ export {
   PORTRAIT_TURNS_CURSOR,
   cleanUserTurn,
   evaluateTwin,
+  parseTurnCursor,
   reviewProbes,
   rebuildTwin,
   seedCodingTwin,
   twinEvalLog,
   type RebuildTwinInput,
   type RebuildTwinResult,
+  type TurnCursor,
   type TwinEvalResult,
   type TwinEvalScore,
   type TwinEvalScores,
@@ -192,7 +194,7 @@ export {
   type TwinTexts,
   type VersionBump,
 } from "./twin.js";
-export { twinStandardProblems } from "./twin-standard.js";
+export { twinCrossLayerProblems, twinStandardProblems } from "./twin-standard.js";
 export {
   MERGE_SUGGESTIONS_CURSOR,
   mergeSuggestionLines,

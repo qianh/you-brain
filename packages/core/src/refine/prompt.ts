@@ -22,6 +22,7 @@ export interface RefinePromptView {
   openTodos: readonly OpenTodo[];
   messages: readonly RefineMessage[];
   truncated: boolean;
+  hasMore?: boolean;
 }
 
 function bullet(lines: readonly string[]): string {
@@ -79,9 +80,14 @@ export function buildRefinePrompt(view: RefinePromptView): { system: string; use
     view.messages.length === 0
       ? "（无）"
       : view.messages.map((message) => `[${message.role}]\n${message.text}`).join("\n\n");
-  const truncation = view.truncated
-    ? "（更早的新增消息已因长度截断，下面只保留最近的内容）\n"
-    : "";
+  const notices: string[] = [];
+  if (view.truncated) {
+    notices.push("（单条超长消息已截取末尾内容）");
+  }
+  if (view.hasMore) {
+    notices.push("（新增消息较长，本轮仅展示前一批；后续消息将在下一轮继续提炼，进行中的中间步骤不要列为待办）");
+  }
+  const truncation = notices.length > 0 ? `${notices.join("\n")}\n` : "";
   const openTodos =
     view.openTodos.length === 0
       ? "（没有可完成的开放待办，todos_completed 必须是空数组）"

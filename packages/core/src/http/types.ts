@@ -366,6 +366,33 @@ export interface PortraitProposalActionResult {
   version: string | null;
 }
 
+export interface PortraitProbeView {
+  id: string;
+  layer: "persona" | "coding";
+  situation: string;
+  expect: string;
+  day?: string;
+}
+
+export interface PortraitProbesResponse {
+  probes: PortraitProbeView[];
+}
+
+export const PortraitProbeActionBodySchema = z
+  .object({
+    id: z.string().min(1),
+    action: z.enum(["keep", "drop"]),
+  })
+  .strict();
+
+export type PortraitProbeActionBody = z.infer<typeof PortraitProbeActionBodySchema>;
+
+export interface PortraitProbeActionResult {
+  ok: true;
+  probes: PortraitProbeView[];
+  scoredTotal: number;
+}
+
 export interface SearchRequest {
   query: string;
   limit?: number;

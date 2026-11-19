@@ -29,6 +29,7 @@ import {
   portraitEvalStep,
   portraitMonthlyStep,
   portraitStep,
+  readTwinSessions,
   rebuildTwin,
   reviewCodingProposals,
   reviewProbes,
@@ -50,7 +51,7 @@ import {
   TWIN_PROBES_SYSTEM_PROMPT,
 } from "../../src/consolidate/prompt.js";
 import { TWIN_SKELETON } from "../../src/consolidate/twin.js";
-import { twinStandardProblems } from "../../src/consolidate/twin-standard.js";
+import { twinCrossLayerProblems, twinStandardProblems } from "../../src/consolidate/twin-standard.js";
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
 import type { LlmCompleteRequest } from "../../src/llm/types.js";
 import {
@@ -996,7 +997,7 @@ describe("portrait eval", () => {
     expect(reminders(box.events)).toEqual([
       {
         kind: "portrait_eval",
-        text: "留出题上分身没有比对照答得更好；有 1 道新题等你过目，运行 you-brain portrait-probes。答错的题：无",
+        text: "留出题上分身没有比对照答得更好；有 1 道新评测题等你过目，可在数字分身页或运行 you-brain portrait-probes 审核。答错的题：无",
       },
     ]);
 
@@ -1298,5 +1299,87 @@ describe("portrait rebuild", () => {
     expect(await textAt(box.drive, PENDING)).toBeNull();
     expect(await textAt(box.drive, CHANGELOG)).toContain("从 v1.3.11 重建为三层");
     expect(lines[0]).toBe("旧分身切成 2 段，开始抽取主张");
+  });
+
+  it("warns on oversized project groups and flags rules duplicated across full and coding", () => {
+    const bigProject = `# 数字分身 · 项目决定\n版本 v4.5.0 · ${LOCAL_DAY} · 变更见 changelog\n\n## 超大项目 · 一\n${"甲".repeat(1_200)}\n\n## 超大项目 · 二\n${"乙".repeat(1_200)}\n\n## 超大项目 · 三\n${"丙".repeat(1_200)}\n`;
+    const check = checkTwin({ full: FULL_TEXT, coding: CODING_TEXT, projects: bigProject }, new Set(["projects"]));
+    expect(check.warnings.some((w) => w.includes("超大项目") && w.includes("项目总长超过"))).toBe(true);
+
+    const dupFull = `# 数字分身 · 人格\n版本 v4.5.0 · ${LOCAL_DAY} · 变更见 changelog\n\n## 8. 合作说明\n仅在用户明确要求时执行 commit 或 push，不要自作主张提交代码。\n`;
+    const dupCoding = `# 数字分身 · 编码\n版本 v4.5.0 · ${LOCAL_DAY} · 变更见 changelog\n\n## 安全与授权\n- **提交授权**：仅在用户明确要求时执行 commit 或 push，不要自作主张提交代码。\n`;
+    expect(twinCrossLayerProblems(dupFull, dupCoding)[0]).toContain("full 与 coding 重复写了同一条通用规范");
+  });
+
+  it("retains unmerged high-confidence claims when finishTwin skips, and skips action=none noise in readTwinSessions", async () => {
+    const box = await world();
+    await seedTwin(box);
+    await seed(
+      box.drive,
+      "inbox/dev/noise.md",
+      "---\nsource: codex\nconversation_id: c-noise\nstarted_at: 2026-10-23T01:00:00.000Z\nupdated_at: 2026-10-23T01:05:00.000Z\n---\n\n## User\n\n回复 ok\n",
+    );
+    await seed(
+      box.drive,
+      "inbox/dev/older-unread.md",
+      "---\nsource: codex\nconversation_id: c-unread\nstarted_at: 2026-10-20T08:00:00.000Z\nupdated_at: 2026-10-20T08:05:00.000Z\n---\n\n## User\n\n以后汇报先说结论\n",
+    );
+    const noiseEntry = await box.drive.findByPath("inbox/dev/noise.md");
+    const unreadEntry = await box.drive.findByPath("inbox/dev/older-unread.md");
+    const sessions = await readTwinSessions({
+      drive: box.drive,
+      timeZone: SHANGHAI,
+      day: LOCAL_DAY,
+      seenTurns: {},
+      sessions: [
+        {
+          sessionKey: "noise-1",
+          title: "探针",
+          fileId: noiseEntry?.id ?? null,
+          updatedAt: `${LOCAL_DAY}T01:05:00.000Z`,
+          msgCount: 2,
+          refinedUpTo: 2,
+          topicId: null,
+        },
+        {
+          sessionKey: "unread-1",
+          title: "三天前未读完",
+          fileId: unreadEntry?.id ?? null,
+          updatedAt: "2026-10-20T08:05:00.000Z",
+          msgCount: 2,
+          refinedUpTo: 2,
+          topicId: "topic-1",
+        },
+      ],
+    });
+    expect(sessions.map((s) => s.sessionKey)).toEqual(["unread-1"]);
+
+    box.sessions = [{ sessionKey: "s-high", title: "新原则", turns: ["以后汇报一律先给结论"] }];
+    const extracted = {
+      claims: [{ layer: "persona", project: "", confidence: "high", text: "汇报时先给结论。" }],
+    };
+    const badMerge = {
+      bump: "minor",
+      changelog: ["新增结论规则"],
+      edits: [{ layer: "full", heading: "## 1. 一句话", text: "## 1. 一句话\n样本数 5。" }],
+    };
+    const skipped = await run(box, model({ claims: extracted, merge: badMerge, fix: noEdits }));
+    expect(skipped.warnings[0]).toContain("没有通过写入前检查");
+    const pendingAfterSkip = jsonl(await textAt(box.drive, PENDING));
+    expect(pendingAfterSkip).toEqual([
+      expect.objectContaining({ layer: "persona", confidence: "high", text: "汇报时先给结论。" }),
+    ]);
+
+    // Next day with no new turns still merges the retained high-confidence claim and clears pending
+    box.sessions = [];
+    const cleanMerge = {
+      bump: "minor",
+      changelog: ["补入结论规则"],
+      edits: [{ layer: "full", heading: "## 1. 一句话", text: "## 1. 一句话\n汇报时先给结论。" }],
+    };
+    const nextDay = await run(box, model({ merge: cleanMerge }), { day: "2026-10-24" });
+    expect(nextDay.ok).toBe(true);
+    expect(await textAt(box.drive, FULL)).toContain("汇报时先给结论。");
+    expect(jsonl(await textAt(box.drive, PENDING))).toEqual([]);
   });
 });

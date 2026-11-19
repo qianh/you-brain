@@ -430,9 +430,9 @@ describe("merge suggestions", () => {
     ]);
     expect(result.steps[0]?.ok).toBe(true);
     expect(result.steps[2]?.ok).toBe(true);
-    expect(result.steps[3]).toEqual({ id: "portrait", ok: false, error: "依赖步骤失败" });
-    expect(result.steps[4]).toEqual({ id: "portrait_eval", ok: false, error: "依赖步骤失败" });
-    expect(result.steps[5]).toEqual({ id: "portrait_monthly", ok: false, error: "依赖步骤失败" });
+    expect(result.steps[3]).toEqual({ id: "portrait", ok: true });
+    expect(result.steps[4]).toEqual({ id: "portrait_eval", ok: true });
+    expect(result.steps[5]).toEqual({ id: "portrait_monthly", ok: true });
     expect(result.steps[6]).toEqual({ id: "topic_files", ok: false, error: "依赖步骤失败" });
     expect(rewritten(events, "a")).toEqual([]);
     expect(JSON.parse(cursors.get(MERGE_SUGGESTIONS_CURSOR) ?? "").pairs).toEqual([

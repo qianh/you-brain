@@ -6,6 +6,7 @@ import {
   groupReferenceCandidates,
   isReferenceShortcut,
   moveReferenceSelection,
+  writeClipboardDeferred,
 } from "../../src/pages/deck-reference-logic.js";
 
 function candidate(kind: ReferenceCandidateView["kind"], label: string): ReferenceCandidateView {
@@ -65,5 +66,55 @@ describe("deck reference logic", () => {
     expect(isReferenceShortcut(key("@", { shift: true }), "meta")).toBe(false);
     expect(isReferenceShortcut(key("2", { meta: true }), "meta")).toBe(false);
     expect(isReferenceShortcut(key("@", { meta: true, shift: true, alt: true }), "meta")).toBe(false);
+  });
+});
+
+describe("writeClipboardDeferred", () => {
+  test("在调用时同步发起 write，文本稍后才到", async () => {
+    let resolveText: (value: string) => void = () => undefined;
+    const text = new Promise<string>((resolve) => {
+      resolveText = resolve;
+    });
+    const written: Array<Record<string, Promise<Blob>>> = [];
+    let writeCalls = 0;
+    const result = writeClipboardDeferred(
+      text,
+      {
+        write: async () => {
+          writeCalls += 1;
+        },
+        writeText: async () => {
+          throw new Error("不应走 writeText");
+        },
+      },
+      (data) => {
+        written.push(data);
+        return data as unknown as ClipboardItem;
+      },
+    );
+    expect(writeCalls).toBe(1);
+    resolveText("@/a.md ");
+    expect(await result).toBe(true);
+    expect(await (await written[0]!["text/plain"]!).text()).toBe("@/a.md ");
+  });
+
+  test("没有 ClipboardItem 时退回 writeText", async () => {
+    const seen: string[] = [];
+    const ok = await writeClipboardDeferred(
+      Promise.resolve("@/b.md "),
+      { writeText: async (value) => void seen.push(value) },
+      null,
+    );
+    expect(ok).toBe(true);
+    expect(seen).toEqual(["@/b.md "]);
+  });
+
+  test("写入被拒返回 false", async () => {
+    const ok = await writeClipboardDeferred(
+      Promise.resolve("x"),
+      { write: async () => Promise.reject(new Error("NotAllowedError")), writeText: async () => undefined },
+      (data) => data as unknown as ClipboardItem,
+    );
+    expect(ok).toBe(false);
   });
 });

@@ -8,6 +8,9 @@ import type { TerminalConnection, TerminalSize, Tty7TerminalEvents } from "../de
 import type {
   CodingProposalView,
   PortraitCorrectionView,
+  PortraitProbeActionBody,
+  PortraitProbeActionResult,
+  PortraitProbeView,
   PortraitProposalActionBody,
   PortraitProposalActionResult,
   PortraitResponse,
@@ -118,6 +121,8 @@ export interface HttpDeps {
   portraitCorrections(variant?: string): Promise<PortraitCorrectionView[]>;
   portraitProposals?(): Promise<CodingProposalView[]>;
   reviewPortraitProposal?(body: PortraitProposalActionBody): Promise<PortraitProposalActionResult>;
+  portraitProbes?(): Promise<PortraitProbeView[]>;
+  reviewPortraitProbe?(body: PortraitProbeActionBody): Promise<PortraitProbeActionResult>;
   search(query: SearchRequest): Promise<SearchResponse>;
   /** Load the vector cache and the query model ahead of a likely search. Returns at once. */
   searchWarm?(): void;

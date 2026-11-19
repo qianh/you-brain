@@ -1,3 +1,4 @@
+import { isAutomatedBatchPrompt, isCliControlTurn, isInjectedPrompt } from "../adapters/conversation.js";
 import { ConflictError } from "../drive/errors.js";
 import type { LlmBackend } from "../llm/types.js";
 import { extractJson } from "../refine/parse.js";
@@ -51,6 +52,7 @@ import type {
 import { clipUnits, textUnits } from "./text.js";
 import {
   TWIN_LAYERS,
+  TWIN_SCAN,
   applyTwinEdits,
   bumpVersion,
   changedLayers,
@@ -68,7 +70,7 @@ import {
   type TwinTexts,
   type VersionBump,
 } from "./twin.js";
-import { twinStandardProblems } from "./twin-standard.js";
+import { twinCrossLayerProblems, twinStandardProblems } from "./twin-standard.js";
 
 const MAX_ATTEMPTS = 2;
 const EXTRACT_CONCURRENCY = 3;
@@ -95,7 +97,6 @@ export const PORTRAIT_EVAL_CURSOR = "portrait.eval";
 
 export const portraitStep: ConsolidationStep = {
   id: "portrait",
-  dependsOn: ["topic_summaries"],
   async run(ctx) {
     const portrait = ctx.portrait;
     if (!portrait) return;
@@ -108,25 +109,28 @@ export const portraitStep: ConsolidationStep = {
     const seen = parseTurnCursor(ctx.cursors.get(PORTRAIT_TURNS_CURSOR));
     const input = collectTurns(await portrait.sessions(ctx.day), seen);
     const corrections = portrait.corrections();
-    if (input.chunks.length === 0 && corrections.length === 0) return;
-
-    const claims = (
-      await extractClaims(ctx.llm, input.chunks, "sessions", projectNames(before.projects))
-    ).map((claim) => ({ ...claim, day: ctx.day }));
-    const earlier = (await portrait.pendingClaims()).filter((claim) => claim.day !== ctx.day);
-    const low = claims.filter((claim) => claim.confidence === "low");
     const keepFrom = shiftDateKey(ctx.day, -PENDING_KEEP_DAYS);
-    if (input.chunks.length > 0) {
-      await portrait.saveClaims({
-        name: ctx.day,
-        claims,
-        pending: [...earlier.filter((claim) => claim.day >= keepFrom), ...low],
-      });
-    }
+    const earlier = (await portrait.pendingClaims()).filter((claim) => claim.day !== ctx.day);
+    const earlierHigh = earlier.filter(
+      (claim) => claim.confidence === "high" && claim.day >= keepFrom && !hasSensitiveHit(claim.text),
+    );
+    const earlierLow = earlier.filter(
+      (claim) => claim.confidence === "low" && claim.day >= keepFrom && !hasSensitiveHit(claim.text),
+    );
+    if (input.chunks.length === 0 && corrections.length === 0 && earlierHigh.length === 0) return;
+
+    const claims =
+      input.chunks.length > 0
+        ? (await extractClaims(ctx.llm, input.chunks, "sessions", projectNames(before.projects))).map((claim) => ({
+            ...claim,
+            day: ctx.day,
+          }))
+        : [];
+    const low = claims.filter((claim) => claim.confidence === "low" && !hasSensitiveHit(claim.text));
 
     // 1. Session coding claims become reviewable proposals instead of mutating coding.md directly.
     const codingClaims = claims.filter((claim) => claim.layer === "coding");
-    const codingEarlier = earlier.filter((claim) => claim.layer === "coding");
+    const codingEarlier = earlierLow.filter((claim) => claim.layer === "coding");
     const shouldProposeCoding =
       codingClaims.some((claim) => claim.confidence === "high") ||
       (codingClaims.some((claim) => claim.confidence === "low") && codingEarlier.length > 0);
@@ -149,8 +153,11 @@ export const portraitStep: ConsolidationStep = {
     }
 
     // 2. Resident merge: persona claims + explicit full/coding corrections (without sending 60KB projects.md).
-    const personaClaims = claims.filter((claim) => claim.layer === "persona");
-    const personaEarlier = earlier.filter((claim) => claim.layer === "persona");
+    const personaClaims = dedupeStoredClaims([
+      ...earlierHigh.filter((claim) => claim.layer === "persona"),
+      ...claims.filter((claim) => claim.layer === "persona"),
+    ]);
+    const personaEarlier = earlierLow.filter((claim) => claim.layer === "persona");
     const residentCorrections = corrections.filter((item) => item.variant !== "projects");
     const codingCorrections = residentCorrections.filter((item) => item.variant === "coding");
     const shouldMergeResident =
@@ -159,8 +166,11 @@ export const portraitStep: ConsolidationStep = {
       residentCorrections.length > 0;
 
     // 3. Per-project local merge: only touched project groups are sent and rewritten.
-    const projectClaims = claims.filter((claim) => claim.layer === "project");
-    const projectEarlier = earlier.filter((claim) => claim.layer === "project");
+    const projectClaims = dedupeStoredClaims([
+      ...earlierHigh.filter((claim) => claim.layer === "project"),
+      ...claims.filter((claim) => claim.layer === "project"),
+    ]);
+    const projectEarlier = earlierLow.filter((claim) => claim.layer === "project");
     const projectCorrections = corrections.filter((item) => item.variant === "projects");
     const shouldMergeProjects =
       projectClaims.some((claim) => claim.confidence === "high") ||
@@ -168,6 +178,13 @@ export const portraitStep: ConsolidationStep = {
       projectCorrections.length > 0;
 
     if (!shouldMergeResident && !shouldMergeProjects) {
+      if (input.chunks.length > 0 || earlierHigh.length > 0) {
+        await portrait.saveClaims({
+          name: ctx.day,
+          claims,
+          pending: [...earlierLow, ...low],
+        });
+      }
       ctx.cursors.set(PORTRAIT_TURNS_CURSOR, JSON.stringify(input.cursor));
       return;
     }
@@ -235,6 +252,16 @@ export const portraitStep: ConsolidationStep = {
     };
     const outcome = await finishTwin(ctx.llm, before, merged.texts, { guardShrink: true });
     if ("skip" in outcome) {
+      if (input.chunks.length > 0 || earlierHigh.length > 0) {
+        const unmergedHigh = [...personaClaims, ...projectClaims].filter(
+          (claim) => claim.confidence === "high" && !hasSensitiveHit(claim.text),
+        );
+        await portrait.saveClaims({
+          name: ctx.day,
+          claims,
+          pending: dedupeStoredClaims([...earlierLow, ...low, ...unmergedHigh]),
+        });
+      }
       ctx.warnings.push(outcome.skip);
       ctx.cursors.set(PORTRAIT_TURNS_CURSOR, JSON.stringify(input.cursor));
       return;
@@ -259,6 +286,13 @@ export const portraitStep: ConsolidationStep = {
         throw error;
       }
       for (const warning of outcome.warnings) ctx.warnings.push(warning);
+    }
+    if (input.chunks.length > 0 || earlierHigh.length > 0) {
+      await portrait.saveClaims({
+        name: ctx.day,
+        claims,
+        pending: [...earlierLow, ...low],
+      });
     }
     ctx.cursors.set(PORTRAIT_TURNS_CURSOR, JSON.stringify(input.cursor));
     const applied = new Set(merged.includedCorrectionIds);
@@ -307,7 +341,9 @@ export const portraitEvalStep: ConsolidationStep = {
       }
       if (result.heldOut && lift(result.heldOut) <= 0) notes.push("留出题上分身没有比对照答得更好");
     }
-    if (result.pending > 0) notes.push(`有 ${result.pending} 道新题等你过目，运行 you-brain portrait-probes`);
+    if (result.pending > 0) {
+      notes.push(`有 ${result.pending} 道新评测题等你过目，可在数字分身页或运行 you-brain portrait-probes 审核`);
+    }
     if (notes.length > 0) {
       const failed = twin.total > 0 ? `答错的题：${twin.failed.join("、") || "无"}` : "";
       await ctx.emit("reminder.issued", {
@@ -797,9 +833,12 @@ async function mergeOnce(llm: LlmBackend, input: MergeInput): Promise<MergeResul
 }
 
 async function fixOnce(llm: LlmBackend, texts: TwinTexts, problems: readonly string[]): Promise<TwinTexts> {
-  const omitLargeProjects =
-    byteSize(texts.projects) > 16_384 && !problems.some((problem) => problem.includes("projects"));
-  const promptDocs = omitLargeProjects ? { ...texts, projects: "" } : texts;
+  const hasProjectsProblem = problems.some((problem) => problem.includes("projects"));
+  const isLargeProjects = byteSize(texts.projects) > 16_384;
+  const omitLargeProjects = isLargeProjects && !hasProjectsProblem;
+  const scopedProjects =
+    isLargeProjects && hasProjectsProblem ? scopeProblemProjects(texts.projects, problems) : texts.projects;
+  const promptDocs = omitLargeProjects ? { ...texts, projects: "" } : { ...texts, projects: scopedProjects };
   const update: TwinEditsUpdate = await completeJson(
     llm,
     buildTwinFixPrompt({ docs: promptDocs, problems }),
@@ -810,6 +849,20 @@ async function fixOnce(llm: LlmBackend, texts: TwinTexts, problems: readonly str
     ? update.edits.filter((edit) => edit.layer !== "projects")
     : update.edits;
   return applyEditsWithIndex(texts, safeEdits);
+}
+
+function scopeProblemProjects(projectsText: string, problems: readonly string[]): string {
+  const { groups } = parseProjectGroups(projectsText);
+  const problemBlob = problems.join("\n");
+  const matched = groups.filter(
+    (group) =>
+      problemBlob.includes(group.name) ||
+      group.sections.some(
+        (sec) => problemBlob.includes(sec.heading) || /待确认|不升格|两条都有效|证据 ?ID|样本数/u.test(sec.text),
+      ),
+  );
+  if (matched.length === 0) return projectsText;
+  return matched.flatMap((group) => group.sections.map((sec) => sec.text)).join("\n\n");
 }
 
 function higherBump(left: VersionBump, right: VersionBump): VersionBump {
@@ -963,10 +1016,16 @@ type FinishOutcome =
  * shape is not blocked forever, and a layer that meets it can never slip back.
  */
 function checkWithStandard(before: TwinTexts, texts: TwinTexts, changed: ReadonlySet<TwinLayer>): TwinCheck {
-  const check = checkTwin(texts, changed);
+  const check = checkTwin(texts, changed, before);
   for (const layer of ["full", "coding"] as const) {
     if (!changed.has(layer) || twinStandardProblems(layer, before[layer]).length > 0) continue;
     check.blocking.push(...twinStandardProblems(layer, texts[layer]));
+  }
+  if (
+    (changed.has("full") || changed.has("coding")) &&
+    twinCrossLayerProblems(before.full, before.coding).length === 0
+  ) {
+    check.blocking.push(...twinCrossLayerProblems(texts.full, texts.coding));
   }
   return check;
 }
@@ -1186,9 +1245,9 @@ function packPieces(pieces: readonly string[]): string[] {
   return chunks;
 }
 
-type TurnCursor = Record<string, number>;
+export type TurnCursor = Record<string, number>;
 
-function parseTurnCursor(raw: string | null): TurnCursor {
+export function parseTurnCursor(raw: string | null): TurnCursor {
   if (!raw) return {};
   try {
     const parsed = JSON.parse(raw) as unknown;
@@ -1201,6 +1260,22 @@ function parseTurnCursor(raw: string | null): TurnCursor {
   } catch {
     return {};
   }
+}
+
+function hasSensitiveHit(text: string): boolean {
+  return TWIN_SCAN.some((rule) => new RegExp(rule.pattern.source, rule.pattern.flags).test(text));
+}
+
+function dedupeStoredClaims(claims: readonly StoredTwinClaim[]): StoredTwinClaim[] {
+  const seen = new Set<string>();
+  const out: StoredTwinClaim[] = [];
+  for (const claim of claims) {
+    const key = `${claim.layer}\0${claim.project}\0${claim.confidence}\0${claim.text}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(claim);
+  }
+  return out;
 }
 
 /**
@@ -1243,14 +1318,15 @@ const INJECTED_BLOCKS = [
 const INJECTED_TURNS = [
   /^This session is being continued/u,
   /^Caveat: /u,
-  /^只根据\s*\S+\.raw\.txt\s*整理/u,
 ];
 
-/** The user's own words: injected context blocks and harness turns drop out. */
+/** The user's own words: injected context blocks, CLI control commands, and batch templates drop out. */
 export function cleanUserTurn(raw: string): string {
+  if (isInjectedPrompt(raw) || isCliControlTurn(raw) || isAutomatedBatchPrompt(raw)) return "";
   let text = raw;
   for (const pattern of INJECTED_BLOCKS) text = text.replace(pattern, " ");
   text = text.replace(/\s+/gu, " ").trim();
+  if (text === "" || isCliControlTurn(text) || isAutomatedBatchPrompt(text)) return "";
   if (INJECTED_TURNS.some((pattern) => pattern.test(text))) return "";
   return clipUnits(text, TURN_CLIP);
 }

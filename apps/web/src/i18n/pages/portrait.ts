@@ -48,6 +48,15 @@ export const zh = {
   proposalActionAdd: "新增",
   proposalActionReplace: "替换",
   proposalTarget: "替换原句：",
+  probeTitle: "待审保真评测题",
+  probeHint: "从近一周会话抽取的情境题，确认符合本人真实选择后纳入每周保真计分",
+  probeKeep: "保留入库",
+  probeDrop: "丢弃",
+  probeKept: "已纳入保真评测题库",
+  probeDropped: "已丢弃该题",
+  probeExpect: "预期反应：",
+  probeLayerPersona: "人格",
+  probeLayerCoding: "编码",
 } as const;
 
 export const en = {
@@ -100,4 +109,13 @@ export const en = {
   proposalActionAdd: "Add",
   proposalActionReplace: "Replace",
   proposalTarget: "Replaces: ",
+  probeTitle: "Pending eval probes",
+  probeHint: "Situational probes drafted from recent sessions; kept probes join the weekly fidelity eval.",
+  probeKeep: "Keep",
+  probeDrop: "Discard",
+  probeKept: "Added to scored probes",
+  probeDropped: "Probe discarded",
+  probeExpect: "Expected response: ",
+  probeLayerPersona: "Persona",
+  probeLayerCoding: "Coding",
 } as const;

@@ -61,4 +61,21 @@ describe("conversation filter", () => {
   it("drops a session that holds only assistant text", () => {
     expect(isConversation([turn("assistant", "anything I can help with?")])).toBe(false);
   });
+
+  it("drops bare CLI housekeeping commands while keeping custom skill invocations with args", () => {
+    expect(isConversation([turn("user", "/clear")])).toBe(false);
+    expect(
+      isConversation([
+        turn("user", "<command-message>clear</command-message>\n<command-name>/clear</command-name>"),
+      ]),
+    ).toBe(false);
+    expect(
+      isConversation([
+        turn(
+          "user",
+          "<command-name>/grill-with-docs</command-name>\n<command-args>复核当前增量方案</command-args>",
+        ),
+      ]),
+    ).toBe(true);
+  });
 });

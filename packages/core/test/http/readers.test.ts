@@ -260,6 +260,9 @@ describe("portrait files", () => {
         reason: "测试门禁",
       },
     ];
+    let pendingProbes = [
+      { id: "p08", layer: "coding" as const, situation: "用户只问原因", expect: "只分析不改代码", day: "2026-11-18" },
+    ];
     const ctx = {
       hub,
       createId: () => "id-1",
@@ -278,6 +281,11 @@ describe("portrait files", () => {
         reviewPortraitProposal: async (body: { id: string; action: "approve" | "reject" }) => {
           pending = pending.filter((p) => p.id !== body.id);
           return { ok: true as const, proposals: pending, version: body.action === "approve" ? "4.6.0" : null };
+        },
+        portraitProbes: async () => pendingProbes,
+        reviewPortraitProbe: async (body: { id: string; action: "keep" | "drop" }) => {
+          pendingProbes = pendingProbes.filter((p) => p.id !== body.id);
+          return { ok: true as const, probes: pendingProbes, scoredTotal: body.action === "keep" ? 8 : 7 };
         },
       } as never,
     };
@@ -307,5 +315,22 @@ describe("portrait files", () => {
       ctx,
     );
     expect(await approveRes.json()).toEqual({ ok: true, proposals: [], version: "4.6.0" });
+
+    const probesListRes = await handleApi(
+      new Request("http://127.0.0.1/api/portrait/probes"),
+      new URL("http://127.0.0.1/api/portrait/probes"),
+      ctx,
+    );
+    expect(await probesListRes.json()).toEqual({ probes: pendingProbes });
+
+    const probeKeepRes = await handleApi(
+      new Request("http://127.0.0.1/api/portrait/probes", {
+        method: "POST",
+        body: JSON.stringify({ id: "p08", action: "keep" }),
+      }),
+      new URL("http://127.0.0.1/api/portrait/probes"),
+      ctx,
+    );
+    expect(await probeKeepRes.json()).toEqual({ ok: true, probes: [], scoredTotal: 8 });
   });
 });

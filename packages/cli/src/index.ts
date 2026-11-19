@@ -45,6 +45,7 @@ import {
   applyIntegrations,
   evaluatePortrait,
   listIntegrations,
+  publishLocalPortrait,
   rebuildPortrait,
   restoreBrainHub,
   reviewPortraitProbes,
@@ -271,6 +272,18 @@ program
   .action(async (opts: { from?: string }) => {
     try {
       await seedPortraitCoding(opts.from ? { fromPath: opts.from } : {});
+    } catch (error) {
+      fail(error);
+    }
+  });
+
+program
+  .command("portrait-push")
+  .description("校验本机 ~/.you-brain/portrait/ 三层修订并同步到 Drive，同时刷新 projects/ 拆分子文件与 CLI 规则")
+  .option("--note <text>", "写入 changelog 的变更说明")
+  .action(async (opts: { note?: string }) => {
+    try {
+      await publishLocalPortrait(opts.note ? { note: opts.note } : {});
     } catch (error) {
       fail(error);
     }

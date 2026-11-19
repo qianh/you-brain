@@ -40,6 +40,7 @@ export const TERMINAL_NOTIFY_PREF_KEY = "you-brain.deck.terminal-notify";
 const NOTICES_KEPT = 50;
 const DEFAULT_POLL_MS = 30_000;
 const DEFAULT_DEBOUNCE_MS = 300;
+const DEFAULT_SUMMARIZE_TIMEOUT_MS = 45_000;
 /** 网页每 5 秒报一次正在看的会话；超过这么久没更新就当没人在看。 */
 const VIEWING_TTL_MS = 15_000;
 
@@ -126,6 +127,13 @@ export interface SessionNoticeWatcherOptions {
   enabled(): Promise<boolean>;
   /** 产生了新条目。 */
   onNotice(): void;
+  /**
+   * 把提醒正文写成分析后的结论和建议（读屏幕交给模型）。返回 null 或抛错时用会话自报的状态兜底。
+   * 提供时，提醒等分析完成（或超时）后才记下，系统通知和弹框一出来就是分析后的内容。
+   */
+  summarize?(draft: SessionNoticeDraft): Promise<string | null>;
+  /** 等分析的上限，超时就用兜底正文先记下。 */
+  summarizeTimeoutMs?: number;
   now?(): number;
   pollMs?: number;
   debounceMs?: number;
@@ -144,6 +152,8 @@ export class SessionNoticeWatcher {
   #debounceTimer: ReturnType<typeof setTimeout> | null = null;
   #reading = false;
   #again = false;
+  /** 正在分析、还没记下的会话；同一会话分析期间再次触发不重复分析。 */
+  readonly #summarizing = new Set<number>();
 
   constructor(options: SessionNoticeWatcherOptions) {
     this.#options = options;
@@ -227,6 +237,47 @@ export class SessionNoticeWatcher {
     this.#debounceTimer.unref?.();
   }
 
+  async #summarizeThenPush(item: SessionNoticeDraft): Promise<void> {
+    const summarize = this.#options.summarize;
+    let summary: string | null = null;
+    if (summarize !== undefined) {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const timeout = new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), this.#options.summarizeTimeoutMs ?? DEFAULT_SUMMARIZE_TIMEOUT_MS);
+        (timer as { unref?: () => void }).unref?.();
+      });
+      try {
+        summary = await Promise.race([summarize(item).catch(() => null), timeout]);
+      } finally {
+        if (timer !== null) clearTimeout(timer);
+      }
+    }
+    if (!this.#started) return;
+    // 分析期间会话状态变了（又开始工作、已关闭）或用户已经在看，这条就不用记了。
+    if (this.#snapshot?.get(item.pane) !== item.kind || this.#viewingPane() === item.pane) return;
+    const text = summary?.trim() ?? "";
+    this.#push([text === "" ? item : { ...item, body: text }]);
+  }
+
+  #push(found: readonly SessionNoticeDraft[]): void {
+    const at = new Date(this.#now()).toISOString();
+    const replacedPanes = new Set(found.map((item) => item.pane));
+    for (const existing of this.#notices) {
+      if (existing.status === "open" && replacedPanes.has(existing.pane)) {
+        existing.status = "closed";
+      }
+    }
+    for (const item of found) {
+      this.#notices.push({ seq: ++this.#seq, status: "open", ...item, at });
+    }
+    if (this.#notices.length > NOTICES_KEPT) this.#notices.splice(0, this.#notices.length - NOTICES_KEPT);
+    try {
+      this.#options.onNotice();
+    } catch {
+      // 通知其他部分失败不影响监视。
+    }
+  }
+
   /** 读一次会话并和上次快照比较。同一时刻只有一次在跑，跑的时候来的请求合并成再读一次。 */
   async #read(): Promise<void> {
     if (!this.#started) return;
@@ -264,21 +315,21 @@ export class SessionNoticeWatcher {
         }
         return;
       }
-      const at = new Date(this.#now()).toISOString();
-      const replacedPanes = new Set(found.map((item) => item.pane));
-      for (const existing of this.#notices) {
-        if (existing.status === "open" && replacedPanes.has(existing.pane)) {
-          existing.status = "closed";
+      if (this.#options.summarize === undefined) {
+        this.#push(found);
+        return;
+      }
+      if (reconciled) {
+        try {
+          this.#options.onNotice();
+        } catch {
+          // 通知其他部分失败不影响监视。
         }
       }
       for (const item of found) {
-        this.#notices.push({ seq: ++this.#seq, status: "open", ...item, at });
-      }
-      if (this.#notices.length > NOTICES_KEPT) this.#notices.splice(0, this.#notices.length - NOTICES_KEPT);
-      try {
-        this.#options.onNotice();
-      } catch {
-        // 通知其他部分失败不影响监视。
+        if (this.#summarizing.has(item.pane)) continue;
+        this.#summarizing.add(item.pane);
+        void this.#summarizeThenPush(item).finally(() => this.#summarizing.delete(item.pane));
       }
     } finally {
       this.#reading = false;

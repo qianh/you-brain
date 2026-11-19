@@ -1,6 +1,6 @@
 import { parseRefineOutput, type RefineOutput } from "@you-brain/protocol";
 
-import { isAutomatedBatchSession } from "../adapters/conversation.js";
+import { isAutomatedBatchSession, isTrivialControlSession } from "../adapters/conversation.js";
 import type { LlmBackend } from "../llm/types.js";
 import { defaultRefineIds, refineToEvents } from "./events.js";
 import {
@@ -42,10 +42,11 @@ export async function refineSession(
   }
 
   const ids = options.ids ?? defaultRefineIds();
-  if (!input.previous && isAutomatedBatchSession(input.messages)) {
+  if (!input.previous && (isAutomatedBatchSession(input.messages) || isTrivialControlSession(input.messages))) {
+    const isControl = isTrivialControlSession(input.messages);
     const batchOutput: RefineOutput = {
-      title: "自动任务批处理",
-      summary: "定时自动批处理任务，不沉淀话题与待办",
+      title: isControl ? "终端控制命令" : "自动任务批处理",
+      summary: isControl ? "内置控制命令会话，不沉淀话题与待办" : "定时自动批处理任务，不沉淀话题与待办",
       topic: { action: "none", topicId: "", name: "", aliases: [] },
       conclusions_added: [],
       todos_added: [],
@@ -55,21 +56,22 @@ export async function refineSession(
     return { status: "refined", output: batchOutput, events };
   }
 
-  const topics = selectCandidateTopics(input.topics, options.historyLimit, {
-    query: candidateQuery(input.previous, input.messages),
-    currentTopicId: input.previous?.topicId ?? null,
-  });
-  const openTodos = selectOpenTodos(input.openTodos, topics);
   const fitted = fitRefineMessages(
     input.messages,
     options.charBudget,
   );
+  const topics = selectCandidateTopics(input.topics, options.historyLimit, {
+    query: candidateQuery(input.previous, fitted.messages),
+    currentTopicId: input.previous?.topicId ?? null,
+  });
+  const openTodos = selectOpenTodos(input.openTodos, topics);
   const prompt = buildRefinePrompt({
     previous: input.previous,
     topics,
     openTodos,
     messages: fitted.messages,
     truncated: fitted.truncated,
+    hasMore: fitted.hasMore,
   });
   let lastDetail = "模型输出无法校验";
 
@@ -82,6 +84,7 @@ export async function refineSession(
       system: prompt.system,
       user,
       jsonSchema: REFINE_OUTPUT_JSON_SCHEMA,
+      ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     });
     try {
       const parsed = parseRefineOutput(extractJson(raw));
@@ -94,7 +97,10 @@ export async function refineSession(
       const reactivate =
         output.topic.action === "assign" &&
         input.topics.some((topic) => topic.topicId === output.topic.topicId && topic.archived === true);
-      const events = refineToEvents(input, output, options.eventFactory, ids, { reactivate });
+      const events = refineToEvents(input, output, options.eventFactory, ids, {
+        reactivate,
+        consumed: fitted.consumed,
+      });
       return { status: "refined", output, events };
     } catch (error) {
       lastDetail = failureDetail(error, raw);

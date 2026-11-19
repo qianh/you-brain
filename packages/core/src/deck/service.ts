@@ -1,11 +1,13 @@
 import type { LlmProvider } from "@you-brain/protocol";
 
 import type { SearchProvider } from "../auth/search-secrets.js";
+import type { LlmBackend } from "../llm/types.js";
 import type { DshLoginProviderId, DshLoginView } from "./dsh/login.js";
 import { DshRuntime, type DshRuntimeOptions } from "./dsh/runtime.js";
 import type { DshWebState } from "./dsh/web.js";
 import { ActivityMonitor } from "./activity.js";
 import { MuseDeckRuntime } from "./muse/runtime.js";
+import { summarizeNotice } from "./notice-summary.js";
 import {
   SessionNoticeWatcher,
   type SessionNoticeDismissInput,
@@ -51,6 +53,8 @@ export interface DeckServiceOptions {
   noticesEnabled?: () => Promise<boolean>;
   /** 产生了新的会话提醒（daemon 借此通知订阅者）。 */
   onNotices?: () => void;
+  /** 当前可用的模型；有就用它把提醒正文写成分析后的结论和建议，没有就用会话自报的状态。 */
+  noticeLlm?: () => Promise<Pick<LlmBackend, "complete"> | null>;
   dsh?: {
     runtime?: Pick<DshRuntime, "close" | "webState" | "loginView" | "loginAction"> & Partial<Pick<DshRuntime, "refresh">>;
     sidecarDir?: string;
@@ -61,6 +65,9 @@ export interface DeckServiceOptions {
 
 /** 启动后等这么久再拉起 dsh，避开启动高峰。 */
 const DSH_WARM_DELAY_MS = 3_000;
+/** 提醒分析读屏幕的行数与模型调用超时。 */
+const NOTICE_SCREEN_LINES = 150;
+const NOTICE_SUMMARY_TIMEOUT_MS = 40_000;
 
 export class DeckService {
   readonly #options: DeckServiceOptions;
@@ -88,6 +95,19 @@ export class DeckService {
       subscribe: (onLine) => this.tty7.events(onLine),
       enabled: options.noticesEnabled ?? (async () => true),
       onNotice: () => options.onNotices?.(),
+      ...(options.noticeLlm === undefined
+        ? {}
+        : {
+            summarize: async (draft) => {
+              const llm = await options.noticeLlm?.();
+              if (!llm) return null;
+              const screen = await this.tty7
+                .screen(draft.pane, NOTICE_SCREEN_LINES)
+                .then((view) => view.text)
+                .catch(() => "");
+              return summarizeNotice(llm, draft, screen, NOTICE_SUMMARY_TIMEOUT_MS);
+            },
+          }),
     });
     this.activity = new ActivityMonitor({
       sessions: () => this.tty7.sessions({ withActivity: false }),

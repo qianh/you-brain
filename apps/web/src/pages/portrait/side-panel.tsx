@@ -9,6 +9,7 @@ import { formatDateTime, formatRelative } from "../../lib/format.js";
 import { shouldShowToc, type TocItem } from "../../lib/markdown.js";
 import { PortraitCorrections } from "./corrections.js";
 import { scrollBehavior, snapshotVersion } from "./logic.js";
+import { PortraitProbes } from "./probes.js";
 import { PortraitProposals } from "./proposals.js";
 
 export function PortraitSide({
@@ -101,6 +102,7 @@ export function PortraitSide({
               }}
             />
           ) : null}
+          {variant === "full" || variant === "coding" ? <PortraitProbes /> : null}
           <PortraitCorrections variant={variant} toc={toc} />
           <section className="portrait-block" aria-label={t("portraitHistory")}>
             <div className="portrait-kicker-row">

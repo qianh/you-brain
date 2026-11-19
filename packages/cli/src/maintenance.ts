@@ -12,15 +12,28 @@ import {
 } from "@you-brain/protocol";
 import { getLlmApiKey, resolveSecretBackend } from "@you-brain/core/auth";
 import {
+  PORTRAIT_TURNS_CURSOR,
+  TWIN_LAYERS,
+  bumpVersion,
+  changedLayers,
+  checkTwin,
   createDrivePortrait,
   evaluateTwin,
   localDayKey,
+  normalizeProjectsTwin,
+  parseTurnCursor,
   readTwinSessions,
   rebuildTwin,
   reviewCodingProposals,
   reviewProbes,
   seedCodingTwin,
+  twinCrossLayerProblems,
   twinEvalLog,
+  twinStandardProblems,
+  twinVersion,
+  withHeader,
+  withProjectsPointer,
+  type TwinLayer,
   type TwinSessionRow,
 } from "@you-brain/core/consolidate";
 import { openGoogleDrive } from "@you-brain/core/daemon";
@@ -35,9 +48,12 @@ import {
 import { restoreBrainHubMigration } from "@you-brain/core/migrate";
 import {
   FilePortraitConsentStore,
+  PortraitService,
   grantIntegrationConsent,
   portraitConsentPath,
   revokeIntegrationConsent,
+  syncSplitProjectFilesFromLocal,
+  type PortraitStore,
 } from "@you-brain/core/portrait";
 import type { SessionSource } from "@you-brain/core";
 import { SESSION_SOURCES, loadLocalConfig } from "@you-brain/core";
@@ -151,28 +167,67 @@ async function openDrivePortrait(timeoutSeconds: number) {
     timeoutMs: timeoutSeconds * 1000,
   });
   const drive = opened.drive;
+  const memoryPortraitRecords = new Map<string, Parameters<PortraitStore["upsertPortrait"]>[0]>();
+  const localService = new PortraitService({
+    drive,
+    store: {
+      getPortrait: (variant) => memoryPortraitRecords.get(variant) ?? null,
+      upsertPortrait: (record) => {
+        memoryPortraitRecords.set(record.variant, record);
+      },
+    },
+    paths: loaded.paths,
+    config: {
+      variants: shared.portrait.variants,
+      snapshotPattern: shared.portrait.snapshotPattern,
+    },
+    driveRoot: opened.config.driveRoot,
+    consent: new FilePortraitConsentStore(portraitConsentPath(dataDir)),
+    homeDir,
+    managedStatePath: join(dataDir, "managed-blocks.json"),
+  });
   const portrait = createDrivePortrait({
     drive,
+    service: localService,
     driveRoot: opened.config.driveRoot,
     config: () => ({
       variants: shared.portrait.variants,
       snapshotPattern: shared.portrait.snapshotPattern,
     }),
     events: () => [],
-    sessions: (day) =>
-      readTwinSessions({ drive, sessions: sessionRows(loaded.paths.stateFile), timeZone: roles.timezone, day }),
+    sessions: (day) => {
+      const snapshot = readSessionSnapshot(loaded.paths.stateFile);
+      return readTwinSessions({
+        drive,
+        sessions: snapshot.rows,
+        timeZone: roles.timezone,
+        day,
+        seenTurns: snapshot.seenTurns,
+      });
+    },
   });
   return { llm, portrait, day: localDayKey(new Date(), roles.timezone) };
 }
 
-/** Session rows from the daemon's database, opened read-only so a running daemon is not disturbed. */
-function sessionRows(stateFile: string): TwinSessionRow[] {
-  if (!existsSync(stateFile)) return [];
+/** Session rows and turn cursor from the daemon's database, opened read-only so a running daemon is not disturbed. */
+function readSessionSnapshot(stateFile: string): { rows: TwinSessionRow[]; seenTurns: Record<string, number> } {
+  if (!existsSync(stateFile)) return { rows: [], seenTurns: {} };
   const db = new Database(stateFile, { readonly: true });
   try {
-    return db
-      .query<{ session_key: string; title: string; file_id: string | null; updated_at: string | null }, []>(
-        "SELECT session_key, title, file_id, updated_at FROM sessions",
+    const rows = db
+      .query<
+        {
+          session_key: string;
+          title: string;
+          file_id: string | null;
+          updated_at: string | null;
+          msg_count: number;
+          refined_up_to: number;
+          topic_id: string | null;
+        },
+        []
+      >(
+        "SELECT session_key, title, file_id, updated_at, msg_count, refined_up_to, topic_id FROM sessions",
       )
       .all()
       .map((row) => ({
@@ -180,7 +235,14 @@ function sessionRows(stateFile: string): TwinSessionRow[] {
         title: row.title,
         fileId: row.file_id,
         updatedAt: row.updated_at,
+        msgCount: row.msg_count,
+        refinedUpTo: row.refined_up_to,
+        topicId: row.topic_id,
       }));
+    const cursorRow = db
+      .query<{ value: string }, [string]>("SELECT value FROM cursors WHERE key = ?")
+      .get(PORTRAIT_TURNS_CURSOR);
+    return { rows, seenTurns: parseTurnCursor(cursorRow?.value ?? null) };
   } finally {
     db.close();
   }
@@ -308,6 +370,72 @@ export async function seedPortraitCoding(options: { fromPath?: string }): Promis
   const { portrait, day } = await openDrivePortrait(60);
   const saved = await seedCodingTwin({ portrait, sourceMarkdown, day });
   console.log(`已从 ${sourcePath} 生成编码分身 v${saved.version}（${saved.bytes} 字节）并同步到 Drive`);
+}
+
+/**
+ * Validate local `~/.you-brain/portrait/{full,coding,projects}.md` against twin budgets,
+ * standards, and secret scanners, push changed layers to Drive with backup + version bump,
+ * and refresh local split project files and consented CLI coding blocks.
+ */
+export async function publishLocalPortrait(options: { note?: string } = {}): Promise<void> {
+  const paths = runtimePaths();
+  const { portrait, day } = await openDrivePortrait(60);
+  const remote = await portrait.read();
+  const before = {
+    full: remote.full?.text ?? "",
+    coding: remote.coding?.text ?? "",
+    projects: remote.projects?.text ?? "",
+  };
+  const readLocal = (layer: TwinLayer, fallback: string): string => {
+    const filePath = join(paths.portraitDir, `${layer}.md`);
+    return existsSync(filePath) ? readFileSync(filePath, "utf8") : fallback;
+  };
+  const after = {
+    full: readLocal("full", before.full),
+    coding: withProjectsPointer(readLocal("coding", before.coding)),
+    projects: normalizeProjectsTwin(readLocal("projects", before.projects)),
+  };
+  const changed = changedLayers(before, after);
+  if (changed.size === 0) {
+    await syncSplitProjectFilesFromLocal(paths.portraitDir);
+    console.log("本地数字分身与 Drive 一致，已刷新本地 projects/ 拆分子文件。");
+    return;
+  }
+  const check = checkTwin(after, changed, before);
+  for (const layer of ["full", "coding"] as const) {
+    if (changed.has(layer)) check.blocking.push(...twinStandardProblems(layer, after[layer]));
+  }
+  if (changed.has("full") || changed.has("coding")) {
+    check.blocking.push(...twinCrossLayerProblems(after.full, after.coding));
+  }
+  if (check.blocking.length > 0) {
+    throw new CliError(`数字分身未通过质量检查：${check.blocking.join("；")}`);
+  }
+  if (check.scanHits.length > 0) {
+    throw new CliError(`数字分身包含疑似敏感信息：${check.scanHits.join("、")}`);
+  }
+  const nextVersion = bumpVersion(twinVersion(before), "minor");
+  const layers = TWIN_LAYERS.filter((layer) => changed.has(layer));
+  const summary = options.note?.trim() || `同步本地修订：${layers.join("、")}`;
+  const changelog = [
+    `## v${nextVersion} · ${day}`,
+    `- ${summary}`,
+    `- 体积：full ${check.sizes.full} 字节，coding ${check.sizes.coding} 字节，projects 最大小节 ${check.sizes.maxSection} 字节`,
+  ].join("\n");
+  await portrait.save({
+    day,
+    version: nextVersion,
+    files: layers.map((layer) => ({
+      layer,
+      text: withHeader(layer, after[layer], nextVersion, day),
+      previous: remote[layer],
+    })),
+    changelog,
+  });
+  console.log(
+    `已同步数字分身 v${nextVersion}（变更层：${layers.join("、")}）：full ${check.sizes.full} B，coding ${check.sizes.coding} B`,
+  );
+  for (const warning of check.warnings) console.log(`提示：${warning}`);
 }
 
 export async function restoreBrainHub(backupDir: string): Promise<void> {

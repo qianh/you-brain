@@ -8,6 +8,9 @@ import type {
   PortraitCorrectionBody,
   PortraitCorrectionResult,
   PortraitCorrectionsResponse,
+  PortraitProbeActionBody,
+  PortraitProbeActionResult,
+  PortraitProbesResponse,
   PortraitProposalActionBody,
   PortraitProposalActionResult,
   PortraitProposalsResponse,
@@ -141,9 +144,13 @@ export interface BrowserDaemon
     | "applyTopicReorganization"
     | "portraitProposals"
     | "reviewPortraitProposal"
+    | "portraitProbes"
+    | "reviewPortraitProbe"
   > {
   portraitProposals(): Promise<PortraitProposalsResponse>;
   reviewPortraitProposal(body: PortraitProposalActionBody): Promise<PortraitProposalActionResult>;
+  portraitProbes(): Promise<PortraitProbesResponse>;
+  reviewPortraitProbe(body: PortraitProbeActionBody): Promise<PortraitProbeActionResult>;
   planTopicReorganization(body?: { refresh?: boolean }): Promise<TopicReorganizeStatus>;
   topicReorganizeStatus(): Promise<TopicReorganizeStatus>;
   applyTopicReorganization(body: TopicReorganizeApplyBody): Promise<TopicReorganizeResult>;
@@ -329,6 +336,9 @@ export function createBrowserDaemon(options?: {
     portraitProposals: () => request<PortraitProposalsResponse>("GET", "/api/portrait/proposals"),
     reviewPortraitProposal: (body: PortraitProposalActionBody) =>
       request<PortraitProposalActionResult>("POST", "/api/portrait/proposals", body),
+    portraitProbes: () => request<PortraitProbesResponse>("GET", "/api/portrait/probes"),
+    reviewPortraitProbe: (body: PortraitProbeActionBody) =>
+      request<PortraitProbeActionResult>("POST", "/api/portrait/probes", body),
     search: (query) => request<SearchResponse>("GET", `/api/search${searchString(query)}`),
     devices: () => request<DevicesResponse>("GET", "/api/devices"),
     addVirtualDevice: (body: VirtualDeviceCreateBody) =>

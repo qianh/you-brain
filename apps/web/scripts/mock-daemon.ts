@@ -1308,6 +1308,12 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
   if (path === "/api/portrait/proposals" && request.method === "POST") {
     return json({ ok: true, proposals: [], version: null });
   }
+  if (path === "/api/portrait/probes" && request.method === "GET") {
+    return json({ probes: [] });
+  }
+  if (path === "/api/portrait/probes" && request.method === "POST") {
+    return json({ ok: true, probes: [], scoredTotal: 0 });
+  }
   if (path === "/api/portrait" && request.method === "GET") {
     const variant = url.searchParams.get("variant") ?? "full";
     const content = portraits[variant];

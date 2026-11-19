@@ -3,7 +3,12 @@ export const TWIN_LAYERS = ["full", "coding", "projects"] as const;
 export type TwinLayer = (typeof TWIN_LAYERS)[number];
 
 /** The coding layer is injected into every CLI session as AGENTS.md / CLAUDE.md, so it stays far smaller than `full`. */
-export const TWIN_BUDGET = { full: 12_288, coding: 6_144, section: 4_096 } as const;
+export const TWIN_BUDGET = {
+  full: 12_288,
+  coding: 6_144,
+  section: 4_096,
+  projectGroup: 8_192,
+} as const;
 
 /** Where CLIs find the split project index. Stays a home-relative path so the scan never trips on it. */
 export const PROJECTS_LOCAL_PATH = "~/.you-brain/portrait/projects/index.md";
@@ -386,7 +391,11 @@ function overBudget(layer: TwinLayer, size: number, budget: number): string {
   return `${layer} 为 ${size} 字节，超过 ${budget} 字节预算，要压到 ${target} 字节以内`;
 }
 
-export function checkTwin(texts: TwinTexts, changed: ReadonlySet<TwinLayer>): TwinCheck {
+export function checkTwin(
+  texts: TwinTexts,
+  changed: ReadonlySet<TwinLayer>,
+  before?: Partial<TwinTexts>,
+): TwinCheck {
   const blocking: string[] = [];
   const warnings: string[] = [];
   const full = byteLength(texts.full);
@@ -397,17 +406,52 @@ export function checkTwin(texts: TwinTexts, changed: ReadonlySet<TwinLayer>): Tw
     const hits = [...texts[layer].matchAll(LINT)].map((match) => match[0]);
     if (hits.length > 0) blocking.push(`${layer} 出现禁用的记账措辞：${[...new Set(hits)].join("、")}`);
   }
+  const previousSections = new Map<string, string>();
+  const previousGroups = new Map<string, string>();
+  if (before?.projects !== undefined && before.projects.trim() !== "") {
+    for (const sec of splitTwin(before.projects).sections) {
+      previousSections.set(sec.heading, sec.text);
+    }
+    for (const group of parseProjectGroups(before.projects).groups) {
+      previousGroups.set(
+        group.name.toLowerCase(),
+        group.sections.map((sec) => sec.text).join("\n\n"),
+      );
+    }
+  }
   let maxSection = 0;
   const oversized: string[] = [];
   for (const section of splitTwin(texts.projects).sections) {
     const size = byteLength(section.text);
     maxSection = Math.max(maxSection, size);
-    if (size >= TWIN_BUDGET.section) oversized.push(`${section.heading}（${size} 字节）`);
+    const touched =
+      before?.projects === undefined || previousSections.get(section.heading) !== section.text;
+    if (size >= TWIN_BUDGET.section && touched) {
+      oversized.push(`${section.heading}（${size} 字节）`);
+    }
   }
   if (changed.has("projects") && oversized.length > 0) {
     warnings.push(
       `projects 这些小节超过 ${TWIN_BUDGET.section} 字节：${oversized.join("、")}。只合并同义表述、按子主题拆成新的 ## 小节，不删仍成立的规则`,
     );
+  }
+  if (changed.has("projects") && texts.projects.trim() !== "") {
+    const oversizedGroups: string[] = [];
+    for (const group of parseProjectGroups(texts.projects).groups) {
+      const joined = group.sections.map((sec) => sec.text).join("\n\n");
+      const touched =
+        before?.projects === undefined || previousGroups.get(group.name.toLowerCase()) !== joined;
+      if (!touched) continue;
+      const groupBytes = group.sections.reduce((sum, sec) => sum + byteLength(sec.text), 0);
+      if (groupBytes >= TWIN_BUDGET.projectGroup) {
+        oversizedGroups.push(`${group.name}（${groupBytes} 字节）`);
+      }
+    }
+    if (oversizedGroups.length > 0) {
+      warnings.push(
+        `projects 这些项目总长超过 ${TWIN_BUDGET.projectGroup} 字节：${oversizedGroups.join("、")}。合并同项目跨子节重复表述，并删除已被后续决定推翻的旧口径`,
+      );
+    }
   }
   const scanHits: string[] = [];
   for (const layer of TWIN_LAYERS) {

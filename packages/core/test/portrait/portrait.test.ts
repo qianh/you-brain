@@ -13,6 +13,7 @@ import {
   PortraitService,
   decodePortraitMeta,
   lookupProjectPortrait,
+  syncSplitProjectFilesFromLocal,
   type PortraitConfig,
   type PortraitStore,
 } from "../../src/portrait/index.js";
@@ -378,6 +379,12 @@ describe("portrait pull", () => {
       expect(codexAfterUncheck).not.toContain("you-brain:start");
       expect(codexAfterUncheck).toContain("<!-- CODEGRAPH_START -->");
       expect(codexAfterUncheck).toContain("- rtk proxy");
+
+      // Startup/local reconciliation rebuilds missing projects/ split directory without hitting Drive
+      await rm(splitDir, { recursive: true, force: true });
+      const reconciled = await syncSplitProjectFilesFromLocal(join(home, ".you-brain", "portrait"));
+      expect(reconciled.synced).toBe(true);
+      expect((await readdir(splitDir)).sort()).toEqual(["index.md", "法务审批.md", "运价通.md"].sort());
     } finally {
       await cleanup(home, store);
     }

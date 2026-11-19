@@ -93,7 +93,14 @@ describe("diffNotices", () => {
 });
 
 /** 可控的 watcher：手动推进时钟、手动触发事件行。 */
-function harness(options: { enabled?: () => boolean; pollMs?: number } = {}) {
+function harness(
+  options: {
+    enabled?: () => boolean;
+    pollMs?: number;
+    summarize?: (draft: { pane: number; body: string }) => Promise<string | null>;
+    summarizeTimeoutMs?: number;
+  } = {},
+) {
   let nowMs = 1_000_000;
   let current: Tty7SessionsView | Error = view([session(1, "working")]);
   let lineListener: (() => void) | null = null;
@@ -120,6 +127,8 @@ function harness(options: { enabled?: () => boolean; pollMs?: number } = {}) {
     now: () => nowMs,
     pollMs: options.pollMs ?? 60_000,
     debounceMs: 10,
+    ...(options.summarize === undefined ? {} : { summarize: options.summarize }),
+    ...(options.summarizeTimeoutMs === undefined ? {} : { summarizeTimeoutMs: options.summarizeTimeoutMs }),
   });
   return {
     watcher,
@@ -156,6 +165,73 @@ describe("SessionNoticeWatcher", () => {
     expect(list.notices).toHaveLength(1);
     expect(list.notices[0]).toMatchObject({ seq: 1, pane: 1, kind: "waiting", body: "继续吗？" });
     expect(list.epoch).not.toBe("");
+    h.watcher.stop();
+  });
+
+  it("waits for the summary and uses it as the body", async () => {
+    let release: (value: string | null) => void = () => undefined;
+    const h = harness({
+      summarize: () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    });
+    h.watcher.start();
+    await settle();
+    h.set(view([session(1, "done", { statusMessage: "raw" })]));
+    h.line();
+    await settle();
+    expect(h.watcher.list().notices).toHaveLength(0);
+    release("已完成打包安装，签名校验通过；建议打开 App 确认新版本。");
+    await settle();
+    expect(h.watcher.list().notices[0]).toMatchObject({
+      pane: 1,
+      kind: "done",
+      body: "已完成打包安装，签名校验通过；建议打开 App 确认新版本。",
+    });
+    expect(h.notices()).toBe(1);
+    h.watcher.stop();
+  });
+
+  it("falls back to the session status when the summary fails or times out", async () => {
+    const failing = harness({ summarize: async () => Promise.reject(new Error("down")) });
+    failing.watcher.start();
+    await settle();
+    failing.set(view([session(1, "waiting", { statusMessage: "继续吗？" })]));
+    failing.line();
+    await settle();
+    expect(failing.watcher.list().notices[0]).toMatchObject({ body: "继续吗？" });
+    failing.watcher.stop();
+
+    const slow = harness({ summarize: () => new Promise(() => undefined), summarizeTimeoutMs: 20 });
+    slow.watcher.start();
+    await settle();
+    slow.set(view([session(1, "waiting", { statusMessage: "继续吗？" })]));
+    slow.line();
+    await settle(80);
+    expect(slow.watcher.list().notices[0]).toMatchObject({ body: "继续吗？" });
+    slow.watcher.stop();
+  });
+
+  it("drops the notice when the session moves on before the summary is ready", async () => {
+    let release: (value: string | null) => void = () => undefined;
+    const h = harness({
+      summarize: () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    });
+    h.watcher.start();
+    await settle();
+    h.set(view([session(1, "waiting")]));
+    h.line();
+    await settle();
+    h.set(view([session(1, "working")]));
+    h.line();
+    await settle();
+    release("它在问是否继续");
+    await settle();
+    expect(h.watcher.list().notices).toHaveLength(0);
     h.watcher.stop();
   });
 

@@ -9,11 +9,11 @@ import { Spinner } from "../components/spinner.js";
 import { useToast } from "../components/toast.js";
 import { useDaemon } from "../daemon-context.js";
 import { modLabel, shortcutMod } from "../lib/shortcuts.js";
-import { writeClipboard } from "./portrait/logic.js";
 import {
   flattenReferenceGroups,
   groupReferenceCandidates,
   moveReferenceSelection,
+  writeClipboardDeferred,
 } from "./deck-reference-logic.js";
 
 type PreviewState = {
@@ -142,17 +142,26 @@ export function DeckReferencePicker({
     if (!candidate || submitting) return;
     setSubmitting(true);
     try {
-      const res = await client.materializeReference({
+      const materialized = client.materializeReference({
         uri: candidate.uri,
         label: candidate.label,
       });
+      // 剪贴板写入要在点击的同一调用栈里发起，不能等接口返回后再写（WebKit 会拒绝）。
+      const copying =
+        mode === "terminal"
+          ? null
+          : writeClipboardDeferred(
+              materialized.then((value) => `${value.fileMention} `),
+              navigator.clipboard,
+            );
+      const res = await materialized;
       const mentionText = `${res.fileMention} `;
       if (mode === "terminal") {
         onInsert?.(mentionText, candidate.label);
         onClose();
         return;
       }
-      const copied = await writeClipboard(mentionText, (value) => navigator.clipboard.writeText(value));
+      const copied = (await copying) ?? false;
       if (copied) {
         push({
           message: t("deckRefCopiedT3", {

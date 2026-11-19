@@ -33,13 +33,14 @@ export function refineToEvents(
   output: RefineOutput,
   eventFactory: RefineEventFactory,
   ids: RefineIdSource,
-  options: { reactivate?: boolean } = {},
+  options: { reactivate?: boolean; consumed?: number } = {},
 ): Event[] {
   const events: Event[] = [];
   const stamp = () => {
     const next = eventFactory();
     return { ts: next.ts, device: next.device, seq: next.seq, id: ids.eventId() };
   };
+  const consumed = options.consumed ?? input.messages.length;
 
   events.push(
     createEvent({
@@ -51,7 +52,7 @@ export function refineToEvents(
         source: input.source,
         title: output.title,
         summary: output.summary,
-        refinedUpTo: input.refinedUpTo + input.messages.length,
+        refinedUpTo: input.refinedUpTo + consumed,
       },
     }),
   );

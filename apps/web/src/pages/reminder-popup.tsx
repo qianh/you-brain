@@ -9,7 +9,7 @@ import { translate, type MessageKey } from "../i18n/messages.js";
 import type { Language } from "../lib/format.js";
 import { deckPaneHref, topicHref } from "../lib/route.js";
 import { browserWindowBridge } from "../lib/window.js";
-import { buildPopupQueue, formatTerminalSnippet, type PopupItem } from "./popup-queue.js";
+import { buildPopupQueue, type PopupItem } from "./popup-queue.js";
 import { reminderToTaskInput } from "./reminders/model.js";
 
 const POLL_MS = 2_000;
@@ -38,7 +38,6 @@ export function ReminderPopupPage() {
   const [queue, setQueue] = useState<PopupItem[] | null>(null);
   const [offline, setOffline] = useState(false);
   const [reply, setReply] = useState("");
-  const [snippet, setSnippet] = useState("");
   const [busy, setBusy] = useState<BusyAction>(null);
   const [settled, setSettled] = useState<SettledAction>(null);
   const [error, setError] = useState<string | null>(null);
@@ -119,32 +118,6 @@ export function ReminderPopupPage() {
       setError(null);
     }
   }, [activeKey]);
-
-  const terminalPane = current?.type === "terminal" ? current.notice.pane : null;
-  useEffect(() => {
-    if (terminalPane === null) {
-      setSnippet("");
-      return undefined;
-    }
-    let cancelled = false;
-    const pullScreen = async (): Promise<void> => {
-      try {
-        const screen = await client.deckTty7Screen(terminalPane, 10);
-        if (!cancelled) setSnippet(formatTerminalSnippet(screen.text, 4));
-      } catch {
-        if (!cancelled) setSnippet("");
-      }
-    };
-    void pullScreen();
-    const timer = setInterval(() => {
-      if (document.visibilityState === "hidden" || settledRef.current !== null) return;
-      void pullScreen();
-    }, POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [client, terminalPane]);
 
   useEffect(() => {
     if (queue === null || current !== null || offline) return;
@@ -376,9 +349,6 @@ export function ReminderPopupPage() {
             <p className="popup-text">
               {current.notice.body !== "" ? current.notice.body : current.notice.title}
             </p>
-            {snippet !== "" && snippet.trim() !== current.notice.body.trim() ? (
-              <pre className="popup-term-preview">{snippet}</pre>
-            ) : null}
           </section>
 
           {error ? (
