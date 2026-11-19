@@ -97,7 +97,7 @@ function harness(
   options: {
     enabled?: () => boolean;
     pollMs?: number;
-    summarize?: (draft: { pane: number; body: string }) => Promise<string | null>;
+    summarize?: (draft: { pane: number; body: string }) => Promise<{ task: string | null; body: string } | null>;
     summarizeTimeoutMs?: number;
   } = {},
 ) {
@@ -169,7 +169,7 @@ describe("SessionNoticeWatcher", () => {
   });
 
   it("waits for the summary and uses it as the body", async () => {
-    let release: (value: string | null) => void = () => undefined;
+    let release: (value: { task: string | null; body: string } | null) => void = () => undefined;
     const h = harness({
       summarize: () =>
         new Promise((resolve) => {
@@ -182,13 +182,17 @@ describe("SessionNoticeWatcher", () => {
     h.line();
     await settle();
     expect(h.watcher.list().notices).toHaveLength(0);
-    release("已完成打包安装，签名校验通过；建议打开 App 确认新版本。");
+    release({ task: "打包安装", body: "已完成打包安装，签名校验通过；建议打开 App 确认新版本。" });
     await settle();
     expect(h.watcher.list().notices[0]).toMatchObject({
       pane: 1,
       kind: "done",
+      task: "打包安装",
+      title: "打包安装 已完成",
       body: "已完成打包安装，签名校验通过；建议打开 App 确认新版本。",
     });
+    expect(h.watcher.taskOf(1)).toBe("打包安装");
+    expect(h.watcher.taskOf(2)).toBeNull();
     expect(h.notices()).toBe(1);
     h.watcher.stop();
   });
@@ -214,7 +218,7 @@ describe("SessionNoticeWatcher", () => {
   });
 
   it("drops the notice when the session moves on before the summary is ready", async () => {
-    let release: (value: string | null) => void = () => undefined;
+    let release: (value: { task: string | null; body: string } | null) => void = () => undefined;
     const h = harness({
       summarize: () =>
         new Promise((resolve) => {
@@ -229,7 +233,7 @@ describe("SessionNoticeWatcher", () => {
     h.set(view([session(1, "working")]));
     h.line();
     await settle();
-    release("它在问是否继续");
+    release({ task: null, body: "它在问是否继续" });
     await settle();
     expect(h.watcher.list().notices).toHaveLength(0);
     h.watcher.stop();

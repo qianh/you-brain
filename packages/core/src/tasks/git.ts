@@ -21,6 +21,14 @@ interface Owner {
 }
 
 /** 任务只在自己的 worktree 里执行；合并入口只能接收已由人核对的提交。 */
+/** 会话这一轮结束了但分支上还没有提交：多半是 AI 在等用户确认方案或回答问题，不算出错。 */
+export class TaskNoCommitError extends Error {
+  constructor() {
+    super("任务还没有可核对的提交");
+    this.name = "TaskNoCommitError";
+  }
+}
+
 export class TaskGit implements TaskGitPort {
   readonly #options: { dataDir: string; env?: NodeJS.ProcessEnv };
   readonly #queues = new Map<string, Promise<unknown>>();
@@ -82,7 +90,7 @@ export class TaskGit implements TaskGitPort {
       await this.#verifyRun(repo, run);
       const headSha = await this.#sha(run.worktreePath, "HEAD");
       const baseSha = await this.#develop(repo);
-      if (baseSha === headSha) throw new Error("任务还没有可核对的提交");
+      if (baseSha === headSha) throw new TaskNoCommitError();
       await this.#ancestor(repo, baseSha, headSha, "develop 已发生分歧，请先在 T3 中处理后重新核对");
       await this.#safeChanges(repo, baseSha, headSha);
       const stat = (await this.#git(repo, ["diff", "--no-ext-diff", "--no-textconv", "--stat", baseSha, headSha, "--"])).text;

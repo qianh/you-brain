@@ -587,7 +587,7 @@ fn notify_due_reminders(
     *known = Some(updated);
 }
 
-/// 有新的聊到时提醒：把记忆提醒弹框带到屏幕上方居中、置顶并获得焦点。
+/// 有新的聊到时提醒：把记忆提醒弹框带到屏幕上方居中、置顶，但不抢焦点。
 /// 页面自己拉提醒队列并渲染，回复/忽略后没有剩余时经 `hide_reminder_popup` 收起。
 fn show_reminder_popup(app: &tauri::AppHandle, kind: NotificationKind) {
     let app = app.clone();
@@ -603,9 +603,21 @@ fn show_reminder_popup(app: &tauri::AppHandle, kind: NotificationKind) {
             return;
         };
         position_reminder_popup(&app, &window);
-        let _ = window.show();
-        let _ = window.set_focus();
+        present_without_focus(&window);
     });
+}
+
+/// 把弹框摆到最前面但不激活 U-Brain：用户正在用的应用保持焦点，点到弹框时才切过来。
+fn present_without_focus(window: &WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    if let Ok(pointer) = window.ns_window() {
+        // SAFETY: 在主线程（run_on_main_thread 内）调用，指针来自 tauri 持有的 NSWindow。
+        if let Some(ns_window) = unsafe { (pointer as *mut objc2::runtime::AnyObject).as_ref() } {
+            let _: () = unsafe { objc2::msg_send![ns_window, orderFrontRegardless] };
+            return;
+        }
+    }
+    let _ = window.show();
 }
 
 /// 弹框已存在时才被发布逻辑导航；这里负责首次创建。
@@ -647,6 +659,7 @@ fn build_reminder_popup(app: &tauri::AppHandle, url: WebviewUrl) -> tauri::Resul
         .visible(false)
         .skip_taskbar(true)
         .always_on_top(true)
+        .focused(false)
         .build()?;
     let popup = window.clone();
     window.on_window_event(move |event| {

@@ -473,3 +473,18 @@ describe("MCP protocol", () => {
     }
   });
 });
+
+describe("referenceResource", () => {
+  it("@ 菜单右列（description）以【类型】标题开头，后接摘要", async () => {
+    const { referenceResource } = await import("../../src/mcp/server.js");
+    expect(
+      referenceResource({ kind: "session", label: "法务合同模板", detail: "最近编辑 · 2026-11-18", resourceUri: "you-brain://session/x" }),
+    ).toEqual({
+      uri: "you-brain://session/x",
+      name: "会话 · 法务合同模板",
+      description: "【会话】法务合同模板 · 最近编辑 · 2026-11-18",
+      mimeType: "text/markdown",
+    });
+    expect(referenceResource({ kind: "kb", label: "合同", detail: "", resourceUri: "you-brain://kb/y" }).description).toBe("【知识库】合同");
+  });
+});

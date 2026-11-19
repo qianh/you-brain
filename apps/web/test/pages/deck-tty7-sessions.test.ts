@@ -17,6 +17,12 @@ describe("deck-tty7-sessions", () => {
     expect(sessionTitle(make({ pane: 7 }))).toBe("%7");
   });
 
+  it("sessionTitle 优先用最近一轮的任务名，手动起过名的不换", () => {
+    expect(sessionTitle(make({ tabLabel: "多巴胺主题背景色", task: "修复 TODO 状态误标" }))).toBe("修复 TODO 状态误标");
+    expect(sessionTitle(make({ tabLabel: "我的名字", tabNamed: true, task: "修复 TODO 状态误标" }))).toBe("我的名字");
+    expect(sessionTitle(make({ tabLabel: "标签", task: null }))).toBe("标签");
+  });
+
   it("initialDeckView 首次使用默认 T3，记住 dsh 或 muse", () => {
     expect(initialDeckView(null)).toBe("t3");
     expect(initialDeckView("dsh")).toBe("dsh");

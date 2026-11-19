@@ -96,3 +96,22 @@ test("does not scan an unbounded response for a T3 title", async () => {
     expect(await (await probe(server, url)).json()).toEqual({ state: "error", url, reason: "not-t3" });
   }, () => new Response(" ".repeat(70 * 1024) + SHELL, { headers: { "content-type": "text/html" } }));
 });
+
+test("ready 时附上 daemon 的 T3 转发地址，iframe 优先加载它", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "yb-t3-frame-"));
+  const t3 = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(SHELL, { headers: { "content-type": "text/html" } }) });
+  const seen: string[] = [];
+  const server = await startDaemonHttp({
+    dataDir: dir,
+    deps: { deck: { t3Frame: (upstream: string) => { seen.push(upstream); return "http://127.0.0.1:13773/"; } } } as unknown as HttpDeps,
+  });
+  try {
+    const url = `http://127.0.0.1:${t3.port}/`;
+    expect(await (await probe(server, url)).json()).toEqual({ state: "ready", url, frameUrl: "http://127.0.0.1:13773/" });
+    expect(seen).toEqual([url]);
+  } finally {
+    await server.stop();
+    await t3.stop(true);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

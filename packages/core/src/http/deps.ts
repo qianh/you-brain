@@ -230,6 +230,8 @@ export interface HttpDeps {
 export interface DeckHttpPort {
   /** 启动（若未运行）并返回嵌入页面用的 DSH Web 状态。 */
   dshWeb(retry?: boolean): Promise<DeckDshWebResponse>;
+  /** T3 iframe 该加载的转发地址（注入多巴胺底色与 @ 引用）；不支持或起不来时为 null。 */
+  t3Frame?(upstream: string): string | null;
   dshLogin(): Promise<DeckDshLoginResponse>;
   dshLoginAction(body: DeckDshLoginBody): Promise<DeckDshLoginResponse>;
   /** GUI App 桥：给 DSH 的 u-brain-bridge 插件用。 */

@@ -10,6 +10,7 @@ import { loadChunk } from "../lib/load-chunk.js";
 import { prefs } from "../lib/prefs.js";
 import { modLabel, shortcutMod } from "../lib/shortcuts.js";
 import { DeckReferencePicker } from "./deck-reference-picker.js";
+import { REFERENCE_TRIGGER } from "./deck-terminal-input.js";
 import { FONT_MAX, FONT_MIN, FONT_SIZE_KEY, resolveAppearance, stepFontSize } from "./deck-terminal-font.js";
 import { DeckTty7NewForm, DeckTty7SessionList, readGroupColors } from "./deck-tty7-list.js";
 import { baseName, sessionTitle, useSessionRename, type Session, type useTty7Sessions } from "./deck-tty7-sessions.js";
@@ -42,8 +43,26 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
   /** 下拉里的新建表单：null 为收起；label 为 null 表示不限项目。 */
   const [creating, setCreating] = useState<{ label: string | null } | null>(null);
   const [refPickerOpen, setRefPickerOpen] = useState(false);
+  /** 选择器是不是在终端里敲 `%` 打开的；是的话没选就关掉时要把 % 还给会话。 */
+  const refFromAtRef = useRef(false);
+  const refInsertedRef = useRef(false);
   const pasteSeqRef = useRef(0);
-  const [pendingPaste, setPendingPaste] = useState<{ pane: number; seq: number; text: string } | null>(null);
+  const [pendingPaste, setPendingPaste] = useState<{ pane: number; seq: number; text: string; raw?: boolean } | null>(null);
+  const queueInput = (pane: number, text: string, raw: boolean): void => {
+    pasteSeqRef.current += 1;
+    setPendingPaste({ pane, seq: pasteSeqRef.current, text, ...(raw ? { raw: true } : {}) });
+  };
+  const openRefPicker = (fromAt: boolean): void => {
+    refFromAtRef.current = fromAt;
+    refInsertedRef.current = false;
+    setRefPickerOpen(true);
+  };
+  const closeRefPicker = (): void => {
+    setRefPickerOpen(false);
+    // 敲 % 打开却没选（Esc、取消、再敲一个 %）：把 % 原样还给会话。
+    if (refFromAtRef.current && !refInsertedRef.current && tabs.active !== null) queueInput(tabs.active, REFERENCE_TRIGGER, true);
+    refFromAtRef.current = false;
+  };
   const handlePasteHandled = useCallback((seq: number) => {
     setPendingPaste((current) => (current?.seq === seq ? null : current));
   }, []);
@@ -90,7 +109,7 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
       event.preventDefault();
       event.stopPropagation();
       if (action === "back") onTabsChange(hideScreen(tabs));
-      else if (action === "reference") setRefPickerOpen(true);
+      else if (action === "reference") openRefPicker(false);
       else if (action === "fontUp") setFontSize(stepFontSize(fontSize, 1));
       else if (action === "fontDown") setFontSize(stepFontSize(fontSize, -1));
       else if (action === "fontReset") resetFontSize();
@@ -293,7 +312,7 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
             className="deck-term-ref-btn"
             title={t("deckRefButtonTitle", { shortcut: `${modLabel(mod)}⇧2` })}
             onMouseDown={(event) => event.preventDefault()}
-            onClick={() => setRefPickerOpen(true)}
+            onClick={() => openRefPicker(false)}
           >
             {t("deckRefButton")}
           </button>
@@ -337,6 +356,7 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
               active={shown && pane === tabs.active}
               pendingPaste={pendingPaste?.pane === pane ? pendingPaste : null}
               onPasteHandled={handlePasteHandled}
+              onReferenceKey={byPane.get(pane)?.agent ? () => openRefPicker(true) : undefined}
             />
           ))}
         </Suspense>
@@ -344,12 +364,13 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
       <DeckReferencePicker
         open={refPickerOpen}
         mode="terminal"
-        onClose={() => setRefPickerOpen(false)}
+        onClose={closeRefPicker}
         onInsert={(mentionText) => {
           if (tabs.active === null) return;
-          pasteSeqRef.current += 1;
-          setPendingPaste({ pane: tabs.active, seq: pasteSeqRef.current, text: mentionText });
+          refInsertedRef.current = true;
+          queueInput(tabs.active, mentionText, false);
         }}
+        {...(refFromAtRef.current ? { onPassthrough: closeRefPicker } : {})}
         onOpenTerminal={(pane) => onTabsChange(openTab(tabs, pane))}
       />
     </div>

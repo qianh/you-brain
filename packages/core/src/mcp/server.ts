@@ -200,6 +200,24 @@ const KIND_LABELS: Record<ReferenceKind, string> = {
   kb: "知识库",
 };
 
+/**
+ * 引用候选 → MCP 资源条目。Claude Code 的 @ 菜单左列只显示「服务名:uri」（uri 是编码 id，又会被截断），
+ * 右列显示 description；类型和标题放在描述最前面，菜单里才看得出是哪一条，按标题输入 @ 时也能匹配上。
+ */
+export function referenceResource(item: Pick<ReferenceCandidateView, "kind" | "label" | "detail" | "resourceUri">): {
+  uri: string;
+  name: string;
+  description: string;
+  mimeType: string;
+} {
+  return {
+    uri: item.resourceUri,
+    name: `${KIND_LABELS[item.kind]} · ${item.label}`,
+    description: `【${KIND_LABELS[item.kind]}】${item.label}${item.detail ? ` · ${item.detail}` : ""}`,
+    mimeType: "text/markdown",
+  };
+}
+
 function buildFallbackReferencePorts(services: McpServices): ReferencePorts {
   return {
     today: () => services.getToday(),
@@ -738,14 +756,10 @@ export function createMcpServer(services: McpServices): McpServer {
     "u-brain-reference",
     new ResourceTemplate("you-brain://{kind}/{id}", {
       list: async () => {
-        const res = await runSearchReferences(services, { limit: 8 });
+        // Claude Code 只列一次，再自己按输入的字在本地过滤；每类给足 50 条（上限），@ 关键词才搜得到不那么新的条目。
+        const res = await runSearchReferences(services, { limit: 50 });
         return {
-          resources: res.candidates.map((item) => ({
-            uri: item.resourceUri,
-            name: `${KIND_LABELS[item.kind]} · ${item.label}`,
-            ...(item.detail ? { description: item.detail } : {}),
-            mimeType: "text/markdown",
-          })),
+          resources: res.candidates.map(referenceResource),
         };
       },
       complete: {

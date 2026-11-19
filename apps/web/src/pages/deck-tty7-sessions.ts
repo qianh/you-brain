@@ -21,9 +21,15 @@ export function waitingCount(sessions: readonly Session[]): number {
   return sessions.filter((session) => session.status === "waiting").length;
 }
 
-/** 会话显示名：标签名，否则目录名，否则 %pane。 */
-export function sessionTitle(session: Session): string {
+/** 原始标题：tty7 标签名（CLI 自己设的终端标题或手动起的名），否则目录名，否则 %pane。 */
+export function sessionLabel(session: Session): string {
   return session.tabLabel ?? (session.cwd === "" ? `%${session.pane}` : baseName(session.cwd));
+}
+
+/** 会话显示名：最近一轮的任务名优先（手动起过名的除外），否则原始标题。 */
+export function sessionTitle(session: Session): string {
+  if (session.task && !session.tabNamed) return session.task;
+  return sessionLabel(session);
 }
 
 export type DeckViewId = "dsh" | "t3" | "muse";

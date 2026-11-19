@@ -11,6 +11,13 @@ const ANSI_ESCAPE = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|
 const CHROME_LINE = /^[\s─-╿▀-▟│|>❯›»$%#*·•…\-_=+~.]*$/u;
 const SCREEN_CHAR_MAX = 8_000;
 const SUMMARY_CHAR_MAX = 300;
+const TASK_CHAR_MAX = 16;
+
+/** 模型写的提醒：本轮任务名（弹框标签用，随每一轮变化）+ 正文。 */
+export interface NoticeSummary {
+  task: string | null;
+  body: string;
+}
 
 /** 去掉控制符、空行和纯线框行，只保留末尾一段。 */
 export function cleanNoticeScreen(raw: string): string {
@@ -37,7 +44,8 @@ export function buildNoticeSummaryPrompt(
     "已完成：说清楚做成了什么、结果如何（成功/失败/部分完成），有失败或需要用户验证的地方点出来，最后给一句建议的下一步。",
     "等待回复：说清楚它在问什么、有哪些选项，并给出你的建议选择和理由。",
     "屏幕信息不足以判断时，如实说明看不出结果，并建议用户打开终端查看。",
-    `纯文本，不用 Markdown，不加标题和前缀，总共不超过 ${SUMMARY_CHAR_MAX / 2} 个汉字左右，两三句话。`,
+    "第一行固定写「任务：」加这一轮在做的事，不超过 12 个字，说做什么而不是结果（如「任务：修复 TODO 状态误标」）；看不出就写「任务：未知」。",
+    `第二行起写提醒正文：纯文本，不用 Markdown，不加标题和前缀，不超过 ${SUMMARY_CHAR_MAX / 2} 个汉字左右，两三句话。`,
   ].join("\n");
   const head = [
     `会话：${draft.sessionName}${draft.agent ? `（${draft.agent}）` : ""}`,
@@ -65,15 +73,31 @@ export function cleanNoticeSummary(raw: string): string | null {
   return text.length > SUMMARY_CHAR_MAX ? `${text.slice(0, SUMMARY_CHAR_MAX - 1)}…` : text;
 }
 
+/** 拆出第一行的「任务：…」；模型没按格式写时整段都当正文。 */
+export function parseNoticeSummary(raw: string): NoticeSummary | null {
+  const lines = raw.replace(/^\s+/u, "").split(/\r?\n/u);
+  const match = /^[*#\s]*任务\s*[:：]\s*(.*?)[*\s]*$/u.exec(lines[0] ?? "");
+  let task: string | null = null;
+  let rest = raw;
+  if (match) {
+    const name = (match[1] ?? "").replace(/^[「『"“]|[」』"”。.]$/gu, "").trim();
+    task = name === "" || name === "未知" ? null : name.length > TASK_CHAR_MAX ? `${name.slice(0, TASK_CHAR_MAX - 1)}…` : name;
+    rest = lines.slice(1).join("\n");
+  }
+  const body = cleanNoticeSummary(rest);
+  if (body === null) return null;
+  return { task, body };
+}
+
 export async function summarizeNotice(
   backend: Pick<LlmBackend, "complete">,
   draft: Pick<SessionNoticeDraft, "kind" | "sessionName" | "agent" | "cwd" | "body">,
   rawScreen: string,
   timeoutMs: number,
-): Promise<string | null> {
+): Promise<NoticeSummary | null> {
   const screen = cleanNoticeScreen(rawScreen);
   if (screen === "" && draft.body.trim() === "") return null;
   const prompt = buildNoticeSummaryPrompt(draft, screen);
   const raw = await backend.complete({ ...prompt, timeoutMs });
-  return cleanNoticeSummary(raw);
+  return parseNoticeSummary(raw);
 }

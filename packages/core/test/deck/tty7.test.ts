@@ -60,8 +60,8 @@ describe("Tty7.sessions", () => {
       { id: "ws-b", name: "ws-b", attached: false },
     ]);
     expect(view.sessions).toEqual([
-      { pane: 7, workspaceId: "ws-a", workspaceName: "John", tabId: "t1", tabLabel: "修登录", agent: "Claude", cwd: "/repo/a", hibernated: false, status: "waiting", statusMessage: "要不要执行 rm？", model: "opus" },
-      { pane: 9, workspaceId: "ws-b", workspaceName: "ws-b", tabId: "t2", tabLabel: "手动命名", agent: "Codex", cwd: "", hibernated: true, status: null, statusMessage: null, model: null },
+      { pane: 7, workspaceId: "ws-a", workspaceName: "John", tabId: "t1", tabLabel: "修登录", tabNamed: false, agent: "Claude", cwd: "/repo/a", hibernated: false, status: "waiting", statusMessage: "要不要执行 rm？", model: "opus" },
+      { pane: 9, workspaceId: "ws-b", workspaceName: "ws-b", tabId: "t2", tabLabel: "手动命名", tabNamed: true, agent: "Codex", cwd: "", hibernated: true, status: null, statusMessage: null, model: null },
     ]);
     expect(view.harnesses.map((item) => item.id)).toContain("claude");
   });

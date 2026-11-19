@@ -13,7 +13,8 @@ import {
   type SessionNoticeDismissInput,
   type SessionNoticeList,
 } from "./session-notices.js";
-import { Tty7 } from "./tty7.js";
+import { startT3Proxy, type T3Proxy } from "./t3/proxy.js";
+import { Tty7, type Tty7SessionsView } from "./tty7.js";
 import {
   GUI_APPS,
   accessibilityGranted,
@@ -74,6 +75,8 @@ export class DeckService {
   readonly #dsh: Pick<DshRuntime, "close" | "webState" | "loginView" | "loginAction"> &
     Partial<Pick<DshRuntime, "refresh">>;
   #stopped = false;
+  /** T3 转发（ADR-0004）：指挥台的 T3 iframe 经它加载，才能注入多巴胺底色和 @ 引用。 */
+  #t3Proxy: T3Proxy | null = null;
   /** tty7 会话桥（ADR-0004）：与 dsh 无关，dsh 没起来也能用。 */
   readonly tty7: Tty7;
   /** 终端会话提醒：盯着 tty7 会话状态，工作中 → 等你回复/已完成时记一条。 */
@@ -130,8 +133,24 @@ export class DeckService {
       });
   }
 
+  /** 返回 T3 iframe 该加载的转发地址；T3 地址变了就换一个转发。起不来返回 null，网页退回直连。 */
+  t3Frame(upstream: string): string | null {
+    if (this.#stopped) return null;
+    if (this.#t3Proxy?.upstream === upstream) return this.#t3Proxy.url;
+    this.#t3Proxy?.stop();
+    this.#t3Proxy = null;
+    try {
+      this.#t3Proxy = startT3Proxy(upstream);
+      return this.#t3Proxy.url;
+    } catch {
+      return null;
+    }
+  }
+
   stop(): void {
     this.#stopped = true;
+    this.#t3Proxy?.stop();
+    this.#t3Proxy = null;
     this.notices.stop();
     this.activity.stop();
     this.muse.stop();
@@ -156,6 +175,12 @@ export class DeckService {
     this.notices.start();
     this.tty7.setActivity((pane) => this.activity.detail(pane));
     this.activity.start();
+  }
+
+  /** 终端会话列表：在 tty7 的会话上补上最近一轮的任务名。 */
+  async tty7Sessions(): Promise<Tty7SessionsView> {
+    const view = await this.tty7.sessions();
+    return { ...view, sessions: view.sessions.map((session) => ({ ...session, task: this.notices.taskOf(session.pane) })) };
   }
 
   noticeList(): SessionNoticeList {

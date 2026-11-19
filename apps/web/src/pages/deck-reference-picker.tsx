@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { ReferenceCandidateView, ReferenceContentView, ReferenceKind } from "@you-brain/core/http/types.js";
 
-import { Button, IconButton } from "../components/button.js";
+import { Button } from "../components/button.js";
 import { Dialog } from "../components/dialog.js";
 import { Icon, type IconName } from "../components/icons.js";
 import { SearchField } from "../components/input.js";
@@ -9,6 +9,8 @@ import { Spinner } from "../components/spinner.js";
 import { useToast } from "../components/toast.js";
 import { useDaemon } from "../daemon-context.js";
 import { modLabel, shortcutMod } from "../lib/shortcuts.js";
+import { isReferenceTriggerChar } from "./deck-terminal-input.js";
+import { PortraitMarkdown } from "./portrait/markdown-view.js";
 import {
   flattenReferenceGroups,
   groupReferenceCandidates,
@@ -37,9 +39,13 @@ export function DeckReferencePicker({
   onInsert,
   onCopied,
   onOpenTerminal,
+  onPassthrough,
 }: {
   open: boolean;
-  mode: "terminal" | "t3";
+  /** terminal / t3-insert：选中后直接填进去（onInsert）；t3：T3 没走转发时只能复制到剪贴板。 */
+  mode: "terminal" | "t3" | "t3-insert";
+  /** 由终端或 T3 里敲 `%` 打开时提供：搜索框空着再敲一个 `%`，表示要输入 % 本身。 */
+  onPassthrough?: () => void;
   onClose: () => void;
   onInsert?: (mentionText: string, label: string) => void;
   onCopied?: () => void;
@@ -148,7 +154,7 @@ export function DeckReferencePicker({
       });
       // 剪贴板写入要在点击的同一调用栈里发起，不能等接口返回后再写（WebKit 会拒绝）。
       const copying =
-        mode === "terminal"
+        mode !== "t3"
           ? null
           : writeClipboardDeferred(
               materialized.then((value) => `${value.fileMention} `),
@@ -156,7 +162,7 @@ export function DeckReferencePicker({
             );
       const res = await materialized;
       const mentionText = `${res.fileMention} `;
-      if (mode === "terminal") {
+      if (mode !== "t3") {
         onInsert?.(mentionText, candidate.label);
         onClose();
         return;
@@ -188,6 +194,15 @@ export function DeckReferencePicker({
 
   const selected = activeIndex >= 0 ? flat[activeIndex] : undefined;
 
+  // 右侧预览跟随当前选中的一行（点击或上下键）；稍等一下再取，快速翻动时不逐条请求。
+  const previewUri = preview?.candidate.uri;
+  useEffect(() => {
+    if (!open || !selected || selected.uri === previewUri) return;
+    const timer = window.setTimeout(() => loadPreview(selected), 180);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, selected?.uri]);
+
   const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
     if (event.nativeEvent.isComposing) return;
     if (event.key === "ArrowDown") {
@@ -202,7 +217,8 @@ export function DeckReferencePicker({
     }
     if (event.key === "Enter") {
       const target = event.target as HTMLElement | null;
-      if (target?.tagName === "BUTTON") return;
+      // 焦点在别的按钮（刷新、取消等）上时交给按钮自己；在列表行上回车等同插入。
+      if (target?.tagName === "BUTTON" && !target.classList.contains("deck-ref-row")) return;
       if (selected) {
         event.preventDefault();
         void pick(selected);
@@ -220,7 +236,7 @@ export function DeckReferencePicker({
       placement="top"
       className="deck-ref-dialog"
       title={t("deckRefDialogTitle")}
-      description={mode === "terminal" ? t("deckRefDialogDescTerminal") : t("deckRefDialogDescT3")}
+      description={t(mode === "terminal" ? "deckRefDialogDescTerminal" : mode === "t3-insert" ? "deckRefDialogDescT3Insert" : "deckRefDialogDescT3")}
       footer={
         <>
           <Button variant="ghost" data-cancel="" onClick={onClose}>
@@ -232,7 +248,7 @@ export function DeckReferencePicker({
             loading={submitting}
             onClick={() => void pick(selected)}
           >
-            {mode === "terminal" ? t("deckRefInsert") : t("deckRefCopyInsert")}
+            {mode === "t3" ? t("deckRefCopyInsert") : t("deckRefInsert")}
           </Button>
         </>
       }
@@ -240,7 +256,13 @@ export function DeckReferencePicker({
       <div className="deck-ref-picker" onKeyDown={onKeyDown}>
         <SearchField
           value={query}
-          onChange={setQuery}
+          onChange={(value) => {
+            if (onPassthrough && query === "" && isReferenceTriggerChar(value)) {
+              onPassthrough();
+              return;
+            }
+            setQuery(value);
+          }}
           placeholder={t("deckRefSearchPlaceholder")}
           label={t("deckRefSearchLabel")}
           autoFocus
@@ -272,8 +294,8 @@ export function DeckReferencePicker({
                           role="option"
                           aria-selected={isSelected}
                           className="deck-ref-row"
-                          onMouseEnter={() => setActiveIndex(index)}
-                          onClick={() => void pick(item)}
+                          onClick={() => setActiveIndex(index)}
+                          onDoubleClick={() => void pick(item)}
                         >
                           <span className="deck-ref-row-icon" aria-hidden="true">
                             <Icon name={KIND_ICON[item.kind]} />
@@ -283,17 +305,6 @@ export function DeckReferencePicker({
                             {item.detail ? <span className="deck-ref-row-detail">{item.detail}</span> : null}
                           </span>
                         </button>
-                        <IconButton
-                          className="sm deck-ref-preview-btn"
-                          label={t("deckRefPreview")}
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setActiveIndex(index);
-                            loadPreview(item);
-                          }}
-                        >
-                          <Icon name="eye" />
-                        </IconButton>
                       </div>
                     );
                   })}
@@ -347,8 +358,12 @@ export function DeckReferencePicker({
                   <p className="deck-ref-preview-error" role="alert">
                     {preview.error}
                   </p>
-                ) : (
+                ) : preview.candidate.kind === "tty7" ? (
                   <pre className="deck-ref-preview-body">{preview.content?.text}</pre>
+                ) : (
+                  <div className="deck-ref-preview-body is-markdown">
+                    <PortraitMarkdown source={preview.content?.text ?? ""} />
+                  </div>
                 )}
               </>
             )}

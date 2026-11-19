@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import type { NoticeSummary } from "./notice-summary.js";
 import type { Tty7Session, Tty7SessionsView } from "./tty7.js";
 
 /**
@@ -15,6 +16,8 @@ export interface SessionNotice {
   /** open = 待处理（在置顶弹框队列里展示）；closed = 已确认、已跳转或会话状态已推进。 */
   status: "open" | "closed";
   sessionName: string;
+  /** 这一轮在做的事（模型从屏幕概括，每轮都变）；没有时界面退回 sessionName。 */
+  task?: string;
   agent: string | null;
   cwd: string;
   title: string;
@@ -134,7 +137,7 @@ export interface SessionNoticeWatcherOptions {
    * 把提醒正文写成分析后的结论和建议（读屏幕交给模型）。返回 null 或抛错时用会话自报的状态兜底。
    * 提供时，提醒等分析完成（或超时）后才记下，系统通知和弹框一出来就是分析后的内容。
    */
-  summarize?(draft: SessionNoticeDraft): Promise<string | null>;
+  summarize?(draft: SessionNoticeDraft): Promise<NoticeSummary | null>;
   /** 等分析的上限，超时就用兜底正文先记下。 */
   summarizeTimeoutMs?: number;
   now?(): number;
@@ -159,6 +162,8 @@ export class SessionNoticeWatcher {
   readonly #summarizing = new Set<number>();
   /** 用户点了「忽略」的会话；会话关闭后移除（pane 编号可能被新会话复用）。 */
   readonly #muted = new Set<number>();
+  /** 每个会话最近一轮的任务名（来自提醒分析），会话列表用它做标题。 */
+  readonly #tasks = new Map<number, string>();
 
   constructor(options: SessionNoticeWatcherOptions) {
     this.#options = options;
@@ -248,9 +253,14 @@ export class SessionNoticeWatcher {
     this.#debounceTimer.unref?.();
   }
 
+  /** 会话最近一轮的任务名；没分析过时为 null。 */
+  taskOf(pane: number): string | null {
+    return this.#tasks.get(pane) ?? null;
+  }
+
   async #summarizeThenPush(item: SessionNoticeDraft): Promise<void> {
     const summarize = this.#options.summarize;
-    let summary: string | null = null;
+    let summary: NoticeSummary | null = null;
     if (summarize !== undefined) {
       let timer: ReturnType<typeof setTimeout> | null = null;
       const timeout = new Promise<null>((resolve) => {
@@ -264,10 +274,18 @@ export class SessionNoticeWatcher {
       }
     }
     if (!this.#started) return;
+    if (summary?.task) this.#tasks.set(item.pane, summary.task);
     // 分析期间会话状态变了（又开始工作、已关闭）或用户已经在看，这条就不用记了。
     if (this.#snapshot?.get(item.pane) !== item.kind || this.#viewingPane() === item.pane || this.#muted.has(item.pane)) return;
-    const text = summary?.trim() ?? "";
-    this.#push([text === "" ? item : { ...item, body: text }]);
+    const text = summary?.body.trim() ?? "";
+    const task = summary?.task ?? null;
+    this.#push([
+      {
+        ...item,
+        ...(text === "" ? {} : { body: text }),
+        ...(task === null ? {} : { task, title: item.kind === "waiting" ? `${task} 在等你回复` : `${task} 已完成` }),
+      },
+    ]);
   }
 
   #push(found: readonly SessionNoticeDraft[]): void {
@@ -315,6 +333,7 @@ export class SessionNoticeWatcher {
       const viewing = this.#viewingPane();
       const live = new Set(view.sessions.map((session) => session.pane));
       for (const pane of [...this.#muted]) if (!live.has(pane)) this.#muted.delete(pane);
+      for (const pane of [...this.#tasks.keys()]) if (!live.has(pane)) this.#tasks.delete(pane);
       const reconciled = reconcileOpenNotices(this.#notices, view.sessions, viewing);
       const found = enabled ? diffNotices(this.#snapshot, view.sessions, viewing, this.#muted) : [];
       this.#snapshot = new Map(view.sessions.map((session) => [session.pane, session.status]));

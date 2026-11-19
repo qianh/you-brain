@@ -6,7 +6,7 @@ import type { DeckTerminalSize } from "@you-brain/core/http/types.js";
 import "@xterm/xterm/css/xterm.css";
 
 import { useDaemon } from "../daemon-context.js";
-import { preserveTerminalImeInput } from "./deck-terminal-input.js";
+import { isReferenceTrigger, preserveTerminalImeInput } from "./deck-terminal-input.js";
 import { createLatencyProbe } from "./deck-terminal-latency.js";
 import { createBatchedTerminalOutput } from "./deck-terminal-output.js";
 import { muteReplayReplies } from "./deck-terminal-replies.js";
@@ -35,14 +35,17 @@ export function DeckTty7Terminal({
   active = true,
   pendingPaste,
   onPasteHandled,
+  onReferenceKey,
 }: {
   pane: number;
   appearance: TerminalAppearance;
   /** 非当前标签时保持连接，只隐藏不卸载。 */
   active?: boolean;
   /** 由 @ 引用选择器触发的待粘贴文本。 */
-  pendingPaste?: { seq: number; text: string } | null;
+  pendingPaste?: { seq: number; text: string; raw?: boolean } | null;
   onPasteHandled?: (seq: number) => void;
+  /** 提供时，单独敲下的 `@` 不发给会话，改为打开 U-Brain 引用选择器（只给 AI CLI 会话）。 */
+  onReferenceKey?: (() => void) | undefined;
 }) {
   const { client, t } = useDaemon();
   const hostRef = useRef<HTMLDivElement>(null);
@@ -53,6 +56,12 @@ export function DeckTty7Terminal({
   const activeRef = useRef(active);
   activeRef.current = active;
   const handledPasteRef = useRef(0);
+  const onReferenceKeyRef = useRef(onReferenceKey);
+  onReferenceKeyRef.current = onReferenceKey;
+  /** 正在把 @ 原样还给会话（用户取消了选择器），这一次不再拦截。 */
+  const passthroughRef = useRef(false);
+  /** 上一次发给会话的输入的最后一个字符，用来判断 `%` 是不是紧跟在数字后面。 */
+  const lastInputRef = useRef("");
   const [revision, setRevision] = useState(0);
   const [status, setStatus] = useState<Status>("connecting");
   const [focused, setFocused] = useState(false);
@@ -166,6 +175,11 @@ export function DeckTty7Terminal({
       socket.send(bytes);
     };
     const data = terminal.onData((text) => {
+      if (isReferenceTrigger(text, onReferenceKeyRef.current !== undefined, passthroughRef.current, lastInputRef.current)) {
+        onReferenceKeyRef.current?.();
+        return;
+      }
+      lastInputRef.current = text.slice(-1);
       probe?.input();
       send(new TextEncoder().encode(text));
     });
@@ -318,7 +332,17 @@ export function DeckTty7Terminal({
     const live = liveRef.current;
     if (live === null) return;
     handledPasteRef.current = pendingPaste.seq;
-    live.terminal.paste(pendingPaste.text);
+    if (pendingPaste.raw === true) {
+      // 当作用户亲手敲的字符发出（不走 bracketed paste），和用户亲手敲的一样。
+      passthroughRef.current = true;
+      try {
+        live.terminal.input(pendingPaste.text, true);
+      } finally {
+        passthroughRef.current = false;
+      }
+    } else {
+      live.terminal.paste(pendingPaste.text);
+    }
     const seq = pendingPaste.seq;
     onPasteHandled?.(seq);
     const frame = requestAnimationFrame(() => live.terminal.focus());

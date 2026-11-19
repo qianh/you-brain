@@ -15,6 +15,7 @@ import { useRoute } from "../router.js";
 import { createDshCookiePreparer } from "../lib/dsh-cookies.js";
 import { terminalReferenceMessage, type TerminalReference } from "../lib/terminal-reference.js";
 import { dshThemeMessage, isDshThemeRequest } from "../lib/dsh-theme.js";
+import { t3FrameMessage } from "../lib/t3-frame.js";
 import { useTheme } from "../theme-context.js";
 import { isReferenceShortcut } from "./deck-reference-logic.js";
 import { DeckReferencePicker } from "./deck-reference-picker.js";
@@ -84,6 +85,35 @@ export function DshDeckPage() {
   const [t3ReloadVersion, setT3ReloadVersion] = useState(0);
   const [t3RefPickerOpen, setT3RefPickerOpen] = useState(false);
   const t3Frame = useRef<HTMLIFrameElement>(null);
+  /** T3 经 daemon 转发加载、注入脚本已就绪：选中的引用直接填进 T3 输入框，否则只能复制到剪贴板。 */
+  const [t3Injected, setT3Injected] = useState(false);
+  /** 选择器是不是在 T3 输入框里敲 % 打开的；是的话没选就关掉时把 % 还给 T3。 */
+  const t3RefFromAt = useRef(false);
+  const t3RefInserted = useRef(false);
+  const postToT3 = useCallback((message: unknown): void => {
+    const target = t3Frame.current;
+    if (!target?.contentWindow) return;
+    try {
+      target.contentWindow.postMessage(message, new URL(target.src).origin);
+    } catch {
+      // iframe 还没有地址。
+    }
+  }, []);
+  const openT3Picker = useCallback((fromAt: boolean): void => {
+    t3RefFromAt.current = fromAt;
+    t3RefInserted.current = false;
+    setT3RefPickerOpen(true);
+  }, []);
+  const closeT3Picker = (): void => {
+    setT3RefPickerOpen(false);
+    const giveBackAt = t3RefFromAt.current && !t3RefInserted.current;
+    t3RefFromAt.current = false;
+    requestAnimationFrame(() => {
+      t3Frame.current?.focus();
+      // 敲 % 打开却没选（Esc、取消、再敲一个 %）：把 % 原样还给 T3。
+      if (giveBackAt) postToT3({ type: "u-brain:t3-ref:passthrough" });
+    });
+  };
   const mod = shortcutMod(typeof navigator === "undefined" ? "" : navigator.platform);
   const [museVisited, setMuseVisited] = useState(activePage === "muse");
   const [museSettingsOpen, setMuseSettingsOpen] = useState(false);
@@ -174,6 +204,28 @@ export function DshDeckPage() {
     frame.current?.contentWindow?.postMessage(dshThemeMessage(theme), new URL(readyUrl).origin);
   }, [readyUrl, theme]);
 
+  // T3 注入脚本（经 daemon 转发加载时才有）：要主题、报告就绪、在输入框里敲 % 时请求打开引用选择器。
+  useEffect(() => {
+    const receive = (event: MessageEvent): void => {
+      const message = t3FrameMessage(event, t3Frame.current);
+      if (message === "theme-request") postToT3(dshThemeMessage(themeRef.current));
+      else if (message === "ready") setT3Injected(true);
+      else if (message === "open") openT3Picker(true);
+      else if (message === "shortcut") openT3Picker(false);
+    };
+    window.addEventListener("message", receive);
+    return () => window.removeEventListener("message", receive);
+  }, [postToT3, openT3Picker]);
+
+  useEffect(() => {
+    postToT3(dshThemeMessage(theme));
+  }, [theme, postToT3]);
+
+  // T3 重新加载（刷新、换地址）后要等注入脚本重新报到；直连 T3 时不会报到，退回复制到剪贴板。
+  useEffect(() => {
+    setT3Injected(false);
+  }, [t3ReloadVersion]);
+
   // 切到别的菜单（常驻但隐藏）时不确认；切回时立即确认一次，地址变了就换。
   useEffect(() => {
     if (readyUrl === null || !pageActive) return undefined;
@@ -203,7 +255,7 @@ export function DshDeckPage() {
       }
       event.preventDefault();
       event.stopPropagation();
-      setT3RefPickerOpen(true);
+      openT3Picker(false);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -270,7 +322,7 @@ export function DshDeckPage() {
                     size="sm"
                     variant="secondary"
                     title={t("deckRefButtonTitle", { shortcut: `${modLabel(mod)}⇧2` })}
-                    onClick={() => setT3RefPickerOpen(true)}
+                    onClick={() => openT3Picker(false)}
                   >
                     {t("deckRefButton")}
                   </Button>
@@ -335,11 +387,19 @@ export function DshDeckPage() {
       ) : null}
       <DeckReferencePicker
         open={t3RefPickerOpen}
-        mode="t3"
-        onClose={() => setT3RefPickerOpen(false)}
+        mode={t3Injected ? "t3-insert" : "t3"}
+        onClose={closeT3Picker}
+        onInsert={(mentionText) => {
+          t3RefInserted.current = true;
+          requestAnimationFrame(() => {
+            t3Frame.current?.focus();
+            postToT3({ type: "u-brain:t3-ref:insert", text: mentionText });
+          });
+        }}
         onCopied={() => {
           requestAnimationFrame(() => t3Frame.current?.focus());
         }}
+        {...(t3RefFromAt.current ? { onPassthrough: closeT3Picker } : {})}
         onOpenTerminal={openPane}
       />
     </Page>

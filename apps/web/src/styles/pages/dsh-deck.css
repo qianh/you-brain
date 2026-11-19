@@ -154,6 +154,7 @@
 
 .deck-tty7-row-title { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .deck-tty7-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.deck-tty7-row-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); font-size: 12px; }
 .deck-tty7-row-cwd { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; color: var(--text-3); font-size: 12px; }
 .deck-tty7-empty { padding: 12px 8px; color: var(--text-3); }
 
@@ -571,7 +572,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.deck-ref-preview-btn { flex: none; margin-right: 4px; color: var(--text-3); }
 .deck-ref-preview {
   min-height: 0;
   display: flex;
@@ -608,6 +608,17 @@
   line-height: 1.6;
   color: var(--text-2);
 }
+.deck-ref-preview-body.is-markdown {
+  white-space: normal;
+  color: var(--text);
+  padding-right: 4px;
+}
+.deck-ref-preview-body.is-markdown .portrait-prose { font-size: 13px; line-height: 1.65; }
+.deck-ref-preview-body.is-markdown .portrait-prose h1 { font-size: 16px; }
+.deck-ref-preview-body.is-markdown .portrait-prose h2 { font-size: 15px; margin-top: 16px; }
+.deck-ref-preview-body.is-markdown .portrait-prose h3 { font-size: 14px; margin-top: 12px; }
+.deck-ref-preview-body.is-markdown .portrait-prose table { font-size: 12px; }
+.deck-ref-preview-body.is-markdown .portrait-prose pre { font-size: 12px; white-space: pre; }
 .deck-ref-preview-empty,
 .deck-ref-empty {
   margin: auto;

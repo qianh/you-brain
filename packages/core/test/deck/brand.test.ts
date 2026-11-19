@@ -10,7 +10,13 @@ const PLUGIN_DIR = join(import.meta.dirname, "..", "..", "..", "..", "sidecars",
 
 type Exports = { inject: string[]; apply(ctx: unknown): void };
 
-async function load(): Promise<{ id: string; exports: Exports; styles: string[] }> {
+interface FakeWindow {
+  listeners: Array<(event: { source: unknown; data: unknown }) => void>;
+  posted: unknown[];
+  parent: { postMessage: (message: unknown) => void };
+}
+
+async function load(): Promise<{ id: string; exports: Exports; styles: string[]; win: FakeWindow; dataset: Record<string, string> }> {
   const code = await readFile(join(PLUGIN_DIR, "lib", "client.js"), "utf8");
   type Entry = { id: string; factory: (require: (name: string) => unknown) => Exports };
   const holder: { entry?: Entry } = {};
@@ -23,16 +29,32 @@ async function load(): Promise<{ id: string; exports: Exports; styles: string[] 
       return el;
     },
     head: { appendChild: () => undefined },
+    documentElement: { dataset: {} as Record<string, string> },
   };
-  vm.runInNewContext(code, { window: { __ModuleLoader__: { load: (entry: Entry) => (holder.entry = entry) } }, document });
+  const win: FakeWindow = { listeners: [], posted: [], parent: { postMessage: (message) => win.posted.push(message) } };
+  const windowObject = {
+    __ModuleLoader__: { load: (entry: Entry) => (holder.entry = entry) },
+    parent: win.parent,
+    addEventListener: (_type: string, listener: FakeWindow["listeners"][number]) => win.listeners.push(listener),
+    removeEventListener: (_type: string, listener: FakeWindow["listeners"][number]) => {
+      win.listeners = win.listeners.filter((item) => item !== listener);
+    },
+  };
+  vm.runInNewContext(code, { window: windowObject, document });
   if (holder.entry === undefined) throw new Error("client.js 没有调用 __ModuleLoader__.load");
   const react = { createElement: (...args: unknown[]) => args };
-  return { id: holder.entry.id, exports: holder.entry.factory((name) => (name === "react" ? react : undefined)), styles };
+  return {
+    id: holder.entry.id,
+    exports: holder.entry.factory((name) => (name === "react" ? react : undefined)),
+    styles,
+    win,
+    dataset: document.documentElement.dataset,
+  };
 }
 
 describe("u-brain-brand browser module", () => {
   it("occupies the sidebar and hero brand slots and rewrites the hero copy", async () => {
-    const { id, exports, styles } = await load();
+    const { id, exports, styles, win, dataset } = await load();
     const pkg = JSON.parse(await readFile(join(PLUGIN_DIR, "package.json"), "utf8")) as { name: string; dsh: { client: { platform: string } } };
     expect(id).toBe(pkg.name);
     expect(pkg.dsh.client.platform).toBe("web");
@@ -63,8 +85,19 @@ describe("u-brain-brand browser module", () => {
     expect(locale.translate("conversation", "hero.headline")).toBe("Your second brain, on call");
     expect(styles.join("")).toContain("previewBadge");
 
+    // 跟随宿主主题：开口要一次，只认父窗口发来的消息。
+    expect(win.posted).toEqual([{ type: "u-brain:theme:request" }]);
+    expect(styles.join("")).toContain('html[data-ub-theme="dopamine"]');
+    for (const listener of win.listeners) listener({ source: {}, data: { type: "u-brain:theme", theme: "dopamine" } });
+    expect(dataset.ubTheme).toBeUndefined();
+    for (const listener of win.listeners) listener({ source: win.parent, data: { type: "u-brain:theme", theme: "dopamine" } });
+    expect(dataset.ubTheme).toBe("dopamine");
+    for (const listener of win.listeners) listener({ source: win.parent, data: { type: "u-brain:theme", theme: "light" } });
+    expect(dataset.ubTheme).toBeUndefined();
+
     for (const dispose of disposers) dispose();
     expect(locale.translate).toBe(original);
+    expect(win.listeners).toHaveLength(0);
   });
 });
 

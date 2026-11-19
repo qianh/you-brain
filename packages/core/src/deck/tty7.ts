@@ -45,6 +45,10 @@ export interface Tty7Session {
   tabId: string;
   /** tty7 给 tab 起的标题（通常是 agent 会话标题或目录名）。 */
   tabLabel: string | null;
+  /** 用户手动给 tab 起过名（tty7 的 name）；起过名的标题不被本轮任务名替换。 */
+  tabNamed?: boolean;
+  /** 最近一轮提醒里模型概括的本轮任务（U-Brain 补上，tty7 不提供）；没有时为空。 */
+  task?: string | null;
   /** agent 名（Codex、Claude…）：hooks 上报了用 pane 自己的，否则退回 tty7 在 tab 上识别出的。 */
   agent: string | null;
   cwd: string;
@@ -447,6 +451,7 @@ export class Tty7 {
             workspaceName: names.get(pane.workspace) ?? "",
             tabId: pane.tab,
             tabLabel: tab?.name ?? tab?.label ?? null,
+            tabNamed: typeof tab?.name === "string" && tab.name !== "",
             agent: agent?.agent ?? tab?.agent ?? null,
             cwd: pane.cwd ?? "",
             hibernated: pane.hibernated,

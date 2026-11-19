@@ -338,11 +338,11 @@ export function ReminderPopupPage() {
                 type="button"
                 className="popup-topic-link popup-session-link"
                 onClick={() => void openTerminalSession(current.notice)}
-                title={current.notice.cwd || current.notice.sessionName}
+                title={[current.notice.task ? current.notice.sessionName : null, current.notice.cwd].filter(Boolean).join(" · ") || current.notice.sessionName}
               >
                 <Icon name="terminal" size={11} />
                 <span className="popup-topic-name">
-                  {current.notice.sessionName}
+                  {current.notice.task ?? current.notice.sessionName}
                   <span className="popup-pane-tag">%{current.notice.pane}</span>
                   {current.notice.agent ? <span className="popup-agent-tag">· {current.notice.agent}</span> : null}
                 </span>

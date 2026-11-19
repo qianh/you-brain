@@ -7,7 +7,7 @@ import { InlineRename, type InlineRenameHandle } from "../components/inline-rena
 import { Toggle } from "../components/toggle.js";
 import { useDaemon } from "../daemon-context.js";
 import { prefs } from "../lib/prefs.js";
-import { baseName, sessionTitle, type Session } from "./deck-tty7-sessions.js";
+import { baseName, sessionLabel, sessionTitle, type Session } from "./deck-tty7-sessions.js";
 
 const HARNESS_KEY = "you-brain.deck.tty7-harness";
 const ACTIVE_ONLY_KEY = "you-brain.deck.tty7-active-only";
@@ -116,7 +116,7 @@ export function DeckTty7SessionList({ sessions, filter, onFilterChange, onOpen, 
       : ordered;
     if (needle === "") return active;
     return active.filter((session) =>
-      [session.tabLabel ?? "", session.agent ?? "", session.status ?? "", session.cwd, `%${session.pane}`].some((field) =>
+      [session.tabLabel ?? "", session.task ?? "", session.agent ?? "", session.status ?? "", session.cwd, `%${session.pane}`].some((field) =>
         field.toLowerCase().includes(needle),
       ),
     );
@@ -167,6 +167,7 @@ export function DeckTty7SessionList({ sessions, filter, onFilterChange, onOpen, 
 
   const row = (session: Session) => {
     const title = sessionTitle(session);
+    const label = sessionLabel(session);
     const open = (): void => onOpen(session.pane);
     return (
       <li key={session.pane} className="deck-tty7-item">
@@ -210,6 +211,7 @@ export function DeckTty7SessionList({ sessions, filter, onFilterChange, onOpen, 
             )}
             {session.agent !== null && <span className="chip">{session.agent}</span>}
           </span>
+          {label !== title ? <span className="deck-tty7-row-label" title={label}>{label}</span> : null}
           <span className="deck-tty7-row-cwd">{session.cwd}</span>
         </div>
         {onRename !== undefined && (

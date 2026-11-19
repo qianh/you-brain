@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { TaskActionSchema, TaskCreateSchema, TaskUpdateSchema, type TaskState } from "./schema.js";
+import { TaskNoCommitError } from "./git.js";
 import { TaskStore } from "./store.js";
 import type {
   DevelopmentTask, TaskActionInput, TaskAutomationPort, TaskBoard, TaskCreateInput,
@@ -83,7 +84,7 @@ export class TaskService implements TaskHttpPort {
       if (!(await this.#refreshProjects())) return;
       for (const task of state.tasks) {
         if (this.#stopped) return;
-        if (task.projectId === null && (task.status === "preparing" || task.status === "planning" || task.status === "running")) {
+        if (task.projectId === null && (task.status === "preparing" || task.status === "planning" || task.status === "running" || task.status === "failed")) {
           try { await this.#advance(null, task); }
           catch (error) { await this.#fail(task, error); }
         }
@@ -243,7 +244,8 @@ export class TaskService implements TaskHttpPort {
   }
 
   async #advance(project: TaskProject | null, task: DevelopmentTask): Promise<void> {
-    if (task.status === "preparing") await this.#dispatch(project, task);
+    if (task.status === "failed" || task.status === "review") await this.#resume(task);
+    else if (task.status === "preparing") await this.#dispatch(project, task);
     else if (task.status === "planning" || task.status === "running") await this.#inspect(project, task);
     else if (project && task.status === "merging") await this.#merge(project, task);
   }
@@ -290,11 +292,40 @@ export class TaskService implements TaskHttpPort {
       }
       return;
     }
-    const review = project && task.run.branch !== null ? await this.options.git.review(project, task.run) : null;
+    let review: Awaited<ReturnType<TaskGitPort["review"]>> | null = null;
+    if (project && task.run.branch !== null) {
+      try { review = await this.options.git.review(project, task.run); }
+      catch (error) {
+        if (!(error instanceof TaskNoCommitError)) throw error;
+        // 这一轮停下但还没提交：AI 在等用户在 T3 里确认或回答，按“需求确认”继续等，不报错。
+        if (task.status !== "planning") {
+          task.status = "planning";
+          await this.#save(task);
+        }
+        return;
+      }
+    }
     task.run.summary = result.summary;
     task.run.reviewSha = review?.headSha ?? null;
     task.run.error = null;
     task.status = review ? "review" : "done";
+    await this.#save(task);
+  }
+
+  /**
+   * 标成“需要处理”或“待人工核对”后，用户直接在 T3 里回复让它继续干：会话又跑起来就回到进行中，
+   * 不必再点重试；之前核对的版本作废，等这一轮做完重新核对。
+   */
+  async #resume(task: DevelopmentTask): Promise<void> {
+    if (!task.run?.threadId || task.run.pendingFeedback) return;
+    let live: Awaited<ReturnType<TaskAutomationPort["inspect"]>>;
+    try { live = await this.options.automation.inspect(task.run.threadId, task.manual); }
+    catch { return; }
+    if (live.state !== "planning" && live.state !== "running") return;
+    task.status = live.state;
+    task.error = null;
+    task.run.error = null;
+    task.run.reviewSha = null;
     await this.#save(task);
   }
 

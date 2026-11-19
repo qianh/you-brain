@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Terminal } from "@xterm/xterm";
 
-import { preserveTerminalImeInput } from "../../src/pages/deck-terminal-input.js";
+import { isReferenceTrigger, preserveTerminalImeInput } from "../../src/pages/deck-terminal-input.js";
 
 // 运行真实 xterm 的按键编码和 input 去重逻辑；仅替代未挂载 DOM 的渲染与组词服务。
 interface XtermInputCore {
@@ -83,5 +83,23 @@ describe("终端的 WebKit 中文标点输入", () => {
     keydown(keyEvent("keydown", "Enter", 13));
     keydown(keyEvent("keydown", "Escape", 27));
     expect(sent).toEqual(["\u001b[1;2D", "\u001b[Z", "\r", "\u001b"]);
+  });
+});
+
+describe("isReferenceTrigger", () => {
+  test("AI CLI 会话里单独敲的 % / ％ 打开引用选择器", () => {
+    expect(isReferenceTrigger("%", true, false)).toBe(true);
+    expect(isReferenceTrigger("％", true, false)).toBe(true);
+    expect(isReferenceTrigger("%", true, false, " ")).toBe(true);
+    expect(isReferenceTrigger("%", true, false, "看")).toBe(true);
+  });
+  test("@ 留给 CLI 自己；普通 Shell、50%、粘贴的整段文本、把 % 还给 CLI 时不拦截", () => {
+    expect(isReferenceTrigger("@", true, false)).toBe(false);
+    expect(isReferenceTrigger("＠", true, false)).toBe(false);
+    expect(isReferenceTrigger("%", false, false)).toBe(false);
+    expect(isReferenceTrigger("%", true, false, "0")).toBe(false);
+    expect(isReferenceTrigger("%", true, false, "x")).toBe(true);
+    expect(isReferenceTrigger("50%", true, false)).toBe(false);
+    expect(isReferenceTrigger("%", true, true)).toBe(false);
   });
 });

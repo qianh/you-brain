@@ -19,5 +19,6 @@ export function normalizeT3Url(value: string): string | null {
 }
 
 export type T3WebState =
-  | { state: "ready"; url: string }
+  /** frameUrl：daemon 的 T3 转发地址，iframe 优先加载它；没有时直连 url。 */
+  | { state: "ready"; url: string; frameUrl?: string }
   | { state: "error"; url: string; reason: "unavailable" | "not-t3" | "frame-blocked" };

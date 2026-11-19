@@ -513,7 +513,12 @@ export async function handleApi(
     return method(request, "GET", async () => json(await deck(context).dshWeb(url.searchParams.get("retry") === "1")));
   }
   if (path === "/api/deck/t3") {
-    return method(request, "GET", async () => json(await probeT3Web(url.searchParams.get("url") ?? "")));
+    return method(request, "GET", async () => {
+      const state = await probeT3Web(url.searchParams.get("url") ?? "");
+      if (state.state !== "ready") return json(state);
+      const frameUrl = context.deps.deck?.t3Frame?.(state.url) ?? null;
+      return json(frameUrl === null ? state : { ...state, frameUrl });
+    });
   }
   if (path === "/api/deck/muse") {
     return method(request, "GET", async () => {

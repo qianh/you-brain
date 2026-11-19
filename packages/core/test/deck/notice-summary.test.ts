@@ -4,6 +4,7 @@ import {
   buildNoticeSummaryPrompt,
   cleanNoticeScreen,
   cleanNoticeSummary,
+  parseNoticeSummary,
   summarizeNotice,
 } from "../../src/deck/notice-summary.js";
 
@@ -44,15 +45,24 @@ describe("notice summary", () => {
     expect(cleanNoticeSummary("字".repeat(400))?.length).toBe(300);
   });
 
+  it("splits the per-turn task name from the body", () => {
+    expect(parseNoticeSummary("任务：修复 TODO 状态误标\n已改完，建议安装验证。")).toEqual({ task: "修复 TODO 状态误标", body: "已改完，建议安装验证。" });
+    expect(parseNoticeSummary("**任务：「多巴胺配色」**\n已完成。")).toEqual({ task: "多巴胺配色", body: "已完成。" });
+    expect(parseNoticeSummary("任务：未知\n看不出结果。")).toEqual({ task: null, body: "看不出结果。" });
+    expect(parseNoticeSummary("没按格式写的正文")).toEqual({ task: null, body: "没按格式写的正文" });
+    expect(parseNoticeSummary(`任务：${"长".repeat(30)}\n正文`)?.task).toHaveLength(16);
+    expect(parseNoticeSummary("任务：只有任务名")).toBeNull();
+  });
+
   it("calls the model with a timeout and skips an empty screen with no status", async () => {
     const calls: Array<number | undefined> = [];
     const backend = {
       complete: async (request: { timeoutMs?: number }) => {
         calls.push(request.timeoutMs);
-        return "打包成功，建议打开 App 确认。";
+        return "任务：打包安装 U-Brain\n打包成功，建议打开 App 确认。";
       },
     };
-    expect(await summarizeNotice(backend, draft, "打包完成", 5_000)).toBe("打包成功，建议打开 App 确认。");
+    expect(await summarizeNotice(backend, draft, "打包完成", 5_000)).toEqual({ task: "打包安装 U-Brain", body: "打包成功，建议打开 App 确认。" });
     expect(await summarizeNotice(backend, draft, "╭────╮\n", 5_000)).toBeNull();
     expect(calls).toEqual([5_000]);
   });

@@ -3986,12 +3986,13 @@ export class YouBrainDaemon {
     if (!deck) return undefined;
     return {
       dshWeb: (retry) => deck.dshWeb(retry === true),
+      t3Frame: (upstream) => deck.t3Frame(upstream),
       dshLogin: async () => ({ providers: await deck.dshLogin() }),
       dshLoginAction: async (body) => ({ providers: await deck.dshLoginAction(body.action, body.provider) }),
       bridgeApps: async () => ({ apps: await deck.bridgeApps() }),
       bridgeSend: (body) => deck.bridgeSend(body.app, body.prompt),
       bridgeReplies: async (body) => ({ replies: await deck.bridgeReplies(body.app, body.sinceMs) }),
-      tty7Sessions: () => deck.tty7.sessions(),
+      tty7Sessions: () => deck.tty7Sessions(),
       tty7Delete: async (pane) => {
         await deck.tty7.delete(pane);
         return { ok: true };

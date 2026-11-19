@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
+import { TaskNoCommitError } from "../../src/tasks/git.js";
 import { TaskService } from "../../src/tasks/service.js";
 import { TaskStore } from "../../src/tasks/store.js";
 import type { TaskAutomationPort, TaskGitPort } from "../../src/tasks/types.js";
@@ -257,6 +258,56 @@ describe("T3 TODO serial queue", () => {
     expect(f.followups).toHaveLength(1);
     expect(f.followups[0]?.threadId).toBe(first.run!.threadId!);
     expect(f.starts).toHaveLength(1);
+  }));
+
+  test("turn ends without a commit: waits as requirement confirmation instead of failing", () => fixture(async (f) => {
+    await f.service.create({ title: "ask first", projectId: "one" });
+    await enable(f.service);
+    const task = (await f.board()).tasks[0]!;
+    const review = f.options.git.review;
+    f.options.git.review = async () => { throw new TaskNoCommitError(); };
+    f.states.set(task.run!.threadId!, "ready");
+    await f.service.tick();
+    expect((await f.board()).tasks[0]).toMatchObject({ status: "planning" });
+    f.options.git.review = review;
+    await f.service.tick();
+    expect((await f.board()).tasks[0]?.status).toBe("review");
+  }));
+
+  test("a failed TODO returns to work by itself once its T3 thread runs again", () => fixture(async (f) => {
+    await f.service.create({ title: "first", projectId: "one" });
+    await f.service.create({ title: "second", projectId: "one" });
+    await enable(f.service);
+    const first = (await f.board()).tasks[0]!;
+    f.options.git.review = async () => { throw new Error("develop 已发生分歧"); };
+    f.states.set(first.run!.threadId!, "ready");
+    await f.service.tick();
+    expect((await f.board()).tasks[0]?.status).toBe("failed");
+    await f.service.tick();
+    expect((await f.board()).tasks[0]?.status).toBe("failed");
+    f.states.set(first.run!.threadId!, "running");
+    await f.service.tick();
+    expect((await f.board()).tasks[0]).toMatchObject({ status: "running", error: null });
+    expect(f.starts).toHaveLength(1);
+    expect(f.followups).toHaveLength(0);
+  }));
+
+  test("a TODO waiting for review goes back to work when the user continues in T3", () => fixture(async (f) => {
+    await f.service.create({ title: "first", projectId: "one" });
+    await f.service.create({ title: "second", projectId: "one" });
+    await enable(f.service);
+    const reviewed = await f.ready();
+    expect(reviewed).toMatchObject({ status: "review", run: { reviewSha: SHA } });
+    await f.service.tick();
+    expect((await f.board()).tasks[0]?.status).toBe("review");
+    f.states.set(reviewed.run!.threadId!, "running");
+    await f.service.tick();
+    expect((await f.board()).tasks[0]).toMatchObject({ status: "running", run: { reviewSha: null } });
+    expect(f.starts).toHaveLength(1);
+    await expect(f.service.action({ action: "approve", id: reviewed.id, reviewSha: SHA })).rejects.toThrow();
+    f.states.set(reviewed.run!.threadId!, "ready");
+    await f.service.tick();
+    expect((await f.board()).tasks[0]).toMatchObject({ status: "review", run: { reviewSha: SHA } });
   }));
 
   test("uncertain initial dispatch persists and retries same thread", () => fixture(async (f) => {

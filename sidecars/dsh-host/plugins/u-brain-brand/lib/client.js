@@ -23,32 +23,32 @@ window.__ModuleLoader__.load({
 		// 只换底色不换文字色；DSH 自己是深色时文字是浅色，套亮底会看不清，所以不覆盖。
 		const DOPAMINE = 'html[data-ub-theme="dopamine"] body:not([data-ds-dark-theme])';
 		const DOPAMINE_CSS =
-			'html[data-ub-theme="dopamine"]:has(body:not([data-ds-dark-theme])){background:#ffeedd}' +
+			'html[data-ub-theme="dopamine"]:has(body:not([data-ds-dark-theme])){background:#fcefe4}' +
 			DOPAMINE + "{" +
-			"--dsw-alias-bg-base:#ffeedd;" +
-			"--dsw-alias-bg-layer-1:#fff8ef;" +
-			"--dsw-alias-bg-layer-2:#fff8ef;" +
-			"--dsw-alias-bg-layer-3:#fff8ef;" +
-			"--dsw-alias-bg-document-preview:#fff8ef;" +
-			"--dsw-alias-bg-module-platform:#ffe9f1;" +
-			"--dsw-alias-bg-overlay:#ffd8e8;" +
-			"--dsw-alias-markdown-code-block:#ffe9f1;" +
-			"--dsw-alias-markdown-code-block-banner:#ffe0ec;" +
-			"--dsw-alias-markdown-code-segment-selected:#fff8ef;" +
-			"--dsw-alias-markdown-code-segment-unselected:#ffe0ec;" +
-			"--dsw-alias-interactive-bg-hover:rgba(230,36,122,0.06);" +
-			"--dsw-alias-interactive-bg-active:rgba(230,36,122,0.12);" +
-			"--dsw-alias-interactive-bg-hover-solid:#ffe0ec;" +
-			"--dsw-specific-sidebar-fill:#ffe9f1;" +
-			"--dsw-specific-sidebar-nav-item-hover:rgba(230,36,122,0.06);" +
-			"--dsw-specific-sidebar-nav-item-active:rgba(230,36,122,0.12);" +
-			"--dsw-specific-sidebar-nav-item-active-accent:rgba(230,36,122,0.16);" +
-			"--dsw-specific-input-major:#fff8ef;" +
-			"--dsw-specific-bubble:#ffd8e8;" +
-			"--dsw-specific-bubble-highlight:#ffc2db;" +
-			"--dsw-specific-selector:#ffe9f1;" +
-			"--dsw-specific-tip:#ffe9f1;" +
-			"background-color:#ffeedd}";
+			"--dsw-alias-bg-base:#fcefe4;" +
+			"--dsw-alias-bg-layer-1:#fff9f4;" +
+			"--dsw-alias-bg-layer-2:#fff9f4;" +
+			"--dsw-alias-bg-layer-3:#fff9f4;" +
+			"--dsw-alias-bg-document-preview:#fff9f4;" +
+			"--dsw-alias-bg-module-platform:#fbe7ec;" +
+			"--dsw-alias-bg-overlay:#f6d7e1;" +
+			"--dsw-alias-markdown-code-block:#fbe7ec;" +
+			"--dsw-alias-markdown-code-block-banner:#f6d7e1;" +
+			"--dsw-alias-markdown-code-segment-selected:#fff9f4;" +
+			"--dsw-alias-markdown-code-segment-unselected:#f6d7e1;" +
+			"--dsw-alias-interactive-bg-hover:rgba(204,47,105,0.06);" +
+			"--dsw-alias-interactive-bg-active:rgba(204,47,105,0.11);" +
+			"--dsw-alias-interactive-bg-hover-solid:#f6d7e1;" +
+			"--dsw-specific-sidebar-fill:#fbe7ec;" +
+			"--dsw-specific-sidebar-nav-item-hover:rgba(204,47,105,0.06);" +
+			"--dsw-specific-sidebar-nav-item-active:rgba(204,47,105,0.11);" +
+			"--dsw-specific-sidebar-nav-item-active-accent:rgba(204,47,105,0.15);" +
+			"--dsw-specific-input-major:#fff9f4;" +
+			"--dsw-specific-bubble:#f6d7e1;" +
+			"--dsw-specific-bubble-highlight:#efc2d2;" +
+			"--dsw-specific-selector:#fbe7ec;" +
+			"--dsw-specific-tip:#fbe7ec;" +
+			"background-color:#fcefe4}";
 
 		function Mark(props) {
 			const size = props.size || 24;
