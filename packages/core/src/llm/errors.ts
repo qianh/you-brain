@@ -34,6 +34,17 @@ export class LlmRequestError extends Error {
   }
 }
 
+export class LlmAbortError extends Error {
+  constructor(message = "请求已取消") {
+    super(message);
+    this.name = "LlmAbortError";
+  }
+}
+
+export function isLlmAbortError(error: unknown): error is LlmAbortError {
+  return error instanceof LlmAbortError;
+}
+
 export function isLlmRequestError(error: unknown): error is LlmRequestError {
   return error instanceof LlmRequestError;
 }
@@ -92,6 +103,7 @@ export function httpStatusError(status: number, body: string): LlmRequestError {
 }
 
 export function networkError(error: unknown): LlmRequestError {
+  if (error instanceof LlmAbortError) throw error;
   if (error instanceof LlmRequestError) return error;
   const name = error instanceof Error ? error.name : "";
   if (name === "TimeoutError" || name === "AbortError") {

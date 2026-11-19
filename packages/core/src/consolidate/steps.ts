@@ -1,9 +1,10 @@
 import type { EventOf, EventType } from "@you-brain/protocol";
 
+import { isLlmAbortError } from "../llm/errors.js";
 import type { LlmBackend } from "../llm/types.js";
-import { extractJson } from "../refine/parse.js";
 import type { TopicBook } from "../topics/types.js";
 import { partitionTopics } from "../topics/zones.js";
+import { completeJsonWithRetry } from "./llm-json.js";
 import { normalizeMergePairs, parseTopicRewrite } from "./normalize.js";
 import { buildMergeSuggestionsPrompt, buildTopicSummaryPrompt } from "./prompt.js";
 import { instantOnLocalDay } from "./schedule.js";
@@ -24,7 +25,6 @@ import type { TwinLayer } from "./twin.js";
 
 export { portraitEvalStep, portraitMonthlyStep, portraitStep, todoReviewStep };
 
-const MAX_ATTEMPTS = 2;
 const TOPIC_CONCURRENCY = 2;
 
 export interface TwinFileRef {
@@ -60,7 +60,10 @@ export interface ConsolidationPortrait {
   /** Current files of the three layers. A missing file is null. */
   read(): Promise<Record<TwinLayer, TwinFileRef | null>>;
   /** The user's own turns, in order, for sessions updated on or after `day`. */
-  sessions(day: string): Promise<Array<{ sessionKey: string; title: string; turns: string[] }>>;
+  sessions(
+    day: string,
+    options?: { budgetUnits?: number },
+  ): Promise<Array<{ sessionKey: string; title: string; turns: string[] }>>;
   /** Pending corrections for any layer, oldest first. */
   corrections(): Array<{ correctionId: string; variant: string; section: string; text: string }>;
   /** Low-confidence claims kept from earlier days. */
@@ -133,12 +136,18 @@ export interface ConsolidationContext {
    * Absent where Drive transcripts are not wired; `todo_review` then succeeds without changes.
    */
   topicTranscripts?: (input: { day: string; sessionKeys: readonly string[] }) => Promise<string>;
+  /** Cancellation signal for the current step (combines daemon/job abort and step budget). */
+  signal?: AbortSignal;
 }
 
 export interface ConsolidationStep {
   id: string;
   /** Skipped when any listed step failed. */
   dependsOn?: readonly string[];
+  /** Whole-state idempotent step; during multi-day catch-up it only runs on the final day. */
+  finalDayOnly?: boolean;
+  /** Failure is recorded in step results and warnings but does not fail the run or block the lease. */
+  advisory?: boolean;
   run(ctx: ConsolidationContext): Promise<void>;
 }
 
@@ -204,6 +213,8 @@ export const topicSummariesStep: ConsolidationStep = {
 export const topicFilesStep: ConsolidationStep = {
   id: "topic_files",
   dependsOn: ["topic_summaries"],
+  finalDayOnly: true,
+  advisory: true,
   async run(ctx) {
     const write = ctx.topicFiles;
     if (!write) return;
@@ -219,6 +230,7 @@ export const topicFilesStep: ConsolidationStep = {
 
 export const mergeSuggestionsStep: ConsolidationStep = {
   id: "merge_suggestions",
+  finalDayOnly: true,
   async run(ctx) {
     const loaded = ctx.load();
     const zoned = partitionTopics(loaded.book, {
@@ -243,27 +255,17 @@ export const mergeSuggestionsStep: ConsolidationStep = {
         zone: topic.zone,
       })),
     });
-    let lastDetail = "模型输出无法校验";
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-      const user =
-        attempt === 1
-          ? prompt.user
-          : `${prompt.user}\n\n## 上次输出无法通过校验\n${lastDetail}\n请只输出修正后的 JSON。`;
-      let raw = "";
-      try {
-        raw = await ctx.llm.complete({
-          system: prompt.system,
-          user,
-          jsonSchema: MERGE_SUGGESTIONS_JSON_SCHEMA,
-        });
-        const pairs = normalizeMergePairs(extractJson(raw), allowed);
-        ctx.cursors.set(MERGE_SUGGESTIONS_CURSOR, JSON.stringify({ day: ctx.day, pairs }));
-        return;
-      } catch (error) {
-        lastDetail = failureDetail(error, raw);
-      }
-    }
-    throw new Error("合并建议没有写完");
+    const pairs = await completeJsonWithRetry(
+      ctx.llm,
+      prompt,
+      MERGE_SUGGESTIONS_JSON_SCHEMA,
+      (parsed) => normalizeMergePairs(parsed, allowed),
+      {
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
+        wrapError: () => new Error("合并建议没有写完"),
+      },
+    );
+    ctx.cursors.set(MERGE_SUGGESTIONS_CURSOR, JSON.stringify({ day: ctx.day, pairs }));
   },
 };
 
@@ -313,36 +315,22 @@ async function rewriteTopic(
       .filter((todo) => todo.topicId === topicId && todo.status === "open")
       .map((todo) => todo.text),
   });
-  let lastDetail = "模型输出无法校验";
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    const user =
-      attempt === 1
-        ? prompt.user
-        : `${prompt.user}\n\n## 上次输出无法通过校验\n${lastDetail}\n请只输出修正后的 JSON。`;
-    let raw = "";
-    try {
-      raw = await ctx.llm.complete({
-        system: prompt.system,
-        user,
-        jsonSchema: TOPIC_SUMMARY_JSON_SCHEMA,
-      });
-      const rewrite = parseTopicRewrite(extractJson(raw));
-      if (sameText(rewrite.summary, topic.summary) && sameText(rewrite.nextStep, topic.nextStep)) {
-        return { topicId, rewrite: null, failed: false };
-      }
-      return { topicId, rewrite, failed: false };
-    } catch (error) {
-      lastDetail = failureDetail(error, raw);
+  try {
+    const rewrite = await completeJsonWithRetry(
+      ctx.llm,
+      prompt,
+      TOPIC_SUMMARY_JSON_SCHEMA,
+      parseTopicRewrite,
+      { ...(ctx.signal ? { signal: ctx.signal } : {}) },
+    );
+    if (sameText(rewrite.summary, topic.summary) && sameText(rewrite.nextStep, topic.nextStep)) {
+      return { topicId, rewrite: null, failed: false };
     }
+    return { topicId, rewrite, failed: false };
+  } catch (error) {
+    if (isLlmAbortError(error)) throw error;
+    return { topicId, rewrite: null, failed: true };
   }
-  return { topicId, rewrite: null, failed: true };
-}
-
-function failureDetail(error: unknown, raw: string): string {
-  const message = error instanceof Error ? error.message : "模型输出无法校验";
-  const snippet = raw.trim().slice(0, 500);
-  const text = snippet === "" ? message : `${message}\n上次输出：${snippet}`;
-  return text.length > 2_000 ? `${text.slice(0, 2_000)}…` : text;
 }
 
 async function mapWithLimit<T, R>(

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { LlmRequestError } from "../../src/llm/errors.js";
+import { LlmAbortError, LlmRequestError } from "../../src/llm/errors.js";
 import { createOpenAiCompatibleBackend } from "../../src/llm/openai-compatible.js";
 import { LLM_PRESETS } from "../../src/llm/presets.js";
 
@@ -199,6 +199,257 @@ describe("openai-compatible backend", () => {
         expect(typed.kind).toBe("network");
         expect(typed.message).toBe("请求超时");
         expect(typed.retryable).toBe(true);
+      },
+    );
+  });
+
+  it("concatenates SSE chunks, ignores reasoning_content in output, and keeps idle timer alive", async () => {
+    const seenBodies: Array<Record<string, unknown>> = [];
+    const deltas: string[] = [];
+    await withServer(
+      async (request) => {
+        seenBodies.push((await request.json()) as Record<string, unknown>);
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            controller.enqueue(encoder.encode(": keep-alive\n\n"));
+            await new Promise((r) => setTimeout(r, 40));
+            controller.enqueue(
+              encoder.encode(
+                `data:${JSON.stringify({ choices: [{ delta: { reasoning_content: "思考中" } }] })}\r\n\r\n`,
+              ),
+            );
+            await new Promise((r) => setTimeout(r, 40));
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({ choices: [{ delta: { content: "{\"ok\":" } }] })}\n\n`,
+              ),
+            );
+            await new Promise((r) => setTimeout(r, 40));
+            controller.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({ choices: [{ delta: { content: "true}" }, finish_reason: "stop" }] })}\n\n`,
+              ),
+            );
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          },
+        });
+        return new Response(stream, {
+          headers: { "content-type": "text/event-stream; charset=utf-8" },
+        });
+      },
+      async (baseUrl) => {
+        const backend = createOpenAiCompatibleBackend({
+          preset: LLM_PRESETS.magpie,
+          model: "grok/grok-4.7-build-fast",
+          baseUrl,
+        });
+        const text = await backend.completeStream!(
+          {
+            system: "sys",
+            user: "hi",
+            stream: true,
+            timeoutMs: 2_000,
+            firstChunkTimeoutMs: 500,
+            idleTimeoutMs: 120,
+          },
+          (cumulative) => deltas.push(cumulative),
+        );
+        expect(text).toBe("{\"ok\":true}");
+      },
+    );
+    expect(seenBodies[0]?.stream).toBe(true);
+    expect(deltas).toEqual(["{\"ok\":", "{\"ok\":true}"]);
+  });
+
+  it("aborts with a retryable network error when SSE stream goes idle", async () => {
+    await withServer(
+      () => {
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "partial" } }] })}\n\n`),
+            );
+            // Intentionally never sends another chunk or closes.
+          },
+        });
+        return new Response(stream, {
+          headers: { "content-type": "text/event-stream" },
+        });
+      },
+      async (baseUrl) => {
+        const backend = createOpenAiCompatibleBackend({
+          preset: LLM_PRESETS.magpie,
+          model: "grok/grok-4.7-build-fast",
+          baseUrl,
+        });
+        const error = await backend
+          .complete({
+            system: "sys",
+            user: "hi",
+            stream: true,
+            timeoutMs: 5_000,
+            firstChunkTimeoutMs: 1_000,
+            idleTimeoutMs: 100,
+          })
+          .then(
+            () => {
+              throw new Error("expected failure");
+            },
+            (caught: unknown) => caught,
+          );
+        expect(error).toBeInstanceOf(LlmRequestError);
+        expect((error as LlmRequestError).kind).toBe("network");
+        expect((error as LlmRequestError).retryable).toBe(true);
+        expect((error as LlmRequestError).message).toContain("空闲超时");
+      },
+    );
+  });
+
+  it("rejects a truncated SSE stream with neither [DONE] nor finish_reason", async () => {
+    await withServer(
+      () => {
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({ choices: [{ delta: { content: "{\"ok\":" } }] })}\n\n`),
+            );
+            controller.close();
+          },
+        });
+        return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+      },
+      async (baseUrl) => {
+        const backend = createOpenAiCompatibleBackend({
+          preset: LLM_PRESETS.magpie,
+          model: "m",
+          baseUrl,
+        });
+        const error = await backend
+          .complete({ system: "sys", user: "hi", stream: true })
+          .then(
+            () => {
+              throw new Error("expected failure");
+            },
+            (caught: unknown) => caught,
+          );
+        expect(error).toBeInstanceOf(LlmRequestError);
+        expect((error as LlmRequestError).kind).toBe("network");
+        expect((error as LlmRequestError).retryable).toBe(true);
+      },
+    );
+  });
+
+  it("throws a server error when an SSE frame carries an error payload", async () => {
+    await withServer(
+      () => {
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              encoder.encode(`data: ${JSON.stringify({ error: { message: "upstream died" } })}\n\n`),
+            );
+            controller.close();
+          },
+        });
+        return new Response(stream, { headers: { "content-type": "text/event-stream" } });
+      },
+      async (baseUrl) => {
+        const backend = createOpenAiCompatibleBackend({
+          preset: LLM_PRESETS.magpie,
+          model: "m",
+          baseUrl,
+        });
+        const error = await backend
+          .complete({ system: "sys", user: "hi", stream: true })
+          .then(
+            () => {
+              throw new Error("expected failure");
+            },
+            (caught: unknown) => caught,
+          );
+        expect(error).toBeInstanceOf(LlmRequestError);
+        expect((error as LlmRequestError).kind).toBe("server");
+        expect((error as LlmRequestError).message).toContain("upstream died");
+      },
+    );
+  });
+
+  it("falls back smoothly on application/json response and omits stream when not requested", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    await withServer(
+      async (request) => {
+        bodies.push((await request.json()) as Record<string, unknown>);
+        return Response.json({ choices: [{ message: { content: "{\"ok\":true}" } }] });
+      },
+      async (baseUrl) => {
+        const backend = createOpenAiCompatibleBackend({
+          preset: LLM_PRESETS.magpie,
+          model: "m",
+          baseUrl,
+        });
+        expect(await backend.complete({ system: "sys", user: "hi", stream: true })).toBe("{\"ok\":true}");
+        expect(await backend.complete({ system: "sys", user: "hi" })).toBe("{\"ok\":true}");
+      },
+    );
+    expect(bodies[0]?.stream).toBe(true);
+    expect(bodies[1]?.stream).toBeUndefined();
+  });
+
+  it("downgrades to non-streaming on HTTP 400 and remembers streamUnsupported on the backend instance", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    await withServer(
+      async (request) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        bodies.push(body);
+        if (body.stream === true) {
+          return Response.json({ error: { message: "stream not supported with response_format" } }, { status: 400 });
+        }
+        return Response.json({ choices: [{ message: { content: "{\"ok\":true}" } }] });
+      },
+      async (baseUrl) => {
+        const backend = createOpenAiCompatibleBackend({
+          preset: LLM_PRESETS.magpie,
+          model: "m",
+          baseUrl,
+        });
+        expect(await backend.complete({ system: "sys", user: "first", stream: true })).toBe("{\"ok\":true}");
+        expect(await backend.complete({ system: "sys", user: "second", stream: true })).toBe("{\"ok\":true}");
+      },
+    );
+    expect(bodies).toHaveLength(3);
+    expect(bodies[0]?.stream).toBe(true);
+    expect(bodies[1]?.stream).toBeUndefined();
+    expect(bodies[2]?.stream).toBeUndefined();
+  });
+
+  it("throws LlmAbortError when cancelled by an external signal", async () => {
+    const controller = new AbortController();
+    await withServer(
+      (request) =>
+        new Promise<Response>((resolve) => {
+          request.signal.addEventListener("abort", () => resolve(new Response("aborted")), { once: true });
+        }),
+      async (baseUrl) => {
+        const backend = createOpenAiCompatibleBackend({
+          preset: LLM_PRESETS.magpie,
+          model: "m",
+          baseUrl,
+          timeoutMs: 5_000,
+        });
+        setTimeout(() => controller.abort(), 30);
+        const error = await backend
+          .complete({ system: "sys", user: "hi", stream: true, signal: controller.signal })
+          .then(
+            () => {
+              throw new Error("expected abort");
+            },
+            (caught: unknown) => caught,
+          );
+        expect(error).toBeInstanceOf(LlmAbortError);
       },
     );
   });

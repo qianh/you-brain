@@ -101,6 +101,7 @@ import type {
 import { isCliNoOutputTimeout } from "../llm/cli/exec.js";
 import {
   LLM_PRESETS,
+  LlmAbortError,
   createLlmBackend,
   describeLlmSetupFailure,
   isCliProvider,
@@ -281,6 +282,7 @@ import {
 } from "./local-state.js";
 import {
   TOPIC_FILES_MANIFEST,
+  TOPIC_FILES_SWEPT_AT,
   emptyTopicFilesResult,
   syncTopicFiles,
   type TopicFilesResult,
@@ -304,6 +306,8 @@ const BACKFILL_CURSOR = "capture.backfill";
 const PORTRAIT_PULLED_AT_CURSOR = "portrait.pulled_at";
 /** A stuck Drive read must not hold `/api/status` longer than the shell's read timeout. */
 const STATUS_DRIVE_WAIT_MS = 1_000;
+/** 本机记录的最近一次沉淀完成时间（供 /api/status 在 Drive 慢或未就绪时 SWR 降级）。 */
+const CONSOLIDATION_LAST_FINISHED_CURSOR = "consolidate.last_finished_at";
 /** `/api/status` 聚合是秒级操作;这个窗口内的重复调用共享同一份结果。 */
 const STATUS_CACHE_MS = 1_000;
 /** 沉淀租约文件一天才写一次;读它是 Drive 网络往返,不必每次状态都打。 */
@@ -322,6 +326,15 @@ const INBOX_READ_CONCURRENCY = 8;
 const REFINE_BACKFILL_WINDOW_DAYS = 7;
 /** HTTP 后端提炼单次调用的超时（后端默认 60 秒对长会话不够）。 */
 const REFINE_HTTP_TIMEOUT_MS = 180_000;
+/**
+ * 沉淀单次调用的超时。沉淀的概要和分身请求更长，且 magpie 上游延迟波动大
+ * （实测 4～212 秒），60 秒默认会让 topic_summaries 和 portrait 反复超时。
+ */
+const CONSOLIDATE_HTTP_TIMEOUT_MS = 300_000;
+/** 沉淀 SSE 流式首包超时（实测 magpie 约 3s 首事件，留足大请求思考时间）。 */
+const CONSOLIDATE_FIRST_CHUNK_TIMEOUT_MS = 120_000;
+/** 沉淀 SSE 流式空闲超时（实测事件间隔 ≤2s，代理静默断流 60s 内快速重试）。 */
+const CONSOLIDATE_IDLE_TIMEOUT_MS = 60_000;
 /** 提炼连续失败这么多次才在状态页报错；之前的失败交给自动重试。 */
 const REFINE_ERROR_MIN_ATTEMPTS = 3;
 
@@ -453,6 +466,10 @@ export interface DaemonOptions {
   signals?: boolean;
   /** Test injection. Shortens subscription CLI calls so a silent hang fails quickly. */
   llmTimeoutMs?: number;
+  /** Test seam: override per-step timeout budget for consolidation. */
+  consolidationStepBudgetMs?: number;
+  /** Test seam: override how long `/api/status` waits for Drive lease reads before returning SWR fallback. */
+  statusDriveWaitMs?: number;
   /** Test injection. Widens the refine window so a test can set up older history. */
   refineBackfillWindowDays?: number;
   secrets?: SecretStore;
@@ -894,7 +911,8 @@ export class YouBrainDaemon {
   /** Bumps when account state changes, so a status read already in flight cannot refill a stale cache. */
   #statusEpoch = 0;
   #statusInFlightEpoch = 0;
-  #consolidationCache: { at: number; value: StatusResponse["consolidation"] } | null = null;
+  #consolidationCache: { at: number; lastFinishedAt: string | null } | null = null;
+  #consolidationLeaseFlight: Promise<void> | null = null;
   /** Config push failures per file. A success clears `#lastSyncError` only when it is this push's error. */
   #configPushErrors: Record<"shared" | "roles", { message: string; at: string } | null> = {
     shared: null,
@@ -936,6 +954,8 @@ export class YouBrainDaemon {
   #backfillJob: Promise<void> | null = null;
   #notionJob: Promise<void> | null = null;
   #recallJob: Promise<void> | null = null;
+  #consolidationJob: { promise: Promise<void>; abort: AbortController } | null = null;
+  #topicFilesJob: Promise<void> | null = null;
   /** Sessions whose user messages are being read for recall, one at a time. */
   #recallScan: Promise<void> = Promise.resolve();
   /** Turn count last read for a session, so a rewrite with no new turn costs no parse. */
@@ -1278,6 +1298,8 @@ export class YouBrainDaemon {
         this.#uploadJob,
         this.#notionJob,
         this.#recallJob,
+        this.#consolidationJob?.promise ?? null,
+        this.#topicFilesJob,
       ].filter(
         (job): job is Promise<void> => job !== null,
       );
@@ -1297,6 +1319,7 @@ export class YouBrainDaemon {
   async #stopBody(): Promise<void> {
     this.#stopped = true;
     this.#abort.abort();
+    this.#abortConsolidation();
     // Revocation is best effort and must not hold the process. The abort above cancels it.
     if (this.#revokeJob) {
       await Promise.race([this.#revokeJob, delay(BACKGROUND_STOP_MS)]);
@@ -1304,6 +1327,13 @@ export class YouBrainDaemon {
     this.#t3Watch?.stop();
     this.#t3Watch = null;
     this.#deck?.telegram?.attachT3(null);
+    const backgroundConsolidation = [
+      this.#consolidationJob?.promise,
+      this.#topicFilesJob,
+    ].filter((job): job is Promise<void> => job !== undefined && job !== null);
+    if (backgroundConsolidation.length > 0) {
+      await Promise.race([Promise.allSettled(backgroundConsolidation), delay(BACKGROUND_STOP_MS)]);
+    }
     this.#deck?.stop();
     await this.#tasks?.stop();
     await this.#taskAutomation?.close();
@@ -1609,27 +1639,29 @@ export class YouBrainDaemon {
       }
       this.#lastReminders = this.#clock.nowMs();
     }
-    if (intervalDue(this.#lastConsolidation, now, INTERVALS.consolidationMs)) {
-      try {
-        await this.#traced("consolidate", () => this.#consolidate({ manual: false, force: false }));
-      } catch {
-        // A bad lease or model call must not stop the loop.
-      }
-      this.#lastConsolidation = this.#clock.nowMs();
+    if (
+      this.#consolidationJob === null &&
+      intervalDue(this.#lastConsolidation, now, INTERVALS.consolidationMs)
+    ) {
+      this.#lastConsolidation = now;
+      this.#startScheduledConsolidation();
     }
     if (
+      this.#topicFilesJob === null &&
       this.#topicFilesDirty &&
       this.#topicFilesQuietUntil !== null &&
-      now >= this.#topicFilesQuietUntil
+      now >= this.#topicFilesQuietUntil &&
+      this.#canWriteTopicFiles()
     ) {
-      if (this.#canWriteTopicFiles()) {
-        try {
-          await this.#traced("topicFiles", () => this.#writeTopicFiles());
-        } catch {
+      this.#topicFilesJob = this.#traced("topicFiles", () => this.#writeTopicFiles())
+        .then(() => undefined)
+        .catch(() => {
           this.#topicFilesDirty = true;
           this.#topicFilesQuietUntil = this.#clock.nowMs() + INTERVALS.topicFilesDebounceMs;
-        }
-      }
+        })
+        .finally(() => {
+          this.#topicFilesJob = null;
+        });
     }
     if (!this.#stopped && intervalDue(this.#lastWebhook, now, INTERVALS.webhookMs)) {
       try {
@@ -2722,6 +2754,12 @@ export class YouBrainDaemon {
           store.setCursor(TOPIC_FILES_MANIFEST, value);
         },
       },
+      sweptAt: {
+        get: () => store.getCursor(TOPIC_FILES_SWEPT_AT),
+        set: (value) => {
+          store.setCursor(TOPIC_FILES_SWEPT_AT, value);
+        },
+      },
     });
     if (result.failed > 0) {
       this.#topicFilesDirty = true;
@@ -2921,6 +2959,8 @@ export class YouBrainDaemon {
     removedDevices?: string[];
   }): Promise<void> {
     if (update.shared) {
+      const prevLlm = this.#shared.llm;
+      const prevConsolidateLlm = this.#shared.consolidateLlm;
       const prevPortraitClients = this.#shared.integrations.codingPortraitClients;
       this.#shared = preferLocalLlm(update.shared, this.#shared);
       this.#clearCliStall();
@@ -2934,6 +2974,12 @@ export class YouBrainDaemon {
       if (this.#llmOverride === undefined) {
         this.#llm = await this.#createLlm();
         this.#consolidateLlm = await this.#createConsolidateLlm();
+      }
+      if (
+        JSON.stringify(prevLlm) !== JSON.stringify(this.#shared.llm) ||
+        JSON.stringify(prevConsolidateLlm) !== JSON.stringify(this.#shared.consolidateLlm)
+      ) {
+        this.#resetConsolidationBackoff();
       }
       await this.#rewatch();
       if (
@@ -2950,10 +2996,21 @@ export class YouBrainDaemon {
     }
     if (update.roles) {
       const wasWebProcessor = resolveWebProcessor(this.#roles) === this.#local.deviceId;
+      const wasConsolidationEnabled = this.#roles.consolidation.enabled;
+      const prevMainDevice = this.#roles.mainDevice;
       this.#roles = update.roles;
       await writeJsonFile(join(this.#paths.dataDir, "roles.json"), this.#roles);
       this.#applyZone();
       this.#mountOutput();
+      if (
+        (wasConsolidationEnabled && !this.#roles.consolidation.enabled) ||
+        prevMainDevice !== this.#roles.mainDevice
+      ) {
+        this.#abortConsolidation();
+      }
+      if (!wasConsolidationEnabled && this.#roles.consolidation.enabled) {
+        this.#resetConsolidationBackoff();
+      }
       if (!wasWebProcessor && resolveWebProcessor(this.#roles) === this.#local.deviceId) {
         await this.#catchUpWebInbox();
       }
@@ -3146,7 +3203,7 @@ export class YouBrainDaemon {
         env: this.#env,
         homeDir: this.#homeDir,
         ...(this.#options.llmTimeoutMs === undefined
-          ? {}
+          ? { timeoutMs: CONSOLIDATE_HTTP_TIMEOUT_MS }
           : { timeoutMs: this.#options.llmTimeoutMs }),
       });
     } catch {
@@ -3219,6 +3276,7 @@ export class YouBrainDaemon {
     ) {
       this.#llm = await this.#createLlm();
       this.#consolidateLlm = await this.#createConsolidateLlm();
+      this.#resetConsolidationBackoff();
       this.#statusChanged(this.#clock.now().toISOString());
     }
     // magpie 的 Key 有无决定指挥台路由要不要带凭据：让 dsh 重新生成补丁。
@@ -3305,6 +3363,9 @@ export class YouBrainDaemon {
         `本机数据属于另一个 Google 账号，${pickedEmail || "这个账号"}未登录。要换账号，请使用「切换账号」，本机数据会先备份。`,
       );
     }
+    this.#abortConsolidation();
+    this.#consolidationCache = null;
+    this.#consolidationLeaseFlight = null;
     this.#local = opened.config;
     this.#drive = opened.drive;
     this.#forgetStatus();
@@ -3350,7 +3411,6 @@ export class YouBrainDaemon {
 
   /** 状态变了：丢掉缓存再通知页面，页面随后读到的就是新状态。 */
   #statusChanged(at?: string): void {
-    this.#consolidationCache = null;
     this.#forgetStatus();
     this.changes.publish("status", at);
   }
@@ -3382,6 +3442,9 @@ export class YouBrainDaemon {
 
   /** Stops every Drive-backed service. The next login builds them again. */
   #unmountDrive(): void {
+    this.#abortConsolidation();
+    this.#consolidationCache = null;
+    this.#consolidationLeaseFlight = null;
     this.#sync = null;
     this.#uploader = null;
     this.#portrait = null;
@@ -3881,7 +3944,7 @@ export class YouBrainDaemon {
       sync: () => this.#syncNow(),
       regenerateMorningDigest: () => this.#regenerateMorningDigest(),
       upload: (input) => this.#uploadNow(input),
-      consolidate: (input) => this.#run(() => this.#consolidate({ manual: true, force: input.force === true })),
+      consolidate: (input) => this.#consolidateManual(input.force === true),
       // Stays out of `#run`: a model call this long must not hold up capture and sync.
       planTopicReorganization: (input) => {
         const llm = this.#llm;
@@ -4086,12 +4149,33 @@ export class YouBrainDaemon {
   }
 
   async #writeRoles(roles: Roles): Promise<void> {
+    const wasConsolidationEnabled = this.#roles.consolidation.enabled;
+    const prevMainDevice = this.#roles.mainDevice;
     this.#roles = roles;
     await writeJsonFile(join(this.#paths.dataDir, "roles.json"), roles);
     this.#applyZone();
     this.#mountOutput();
+    if (
+      (wasConsolidationEnabled && !roles.consolidation.enabled) ||
+      prevMainDevice !== roles.mainDevice
+    ) {
+      this.#abortConsolidation();
+    }
+    if (!wasConsolidationEnabled && roles.consolidation.enabled) {
+      this.#resetConsolidationBackoff();
+    }
     if (this.#sync) this.#rolesPush.submit(roles);
     this.#statusChanged(this.#clock.now().toISOString());
+  }
+
+  #abortConsolidation(): void {
+    this.#consolidationJob?.abort.abort();
+  }
+
+  #resetConsolidationBackoff(): void {
+    this.#consolidationState.backoffMs = 0;
+    this.#consolidationState.retryAtMs = null;
+    this.#lastConsolidation = null;
   }
 
   #clearCliStall(): void {
@@ -4102,6 +4186,7 @@ export class YouBrainDaemon {
 
   async #writeConfig(config: SharedConfig): Promise<void> {
     const previousLlm = this.#shared.llm;
+    const previousConsolidateLlm = this.#shared.consolidateLlm;
     const previousPortraitClients = this.#shared.integrations.codingPortraitClients;
     this.#shared = config;
     this.#clearCliStall();
@@ -4115,6 +4200,12 @@ export class YouBrainDaemon {
     if (this.#llmOverride === undefined) {
       this.#llm = await this.#createLlm();
       this.#consolidateLlm = await this.#createConsolidateLlm();
+    }
+    if (
+      JSON.stringify(previousLlm) !== JSON.stringify(config.llm) ||
+      JSON.stringify(previousConsolidateLlm) !== JSON.stringify(config.consolidateLlm)
+    ) {
+      this.#resetConsolidationBackoff();
     }
     // 模型选择变了：指挥台的补丁和环境层凭据要跟着重新生成（如 magpie 网关路由）。
     if (JSON.stringify(previousLlm) !== JSON.stringify(config.llm)) this.#deck?.refresh();
@@ -4391,50 +4482,187 @@ export class YouBrainDaemon {
     };
   }
 
-  async #consolidate(options: { manual: boolean; force: boolean }) {
+  #wrapConsolidateLlm(llm: LlmBackend, signal?: AbortSignal): LlmBackend {
+    if (llm.descriptor.kind === "cli") {
+      if (!signal) return llm;
+      return {
+        ...llm,
+        complete(request) {
+          const merged =
+            request.signal && signal ? AbortSignal.any([request.signal, signal]) : (request.signal ?? signal);
+          return llm.complete(merged ? { ...request, signal: merged } : request);
+        },
+      };
+    }
+    const timeoutMs = this.#options.llmTimeoutMs ?? CONSOLIDATE_HTTP_TIMEOUT_MS;
+    const useStream = llm.descriptor.kind === "openai-compatible";
+    const firstChunkTimeoutMs = Math.min(timeoutMs, CONSOLIDATE_FIRST_CHUNK_TIMEOUT_MS);
+    const idleTimeoutMs = Math.min(timeoutMs, CONSOLIDATE_IDLE_TIMEOUT_MS);
+    return {
+      ...llm,
+      complete(request) {
+        const merged =
+          request.signal && signal ? AbortSignal.any([request.signal, signal]) : (request.signal ?? signal);
+        return llm.complete({
+          ...request,
+          timeoutMs: request.timeoutMs ?? timeoutMs,
+          ...(useStream
+            ? {
+                stream: request.stream ?? true,
+                firstChunkTimeoutMs: request.firstChunkTimeoutMs ?? firstChunkTimeoutMs,
+                idleTimeoutMs: request.idleTimeoutMs ?? idleTimeoutMs,
+              }
+            : {}),
+          ...(merged ? { signal: merged } : {}),
+        });
+      },
+    };
+  }
+
+  #startScheduledConsolidation(): void {
+    if (this.#consolidationJob !== null || this.#stopped) return;
+    const ownAbort = new AbortController();
+    const signal = AbortSignal.any([this.#abort.signal, ownAbort.signal]);
+    const entry: { promise: Promise<void>; abort: AbortController } = {
+      abort: ownAbort,
+      promise: Promise.resolve(),
+    };
+    const promise = this.#traced("consolidate", async () => {
+      try {
+        await this.#consolidateBody({ manual: false, force: false, signal });
+      } catch {
+        // A bad lease or model call must not stop the loop.
+      }
+    }).finally(() => {
+      if (this.#consolidationJob === entry) {
+        this.#consolidationJob = null;
+        this.#lastConsolidation = this.#clock.nowMs();
+        this.#forgetStatus();
+      }
+    });
+    entry.promise = promise;
+    this.#consolidationJob = entry;
+    this.#forgetStatus();
+  }
+
+  async #consolidateManual(force: boolean): Promise<{
+    day: string;
+    ok: boolean;
+    steps: Array<{ id: string; ok: boolean; error?: string }>;
+  }> {
+    if (this.#consolidationJob !== null) {
+      throw new HttpError(409, "CONSOLIDATION_RUNNING", "沉淀正在进行中");
+    }
+    const ownAbort = new AbortController();
+    const signal = AbortSignal.any([this.#abort.signal, ownAbort.signal]);
+    let resolveDone!: () => void;
+    const settled = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+    const entry = { promise: settled, abort: ownAbort };
+    this.#consolidationJob = entry;
+    this.#forgetStatus();
+    try {
+      return await this.#traced("consolidate", () =>
+        this.#consolidateBody({ manual: true, force, signal }),
+      );
+    } finally {
+      if (this.#consolidationJob === entry) {
+        this.#consolidationJob = null;
+        this.#lastConsolidation = this.#clock.nowMs();
+        this.#forgetStatus();
+      }
+      resolveDone();
+    }
+  }
+
+  async #consolidateBody(options: { manual: boolean; force: boolean; signal: AbortSignal }) {
+    const { signal } = options;
+    const drive = this.#drive;
     const store = this.#store;
-    const effectiveLlm =
+    const portraitService = this.#portrait;
+    const deviceId = this.#local.deviceId;
+    const mainDevice = this.#roles.mainDevice;
+    const enabled = this.#roles.consolidation.enabled;
+    const time = this.#roles.consolidation.time;
+    const timeZone = this.#roles.timezone;
+    const rawLlm =
       (this.#shared.consolidateLlm.enabled ? this.#consolidateLlm : null) ?? this.#llm;
+    const effectiveLlm = rawLlm ? this.#wrapConsolidateLlm(rawLlm, signal) : null;
+    const isAlive = (): boolean =>
+      !this.#stopped &&
+      !signal.aborted &&
+      this.#store === store &&
+      this.#drive === drive;
+
     const outcome = await executeConsolidation(
       {
-        deviceId: this.#local.deviceId,
-        mainDevice: this.#roles.mainDevice,
-        enabled: this.#roles.consolidation.enabled,
-        time: this.#roles.consolidation.time,
-        timeZone: this.#roles.timezone,
+        deviceId,
+        mainDevice,
+        enabled,
+        time,
+        timeZone,
         hasLlm: effectiveLlm !== null,
-        hasDrive: this.#drive !== null,
+        hasDrive: drive !== null,
         llm: effectiveLlm,
         activeLimit: this.#shared.topics.activeLimit,
         historyDays: this.#shared.topics.historyDays,
         clock: this.#clock,
-        load: () => this.#consolidationView(),
-        emit: (type, data) => this.#emitUser(type, data),
+        signal,
+        ...(this.#options.consolidationStepBudgetMs === undefined
+          ? {}
+          : { stepBudgetMs: this.#options.consolidationStepBudgetMs }),
+        load: () => (isAlive() ? this.#consolidationViewFrom(store) : this.#consolidationViewFrom(null)),
+        emit: async (type, data) => {
+          if (!isAlive()) return;
+          await this.#emitUser(type, data);
+        },
         cursors: {
-          get: (key) => store?.getCursor(key) ?? null,
+          get: (key) => (isAlive() ? (store?.getCursor(key) ?? null) : null),
           set: (key, value) => {
+            if (!isAlive()) return;
             store?.setCursor(key, value);
           },
         },
-        ...this.#portraitRuntime(),
-        topicFiles: () => this.#writeTopicFiles(),
-        topicTranscripts: ({ day, sessionKeys }) => this.#topicTranscripts(day, sessionKeys),
-        readLease: async () => {
-          if (!this.#drive) return null;
-          return readConsolidateLease(this.#drive, (message) => {
-            console.warn(message);
+        ...this.#portraitRuntimeSnapshot(drive, portraitService, store, timeZone),
+        topicFiles: async () => {
+          if (!isAlive()) return emptyTopicFilesResult();
+          return this.#writeTopicFiles();
+        },
+        topicTranscripts: ({ day, sessionKeys }) => {
+          if (!drive || !store || !isAlive()) return Promise.resolve("");
+          return readTopicTranscripts({
+            drive,
+            sessions: store.listSessions(),
+            sessionKeys,
+            timeZone,
+            day,
           });
         },
+        readLease: async () => {
+          if (!drive || !isAlive()) return null;
+          const lease = await readConsolidateLease(drive, (message) => {
+            console.warn(message);
+          });
+          if (lease?.finishedAt && isAlive()) {
+            this.#rememberConsolidationFinishedAt(lease.finishedAt);
+          }
+          return lease;
+        },
         writeLease: async (lease) => {
-          if (!this.#drive) throw new Error("Drive 未打开");
-          await writeConsolidateLease(this.#drive, lease);
+          if (!isAlive()) throw new LlmAbortError();
+          if (!drive) throw new Error("Drive 未打开");
+          await writeConsolidateLease(drive, lease);
+          if (isAlive()) {
+            this.#rememberConsolidationFinishedAt(lease.finishedAt);
+          }
         },
       },
       this.#consolidationState,
-      options,
+      { manual: options.manual, force: options.force },
     );
     if (outcome.status === "rejected") throw new ConsolidationRejected(outcome.code);
-    if (outcome.status === "done" && outcome.attempted) {
+    if (outcome.status === "done" && outcome.attempted && !outcome.result.aborted && !this.#stopped) {
       const at = this.#clock.now().toISOString();
       this.changes.publish("topics", at);
       this.#statusChanged(at);
@@ -4451,10 +4679,16 @@ export class YouBrainDaemon {
     };
   }
 
-  #portraitRuntime(): { portrait: ReturnType<typeof createDrivePortrait> } | Record<string, never> {
-    const drive = this.#drive;
-    const service = this.#portrait;
-    const store = this.#store;
+  #portraitRuntime() {
+    return this.#portraitRuntimeSnapshot(this.#drive, this.#portrait, this.#store, this.#roles.timezone);
+  }
+
+  #portraitRuntimeSnapshot(
+    drive: DrivePort | null,
+    service: PortraitService | null,
+    store: SqliteStore | null,
+    timeZone: string,
+  ): { portrait: ReturnType<typeof createDrivePortrait> } | Record<string, never> {
     if (!drive || !service || !store) return {};
     return {
       portrait: createDrivePortrait({
@@ -4466,42 +4700,28 @@ export class YouBrainDaemon {
           snapshotPattern: this.#shared.portrait.snapshotPattern,
         }),
         events: () =>
-          store.listEventsByType(["portrait.correction", "portrait.correction_applied"]),
-        sessions: (day) => this.#twinSessions(day),
+          this.#stopped || this.#store !== store
+            ? []
+            : store.listEventsByType(["portrait.correction", "portrait.correction_applied"]),
+        sessions: (day, options) => {
+          if (this.#stopped || this.#store !== store || this.#drive !== drive) {
+            return Promise.resolve([]);
+          }
+          const seenTurns = parseTurnCursor(store.getCursor(PORTRAIT_TURNS_CURSOR));
+          return readTwinSessions({
+            drive,
+            sessions: store.listSessions(),
+            timeZone,
+            day,
+            seenTurns,
+            ...(options?.budgetUnits === undefined ? {} : { budgetUnits: options.budgetUnits }),
+          });
+        },
       }),
     };
   }
 
-  /** The user's own turns for sessions last updated on or after `day`, oldest session first. */
-  async #twinSessions(day: string): Promise<Array<{ sessionKey: string; title: string; turns: string[] }>> {
-    const drive = this.#drive;
-    const store = this.#store;
-    if (!drive || !store) return [];
-    const seenTurns = parseTurnCursor(store.getCursor(PORTRAIT_TURNS_CURSOR));
-    return readTwinSessions({
-      drive,
-      sessions: store.listSessions(),
-      timeZone: this.#roles.timezone,
-      day,
-      seenTurns,
-    });
-  }
-
-  async #topicTranscripts(day: string, sessionKeys: readonly string[]): Promise<string> {
-    const drive = this.#drive;
-    const store = this.#store;
-    if (!drive || !store) return "";
-    return readTopicTranscripts({
-      drive,
-      sessions: store.listSessions(),
-      sessionKeys,
-      timeZone: this.#roles.timezone,
-      day,
-    });
-  }
-
-  #consolidationView() {
-    const store = this.#store;
+  #consolidationViewFrom(store: SqliteStore | null) {
     const events = store?.listEvents() ?? [];
     const sessionUpdatedAt: Record<string, string> = {};
     for (const session of store?.listSessions() ?? []) {
@@ -4510,50 +4730,89 @@ export class YouBrainDaemon {
     return { book: foldEventsCached(events), sessionUpdatedAt };
   }
 
+  #consolidationView() {
+    return this.#consolidationViewFrom(this.#store);
+  }
+
+  #rememberConsolidationFinishedAt(finishedAt: string | null, atMs?: number): void {
+    const at = atMs ?? this.#clock.nowMs();
+    this.#consolidationCache = { at, lastFinishedAt: finishedAt };
+    if (finishedAt !== null && !this.#stopped) {
+      this.#store?.setCursor(CONSOLIDATION_LAST_FINISHED_CURSOR, finishedAt);
+    }
+  }
+
+  #buildConsolidationStatus(lastFinishedAt: string | null): StatusResponse["consolidation"] {
+    const ms = lastFinishedAt === null ? Number.NaN : Date.parse(lastFinishedAt);
+    const stale = Number.isNaN(ms) ? false : this.#clock.nowMs() - ms > INTERVALS.portraitMs;
+    return this.#withLastRun({
+      enabled: true,
+      lastFinishedAt,
+      stale,
+      status: stale ? "stale" : "ok",
+    });
+  }
+
   async #consolidation(): Promise<StatusResponse["consolidation"]> {
     if (!this.#roles.consolidation.enabled) {
       return { enabled: false, lastFinishedAt: null, stale: false, status: "disabled" };
     }
     const now = this.#clock.nowMs();
     if (this.#consolidationCache && now - this.#consolidationCache.at < CONSOLIDATION_CACHE_MS) {
-      return this.#consolidationCache.value;
+      return this.#buildConsolidationStatus(this.#consolidationCache.lastFinishedAt);
     }
-    const idle = this.#withLastRun({
-      enabled: true,
-      lastFinishedAt: null,
-      stale: false,
-      status: "ok" as const,
-    });
-    if (!this.#drive || !this.#driveKnown || !this.#driveReachable) return idle;
-    try {
-      const read = this.#drive.readPath(DRIVE_PATHS.consolidateLease).catch(() => null);
-      const object = await Promise.race([
-        read,
-        delay(STATUS_DRIVE_WAIT_MS).then(() => undefined),
-      ]);
-      if (!object) return idle;
-      const parsed = JSON.parse(object.bytes.toString("utf8")) as { finishedAt?: unknown };
-      const finished = typeof parsed.finishedAt === "string" ? parsed.finishedAt : null;
-      if (!finished) return idle;
-      const ms = Date.parse(finished);
-      const stale = Number.isNaN(ms) ? false : this.#clock.nowMs() - ms > INTERVALS.portraitMs;
-      const value = this.#withLastRun({
-        enabled: true,
-        lastFinishedAt: finished,
-        stale,
-        status: stale ? "stale" : "ok",
-      });
-      this.#consolidationCache = { at: now, value };
-      return value;
-    } catch {
-      return idle;
+    const cursorFinished = this.#store?.getCursor(CONSOLIDATION_LAST_FINISHED_CURSOR) ?? null;
+    const fallbackFinishedAt =
+      this.#consolidationCache?.lastFinishedAt ??
+      (cursorFinished !== null && cursorFinished.trim() !== "" ? cursorFinished : null);
+
+    const drive = this.#drive;
+    if (!drive || !this.#driveKnown || !this.#driveReachable) {
+      return this.#buildConsolidationStatus(fallbackFinishedAt);
     }
+
+    if (this.#consolidationLeaseFlight === null) {
+      let flight: Promise<void> | null = null;
+      flight = (async () => {
+        try {
+          const object = await drive.readPath(DRIVE_PATHS.consolidateLease);
+          if (this.#drive !== drive || this.#stopped) return;
+          if (!object) {
+            this.#consolidationCache = { at: this.#clock.nowMs(), lastFinishedAt: null };
+            return;
+          }
+          const parsed = JSON.parse(object.bytes.toString("utf8")) as { finishedAt?: unknown };
+          const finished =
+            typeof parsed.finishedAt === "string" && parsed.finishedAt.trim() !== ""
+              ? parsed.finishedAt
+              : null;
+          this.#rememberConsolidationFinishedAt(finished);
+        } catch {
+          // Transient Drive failure keeps the previous cached / cursor value.
+        } finally {
+          if (this.#consolidationLeaseFlight === flight) this.#consolidationLeaseFlight = null;
+        }
+      })();
+      this.#consolidationLeaseFlight = flight;
+    }
+
+    const waitMs = this.#options.statusDriveWaitMs ?? STATUS_DRIVE_WAIT_MS;
+    await Promise.race([this.#consolidationLeaseFlight, delay(waitMs)]);
+    const latest =
+      this.#consolidationCache && this.#consolidationCache.at >= now
+        ? this.#consolidationCache.lastFinishedAt
+        : fallbackFinishedAt;
+    return this.#buildConsolidationStatus(latest);
   }
 
   #withLastRun<T extends StatusResponse["consolidation"]>(value: T): T {
+    const running = this.#consolidationJob !== null;
     const lastRun = this.#consolidationState.lastRun;
-    if (!lastRun) return value;
-    return { ...value, lastRun };
+    return {
+      ...value,
+      ...(running ? { running: true } : {}),
+      ...(lastRun ? { lastRun } : {}),
+    };
   }
 
   #codingVariantPath(): string {

@@ -94,6 +94,10 @@ async function execute(
       await mkdir(skillsDir, { recursive: true });
       ctx.skillsDir = skillsDir;
     }
+    const combinedSignal =
+      options.signal && request.signal
+        ? AbortSignal.any([options.signal, request.signal])
+        : (request.signal ?? options.signal);
     const built = driver.build(ctx);
     const result = await runCliProcess({
       bin,
@@ -101,7 +105,7 @@ async function execute(
       cwd,
       ...(built.stdin !== undefined ? { stdin: built.stdin } : {}),
       timeoutMs: request.timeoutMs ?? options.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS,
-      ...(options.signal ? { signal: options.signal } : {}),
+      ...(combinedSignal ? { signal: combinedSignal } : {}),
       env: childEnv,
       ...(unset.length > 0 ? { unset } : {}),
       secrets,
@@ -193,6 +197,10 @@ async function executeStream(
       await mkdir(skillsDir, { recursive: true });
       ctx.skillsDir = skillsDir;
     }
+    const combinedSignal =
+      options.signal && request.signal
+        ? AbortSignal.any([options.signal, request.signal])
+        : (request.signal ?? options.signal);
     const built = stream.args(ctx);
     const result = await runCliProcess({
       bin,
@@ -200,7 +208,7 @@ async function executeStream(
       cwd,
       ...(built.stdin !== undefined ? { stdin: built.stdin } : {}),
       timeoutMs: options.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS,
-      ...(options.signal ? { signal: options.signal } : {}),
+      ...(combinedSignal ? { signal: combinedSignal } : {}),
       env: childEnv,
       ...(unset.length > 0 ? { unset } : {}),
       secrets,

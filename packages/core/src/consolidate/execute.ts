@@ -54,6 +54,8 @@ export interface ConsolidationRuntime {
   readLease: () => Promise<ConsolidateLease | null>;
   writeLease: (lease: ConsolidateLease) => Promise<void>;
   steps?: readonly ConsolidationStep[];
+  signal?: AbortSignal;
+  stepBudgetMs?: number;
 }
 
 export type ConsolidationExecution =
@@ -144,7 +146,15 @@ export async function executeConsolidation(
   }
   const steps = runtime.steps ?? consolidationSteps();
   let last: ConsolidationRunResult = { day: today, ok: true, steps: [], warnings: [] };
-  for (const day of days) {
+  for (let index = 0; index < days.length; index += 1) {
+    const day = days[index]!;
+    if (runtime.signal?.aborted) {
+      return {
+        status: "done",
+        attempted: index > 0,
+        result: { day, ok: false, aborted: true, steps: [], warnings: [] },
+      };
+    }
     const result = await runConsolidation({
       day,
       timeZone: runtime.timeZone,
@@ -155,11 +165,17 @@ export async function executeConsolidation(
       emit: runtime.emit,
       cursors: runtime.cursors,
       steps,
+      isFinalDay: index === days.length - 1,
+      ...(runtime.signal ? { signal: runtime.signal } : {}),
+      ...(runtime.stepBudgetMs === undefined ? {} : { stepBudgetMs: runtime.stepBudgetMs }),
       ...(runtime.portrait ? { portrait: runtime.portrait } : {}),
       ...(runtime.topicFiles ? { topicFiles: runtime.topicFiles } : {}),
       ...(runtime.topicTranscripts ? { topicTranscripts: runtime.topicTranscripts } : {}),
     });
     last = result;
+    if (result.aborted || runtime.signal?.aborted) {
+      return { status: "done", attempted: true, result: { ...result, ok: false, aborted: true } };
+    }
     const finishedAt = runtime.clock.now().toISOString();
     if (!result.ok) {
       rememberFailure(state, runtime.clock.nowMs(), {
@@ -171,8 +187,14 @@ export async function executeConsolidation(
       return { status: "done", attempted: true, result };
     }
     try {
+      if (runtime.signal?.aborted) {
+        return { status: "done", attempted: true, result: { ...result, ok: false, aborted: true } };
+      }
       await runtime.writeLease({ date: day, deviceId: runtime.deviceId, finishedAt });
     } catch {
+      if (runtime.signal?.aborted) {
+        return { status: "done", attempted: true, result: { ...result, ok: false, aborted: true } };
+      }
       const failed: ConsolidationRunResult = {
         ...result,
         ok: false,

@@ -16,6 +16,7 @@ import {
 } from "../../src/topic-files/names.js";
 import {
   TOPIC_FILES_MANIFEST,
+  TOPIC_FILES_SWEPT_AT,
   syncTopicFiles,
   type TopicFilesManifestStore,
   type TopicFilesResult,
@@ -40,10 +41,11 @@ class MemManifest implements TopicFilesManifestStore {
 }
 
 class RecordingDrive extends MemoryDrive {
-  readonly calls = { create: 0, update: 0, move: 0, upsert: 0, trash: 0 };
+  readonly calls = { create: 0, update: 0, move: 0, upsert: 0, trash: 0, findByPath: 0, list: 0 };
   failCreatePath: string | null = null;
   failTrash = false;
   failRead = false;
+  failList = false;
 
   resetCalls(): void {
     this.calls.create = 0;
@@ -51,6 +53,19 @@ class RecordingDrive extends MemoryDrive {
     this.calls.move = 0;
     this.calls.upsert = 0;
     this.calls.trash = 0;
+    this.calls.findByPath = 0;
+    this.calls.list = 0;
+  }
+
+  override async list(query: Parameters<DrivePort["list"]>[0]): Promise<DriveEntry[]> {
+    this.calls.list += 1;
+    if (this.failList) throw new Error("list down");
+    return super.list(query);
+  }
+
+  override async findByPath(path: string): Promise<DriveEntry | null> {
+    this.calls.findByPath += 1;
+    return super.findByPath(path);
   }
 
   override async create(input: DrivePutInput): Promise<DriveEntry> {
@@ -94,7 +109,13 @@ class RecordingDrive extends MemoryDrive {
 }
 
 function zeroWrites(drive: RecordingDrive): void {
-  expect(drive.calls).toEqual({ create: 0, update: 0, move: 0, upsert: 0, trash: 0 });
+  expect({
+    create: drive.calls.create,
+    update: drive.calls.update,
+    move: drive.calls.move,
+    upsert: drive.calls.upsert,
+    trash: drive.calls.trash,
+  }).toEqual({ create: 0, update: 0, move: 0, upsert: 0, trash: 0 });
 }
 
 async function publish(
@@ -105,6 +126,8 @@ async function publish(
     language?: TopicFilesSyncInput["language"];
     sessionUpdatedAt?: Readonly<Record<string, string>>;
     timeZone?: string;
+    now?: string;
+    sweptAt?: TopicFilesManifestStore;
   },
 ): Promise<TopicFilesResult> {
   return syncTopicFiles({
@@ -113,12 +136,13 @@ async function publish(
     language: options?.language ?? "zh",
     timeZone: options?.timeZone ?? SHANGHAI,
     zone: {
-      now: NOW,
+      now: options?.now ?? NOW,
       activeLimit: 10,
       historyDays: 30,
       ...(options?.sessionUpdatedAt ? { sessionUpdatedAt: options.sessionUpdatedAt } : {}),
     },
     manifest,
+    ...(options?.sweptAt ? { sweptAt: options.sweptAt } : {}),
   });
 }
 
@@ -571,5 +595,112 @@ describe("topic files", () => {
 
   it("stores the manifest under the cursor key name", () => {
     expect(TOPIC_FILES_MANIFEST).toBe("topicfiles.manifest");
+    expect(TOPIC_FILES_SWEPT_AT).toBe("topicfiles.swept_at");
+  });
+
+  it("does not call findByPath or list for historical merged topics when manifest is intact and recently swept", async () => {
+    const drive = new RecordingDrive();
+    const manifest = new MemManifest();
+    const sweptAt = new MemManifest();
+    const events = [created("keep", "主话题", "2026-01-01T00:00:00.000Z")];
+    for (let i = 0; i < 100; i += 1) {
+      events.push(
+        created(`old-${i}`, `旧话题${i}`, "2026-01-01T00:00:01.000Z"),
+        ev("topic.merged", { fromTopicId: `old-${i}`, intoTopicId: "keep" }, "2026-01-02T00:00:00.000Z"),
+      );
+    }
+    const book = fold(events);
+    await publish(drive, book, manifest, { sweptAt });
+    expect(sweptAt.raw).toBe(NOW);
+
+    drive.resetCalls();
+    const again = await publish(drive, book, manifest, {
+      sweptAt,
+      now: "2026-10-23T12:00:00.000Z",
+    });
+    expect(again.failed).toBe(0);
+    expect(drive.calls.findByPath).toBe(0);
+    expect(drive.calls.list).toBe(0);
+    zeroWrites(drive);
+  });
+
+  it("adopts existing files and sweeps merged residuals in a single list when manifest is lost or corrupt", async () => {
+    const drive = new RecordingDrive();
+    const manifest = new MemManifest();
+    const sweptAt = new MemManifest();
+    const events = [
+      created("keep", "留下", "2026-01-01T00:00:00.000Z"),
+      created("drop", "去掉", "2026-01-01T00:00:01.000Z"),
+    ];
+    await publish(drive, fold(events), manifest, { sweptAt });
+    const keepId = (await drive.findByPath(topicHistoryPath("keep")))?.id;
+    expect(await drive.findByPath(topicHistoryPath("drop"))).not.toBeNull();
+
+    const merged = fold([
+      ...events,
+      ev("topic.merged", { fromTopicId: "drop", intoTopicId: "keep" }, "2026-01-02T00:00:00.000Z"),
+    ]);
+
+    manifest.raw = null;
+    drive.resetCalls();
+    const recovered = await publish(drive, merged, manifest, { sweptAt });
+    expect(recovered.failed).toBe(0);
+    expect(recovered.trashed).toBe(1);
+    expect(drive.calls.list).toBe(1);
+    expect(drive.calls.findByPath).toBe(0);
+    expect((await drive.findByPath(topicHistoryPath("keep")))?.id).toBe(keepId);
+    expect(await drive.findByPath(topicHistoryPath("drop"))).toBeNull();
+  });
+
+  it("sweeps orphan merged files via a single list when sweptAt is older than 24 hours", async () => {
+    const drive = new RecordingDrive();
+    const manifest = new MemManifest();
+    const sweptAt = new MemManifest();
+    const events = [
+      created("keep", "留下", "2026-01-01T00:00:00.000Z"),
+      created("orphan", "另一设备合并", "2026-01-01T00:00:01.000Z"),
+      ev("topic.merged", { fromTopicId: "orphan", intoTopicId: "keep" }, "2026-01-02T00:00:00.000Z"),
+    ];
+    const book = fold(events);
+    await publish(drive, book, manifest, { sweptAt });
+
+    // Simulate an orphan file left behind on Drive by another main device, absent from local manifest.
+    await drive.create({
+      path: topicHistoryPath("orphan"),
+      bytes: Buffer.from("# orphan\n", "utf8"),
+      mimeType: "text/markdown",
+    });
+
+    sweptAt.raw = "2026-10-22T01:59:59.000Z";
+    drive.resetCalls();
+    const result = await publish(drive, book, manifest, { sweptAt, now: NOW });
+    expect(result.failed).toBe(0);
+    expect(result.trashed).toBe(1);
+    expect(drive.calls.list).toBe(1);
+    expect(drive.calls.findByPath).toBe(0);
+    expect(sweptAt.raw).toBe(NOW);
+    expect(await drive.findByPath(topicHistoryPath("orphan"))).toBeNull();
+  });
+
+  it("records a warning without failing or advancing sweptAt when list throws during sweep", async () => {
+    const drive = new RecordingDrive();
+    const manifest = new MemManifest();
+    const sweptAt = new MemManifest();
+    const events = [
+      created("keep", "留下", "2026-01-01T00:00:00.000Z"),
+      created("old", "旧", "2026-01-01T00:00:01.000Z"),
+      ev("topic.merged", { fromTopicId: "old", intoTopicId: "keep" }, "2026-01-02T00:00:00.000Z"),
+    ];
+    const book = fold(events);
+    await publish(drive, book, manifest, { sweptAt });
+
+    const staleSweep = "2026-10-20T00:00:00.000Z";
+    sweptAt.raw = staleSweep;
+    drive.failList = true;
+    drive.resetCalls();
+    const result = await publish(drive, book, manifest, { sweptAt, now: NOW });
+    expect(result.failed).toBe(0);
+    expect(result.warnings.length).toBeGreaterThan(0);
+    expect(sweptAt.raw).toBe(staleSweep);
   });
 });

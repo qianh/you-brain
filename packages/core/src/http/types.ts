@@ -509,6 +509,8 @@ export interface StatusResponse {
     stale: boolean;
     /** `disabled` is “未启用”. Stale is only computed when consolidation is enabled. */
     status: "disabled" | "ok" | "stale";
+    /** True while a consolidation run is currently executing in the background. */
+    running?: boolean;
     /** Present after this process has attempted a run. Memory only. */
     lastRun?: {
       day: string;

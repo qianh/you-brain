@@ -18,6 +18,7 @@ export {
 } from "./render.js";
 export {
   TOPIC_FILES_MANIFEST,
+  TOPIC_FILES_SWEPT_AT,
   emptyTopicFilesResult,
   syncTopicFiles,
   type TopicFileEntry,

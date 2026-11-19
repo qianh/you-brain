@@ -106,14 +106,41 @@ export function partitionTopics(book: TopicBook, query: ZoneQuery): ZonePartitio
   return { active, history };
 }
 
-export function resolveMergedTopic(book: TopicBook, topicId: string): string {
-  const byId = new Map(book.topics.map((topic) => [topic.topicId, topic]));
-  let current = topicId;
-  const seen = new Set<string>();
-  while (true) {
-    const next = byId.get(current)?.mergedInto;
-    if (!next || seen.has(current)) return current;
-    seen.add(current);
-    current = next;
+export function createMergedTopicResolver(book: TopicBook): (topicId: string) => string {
+  const mergedIntoById = new Map<string, string | null>();
+  for (const topic of book.topics) {
+    mergedIntoById.set(topic.topicId, topic.mergedInto);
   }
+  const cache = new Map<string, string>();
+  return (topicId: string): string => {
+    const cached = cache.get(topicId);
+    if (cached !== undefined) return cached;
+    let current = topicId;
+    const seen = new Set<string>();
+    const trail: string[] = [];
+    while (true) {
+      const hit = cache.get(current);
+      if (hit !== undefined) {
+        for (const node of trail) cache.set(node, hit);
+        return hit;
+      }
+      const next = mergedIntoById.get(current);
+      if (!next) {
+        for (const node of trail) cache.set(node, current);
+        cache.set(current, current);
+        return current;
+      }
+      if (seen.has(current)) {
+        // Cycle: mirror the original walk semantics where each entry stops on itself.
+        return current;
+      }
+      seen.add(current);
+      trail.push(current);
+      current = next;
+    }
+  };
+}
+
+export function resolveMergedTopic(book: TopicBook, topicId: string): string {
+  return createMergedTopicResolver(book)(topicId);
 }

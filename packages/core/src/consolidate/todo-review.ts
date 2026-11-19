@@ -1,4 +1,5 @@
-import { extractJson } from "../refine/parse.js";
+import { isLlmAbortError } from "../llm/errors.js";
+import { completeJsonWithRetry } from "./llm-json.js";
 import { parseTodoReview } from "./normalize.js";
 import { TODO_REVIEW_JSON_SCHEMA } from "./schema.js";
 import { selectTopicsChangedOnDay } from "./select.js";
@@ -6,7 +7,6 @@ import type { ConsolidationContext, ConsolidationStep } from "./steps.js";
 
 export const TODO_REVIEW_CURSOR = "consolidate.todo_review";
 export const TODO_REVIEW_TRANSCRIPT_CHARS = 24_000;
-const MAX_ATTEMPTS = 2;
 const TOPIC_CONCURRENCY = 2;
 const MIN_QUOTE_CHARS = 6;
 
@@ -168,41 +168,33 @@ async function reviewOneTopic(
   });
   const openIds = new Set(candidate.openTodos.map((todo) => todo.todoId));
 
-  let lastDetail = "模型输出无法校验";
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    const user =
-      attempt === 1
-        ? prompt.user
-        : `${prompt.user}\n\n## 上次输出无法通过校验\n${lastDetail}\n请只输出修正后的 JSON。`;
-    let raw = "";
-    try {
-      raw = await ctx.llm.complete({
-        system: prompt.system,
-        user,
-        jsonSchema: TODO_REVIEW_JSON_SCHEMA,
+  try {
+    const parsed = await completeJsonWithRetry(
+      ctx.llm,
+      prompt,
+      TODO_REVIEW_JSON_SCHEMA,
+      parseTodoReview,
+      { ...(ctx.signal ? { signal: ctx.signal } : {}) },
+    );
+    const seen = new Set<string>();
+    const closed: TodoReviewRecord[] = [];
+    for (const item of parsed) {
+      if (!openIds.has(item.todoId) || seen.has(item.todoId)) continue;
+      seen.add(item.todoId);
+      if (item.verdict === "keep") continue;
+      if (!quoteAppearsInTranscript(item.quote, transcript)) continue;
+      closed.push({
+        todoId: item.todoId,
+        topicId: candidate.topicId,
+        status: item.verdict,
+        quote: item.quote,
       });
-      const parsed = parseTodoReview(extractJson(raw));
-      const seen = new Set<string>();
-      const closed: TodoReviewRecord[] = [];
-      for (const item of parsed) {
-        if (!openIds.has(item.todoId) || seen.has(item.todoId)) continue;
-        seen.add(item.todoId);
-        if (item.verdict === "keep") continue;
-        if (!quoteAppearsInTranscript(item.quote, transcript)) continue;
-        closed.push({
-          todoId: item.todoId,
-          topicId: candidate.topicId,
-          status: item.verdict,
-          quote: item.quote,
-        });
-      }
-      return { topicId: candidate.topicId, attempted: true, failed: false, closed };
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : "模型输出无法校验";
-      lastDetail = `${msg}\n${raw.trim().slice(0, 400)}`.trim();
     }
+    return { topicId: candidate.topicId, attempted: true, failed: false, closed };
+  } catch (error) {
+    if (isLlmAbortError(error)) throw error;
+    return { topicId: candidate.topicId, attempted: true, failed: true, closed: [] };
   }
-  return { topicId: candidate.topicId, attempted: true, failed: true, closed: [] };
 }
 
 async function mapWithLimit<T, R>(

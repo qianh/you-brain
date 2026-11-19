@@ -6,6 +6,8 @@ import {
   consolidationRejectMessage,
   emptyConsolidationState,
   executeConsolidation,
+  mergeSuggestionsStep,
+  topicFilesStep,
   type ConsolidationRuntime,
   type ConsolidationState,
 } from "../../src/consolidate/index.js";
@@ -382,5 +384,117 @@ describe("executeConsolidation", () => {
         force: false,
       }),
     ).rejects.toThrow("时区无效");
+  });
+
+  it("runs finalDayOnly steps only on the final catch-up day, and runs them normally on a single day", async () => {
+    expect(mergeSuggestionsStep.finalDayOnly).toBe(true);
+    expect(topicFilesStep.finalDayOnly).toBe(true);
+    expect(topicFilesStep.advisory).toBe(true);
+
+    const clock = clockFrom(TODAY);
+    const state = emptyConsolidationState();
+    let lease: ConsolidateLease | null = {
+      date: "2026-10-20",
+      deviceId: "device-a",
+      finishedAt: "2026-10-20T03:00:00.000Z",
+    };
+    const dailyDays: string[] = [];
+    const mergeDays: string[] = [];
+    const fileDays: string[] = [];
+    const steps = [
+      {
+        id: "daily",
+        async run(ctx: { day: string }) {
+          dailyDays.push(ctx.day);
+        },
+      },
+      {
+        id: "merge_suggestions",
+        finalDayOnly: true,
+        async run(ctx: { day: string }) {
+          mergeDays.push(ctx.day);
+        },
+      },
+      {
+        id: "topic_files",
+        finalDayOnly: true,
+        advisory: true,
+        async run(ctx: { day: string }) {
+          fileDays.push(ctx.day);
+        },
+      },
+    ];
+    const outcome = await executeConsolidation(
+      runtime(clock, {
+        readLease: async () => lease,
+        writeLease: async (next) => {
+          lease = next;
+        },
+        steps,
+      }),
+      state,
+      { manual: false, force: false },
+    );
+    expect(outcome).toMatchObject({ status: "done", attempted: true, result: { ok: true } });
+    expect(dailyDays).toEqual(["2026-10-21", "2026-10-22", "2026-10-23"]);
+    expect(mergeDays).toEqual(["2026-10-23"]);
+    expect(fileDays).toEqual(["2026-10-23"]);
+
+    // Single-day forced run still runs finalDayOnly steps.
+    dailyDays.length = 0;
+    mergeDays.length = 0;
+    fileDays.length = 0;
+    const single = await executeConsolidation(
+      runtime(clock, {
+        readLease: async () => lease,
+        writeLease: async (next) => {
+          lease = next;
+        },
+        steps,
+      }),
+      state,
+      { manual: true, force: true },
+    );
+    expect(single).toMatchObject({ status: "done", attempted: true, result: { ok: true } });
+    expect(mergeDays).toEqual(["2026-10-23"]);
+    expect(fileDays).toEqual(["2026-10-23"]);
+  });
+
+  it("writes the lease even when an advisory step like topic_files fails", async () => {
+    const clock = clockFrom(TODAY);
+    const state = emptyConsolidationState();
+    let lease = null as ConsolidateLease | null;
+    const outcome = await executeConsolidation(
+      runtime(clock, {
+        readLease: async () => lease,
+        writeLease: async (next) => {
+          lease = next;
+        },
+        steps: [
+          { id: "topic_summaries", async run() {} },
+          {
+            id: "topic_files",
+            dependsOn: ["topic_summaries"],
+            finalDayOnly: true,
+            advisory: true,
+            async run() {
+              throw new Error("部分话题文件没有写完");
+            },
+          },
+        ],
+      }),
+      state,
+      { manual: false, force: false },
+    );
+    expect(outcome.status).toBe("done");
+    if (outcome.status !== "done") throw new Error("unexpected");
+    expect(outcome.result.ok).toBe(true);
+    expect(outcome.result.steps).toEqual([
+      { id: "topic_summaries", ok: true },
+      { id: "topic_files", ok: false, error: "部分话题文件没有写完" },
+    ]);
+    expect(lease?.date).toBe("2026-10-23");
+    expect(state.backoffMs).toBe(0);
+    expect(state.retryAtMs).toBeNull();
   });
 });

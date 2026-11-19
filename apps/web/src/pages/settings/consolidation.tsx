@@ -83,7 +83,14 @@ export function ConsolidationSection({
     deviceId: status?.deviceId ?? null,
     mainDevice: savedRoles?.mainDevice ?? null,
   });
-  const blocked = gate === "ready" ? null : t(gate === "not-main" ? "consolidateNotMain" : "consolidateOff");
+  const backendRunning = status?.consolidation.running === true;
+  const isRunning = running || backendRunning;
+  const blocked =
+    gate !== "ready"
+      ? t(gate === "not-main" ? "consolidateNotMain" : "consolidateOff")
+      : backendRunning
+        ? t("consolidateRunning")
+        : null;
   const timeError = issues.includes("invalidTime") ? t("invalidTime") : undefined;
   const zoneError = issues.includes("invalidZone") ? t("invalidZone") : undefined;
   const baseError = issues.includes("invalidBase") ? t("invalidBase") : undefined;
@@ -102,7 +109,7 @@ export function ConsolidationSection({
   });
 
   async function runNow(): Promise<void> {
-    if (running || gate !== "ready") return;
+    if (isRunning || gate !== "ready") return;
     setRunning(true);
     try {
       const result = await client.consolidate({ force: true });
@@ -113,9 +120,14 @@ export function ConsolidationSection({
       });
       await reload("status");
     } catch (caught) {
-      const message =
-        caught instanceof BrowserDaemonError && caught.message !== "" ? caught.message : t("actionFailed");
-      push({ message, tone: "danger" });
+      if (caught instanceof BrowserDaemonError && caught.code === "CONSOLIDATION_RUNNING") {
+        push({ message: t("consolidateRunning"), tone: "danger" });
+        await reload("status");
+      } else {
+        const message =
+          caught instanceof BrowserDaemonError && caught.message !== "" ? caught.message : t("actionFailed");
+        push({ message, tone: "danger" });
+      }
     } finally {
       setRunning(false);
     }
@@ -280,8 +292,8 @@ export function ConsolidationSection({
             <Button
               variant="primary"
               size="sm"
-              loading={running}
-              disabled={gate !== "ready"}
+              loading={isRunning}
+              disabled={gate !== "ready" || isRunning}
               onClick={() => {
                 void runNow();
               }}

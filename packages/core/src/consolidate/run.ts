@@ -1,4 +1,7 @@
+import { isLlmAbortError } from "../llm/errors.js";
 import type { ConsolidationContext, ConsolidationStep } from "./steps.js";
+
+export const DEFAULT_CONSOLIDATION_STEP_BUDGET_MS = 20 * 60 * 1000;
 
 export interface ConsolidationStepResult {
   id: string;
@@ -9,34 +12,72 @@ export interface ConsolidationStepResult {
 export interface ConsolidationRunResult {
   day: string;
   ok: boolean;
+  aborted?: boolean;
   steps: ConsolidationStepResult[];
   warnings: string[];
 }
 
 export async function runConsolidation(
-  input: Omit<ConsolidationContext, "warnings"> & { steps: readonly ConsolidationStep[] },
+  input: Omit<ConsolidationContext, "warnings"> & {
+    steps: readonly ConsolidationStep[];
+    isFinalDay?: boolean;
+    stepBudgetMs?: number;
+  },
 ): Promise<ConsolidationRunResult> {
+  const isFinalDay = input.isFinalDay ?? true;
+  const stepBudgetMs = input.stepBudgetMs ?? DEFAULT_CONSOLIDATION_STEP_BUDGET_MS;
+  const externalSignal = input.signal;
   const warnings: string[] = [];
   const failed = new Set<string>();
   const steps: ConsolidationStepResult[] = [];
-  const ctx: ConsolidationContext = { ...input, warnings };
+
   for (const step of input.steps) {
+    if (externalSignal?.aborted) {
+      return { day: input.day, ok: false, aborted: true, steps, warnings };
+    }
+    if (step.finalDayOnly && !isFinalDay) continue;
     if (step.dependsOn?.some((id) => failed.has(id))) {
       const error = "依赖步骤失败";
       warnings.push(`${step.id}：${error}`);
       steps.push({ id: step.id, ok: false, error });
-      failed.add(step.id);
+      if (!step.advisory) failed.add(step.id);
       continue;
     }
+
+    const budgetController = new AbortController();
+    let timedOut = false;
+    const budgetTimer = setTimeout(() => {
+      timedOut = true;
+      budgetController.abort();
+    }, stepBudgetMs);
+
+    const stepSignal = externalSignal
+      ? AbortSignal.any([externalSignal, budgetController.signal])
+      : budgetController.signal;
+    const ctx: ConsolidationContext = { ...input, warnings, signal: stepSignal };
+
     try {
       await step.run(ctx);
+      if (externalSignal?.aborted) {
+        return { day: input.day, ok: false, aborted: true, steps, warnings };
+      }
       steps.push({ id: step.id, ok: true });
     } catch (error) {
-      const message = error instanceof Error ? error.message.trim() : "";
+      if (externalSignal?.aborted) {
+        return { day: input.day, ok: false, aborted: true, steps, warnings };
+      }
+      const message =
+        timedOut && isLlmAbortError(error)
+          ? "步骤执行超时"
+          : error instanceof Error
+            ? error.message.trim()
+            : "";
       const short = clip(message === "" ? "步骤失败" : message);
       warnings.push(short);
       steps.push({ id: step.id, ok: false, error: short });
-      failed.add(step.id);
+      if (!step.advisory) failed.add(step.id);
+    } finally {
+      clearTimeout(budgetTimer);
     }
   }
   return { day: input.day, ok: failed.size === 0, steps, warnings };

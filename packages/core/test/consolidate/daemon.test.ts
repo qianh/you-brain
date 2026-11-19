@@ -4,8 +4,9 @@ import { join } from "node:path";
 import { DRIVE_PATHS } from "@you-brain/protocol";
 import { afterEach, describe, expect, it } from "bun:test";
 
-import { startDaemon, type YouBrainDaemon } from "../../src/daemon/daemon.js";
+import { startDaemon, type DaemonOptions, type YouBrainDaemon } from "../../src/daemon/daemon.js";
 import { INTERVALS } from "../../src/daemon/schedule.js";
+import { LlmAbortError } from "../../src/llm/errors.js";
 import {
   TWIN_CLAIMS_SYSTEM_PROMPT,
   TWIN_CODING_PROPOSALS_SYSTEM_PROMPT,
@@ -403,6 +404,406 @@ describe("consolidation daemon", () => {
     ).toBe(full);
     expect(await readFile(join(dirs.homeDir, "portrait", "full.md"), "utf8")).toBe(written ?? "");
   });
+
+  it("resets consolidation backoff and triggers on the next tick after consolidateLlm config changes", async () => {
+    const dirs = await trackDirs();
+    const clock = testClock();
+    const drive = new MemoryDrive({ now: () => clock.now() });
+    await writeClaudeSession(dirs.sourceDir, [
+      claudeLine("backoff-reset-1", "user", "First topic work", CLOCK_START.toISOString()),
+      claudeLine("backoff-reset-1", "assistant", "好的。", CLOCK_START.toISOString()),
+    ]);
+    let failSummaries = true;
+    const daemon = await startTracked(
+      dirs,
+      clock,
+      drive,
+      fakeBackend(async (request) => {
+        if (request.system.includes("话题概要")) {
+          if (failSummaries) throw new Error("model 404");
+          return JSON.stringify({ summary: "新概要", nextStep: "" });
+        }
+        if (request.system.includes("合并建议")) return JSON.stringify({ pairs: [] });
+        return refineJson("讨论了分阶段发布");
+      }),
+    );
+    const id = (await readStatus(daemon)).deviceId;
+    await postJson<{ uploaded: number }>(daemon, "/api/actions/upload", { backfill: true });
+    await refineNow(clock, daemon);
+    expect(
+      (await putRoles(daemon, { mainDevice: id, consolidation: { enabled: true, time: "00:00" } })).status,
+    ).toBe(200);
+
+    // First scheduled run fails and enters 30m backoff.
+    await clock.advance(INTERVALS.tickMs);
+    await daemon.settled();
+    expect(await leaseFinishedAt(drive)).toBeNull();
+    expect((await readStatus(daemon)).consolidation.lastRun?.ok).toBe(false);
+
+    // Fix model and update consolidateLlm config; backoff and consolidation interval should reset immediately.
+    failSummaries = false;
+    expect(
+      (
+        await send(daemon, "/api/config", {
+          method: "PUT",
+          body: JSON.stringify({
+            consolidateLlm: { enabled: true, provider: "magpie", model: "stable/model", baseUrl: "" },
+          }),
+        })
+      ).status,
+    ).toBe(200);
+
+    await clock.advance(INTERVALS.tickMs);
+    await daemon.settled();
+    expect(await leaseFinishedAt(drive)).not.toBeNull();
+    expect((await readStatus(daemon)).consolidation.lastRun?.ok).toBe(true);
+  });
+
+  it("runs consolidation detached without blocking scan, sync, or status, and rejects concurrent manual runs with 409", async () => {
+    const dirs = await trackDirs();
+    const clock = testClock();
+    const drive = new MemoryDrive({ now: () => clock.now() });
+    await writeClaudeSession(dirs.sourceDir, [
+      claudeLine("detached-1", "user", "Detached test work", CLOCK_START.toISOString()),
+      claudeLine("detached-1", "assistant", "好的。", CLOCK_START.toISOString()),
+    ]);
+    let releaseLlm!: () => void;
+    let llmEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      llmEntered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseLlm = resolve;
+    });
+
+    const daemon = await startTracked(
+      dirs,
+      clock,
+      drive,
+      fakeBackend(async (request) => {
+        if (request.system.includes("话题概要")) {
+          llmEntered();
+          await gate;
+          return JSON.stringify({ summary: "异步完成", nextStep: "" });
+        }
+        if (request.system.includes("合并建议")) return JSON.stringify({ pairs: [] });
+        return refineJson("讨论了异步化");
+      }),
+    );
+    const id = (await readStatus(daemon)).deviceId;
+    await postJson<{ uploaded: number }>(daemon, "/api/actions/upload", { backfill: true });
+    await refineNow(clock, daemon);
+    expect(
+      (await putRoles(daemon, { mainDevice: id, consolidation: { enabled: true, time: "23:00" } })).status,
+    ).toBe(200);
+
+    const firstRun = postConsolidate(daemon, {});
+    await entered;
+
+    // While consolidation is waiting on the model, status / scan / sync must remain responsive.
+    const duringStatus = await readStatus(daemon);
+    expect(duringStatus.consolidation.running).toBe(true);
+    await daemon.scan();
+    const syncRes = await postJson<{ started: boolean }>(daemon, "/api/actions/sync", {});
+    expect(syncRes.started).toBe(true);
+
+    // Concurrent manual run gets 409 CONSOLIDATION_RUNNING immediately.
+    const duplicate = await postConsolidate(daemon, {});
+    expect(duplicate.status).toBe(409);
+    expect(await duplicate.json()).toEqual({
+      error: { code: "CONSOLIDATION_RUNNING", message: "沉淀正在进行中" },
+    });
+
+    releaseLlm();
+    const finished = await firstRun;
+    expect(finished.status).toBe(200);
+    expect(((await finished.json()) as ConsolidateActionResult).ok).toBe(true);
+    expect((await readStatus(daemon)).consolidation.running).toBeUndefined();
+  });
+
+  it("aborts in-flight consolidation cleanly on daemon.stop() without store errors", async () => {
+    const dirs = await trackDirs();
+    const clock = testClock();
+    const drive = new MemoryDrive({ now: () => clock.now() });
+    await writeClaudeSession(dirs.sourceDir, [
+      claudeLine("stop-1", "user", "Stop abort test", CLOCK_START.toISOString()),
+      claudeLine("stop-1", "assistant", "好的。", CLOCK_START.toISOString()),
+    ]);
+    let llmEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      llmEntered = resolve;
+    });
+    let sawAbort = false;
+    const daemon = await startTracked(
+      dirs,
+      clock,
+      drive,
+      fakeBackend(async (request) => {
+        if (request.system.includes("话题概要")) {
+          llmEntered();
+          return new Promise<string>((_, reject) => {
+            if (request.signal?.aborted) {
+              sawAbort = true;
+              reject(new LlmAbortError());
+              return;
+            }
+            request.signal?.addEventListener(
+              "abort",
+              () => {
+                sawAbort = true;
+                reject(new LlmAbortError());
+              },
+              { once: true },
+            );
+          });
+        }
+        return refineJson("讨论了停机中止");
+      }),
+    );
+    const id = (await readStatus(daemon)).deviceId;
+    await postJson<{ uploaded: number }>(daemon, "/api/actions/upload", { backfill: true });
+    await refineNow(clock, daemon);
+    expect(
+      (await putRoles(daemon, { mainDevice: id, consolidation: { enabled: true, time: "23:00" } })).status,
+    ).toBe(200);
+
+    const runPromise = postConsolidate(daemon, {}).catch(() => null);
+    await entered;
+
+    const startedStop = Date.now();
+    await daemon.stop();
+    expect(Date.now() - startedStop).toBeLessThan(2_500);
+    expect(sawAbort).toBe(true);
+    expect(await leaseFinishedAt(drive)).toBeNull();
+    await runPromise;
+  });
+
+  it("aborts in-flight consolidation without writing lease or backoff when mainDevice changes", async () => {
+    const dirs = await trackDirs();
+    const clock = testClock();
+    const drive = new MemoryDrive({ now: () => clock.now() });
+    await writeClaudeSession(dirs.sourceDir, [
+      claudeLine("switch-1", "user", "Role switch test", CLOCK_START.toISOString()),
+      claudeLine("switch-1", "assistant", "好的。", CLOCK_START.toISOString()),
+    ]);
+    let llmEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      llmEntered = resolve;
+    });
+    const daemon = await startTracked(
+      dirs,
+      clock,
+      drive,
+      fakeBackend(async (request) => {
+        if (request.system.includes("话题概要")) {
+          llmEntered();
+          return new Promise<string>((_, reject) => {
+            request.signal?.addEventListener("abort", () => reject(new LlmAbortError()), { once: true });
+          });
+        }
+        return refineJson("讨论了切主设备");
+      }),
+    );
+    const id = (await readStatus(daemon)).deviceId;
+    await postJson<{ uploaded: number }>(daemon, "/api/actions/upload", { backfill: true });
+    await refineNow(clock, daemon);
+    expect(
+      (await putRoles(daemon, { mainDevice: id, consolidation: { enabled: true, time: "23:00" } })).status,
+    ).toBe(200);
+
+    const runPromise = postConsolidate(daemon, {});
+    await entered;
+    // Sign out / clear Drive while consolidation is running; job must abort without writing lease or backoff.
+    expect((await send(daemon, "/api/actions/google-logout", { method: "POST", body: "{}" })).status).toBe(200);
+    const response = await runPromise;
+    expect(response.status).toBe(200);
+    expect(await leaseFinishedAt(drive)).toBeNull();
+    // Aborted run must not record a failure or enter backoff.
+    expect((await readStatus(daemon)).consolidation.lastRun).toBeUndefined();
+  });
+
+  it("fails a consolidation step that exceeds consolidationStepBudgetMs", async () => {
+    const dirs = await trackDirs();
+    const clock = testClock();
+    const drive = new MemoryDrive({ now: () => clock.now() });
+    await writeClaudeSession(dirs.sourceDir, [
+      claudeLine("budget-1", "user", "Step budget test", CLOCK_START.toISOString()),
+      claudeLine("budget-1", "assistant", "好的。", CLOCK_START.toISOString()),
+    ]);
+    const daemon = await startTracked(
+      dirs,
+      clock,
+      drive,
+      fakeBackend(async (request) => {
+        if (request.system.includes("话题概要")) {
+          return new Promise<string>((_, reject) => {
+            request.signal?.addEventListener("abort", () => reject(new LlmAbortError()), { once: true });
+          });
+        }
+        if (request.system.includes("合并建议")) return JSON.stringify({ pairs: [] });
+        return refineJson("讨论了步骤超时");
+      }),
+      { consolidationStepBudgetMs: 80 },
+    );
+    const id = (await readStatus(daemon)).deviceId;
+    await postJson<{ uploaded: number }>(daemon, "/api/actions/upload", { backfill: true });
+    await refineNow(clock, daemon);
+    expect(
+      (await putRoles(daemon, { mainDevice: id, consolidation: { enabled: true, time: "23:00" } })).status,
+    ).toBe(200);
+
+    const response = await postConsolidate(daemon, {});
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as ConsolidateActionResult;
+    expect(body.ok).toBe(false);
+    expect(body.steps.find((step) => step.id === "topic_summaries")).toMatchObject({
+      ok: false,
+      error: "步骤执行超时",
+    });
+    expect(await leaseFinishedAt(drive)).toBeNull();
+  });
+
+  it("uses SWR with single-flight Drive reads for /api/status lease and refreshes in background", async () => {
+    const dirs = await trackDirs();
+    const clock = testClock();
+    const drive = new MemoryDrive({ now: () => clock.now() });
+    const oldFinished = "2026-10-18T01:00:00.000Z";
+    const newFinished = "2026-10-18T02:00:00.000Z";
+    await drive.upsert({
+      path: DRIVE_PATHS.consolidateLease,
+      bytes: Buffer.from(JSON.stringify({ date: "2026-10-18", deviceId: "device-a", finishedAt: oldFinished }), "utf8"),
+      mimeType: "application/json",
+    });
+
+    const origReadPath = drive.readPath.bind(drive);
+    let leaseReads = 0;
+    let slowLease = false;
+    let releaseLease!: () => void;
+    let leaseEntered!: () => void;
+    let enteredPromise = new Promise<void>((r) => {
+      leaseEntered = r;
+    });
+    let gatePromise = new Promise<void>((r) => {
+      releaseLease = r;
+    });
+
+    drive.readPath = async (path: string) => {
+      if (path === DRIVE_PATHS.consolidateLease) {
+        leaseReads += 1;
+        if (slowLease) {
+          leaseEntered();
+          await gatePromise;
+        }
+      }
+      return origReadPath(path);
+    };
+
+    const daemon = await startTracked(
+      dirs,
+      clock,
+      drive,
+      fakeBackend(async () => refineJson("概要")),
+      { statusDriveWaitMs: 30 },
+    );
+    const id = (await readStatus(daemon)).deviceId;
+    expect(
+      (await putRoles(daemon, { mainDevice: id, consolidation: { enabled: true, time: "23:00" } })).status,
+    ).toBe(200);
+
+    // Warm cache with oldFinished.
+    expect((await readStatus(daemon)).consolidation.lastFinishedAt).toBe(oldFinished);
+
+    // Update remote lease, advance past 30s cache TTL, and make Drive read slow.
+    await drive.upsert({
+      path: DRIVE_PATHS.consolidateLease,
+      bytes: Buffer.from(JSON.stringify({ date: "2026-10-18", deviceId: "device-a", finishedAt: newFinished }), "utf8"),
+      mimeType: "application/json",
+    });
+    clock.advance(35_000);
+    leaseReads = 0;
+    slowLease = true;
+    enteredPromise = new Promise<void>((r) => {
+      leaseEntered = r;
+    });
+    gatePromise = new Promise<void>((r) => {
+      releaseLease = r;
+    });
+
+    // Two concurrent status calls should share a single Drive lease read and return stale oldFinished after 30ms.
+    const [s1, s2] = await Promise.all([readStatus(daemon), readStatus(daemon)]);
+    await enteredPromise;
+    expect(leaseReads).toBe(1);
+    expect(s1.consolidation.lastFinishedAt).toBe(oldFinished);
+    expect(s2.consolidation.lastFinishedAt).toBe(oldFinished);
+
+    // Release slow Drive read; background flight updates cache & cursor, next status (past 3s statusCache) sees newFinished.
+    releaseLease();
+    await new Promise((r) => setTimeout(r, 20));
+    clock.advance(5_000);
+    expect((await readStatus(daemon)).consolidation.lastFinishedAt).toBe(newFinished);
+  });
+
+  it("returns cursor-stored lastFinishedAt after restart when Drive is not open, and reflects new lastRun immediately", async () => {
+    const dirs = await trackDirs();
+    const clock = testClock();
+    const drive = new MemoryDrive({ now: () => clock.now() });
+    await writeClaudeSession(dirs.sourceDir, [
+      claudeLine("swr-restart-1", "user", "Check cursor fallback", CLOCK_START.toISOString()),
+      claudeLine("swr-restart-1", "assistant", "好的。", CLOCK_START.toISOString()),
+    ]);
+    let failSummaries = false;
+    const daemon1 = await startTracked(
+      dirs,
+      clock,
+      drive,
+      fakeBackend(async (request) => {
+        if (request.system.includes("话题概要")) {
+          if (failSummaries) throw new Error("summary down");
+          return JSON.stringify({ summary: "ok", nextStep: "" });
+        }
+        if (request.system.includes("合并建议")) return JSON.stringify({ pairs: [] });
+        return refineJson("讨论了状态缓存");
+      }),
+    );
+    const id = (await readStatus(daemon1)).deviceId;
+    await postJson<{ uploaded: number }>(daemon1, "/api/actions/upload", { backfill: true });
+    await refineNow(clock, daemon1);
+    expect(
+      (await putRoles(daemon1, { mainDevice: id, consolidation: { enabled: true, time: "23:00" } })).status,
+    ).toBe(200);
+    await daemon1.settleConfigPush();
+
+    // Run 1 succeeds and populates lease cache + cursor.
+    const okRes = await postConsolidate(daemon1, {});
+    expect(okRes.status).toBe(200);
+    const savedFinished = await leaseFinishedAt(drive);
+    expect(savedFinished).not.toBeNull();
+    expect((await readStatus(daemon1)).consolidation.lastRun?.ok).toBe(true);
+
+    // Within the 30s lease cache TTL, a forced run fails; /api/status must immediately show lastRun.ok = false
+    // while still preserving lastFinishedAt.
+    failSummaries = true;
+    await writeClaudeSession(dirs.sourceDir, [
+      claudeLine("swr-restart-1", "user", "Check cursor fallback", CLOCK_START.toISOString()),
+      claudeLine("swr-restart-1", "assistant", "好的。", CLOCK_START.toISOString()),
+      claudeLine("swr-restart-1", "user", "Add a second turn so summary rewrites", CLOCK_START.toISOString()),
+      claudeLine("swr-restart-1", "assistant", "收到。", CLOCK_START.toISOString()),
+    ]);
+    await postJson<{ uploaded: number }>(daemon1, "/api/actions/upload", { backfill: true });
+    await refineNow(clock, daemon1);
+    const failRes = await postConsolidate(daemon1, { force: true });
+    expect(failRes.status).toBe(200);
+    const afterFail = await readStatus(daemon1);
+    expect(afterFail.consolidation.lastFinishedAt).toBe(savedFinished);
+    expect(afterFail.consolidation.lastRun?.ok).toBe(false);
+
+    // Restart with Drive unavailable: /api/status should fall back to the cursor-stored lastFinishedAt.
+    await daemon1.stop();
+    const daemon2 = await startTracked(dirs, clock, null, fakeBackend(async () => refineJson("概要")));
+    const restartedStatus = await readStatus(daemon2);
+    expect(restartedStatus.consolidation.enabled).toBe(true);
+    expect(restartedStatus.consolidation.lastFinishedAt).toBe(savedFinished);
+  });
 });
 
 function daemonClient(daemon: YouBrainDaemon) {
@@ -420,6 +821,7 @@ async function startTracked(
   clock: ReturnType<typeof testClock>,
   drive: MemoryDrive | null,
   llm: ReturnType<typeof fakeBackend> | null,
+  extra: Partial<DaemonOptions> = {},
 ): Promise<YouBrainDaemon> {
   const daemon = await startDaemon({
     homeDir: dirs.homeDir,
@@ -433,6 +835,7 @@ async function startTracked(
     sourceRoots: { "claude-code": [dirs.sourceDir] },
     watch: false,
     signals: false,
+    ...extra,
   });
   started.push(daemon);
   await daemon.settled();

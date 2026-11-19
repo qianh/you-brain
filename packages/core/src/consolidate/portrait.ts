@@ -1,7 +1,8 @@
 import { isAutomatedBatchPrompt, isCliControlTurn, isInjectedPrompt } from "../adapters/conversation.js";
 import { ConflictError } from "../drive/errors.js";
+import { sha256Hex } from "../drive/hash.js";
 import type { LlmBackend } from "../llm/types.js";
-import { extractJson } from "../refine/parse.js";
+import { completeJsonWithRetry } from "./llm-json.js";
 import {
   nextCodingProposalNumber,
   normalizeCodingRuleLine,
@@ -72,7 +73,6 @@ import {
 } from "./twin.js";
 import { twinCrossLayerProblems, twinStandardProblems } from "./twin-standard.js";
 
-const MAX_ATTEMPTS = 2;
 const EXTRACT_CONCURRENCY = 3;
 /** Units of user text per extraction call. */
 const CHUNK_UNITS = 10_000;
@@ -94,20 +94,100 @@ const PROBE_SESSION_UNITS = 4_000;
 
 export const PORTRAIT_TURNS_CURSOR = "portrait.turns";
 export const PORTRAIT_EVAL_CURSOR = "portrait.eval";
+export const PORTRAIT_STAGE_CURSOR = "portrait.stages";
+const MAX_STAGE_CACHE_ENTRIES = 64;
+
+interface PortraitStageCacheState {
+  day: string;
+  entries: Record<string, unknown>;
+}
+
+type StageCompleter = <T>(
+  stage: string,
+  llm: LlmBackend,
+  prompt: { system: string; user: string },
+  jsonSchema: Record<string, unknown>,
+  parse: (input: unknown) => T,
+  signal?: AbortSignal,
+  cacheKeyInput?: string,
+) => Promise<T>;
+
+function parseStageCache(raw: string | null, day: string): PortraitStageCacheState {
+  if (!raw || raw.trim() === "") return { day, entries: {} };
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { day, entries: {} };
+    const record = parsed as { day?: unknown; entries?: unknown };
+    if (record.day !== day) return { day, entries: {} };
+    if (!record.entries || typeof record.entries !== "object" || Array.isArray(record.entries)) {
+      return { day, entries: {} };
+    }
+    return { day, entries: { ...(record.entries as Record<string, unknown>) } };
+  } catch {
+    return { day, entries: {} };
+  }
+}
+
+function createStageCompleter(
+  cursors: { get(key: string): string | null; set(key: string, value: string): void },
+  day: string,
+): { complete: StageCompleter; clear: () => void } {
+  const state = parseStageCache(cursors.get(PORTRAIT_STAGE_CURSOR), day);
+  let hasStored = cursors.get(PORTRAIT_STAGE_CURSOR) !== null && cursors.get(PORTRAIT_STAGE_CURSOR) !== "";
+
+  const complete: StageCompleter = async (
+    stage,
+    llm,
+    prompt,
+    jsonSchema,
+    parse,
+    signal,
+    cacheKeyInput,
+  ) => {
+    const keyPayload =
+      cacheKeyInput ??
+      `${stage}\n${prompt.system}\n${prompt.user}\n${JSON.stringify(jsonSchema)}`;
+    const key = sha256Hex(Buffer.from(keyPayload, "utf8"));
+    if (Object.prototype.hasOwnProperty.call(state.entries, key)) {
+      return state.entries[key] as ReturnType<typeof parse>;
+    }
+    const result = await completeJson(llm, prompt, jsonSchema, parse, signal);
+    state.entries[key] = result;
+    const keys = Object.keys(state.entries);
+    while (keys.length > MAX_STAGE_CACHE_ENTRIES) {
+      const oldest = keys.shift();
+      if (oldest !== undefined) delete state.entries[oldest];
+    }
+    cursors.set(PORTRAIT_STAGE_CURSOR, JSON.stringify(state));
+    hasStored = true;
+    return result;
+  };
+
+  const clear = (): void => {
+    if (!hasStored) return;
+    hasStored = false;
+    state.entries = {};
+    cursors.set(PORTRAIT_STAGE_CURSOR, "");
+  };
+
+  return { complete, clear };
+}
 
 export const portraitStep: ConsolidationStep = {
   id: "portrait",
   async run(ctx) {
     const portrait = ctx.portrait;
     if (!portrait) return;
+    const stageCache = createStageCompleter(ctx.cursors, ctx.day);
     const files = await portrait.read();
     if (!files.full || !files.coding) {
       ctx.warnings.push("没有现有数字分身，跳过");
+      stageCache.clear();
       return;
     }
     const before = textsOf(files);
     const seen = parseTurnCursor(ctx.cursors.get(PORTRAIT_TURNS_CURSOR));
-    const input = collectTurns(await portrait.sessions(ctx.day), seen);
+    const input = collectTurns(await portrait.sessions(ctx.day, { budgetUnits: DAY_UNITS }), seen);
     const corrections = portrait.corrections();
     const keepFrom = shiftDateKey(ctx.day, -PENDING_KEEP_DAYS);
     const earlier = (await portrait.pendingClaims()).filter((claim) => claim.day !== ctx.day);
@@ -117,11 +197,24 @@ export const portraitStep: ConsolidationStep = {
     const earlierLow = earlier.filter(
       (claim) => claim.confidence === "low" && claim.day >= keepFrom && !hasSensitiveHit(claim.text),
     );
-    if (input.chunks.length === 0 && corrections.length === 0 && earlierHigh.length === 0) return;
+    if (input.chunks.length === 0 && corrections.length === 0 && earlierHigh.length === 0) {
+      stageCache.clear();
+      return;
+    }
 
     const claims =
       input.chunks.length > 0
-        ? (await extractClaims(ctx.llm, input.chunks, "sessions", projectNames(before.projects))).map((claim) => ({
+        ? (
+            await extractClaims(
+              ctx.llm,
+              input.chunks,
+              "sessions",
+              projectNames(before.projects),
+              undefined,
+              ctx.signal,
+              stageCache.complete,
+            )
+          ).map((claim) => ({
             ...claim,
             day: ctx.day,
           }))
@@ -141,6 +234,8 @@ export const portraitStep: ConsolidationStep = {
         portrait,
         claims: codingClaims,
         pending: codingEarlier,
+        ...(ctx.signal ? { signal: ctx.signal } : {}),
+        complete: stageCache.complete,
       });
       if (addedProposals > 0) {
         await ctx.emit("reminder.issued", {
@@ -186,6 +281,7 @@ export const portraitStep: ConsolidationStep = {
         });
       }
       ctx.cursors.set(PORTRAIT_TURNS_CURSOR, JSON.stringify(input.cursor));
+      stageCache.clear();
       return;
     }
 
@@ -202,11 +298,13 @@ export const portraitStep: ConsolidationStep = {
         pending: personaEarlier,
         corrections: residentCorrections,
       });
-      const residentUpdate = await completeJson(
+      const residentUpdate = await stageCache.complete(
+        "resident_merge",
         ctx.llm,
         residentPrompt,
         TWIN_EDITS_JSON_SCHEMA,
         parseTwinEdits,
+        ctx.signal,
       );
       const allowedEdits =
         codingCorrections.length > 0
@@ -231,11 +329,13 @@ export const portraitStep: ConsolidationStep = {
         pending: projectEarlier,
         corrections: projectCorrections,
       });
-      const projectUpdate = await completeJson(
+      const projectUpdate = await stageCache.complete(
+        "project_merge",
         ctx.llm,
         projectPrompt,
         TWIN_EDITS_JSON_SCHEMA,
         parseTwinEdits,
+        ctx.signal,
       );
       const projectEdits = projectUpdate.edits.filter((edit) => edit.layer === "projects");
       workingTexts = applyEditsWithIndex(workingTexts, projectEdits);
@@ -250,7 +350,11 @@ export const portraitStep: ConsolidationStep = {
       changelog: combinedChangelog.slice(0, 8),
       includedCorrectionIds,
     };
-    const outcome = await finishTwin(ctx.llm, before, merged.texts, { guardShrink: true });
+    const outcome = await finishTwin(ctx.llm, before, merged.texts, {
+      guardShrink: true,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+      complete: stageCache.complete,
+    });
     if ("skip" in outcome) {
       if (input.chunks.length > 0 || earlierHigh.length > 0) {
         const unmergedHigh = [...personaClaims, ...projectClaims].filter(
@@ -264,6 +368,7 @@ export const portraitStep: ConsolidationStep = {
       }
       ctx.warnings.push(outcome.skip);
       ctx.cursors.set(PORTRAIT_TURNS_CURSOR, JSON.stringify(input.cursor));
+      stageCache.clear();
       return;
     }
     let written: WrittenTwin | null = null;
@@ -281,6 +386,7 @@ export const portraitStep: ConsolidationStep = {
       } catch (error) {
         if (error instanceof ConflictError) {
           ctx.warnings.push("数字分身在沉淀期间被别处更新，已跳过");
+          stageCache.clear();
           return;
         }
         throw error;
@@ -295,6 +401,7 @@ export const portraitStep: ConsolidationStep = {
       });
     }
     ctx.cursors.set(PORTRAIT_TURNS_CURSOR, JSON.stringify(input.cursor));
+    stageCache.clear();
     const applied = new Set(merged.includedCorrectionIds);
     for (const correction of corrections) {
       if (!applied.has(correction.correctionId)) continue;
@@ -322,7 +429,13 @@ export const portraitEvalStep: ConsolidationStep = {
     if (!portrait) return;
     const last = parseEvalCursor(ctx.cursors.get(PORTRAIT_EVAL_CURSOR));
     if (last && last.day > shiftDateKey(ctx.day, -EVAL_INTERVAL_DAYS)) return;
-    const result = await evaluateTwin({ llm: ctx.llm, portrait, day: ctx.day, newProbes: WEEKLY_PROBES });
+    const result = await evaluateTwin({
+      llm: ctx.llm,
+      portrait,
+      day: ctx.day,
+      newProbes: WEEKLY_PROBES,
+      ...(ctx.signal ? { signal: ctx.signal } : {}),
+    });
     if (!result) return;
     const { twin } = result.current;
     ctx.cursors.set(
@@ -392,8 +505,9 @@ export async function evaluateTwin(input: {
   portrait: ConsolidationPortrait;
   day: string;
   newProbes: number;
+  signal?: AbortSignal;
 }): Promise<TwinEvalResult | null> {
-  const { llm, portrait, day } = input;
+  const { llm, portrait, day, signal } = input;
   const files = await portrait.read();
   if (!files.full || !files.coding) return null;
   const sizes = { full: byteSize(files.full.text), coding: byteSize(files.coding.text) };
@@ -406,7 +520,7 @@ export async function evaluateTwin(input: {
     if (turns !== "") {
       const existing = [...probes, ...pending];
       const prompt = buildTwinProbesPrompt({ turns, existing, limit: input.newProbes });
-      const drafts = (await completeJson(llm, prompt, TWIN_PROBES_JSON_SCHEMA, parseTwinProbes)).slice(
+      const drafts = (await completeJson(llm, prompt, TWIN_PROBES_JSON_SCHEMA, parseTwinProbes, signal)).slice(
         0,
         input.newProbes,
       );
@@ -692,7 +806,7 @@ export const portraitMonthlyStep: ConsolidationStep = {
     const before = await portrait.readSnapshot(base.file);
     if (before === null) return;
     const prompt = buildTwinMonthlyPrompt({ before, after: files.full.text });
-    const notes = await completeJson(ctx.llm, prompt, TWIN_MONTHLY_JSON_SCHEMA, parseTwinMonthly);
+    const notes = await completeJson(ctx.llm, prompt, TWIN_MONTHLY_JSON_SCHEMA, parseTwinMonthly, ctx.signal);
     const lines = [`## 月度对比 · ${ctx.day}`, `- 对比基准 ${base.day}（v${base.version}）`];
     if (notes.length === 0) lines.push("- 没有实质变化");
     lines.push(...notes.map((note) => `- ${note}`));
@@ -832,19 +946,23 @@ async function mergeOnce(llm: LlmBackend, input: MergeInput): Promise<MergeResul
   };
 }
 
-async function fixOnce(llm: LlmBackend, texts: TwinTexts, problems: readonly string[]): Promise<TwinTexts> {
+async function fixOnce(
+  llm: LlmBackend,
+  texts: TwinTexts,
+  problems: readonly string[],
+  signal?: AbortSignal,
+  complete?: StageCompleter,
+): Promise<TwinTexts> {
   const hasProjectsProblem = problems.some((problem) => problem.includes("projects"));
   const isLargeProjects = byteSize(texts.projects) > 16_384;
   const omitLargeProjects = isLargeProjects && !hasProjectsProblem;
   const scopedProjects =
     isLargeProjects && hasProjectsProblem ? scopeProblemProjects(texts.projects, problems) : texts.projects;
   const promptDocs = omitLargeProjects ? { ...texts, projects: "" } : { ...texts, projects: scopedProjects };
-  const update: TwinEditsUpdate = await completeJson(
-    llm,
-    buildTwinFixPrompt({ docs: promptDocs, problems }),
-    TWIN_EDITS_JSON_SCHEMA,
-    parseTwinEdits,
-  );
+  const prompt = buildTwinFixPrompt({ docs: promptDocs, problems });
+  const update: TwinEditsUpdate = complete
+    ? await complete("fix", llm, prompt, TWIN_EDITS_JSON_SCHEMA, parseTwinEdits, signal)
+    : await completeJson(llm, prompt, TWIN_EDITS_JSON_SCHEMA, parseTwinEdits, signal);
   const safeEdits = omitLargeProjects
     ? update.edits.filter((edit) => edit.layer !== "projects")
     : update.edits;
@@ -878,6 +996,8 @@ async function proposeCodingRules(
     portrait: ConsolidationPortrait;
     claims: readonly StoredTwinClaim[];
     pending: readonly StoredTwinClaim[];
+    signal?: AbortSignal;
+    complete?: StageCompleter;
   },
 ): Promise<number> {
   if (!input.portrait.codingProposals || !input.portrait.saveCodingProposals) return 0;
@@ -889,12 +1009,32 @@ async function proposeCodingRules(
     claims: input.claims,
     pending: input.pending,
   });
-  const drafts = await completeJson(
-    llm,
-    prompt,
-    TWIN_CODING_PROPOSALS_JSON_SCHEMA,
-    parseTwinCodingProposals,
-  );
+  const drafts = input.complete
+    ? await input.complete(
+        "coding_proposals",
+        llm,
+        prompt,
+        TWIN_CODING_PROPOSALS_JSON_SCHEMA,
+        parseTwinCodingProposals,
+        input.signal,
+        // Key by stable inputs rather than `existingProposals` so a retry after proposals were
+        // already persisted still hits cache and runs idempotent dedupe without re-calling the LLM.
+        JSON.stringify({
+          stage: "coding_proposals",
+          day: input.day,
+          coding: input.coding,
+          claims: input.claims,
+          pending: input.pending,
+          schema: TWIN_CODING_PROPOSALS_JSON_SCHEMA,
+        }),
+      )
+    : await completeJson(
+        llm,
+        prompt,
+        TWIN_CODING_PROPOSALS_JSON_SCHEMA,
+        parseTwinCodingProposals,
+        input.signal,
+      );
   if (drafts.length === 0) return 0;
 
   const seenLines = new Set(existing.map((item) => normalizeCodingRuleLine(item.proposedLine)));
@@ -1035,14 +1175,14 @@ async function finishTwin(
   llm: LlmBackend,
   before: TwinTexts,
   merged: TwinTexts,
-  options: { guardShrink: boolean },
+  options: { guardShrink: boolean; signal?: AbortSignal; complete?: StageCompleter },
 ): Promise<FinishOutcome> {
   let texts = merged;
   let changed = changedLayers(before, texts);
   if (changed.size === 0) return { texts: before, changed, warnings: [], sizes: checkTwin(before, changed).sizes };
   let check = checkWithStandard(before, texts, changed);
   if (check.blocking.length > 0 || check.warnings.length > 0) {
-    texts = await fixOnce(llm, texts, [...check.blocking, ...check.warnings]);
+    texts = await fixOnce(llm, texts, [...check.blocking, ...check.warnings], options.signal, options.complete);
     changed = changedLayers(before, texts);
     check = checkWithStandard(before, texts, changed);
   }
@@ -1145,15 +1285,15 @@ async function extractClaims(
   source: "sessions" | "legacy",
   projects: readonly string[],
   progress?: (done: number) => void,
+  signal?: AbortSignal,
+  complete?: StageCompleter,
 ): Promise<TwinClaim[]> {
   let done = 0;
   const results = await mapWithLimit(chunks, EXTRACT_CONCURRENCY, async (text) => {
-    const claims = await completeJson(
-      llm,
-      buildTwinClaimsPrompt({ source, projects, text }),
-      TWIN_CLAIMS_JSON_SCHEMA,
-      parseTwinClaims,
-    );
+    const prompt = buildTwinClaimsPrompt({ source, projects, text });
+    const claims = complete
+      ? await complete("extract", llm, prompt, TWIN_CLAIMS_JSON_SCHEMA, parseTwinClaims, signal)
+      : await completeJson(llm, prompt, TWIN_CLAIMS_JSON_SCHEMA, parseTwinClaims, signal);
     done += 1;
     progress?.(done);
     return claims;
@@ -1278,36 +1418,82 @@ function dedupeStoredClaims(claims: readonly StoredTwinClaim[]): StoredTwinClaim
   return out;
 }
 
+export interface TurnSessionInput {
+  sessionKey: string;
+  title: string;
+  turns: readonly string[];
+}
+
+export interface TurnAccumulator {
+  add(session: TurnSessionInput): void;
+  full(): boolean;
+  finish(): { chunks: string[]; cursor: TurnCursor };
+}
+
+/**
+ * Stateful accumulator shared by `readTwinSessions` (for early batch stop) and `collectTurns`.
+ * Preserves the exact semantics: when one turn exceeds remaining budget, that session stops and
+ * later sessions can still fill remaining space; only `used >= budgetUnits` marks full.
+ */
+const MIN_TURN_UNITS = 3;
+
+export function createTurnAccumulator(
+  seen: Readonly<Record<string, number>>,
+  budgetUnits = DAY_UNITS,
+): TurnAccumulator {
+  const cursor: TurnCursor = { ...seen };
+  const pieces: string[] = [];
+  let used = 0;
+  const isFull = (): boolean => used + MIN_TURN_UNITS > budgetUnits;
+  return {
+    add(session) {
+      if (isFull()) return;
+      const start = Math.min(seen[session.sessionKey] ?? 0, session.turns.length);
+      const lines: string[] = [];
+      let taken = start;
+      for (let index = start; index < session.turns.length; index += 1) {
+        const text = cleanUserTurn(session.turns[index] ?? "");
+        const size = textUnits(text) + 2;
+        if (text !== "" && used + size > budgetUnits) break;
+        if (text !== "") {
+          lines.push(`- ${text}`);
+          used += size;
+        }
+        taken = index + 1;
+      }
+      cursor[session.sessionKey] = taken;
+      if (lines.length > 0) {
+        pieces.push([`### ${session.title.trim() || "（无标题）"}`, ...lines].join("\n"));
+      }
+    },
+    full() {
+      return isFull();
+    },
+    finish() {
+      return {
+        chunks: packPieces(
+          pieces.flatMap((piece) => (textUnits(piece) <= CHUNK_UNITS ? [piece] : splitLines(piece))),
+        ),
+        cursor,
+      };
+    },
+  };
+}
+
 /**
  * New user turns per session past the cursor, packed into extraction chunks.
  * Turns over the day's cap stay behind the cursor for the next run.
  */
-function collectTurns(
-  sessions: ReadonlyArray<{ sessionKey: string; title: string; turns: readonly string[] }>,
+export function collectTurns(
+  sessions: ReadonlyArray<TurnSessionInput>,
   seen: TurnCursor,
 ): { chunks: string[]; cursor: TurnCursor } {
-  const cursor: TurnCursor = { ...seen };
-  const pieces: string[] = [];
-  let used = 0;
+  const accumulator = createTurnAccumulator(seen, DAY_UNITS);
   for (const session of sessions) {
-    const start = Math.min(seen[session.sessionKey] ?? 0, session.turns.length);
-    const lines: string[] = [];
-    let taken = start;
-    for (let index = start; index < session.turns.length; index += 1) {
-      const text = cleanUserTurn(session.turns[index] ?? "");
-      const size = textUnits(text) + 2;
-      if (text !== "" && used + size > DAY_UNITS) break;
-      if (text !== "") {
-        lines.push(`- ${text}`);
-        used += size;
-      }
-      taken = index + 1;
-    }
-    cursor[session.sessionKey] = taken;
-    if (lines.length > 0) pieces.push([`### ${session.title.trim() || "（无标题）"}`, ...lines].join("\n"));
-    if (used >= DAY_UNITS) break;
+    if (accumulator.full()) break;
+    accumulator.add(session);
   }
-  return { chunks: packPieces(pieces.flatMap((piece) => (textUnits(piece) <= CHUNK_UNITS ? [piece] : splitLines(piece)))), cursor };
+  return accumulator.finish();
 }
 
 const INJECTED_BLOCKS = [
@@ -1369,29 +1555,12 @@ async function completeJson<T>(
   prompt: { system: string; user: string },
   jsonSchema: Record<string, unknown>,
   parse: (input: unknown) => T,
+  signal?: AbortSignal,
 ): Promise<T> {
-  let lastDetail = "模型输出无法校验";
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
-    const user =
-      attempt === 1
-        ? prompt.user
-        : `${prompt.user}\n\n## 上次输出无法通过校验\n${lastDetail}\n请只输出修正后的 JSON。`;
-    let raw = "";
-    try {
-      raw = await llm.complete({ system: prompt.system, user, jsonSchema });
-      return parse(extractJson(raw));
-    } catch (error) {
-      lastDetail = failureDetail(error, raw);
-    }
-  }
-  throw new Error(`数字分身没有写完：${lastDetail.split("\n")[0] ?? ""}`);
-}
-
-function failureDetail(error: unknown, raw: string): string {
-  const message = error instanceof Error ? error.message : "模型输出无法校验";
-  const snippet = raw.trim().slice(0, 500);
-  const text = snippet === "" ? message : `${message}\n上次输出：${snippet}`;
-  return text.length > 2_000 ? `${text.slice(0, 2_000)}…` : text;
+  return completeJsonWithRetry(llm, prompt, jsonSchema, parse, {
+    ...(signal === undefined ? {} : { signal }),
+    wrapError: (detail) => new Error(`数字分身没有写完：${detail.split("\n")[0] ?? ""}`),
+  });
 }
 
 async function mapWithLimit<T, R>(

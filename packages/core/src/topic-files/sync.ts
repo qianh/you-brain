@@ -20,7 +20,9 @@ import {
 } from "./render.js";
 
 export const TOPIC_FILES_MANIFEST = "topicfiles.manifest";
+export const TOPIC_FILES_SWEPT_AT = "topicfiles.swept_at";
 const MARKDOWN = "text/markdown";
+const SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export interface TopicFileEntry {
   fileId: string;
@@ -47,6 +49,7 @@ export interface TopicFilesSyncInput {
   timeZone: string;
   zone: TopicFilesZone;
   manifest: TopicFilesManifestStore;
+  sweptAt?: TopicFilesManifestStore;
 }
 
 export interface TopicFilesResult {
@@ -63,10 +66,11 @@ export function emptyTopicFilesResult(): TopicFilesResult {
 }
 
 type Manifest = Record<string, TopicFileEntry>;
+type TopicDirIndex = Map<string, DriveEntry[]>;
 
 export async function syncTopicFiles(input: TopicFilesSyncInput): Promise<TopicFilesResult> {
   const result = emptyTopicFilesResult();
-  const manifest = readManifest(input.manifest.get());
+  const { manifest, intact } = readManifest(input.manifest.get());
   const zoned = partitionTopics(input.book, {
     now: input.zone.now,
     activeLimit: input.zone.activeLimit,
@@ -82,9 +86,30 @@ export async function syncTopicFiles(input: TopicFilesSyncInput): Promise<TopicF
     if (entry) links.set(topic.topicId, entry.fileId);
   }
 
+  let dirIndex: TopicDirIndex | null = null;
+  const peekDirIndex = (): TopicDirIndex | null => dirIndex;
+  const loadDirIndex = async (): Promise<TopicDirIndex> => {
+    if (dirIndex !== null) return dirIndex;
+    const entries = await input.drive.list({ prefix: `${DRIVE_PATHS.topics}/` });
+    const indexed: TopicDirIndex = new Map();
+    for (const entry of entries) {
+      const list = indexed.get(entry.path);
+      if (list) list.push(entry);
+      else indexed.set(entry.path, [entry]);
+    }
+    for (const list of indexed.values()) {
+      list.sort(
+        (left, right) =>
+          left.createdTime.localeCompare(right.createdTime) || left.id.localeCompare(right.id),
+      );
+    }
+    dirIndex = indexed;
+    return indexed;
+  };
+
   for (const topic of desired) {
     try {
-      const outcome = await syncTopic(input, manifest, stems, topic);
+      const outcome = await syncTopic(input, manifest, stems, topic, loadDirIndex);
       if (outcome.fileId) links.set(topic.topicId, outcome.fileId);
       if (outcome.unchanged) result.unchanged += 1;
       if (outcome.written) result.written += 1;
@@ -100,22 +125,18 @@ export async function syncTopicFiles(input: TopicFilesSyncInput): Promise<TopicF
     const entry = manifest[topicManifestKey(topic.topicId)];
     if (entry) protectedIds.add(entry.fileId);
   }
-  const retiredIds = new Set(
-    Object.keys(manifest)
-      .map((key) => topicIdFromManifestKey(key))
-      .filter((topicId): topicId is string => topicId !== null && !desiredIds.has(topicId)),
-  );
-  for (const topic of input.book.topics) {
-    if (topic.mergedInto !== null) retiredIds.add(topic.topicId);
-  }
-  const retired = [...retiredIds];
+
+  const retiredIds = Object.keys(manifest)
+    .map((key) => topicIdFromManifestKey(key))
+    .filter((topicId): topicId is string => topicId !== null && !desiredIds.has(topicId));
   const trashedIds = new Set<string>();
-  for (const topicId of retired) {
-    const removed = await retireTopic(
+  for (const topicId of retiredIds) {
+    const entry = manifest[topicManifestKey(topicId)];
+    if (!entry) continue;
+    const removed = await trashFile(
       input.drive,
-      manifest,
-      stems,
       topicId,
+      entry.fileId,
       protectedIds,
       trashedIds,
       result,
@@ -123,6 +144,24 @@ export async function syncTopicFiles(input: TopicFilesSyncInput): Promise<TopicF
     if (removed) {
       delete manifest[topicManifestKey(topicId)];
       writeManifest(input.manifest, manifest);
+    }
+  }
+
+  const shouldSweep =
+    !intact ||
+    (input.sweptAt !== undefined && needsPeriodicSweep(input.sweptAt.get(), input.zone.now));
+  if (shouldSweep) {
+    const sweptOk = await sweepMergedResiduals(
+      input.drive,
+      input.book,
+      stems,
+      protectedIds,
+      trashedIds,
+      loadDirIndex,
+      result,
+    );
+    if (sweptOk) {
+      input.sweptAt?.set(input.zone.now);
     }
   }
 
@@ -141,8 +180,12 @@ export async function syncTopicFiles(input: TopicFilesSyncInput): Promise<TopicF
     if (previous?.hash === hash) {
       result.unchanged += 1;
     } else {
+      const cachedIndex = peekDirIndex();
+      const knownOverview =
+        cachedIndex !== null ? (cachedIndex.get(DRIVE_PATHS.topicsLatest)?.[0] ?? null) : undefined;
       const saved = await upsertByPath(input.drive, DRIVE_PATHS.topicsLatest, overview, {
         mimeType: MARKDOWN,
+        ...(knownOverview !== undefined ? { known: knownOverview } : {}),
       });
       manifest[OVERVIEW_MANIFEST_KEY] = { fileId: saved.id, zone: "active", hash };
       writeManifest(input.manifest, manifest);
@@ -167,6 +210,7 @@ async function syncTopic(
   manifest: Manifest,
   stems: ReadonlyMap<string, string>,
   topic: ZonedTopic,
+  loadDirIndex: () => Promise<TopicDirIndex>,
 ): Promise<TopicOutcome> {
   const stem = stems.get(topic.topicId);
   if (!stem) throw new Error("话题文件名缺失");
@@ -189,7 +233,8 @@ async function syncTopic(
   let fileId = entry?.fileId ?? null;
   let moved = false;
   if (!fileId) {
-    const found = await findAdopt(input.drive, topic.topicId, stem, expected);
+    const dirIndex = await loadDirIndex();
+    const found = findAdoptFromIndex(dirIndex, topic.topicId, stem, expected);
     if (!found) {
       const created = await input.drive.create({
         path: expected,
@@ -216,12 +261,12 @@ async function syncTopic(
   return { written: true, moved, unchanged: false, fileId };
 }
 
-async function findAdopt(
-  drive: DrivePort,
+function findAdoptFromIndex(
+  dirIndex: TopicDirIndex,
   topicId: string,
   stem: string,
   expected: string,
-): Promise<DriveEntry | null> {
+): DriveEntry | null {
   const paths: string[] = [];
   const seen = new Set<string>();
   const add = (path: string): void => {
@@ -235,44 +280,61 @@ async function findAdopt(
     add(topicZonePath("history", name));
   }
   for (const path of paths) {
-    const found = await drive.findByPath(path);
+    const found = dirIndex.get(path)?.[0];
     if (found) return found;
   }
   return null;
 }
 
-async function retireTopic(
+async function sweepMergedResiduals(
   drive: DrivePort,
-  manifest: Manifest,
+  book: TopicBook,
   stems: ReadonlyMap<string, string>,
-  topicId: string,
   protectedIds: ReadonlySet<string>,
   trashedIds: Set<string>,
+  loadDirIndex: () => Promise<TopicDirIndex>,
   result: TopicFilesResult,
 ): Promise<boolean> {
-  const entry = manifest[topicManifestKey(topicId)];
-  let gone = true;
-  if (entry) {
-    gone = await trashFile(drive, topicId, entry.fileId, protectedIds, trashedIds, result);
+  let dirIndex: TopicDirIndex;
+  try {
+    dirIndex = await loadDirIndex();
+  } catch (error) {
+    result.warnings.push(failureNote("残留清理", "列目录失败", error));
+    return false;
   }
-  const stem = stems.get(topicId);
-  const names = stem ? candidateTopicStems(topicId, stem) : [];
-  for (const name of names) {
-    for (const zone of ["active", "history"] as const) {
-      let found: DriveEntry | null = null;
-      try {
-        found = await drive.findByPath(topicZonePath(zone, name));
-      } catch (error) {
-        result.warnings.push(deleteWarning(topicId, error));
-        gone = false;
-        continue;
+  let allRemoved = true;
+  for (const topic of book.topics) {
+    if (topic.mergedInto === null) continue;
+    const stem = stems.get(topic.topicId);
+    const names = stem ? candidateTopicStems(topic.topicId, stem) : [];
+    for (const name of names) {
+      for (const zone of ["active", "history"] as const) {
+        const matches = dirIndex.get(topicZonePath(zone, name));
+        if (!matches) continue;
+        for (const found of matches) {
+          if (protectedIds.has(found.id)) continue;
+          const removed = await trashFile(
+            drive,
+            topic.topicId,
+            found.id,
+            protectedIds,
+            trashedIds,
+            result,
+          );
+          if (!removed) allRemoved = false;
+        }
       }
-      if (!found || protectedIds.has(found.id)) continue;
-      const removed = await trashFile(drive, topicId, found.id, protectedIds, trashedIds, result);
-      if (!removed) gone = false;
     }
   }
-  return gone;
+  return allRemoved;
+}
+
+function needsPeriodicSweep(raw: string | null, nowIso: string): boolean {
+  if (raw === null || raw.trim() === "") return true;
+  const sweptMs = Date.parse(raw);
+  const nowMs = Date.parse(nowIso);
+  if (Number.isNaN(sweptMs) || Number.isNaN(nowMs)) return true;
+  return nowMs - sweptMs >= SWEEP_INTERVAL_MS;
 }
 
 async function trashFile(
@@ -324,25 +386,31 @@ function failureNote(topicId: string, action: string, error: unknown): string {
   return text.length > 180 ? `${text.slice(0, 179)}…` : text;
 }
 
-function readManifest(raw: string | null): Manifest {
-  if (raw === null || raw.trim() === "") return {};
+function readManifest(raw: string | null): { manifest: Manifest; intact: boolean } {
+  if (raw === null || raw.trim() === "") return { manifest: {}, intact: false };
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw) as unknown;
   } catch {
-    return {};
+    return { manifest: {}, intact: false };
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { manifest: {}, intact: false };
+  }
   const manifest: Manifest = {};
+  let intact = true;
   for (const [key, value] of Object.entries(parsed)) {
-    if (!isEntry(value)) continue;
+    if (!isEntry(value)) {
+      intact = false;
+      continue;
+    }
     manifest[key] = {
       fileId: value.fileId,
       zone: value.zone,
       hash: value.hash,
     };
   }
-  return manifest;
+  return { manifest, intact };
 }
 
 function isEntry(value: unknown): value is TopicFileEntry {

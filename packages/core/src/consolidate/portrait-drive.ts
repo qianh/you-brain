@@ -9,6 +9,7 @@ import type { PortraitConfig, PortraitService } from "../portrait/service.js";
 import { resolveDrivePath } from "../portrait/path.js";
 import { parseWebSession } from "../web-sessions/parse.js";
 import type { CodingRuleProposal } from "./coding-proposals.js";
+import { createTurnAccumulator } from "./portrait.js";
 import { localDayKey, shiftDateKey } from "./schedule.js";
 import type {
   ConsolidationPortrait,
@@ -35,7 +36,10 @@ export interface DrivePortraitSource {
   config: () => PortraitConfig;
   events: () => readonly Event[];
   /** The user's own turns for sessions updated on or after `day`. Absent means none. */
-  sessions?: (day: string) => Promise<Array<{ sessionKey: string; title: string; turns: string[] }>>;
+  sessions?: (
+    day: string,
+    options?: { budgetUnits?: number },
+  ) => Promise<Array<{ sessionKey: string; title: string; turns: string[] }>>;
 }
 
 export function createDrivePortrait(source: DrivePortraitSource): ConsolidationPortrait {
@@ -51,8 +55,8 @@ export function createDrivePortrait(source: DrivePortraitSource): ConsolidationP
       }
       return files;
     },
-    async sessions(day) {
-      return source.sessions ? source.sessions(day) : [];
+    async sessions(day, options) {
+      return source.sessions ? source.sessions(day, options) : [];
     },
     corrections() {
       return pendingCorrections(source.events());
@@ -238,6 +242,7 @@ export async function readTwinSessions(input: {
   timeZone: string;
   day: string;
   seenTurns?: Readonly<Record<string, number>>;
+  budgetUnits?: number;
 }): Promise<Array<{ sessionKey: string; title: string; turns: string[] }>> {
   // A 03:00 run would miss yesterday's evening without the extra day; the turn cursor skips repeats.
   // When `seenTurns` is provided, unread turns from the past week also catch up instead of starving.
@@ -256,6 +261,10 @@ export async function readTwinSessions(input: {
       );
     })
     .sort((left, right) => (left.updatedAt ?? "").localeCompare(right.updatedAt ?? ""));
+  const accumulator =
+    input.budgetUnits === undefined
+      ? null
+      : createTurnAccumulator(input.seenTurns ?? {}, input.budgetUnits);
   const sessions: Array<{ sessionKey: string; title: string; turns: string[] }> = [];
   for (let start = 0; start < rows.length; start += SESSION_READ_CONCURRENCY) {
     const batch = rows.slice(start, start + SESSION_READ_CONCURRENCY);
@@ -268,12 +277,15 @@ export async function readTwinSessions(input: {
       const object = objects[index];
       const parsed = object ? parseWebSession(object.bytes.toString("utf8")) : null;
       if (!parsed) return;
-      sessions.push({
+      const item = {
         sessionKey: session.sessionKey,
         title: session.title,
         turns: parsed.turns.filter((turn) => turn.role === "user").map((turn) => turn.text),
-      });
+      };
+      sessions.push(item);
+      accumulator?.add(item);
     });
+    if (accumulator?.full()) break;
   }
   return sessions;
 }

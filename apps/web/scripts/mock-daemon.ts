@@ -856,6 +856,7 @@ function consolidationStatus(): {
   lastFinishedAt: string | null;
   stale: boolean;
   status: "disabled" | "ok" | "stale";
+  running?: boolean;
   lastRun?: { day: string; ok: boolean; error?: string; finishedAt: string };
 } {
   if (scenario === "rich") {

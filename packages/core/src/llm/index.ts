@@ -6,8 +6,10 @@ export {
 } from "./anthropic.js";
 export {
   LLM_ERROR_KINDS,
+  LlmAbortError,
   LlmRequestError,
   httpStatusError,
+  isLlmAbortError,
   isLlmRequestError,
   networkError,
   type LlmErrorKind,
@@ -41,7 +43,16 @@ export {
   type LlmSelection,
   type ResolvedLlmTarget,
 } from "./factory.js";
-export { DEFAULT_LLM_TIMEOUT_MS, joinUrl, postJson } from "./http.js";
+export {
+  DEFAULT_LLM_TIMEOUT_MS,
+  DEFAULT_SSE_FIRST_CHUNK_TIMEOUT_MS,
+  DEFAULT_SSE_IDLE_TIMEOUT_MS,
+  joinUrl,
+  postJson,
+  postSseChat,
+  type PostJsonOptions,
+  type PostSseChatOptions,
+} from "./http.js";
 export {
   createOpenAiCompatibleBackend,
   type OpenAiCompatibleOptions,

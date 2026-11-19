@@ -9,6 +9,14 @@ export interface LlmCompleteRequest {
   jsonSchema?: object;
   /** For one unusually long call. Everything else keeps the backend's default. */
   timeoutMs?: number;
+  /** Explicitly opt into SSE streaming (OpenAI-compatible backends). */
+  stream?: boolean;
+  /** Max time to wait for response headers and the first SSE event when streaming. */
+  firstChunkTimeoutMs?: number;
+  /** Max idle gap between SSE chunks once streaming has started. */
+  idleTimeoutMs?: number;
+  /** External cancellation signal (e.g. daemon shutdown or drive switch). */
+  signal?: AbortSignal;
   /** A CLI backend calls this when the request stops queueing for its slot and starts. */
   onStart?: () => void;
 }

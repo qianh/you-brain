@@ -77,6 +77,7 @@ export function createAnthropicBackend(options: AnthropicBackendOptions): LlmBac
         },
         body,
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        ...(request.signal === undefined ? {} : { signal: request.signal }),
         ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
       });
       return readAnthropicContent(payload);

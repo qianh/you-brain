@@ -9,6 +9,7 @@ import { platformPaths, portraitFile } from "../../src/domain/paths.js";
 import {
   PORTRAIT_EVAL_CURSOR,
   PORTRAIT_MONTHLY_CURSOR,
+  PORTRAIT_STAGE_CURSOR,
   PORTRAIT_TURNS_CURSOR,
   PROJECTS_POINTER,
   TWIN_CLAIMS_JSON_SCHEMA,
@@ -22,6 +23,7 @@ import {
   changedLayers,
   checkTwin,
   cleanUserTurn,
+  collectTurns,
   createDrivePortrait,
   fillSnapshotPattern,
   normalizeProjectsTwin,
@@ -53,6 +55,7 @@ import {
 import { TWIN_SKELETON } from "../../src/consolidate/twin.js";
 import { twinCrossLayerProblems, twinStandardProblems } from "../../src/consolidate/twin-standard.js";
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
+import { LlmRequestError } from "../../src/llm/errors.js";
 import type { LlmCompleteRequest } from "../../src/llm/types.js";
 import {
   PortraitService,
@@ -1381,5 +1384,323 @@ describe("portrait rebuild", () => {
     expect(nextDay.ok).toBe(true);
     expect(await textAt(box.drive, FULL)).toContain("汇报时先给结论。");
     expect(jsonl(await textAt(box.drive, PENDING))).toEqual([]);
+  });
+});
+
+describe("portrait budget early-stop and stage cache", () => {
+  it("stops reading Drive session batches once budgetUnits is reached and matches unbounded collectTurns", async () => {
+    const drive = new MemoryDrive();
+    let reads = 0;
+    const origRead = drive.read.bind(drive);
+    drive.read = async (id: string) => {
+      reads += 1;
+      return origRead(id);
+    };
+
+    const rows: Array<{
+      sessionKey: string;
+      title: string;
+      fileId: string;
+      updatedAt: string;
+    }> = [];
+    // 32 sessions (4 batches of 8); sessions 0..16 fill nearly 40_000 units (including an oversized turn
+    // in session 15 that skips to session 16), and session 17 supplies short turns that hit 40_000 exactly,
+    // so batch 4 (sessions 24..31) is never read.
+    for (let i = 0; i < 32; i += 1) {
+      const turns =
+        i === 15
+          ? ["超".repeat(1_400), "短".repeat(10)]
+          : i === 16
+            ? Array.from({ length: 40 }, () => "补".repeat(48))
+            : i === 17
+              ? Array.from({ length: 20 }, () => "短")
+              : Array.from({ length: 5 }, (_, j) => `会${i}轮${j}${"内".repeat(492)}`);
+      const body = [
+        "---",
+        "source: codex",
+        `conversation_id: c-${i}`,
+        `started_at: ${LOCAL_DAY}T00:${String(i).padStart(2, "0")}:00.000Z`,
+        `updated_at: ${LOCAL_DAY}T00:${String(i).padStart(2, "0")}:30.000Z`,
+        "---",
+        "",
+        ...turns.flatMap((t) => ["## User", "", t, ""]),
+      ].join("\n");
+      const entry = await drive.create({
+        path: `inbox/dev/s-${String(i).padStart(2, "0")}.md`,
+        bytes: Buffer.from(body, "utf8"),
+        mimeType: "text/markdown",
+      });
+      rows.push({
+        sessionKey: `s-${String(i).padStart(2, "0")}`,
+        title: `会话 ${i}`,
+        fileId: entry.id,
+        updatedAt: `${LOCAL_DAY}T00:${String(i).padStart(2, "0")}:30.000Z`,
+      });
+    }
+
+    reads = 0;
+    const bounded = await readTwinSessions({
+      drive,
+      sessions: rows,
+      timeZone: SHANGHAI,
+      day: LOCAL_DAY,
+      seenTurns: {},
+      budgetUnits: 40_000,
+    });
+    const boundedReads = reads;
+    expect(boundedReads).toBeLessThan(rows.length);
+
+    reads = 0;
+    const unbounded = await readTwinSessions({
+      drive,
+      sessions: rows,
+      timeZone: SHANGHAI,
+      day: LOCAL_DAY,
+      seenTurns: {},
+    });
+    expect(reads).toBe(rows.length);
+    expect(collectTurns(bounded, {})).toEqual(collectTurns(unbounded, {}));
+  });
+
+  it("reuses cached chunk extractions, coding proposals, and resident merge across failed retries", async () => {
+    const box = await world();
+    await seedTwin(box);
+    box.sessions = [
+      {
+        sessionKey: "chunk-a",
+        title: "块一",
+        turns: Array.from({ length: 6 }, (_, i) => `块一发言${i}：${"甲".repeat(1_200)}`),
+      },
+      {
+        sessionKey: "chunk-b",
+        title: "块二",
+        turns: Array.from({ length: 6 }, (_, i) => `块二发言${i}：${"乙".repeat(1_200)}`),
+      },
+    ];
+
+    const first = await run(box, (request) => {
+      if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT && request.user.includes("块二")) {
+        throw new LlmRequestError("client", "bad chunk 2", { status: 400 });
+      }
+      if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          claims: [
+            { layer: "persona", project: "", confidence: "high", text: "先给结论。" },
+            { layer: "coding", project: "", confidence: "high", text: "提交前必跑单测。" },
+          ],
+        });
+      }
+      return "{}";
+    });
+    expect(first.ok).toBe(false);
+    expect(box.cursors.get(PORTRAIT_STAGE_CURSOR)).toBeTruthy();
+
+    box.requests.length = 0;
+    const second = await run(box, (request) => {
+      if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT) {
+        expect(request.user).not.toContain("块一");
+        return JSON.stringify({
+          claims: [{ layer: "project", project: "demo", confidence: "high", text: "demo 用 bun。" }],
+        });
+      }
+      if (request.system === TWIN_CODING_PROPOSALS_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          proposals: [
+            { section: "## 验证与交付", action: "add", proposedLine: "- **交付验证**：提交前必跑单测。", reason: "稳定" },
+          ],
+        });
+      }
+      if (request.system === TWIN_MERGE_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          bump: "patch",
+          changelog: ["补充先给结论"],
+          edits: [{ layer: "full", heading: "## 1. 一句话", text: "## 1. 一句话\n先给结论。" }],
+        });
+      }
+      if (request.system === TWIN_PROJECT_MERGE_SYSTEM_PROMPT) {
+        throw new LlmRequestError("client", "project merge boom", { status: 400 });
+      }
+      return "{}";
+    });
+    expect(second.ok).toBe(false);
+    expect(box.requests.map((r) => r.system)).toEqual([
+      TWIN_CLAIMS_SYSTEM_PROMPT,
+      TWIN_CODING_PROPOSALS_SYSTEM_PROMPT,
+      TWIN_MERGE_SYSTEM_PROMPT,
+      TWIN_PROJECT_MERGE_SYSTEM_PROMPT,
+    ]);
+
+    box.requests.length = 0;
+    const third = await run(box, (request) => {
+      if (request.system === TWIN_PROJECT_MERGE_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          bump: "patch",
+          changelog: ["补充 demo 口径"],
+          edits: [{ layer: "projects", heading: "## demo · 基础", text: "## demo · 基础\n- 用 bun。" }],
+        });
+      }
+      throw new Error(`unexpected model call: ${request.system}`);
+    });
+    expect(third.ok).toBe(true);
+    expect(box.requests.map((r) => r.system)).toEqual([TWIN_PROJECT_MERGE_SYSTEM_PROMPT]);
+    expect(box.cursors.get(PORTRAIT_STAGE_CURSOR)).toBe("");
+    expect(await textAt(box.drive, FULL)).toContain("先给结论。");
+    expect(await textAt(box.drive, PROJECTS)).toContain("用 bun。");
+  });
+
+  it("recomputes only resident merge when remote full.md changes before retry, while reusing extracted claims", async () => {
+    const box = await world();
+    await seedTwin(box);
+    box.sessions = [{ sessionKey: "s-etag", title: "变化", turns: ["汇报先说结论"] }];
+
+    const failed = await run(box, (request) => {
+      if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          claims: [
+            { layer: "persona", project: "", confidence: "high", text: "汇报先说结论。" },
+            { layer: "project", project: "demo", confidence: "high", text: "demo 保持简洁。" },
+          ],
+        });
+      }
+      if (request.system === TWIN_MERGE_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          bump: "patch",
+          changelog: ["更新人格"],
+          edits: [{ layer: "full", heading: "## 1. 一句话", text: "## 1. 一句话\n汇报先说结论。" }],
+        });
+      }
+      if (request.system === TWIN_PROJECT_MERGE_SYSTEM_PROMPT) {
+        throw new LlmRequestError("client", "fail project merge", { status: 400 });
+      }
+      return "{}";
+    });
+    expect(failed.ok).toBe(false);
+
+    const fullEntry = await box.drive.findByPath(FULL);
+    await box.drive.update(fullEntry!.id, `${FULL_TEXT}\n\n## 2. 补充\n- 别处新增。\n`, {
+      mimeType: "text/markdown",
+    });
+
+    box.requests.length = 0;
+    const recovered = await run(box, (request) => {
+      if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT) {
+        throw new Error("claims extraction should have hit cache");
+      }
+      if (request.system === TWIN_MERGE_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          bump: "patch",
+          changelog: ["基于新版更新人格"],
+          edits: [{ layer: "full", heading: "## 1. 一句话", text: "## 1. 一句话\n汇报先说结论。" }],
+        });
+      }
+      if (request.system === TWIN_PROJECT_MERGE_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          bump: "patch",
+          changelog: ["更新项目"],
+          edits: [{ layer: "projects", heading: "## demo · 基础", text: "## demo · 基础\n- 保持简洁。" }],
+        });
+      }
+      return "{}";
+    });
+    expect(recovered.ok).toBe(true);
+    expect(box.requests.map((r) => r.system)).toEqual([
+      TWIN_MERGE_SYSTEM_PROMPT,
+      TWIN_PROJECT_MERGE_SYSTEM_PROMPT,
+    ]);
+    expect(box.cursors.get(PORTRAIT_STAGE_CURSOR)).toBe("");
+  });
+
+  it("keeps unaffected chunk cache hits when a later session appends new turns before retry", async () => {
+    const box = await world();
+    await seedTwin(box);
+    box.sessions = [
+      {
+        sessionKey: "stable-chunk",
+        title: "稳定块",
+        turns: Array.from({ length: 8 }, (_, i) => `稳定块发言${i}：${"稳".repeat(1_180)}`),
+      },
+      {
+        sessionKey: "growing-chunk",
+        title: "增长块",
+        turns: [`最初一句话${"增".repeat(600)}`],
+      },
+    ];
+
+    const first = await run(box, (request) => {
+      if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT && request.user.includes("增长块")) {
+        throw new LlmRequestError("client", "transient", { status: 400 });
+      }
+      if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          claims: [{ layer: "persona", project: "", confidence: "low", text: "偏好稳定。" }],
+        });
+      }
+      return "{}";
+    });
+    expect(first.ok).toBe(false);
+
+    box.sessions[1]!.turns.push("追加的新一句话");
+    box.requests.length = 0;
+    const second = await run(box, (request) => {
+      if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT) {
+        expect(request.user).not.toContain("稳定块");
+        expect(request.user).toContain("追加的新一句话");
+        return JSON.stringify({
+          claims: [{ layer: "persona", project: "", confidence: "low", text: "低置信。" }],
+        });
+      }
+      throw new Error(`unexpected call: ${request.system}`);
+    });
+    expect(second.ok).toBe(true);
+    expect(box.requests).toHaveLength(1);
+    expect(box.cursors.get(PORTRAIT_STAGE_CURSOR)).toBe("");
+  });
+
+  it("clears portrait.stages on finishTwin skip and ConflictError normal exit paths", async () => {
+    const skipBox = await world();
+    await seedTwin(skipBox);
+    skipBox.sessions = [{ sessionKey: "s-skip", title: "跳过", turns: ["汇报先说结论"] }];
+    const skipped = await run(
+      skipBox,
+      model({
+        claims: { claims: [{ layer: "persona", project: "", confidence: "high", text: "汇报先说结论。" }] },
+        merge: {
+          bump: "minor",
+          changelog: ["bad"],
+          edits: [{ layer: "full", heading: "## 1. 一句话", text: "## 1. 一句话\n样本数 5。" }],
+        },
+        fix: noEdits,
+      }),
+    );
+    expect(skipped.ok).toBe(true);
+    expect(skipBox.cursors.get(PORTRAIT_STAGE_CURSOR)).toBe("");
+
+    const conflictBox = await world();
+    await seedTwin(conflictBox);
+    conflictBox.sessions = [{ sessionKey: "s-conflict", title: "冲突", turns: ["汇报先说结论"] }];
+    let bumpedRemote = false;
+    const conflictResult = await run(conflictBox, async (request) => {
+      if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          claims: [{ layer: "persona", project: "", confidence: "high", text: "汇报先说结论。" }],
+        });
+      }
+      if (request.system === TWIN_MERGE_SYSTEM_PROMPT) {
+        if (!bumpedRemote) {
+          bumpedRemote = true;
+          const fullEntry = await conflictBox.drive.findByPath(FULL);
+          await conflictBox.drive.update(fullEntry!.id, `${FULL_TEXT}\n`, { mimeType: "text/markdown" });
+        }
+        return JSON.stringify({
+          bump: "patch",
+          changelog: ["更新"],
+          edits: [{ layer: "full", heading: "## 1. 一句话", text: "## 1. 一句话\n汇报先说结论。" }],
+        });
+      }
+      return "{}";
+    });
+    expect(conflictResult.ok).toBe(true);
+    expect(conflictResult.warnings.some((w) => w.includes("别处更新"))).toBe(true);
+    expect(conflictBox.cursors.get(PORTRAIT_STAGE_CURSOR)).toBe("");
   });
 });

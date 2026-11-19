@@ -54,6 +54,34 @@ export function consolidationTimeDue(now: Date, timeZone: string, time: string):
   }
 }
 
+const HOUR_MS = 60 * 60 * 1000;
+
+export function createLocalDayMatcher(
+  day: string,
+  timeZone: string,
+): (iso: string | null | undefined) => number | null {
+  const match = DAY.exec(day);
+  if (!match) return () => null;
+  const baseUtcMs = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  try {
+    localDayKey(new Date(baseUtcMs), timeZone);
+  } catch {
+    return () => null;
+  }
+  const minMs = baseUtcMs - 14 * HOUR_MS;
+  const maxMs = baseUtcMs + 38 * HOUR_MS;
+  return (iso: string | null | undefined): number | null => {
+    if (!iso) return null;
+    const ms = Date.parse(iso);
+    if (Number.isNaN(ms) || ms < minMs || ms > maxMs) return null;
+    try {
+      return localDayKey(new Date(ms), timeZone) === day ? ms : null;
+    } catch {
+      return null;
+    }
+  };
+}
+
 export function instantOnLocalDay(iso: string, day: string, timeZone: string): boolean {
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) return false;
