@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { TaskActionSchema, TaskCreateSchema, TaskUpdateSchema, type TaskState } from "./schema.js";
-import { TaskNoCommitError } from "./git.js";
+import { TaskMergeBlockedError, TaskNoCommitError } from "./git.js";
 import { TaskStore } from "./store.js";
 import type {
   DevelopmentTask, TaskActionInput, TaskAutomationPort, TaskBoard, TaskCreateInput,
@@ -200,6 +200,8 @@ export class TaskService implements TaskHttpPort {
           if (task.status !== "review" || !task.run?.threadId) throw new TaskError(409, "只有待核对的 TODO 可以退回处理。");
           task.run.pendingFeedback = { commandId: randomUUID(), prompt: this.#feedbackPrompt(body.feedback) };
           task.run.reviewSha = null;
+          task.run.error = null;
+          task.error = null;
           task.status = "running";
           await this.#save(task);
           try { await this.#feedback(task); }
@@ -233,6 +235,10 @@ export class TaskService implements TaskHttpPort {
       this.#checkProject(project, task);
       try {
         const result = await this.options.git.review(project, task.run);
+        if (task.run.reviewSha !== result.headSha) {
+          task.error = null;
+          task.run.error = null;
+        }
         task.run.reviewSha = result.headSha;
         await this.#save(task);
         return { task: structuredClone(task), ...result };
@@ -368,14 +374,14 @@ export class TaskService implements TaskHttpPort {
       ...(run.branch !== null ? [
         `任务分支：${run.branch}。只在这个独立工作树和任务分支完成本任务。先阅读项目规则，保护已有修改。`,
         "完成后运行适用检查，并将本任务变更提交到当前任务分支。提交前检查 diff，只提交相关文件，禁止提交 .env、凭证和密钥。",
-        "禁止 checkout、修改或合并 develop，禁止 push、部署、删除工作树和分支。人工核对通过后由 U-Brain 合并。",
+        "不要切换到或修改 develop。仅在用户明确要求时，才可将本地 develop 同步到当前任务分支。禁止 push、部署、删除工作树和分支。人工核对通过后由 U-Brain 合并到 develop。",
       ] : ["工作目录是用户主目录，不代表授权访问无关文件。只在用户确认的范围内处理，不自动创建仓库、提交、推送或部署。"]),
       "最后说明完成内容、验证结果和未解决事项。遇到需要用户决定的问题请在 T3 会话中询问。",
     ].filter(Boolean).join("\n\n");
   }
 
   #feedbackPrompt(feedback: string): string {
-    return `人工核对未通过，请在原任务工作树和分支继续处理以下反馈。完成检查并提交到该任务分支后，再等待人工核对。禁止合并 develop、push 或部署。\n\n${feedback}`;
+    return `人工核对未通过，请在原任务工作树和分支继续处理以下反馈。完成检查并提交到该任务分支后，再等待人工核对。禁止合并到 develop、push 或部署。\n\n${feedback}`;
   }
 
   async #refreshProjects(): Promise<boolean> {
@@ -466,7 +472,7 @@ export class TaskService implements TaskHttpPort {
 
   async #fail(task: DevelopmentTask, error: unknown): Promise<void> {
     if (error instanceof TaskPersistenceError) throw error;
-    task.status = "failed";
+    task.status = task.status === "merging" && error instanceof TaskMergeBlockedError ? "review" : "failed";
     task.error = message(error);
     if (task.run) task.run.error = message(error);
     await this.#save(task);

@@ -122,14 +122,46 @@ describe("TaskGit", () => {
     expect(command(repo, ["rev-parse", "develop"])).toBe(run.baseSha);
   });
 
-  test("develop 有新提交造成分歧时不自动合并或丢弃现场", async () => {
+  test("develop 分叉不影响任务核对，只有合并才要求同步", async () => {
     const run = await task();
     const head = commit(run.worktreePath);
+    const original = await git.review(project, run);
     const develop = commit(repo, "other.txt", "other work\n");
-    await expect(git.review(project, run)).rejects.toThrow("develop 已发生分歧");
-    await expect(git.merge(project, { ...run, reviewSha: head }, head)).rejects.toThrow("develop 已发生分歧");
+    expect(await git.review(project, run)).toEqual(original);
+    expect(original.stat).toContain("task.txt");
+    expect(original.diff).not.toContain("other.txt");
+    await expect(git.merge(project, { ...run, reviewSha: head }, head)).rejects.toThrow("任务分支尚未包含最新的 develop");
     expect(command(repo, ["rev-parse", "develop"])).toBe(develop);
     expect(command(run.worktreePath, ["rev-parse", "HEAD"])).toBe(head);
+
+    command(run.worktreePath, ["merge", "--no-edit", "develop"]);
+    const synced = await git.review(project, run);
+    expect(synced.headSha).not.toBe(head);
+    expect(synced.baseSha).toBe(develop);
+    expect(synced.diff).toBe(original.diff);
+    await expect(git.merge(project, { ...run, reviewSha: head }, head)).rejects.toThrow("任务提交已变化");
+    await git.merge(project, { ...run, reviewSha: synced.headSha }, synced.headSha);
+    expect(command(repo, ["rev-parse", "develop"])).toBe(synced.headSha);
+  });
+
+  test("develop 前进但任务没有提交，仍然等待任务提交", async () => {
+    const run = await task();
+    commit(repo, "other.txt", "other work\n");
+    await expect(git.review(project, run)).rejects.toThrow("没有可核对的提交");
+  });
+
+  test("develop 被移走或退回到任务起点之前，仍按任务起点核对", async () => {
+    const oldBase = command(repo, ["rev-parse", "HEAD"]);
+    commit(repo, "already-there.txt", "pre-existing work\n");
+    const run = await task();
+    const head = commit(run.worktreePath);
+    const original = await git.review(project, run);
+    command(repo, ["branch", "-m", "archived-develop"]);
+    expect(await git.review(project, run)).toEqual(original);
+    command(repo, ["branch", "develop", oldBase]);
+    expect(await git.review(project, run)).toEqual(original);
+    await expect(git.merge(project, { ...run, reviewSha: head }, head)).rejects.toThrow("develop 已退回到任务起点之前");
+    expect(command(repo, ["rev-parse", "develop"])).toBe(oldBase);
   });
 
   test("拒绝未知已存在任务分支，不覆写原提交", async () => {

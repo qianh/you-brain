@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { TaskNoCommitError } from "../../src/tasks/git.js";
+import { TaskMergeBlockedError, TaskNoCommitError } from "../../src/tasks/git.js";
 import { TaskService } from "../../src/tasks/service.js";
 import { TaskStore } from "../../src/tasks/store.js";
 import type { TaskAutomationPort, TaskGitPort } from "../../src/tasks/types.js";
@@ -193,6 +193,47 @@ describe("T3 TODO serial queue", () => {
     await f.service.tick();
     expect(f.merges).toEqual([SHA]);
     expect(f.starts.map((item) => item.title)).toEqual(["first", "second"]);
+  }));
+
+  test("develop blocking merge leaves the task reviewable until it is synced and reapproved", () => fixture(async (f) => {
+    await f.service.create({ title: "first", projectId: "one" });
+    await f.service.create({ title: "second", projectId: "one" });
+    await enable(f.service);
+    const task = await f.ready();
+    const merge = f.options.git.merge;
+    const mergeError = "任务分支尚未包含最新的 develop";
+    f.options.git.merge = async () => { throw new TaskMergeBlockedError(mergeError); };
+    const detail = await f.service.review(task.id);
+    await expect(f.service.action({ action: "approve", id: task.id, reviewSha: detail.headSha })).rejects.toThrow(mergeError);
+    await f.service.tick();
+    expect((await f.board()).tasks[0]).toMatchObject({ status: "review", error: mergeError });
+    expect((await f.service.review(task.id)).diff).toBe(detail.diff);
+    expect(f.starts).toHaveLength(1);
+    expect(f.merges).toHaveLength(0);
+
+    const synced = "c".repeat(40);
+    f.options.git.review = async () => ({ headSha: synced, baseSha: BASE, stat: "1 file", diff: "+change", truncated: false });
+    f.options.git.merge = merge;
+    expect((await f.service.review(task.id)).task).toMatchObject({ status: "review", error: null, run: { error: null } });
+    await expect(f.service.action({ action: "approve", id: task.id, reviewSha: detail.headSha })).rejects.toThrow("核对版本已变化");
+    await f.service.action({ action: "approve", id: task.id, reviewSha: synced });
+    expect(f.merges).toEqual([synced]);
+  }));
+
+  test("rechecking a previously blocked review uses the same T3 turn", () => fixture(async (f) => {
+    await f.service.create({ title: "task", projectId: "one" });
+    await enable(f.service);
+    const review = f.options.git.review;
+    f.options.git.review = async () => { throw new Error("develop 已发生分歧，请先在 T3 中处理后重新核对"); };
+    const blocked = await f.ready();
+    expect(blocked.status).toBe("failed");
+    f.options.git.review = review;
+    await f.service.action({ action: "retry", id: blocked.id });
+    await f.service.tick();
+    expect((await f.service.review(blocked.id)).task).toMatchObject({ status: "review", error: null, run: { threadId: blocked.run?.threadId } });
+    expect(f.starts).toHaveLength(1);
+    expect(f.followups).toHaveLength(0);
+    expect(f.merges).toHaveLength(0);
   }));
 
   test("pause lets current task finish but prevents next claim", () => fixture(async (f) => {

@@ -29,6 +29,8 @@ export class TaskNoCommitError extends Error {
   }
 }
 
+export class TaskMergeBlockedError extends Error {}
+
 export class TaskGit implements TaskGitPort {
   readonly #options: { dataDir: string; env?: NodeJS.ProcessEnv };
   readonly #queues = new Map<string, Promise<unknown>>();
@@ -87,11 +89,10 @@ export class TaskGit implements TaskGitPort {
     this.#assertProject(project, run);
     const repo = await this.#repo(project);
     return this.#serialize(repo, async () => {
-      await this.#verifyRun(repo, run);
-      const headSha = await this.#sha(run.worktreePath, "HEAD");
-      const baseSha = await this.#develop(repo);
+      const headSha = await this.#verifyRun(repo, run);
+      if (run.baseSha === headSha) throw new TaskNoCommitError();
+      const baseSha = await this.#reviewBase(repo, run.baseSha, headSha);
       if (baseSha === headSha) throw new TaskNoCommitError();
-      await this.#ancestor(repo, baseSha, headSha, "develop 已发生分歧，请先在 T3 中处理后重新核对");
       await this.#safeChanges(repo, baseSha, headSha);
       const stat = (await this.#git(repo, ["diff", "--no-ext-diff", "--no-textconv", "--stat", baseSha, headSha, "--"])).text;
       const diff = await this.#git(repo, ["diff", "--no-ext-diff", "--no-textconv", "--no-color", baseSha, headSha, "--"], { limit: DIFF_LIMIT });
@@ -105,15 +106,19 @@ export class TaskGit implements TaskGitPort {
     if (run.reviewSha === null) throw new Error("任务尚未核对，请先核对提交后再合并");
     const repo = await this.#repo(project);
     return this.#serialize(repo, async () => {
-      await this.#verifyRun(repo, run);
-      const headSha = await this.#sha(run.worktreePath, "HEAD");
+      const headSha = await this.#verifyRun(repo, run);
       if (approvedSha !== headSha || run.reviewSha !== approvedSha) {
         throw new Error("任务提交已变化，请重新核对后再合并");
       }
       const develop = await this.#develop(repo);
       // 崩溃可能发生在 Git 成功后、队列写回前。相同提交可以安全补记完成。
       if (develop === approvedSha) return;
-      await this.#ancestor(repo, develop, approvedSha, "develop 已发生分歧，不能快进合并，请先在 T3 中处理后重新核对");
+      if (!(await this.#isAncestor(repo, develop, approvedSha))) {
+        throw new TaskMergeBlockedError("任务分支尚未包含最新的 develop。请在 T3 中将本地 develop 同步到任务分支，再重新核对。");
+      }
+      if (!(await this.#isAncestor(repo, run.baseSha, develop))) {
+        throw new TaskMergeBlockedError("本地 develop 已退回到任务起点之前，合并会带入未核对的提交。请在 T3 中检查分支历史。");
+      }
       await this.#safeChanges(repo, develop, approvedSha);
       const checkedOut = (await this.#worktrees(repo)).filter((entry) => entry.branch === "refs/heads/develop");
       if (checkedOut.length > 1) throw new Error("develop 同时在多个工作树中使用，不能自动合并");
@@ -170,7 +175,7 @@ export class TaskGit implements TaskGitPort {
     }
   }
 
-  async #verifyRun(repo: string, run: TaskWorktreeRun): Promise<void> {
+  async #verifyRun(repo: string, run: TaskWorktreeRun): Promise<string> {
     const id = run.branch.startsWith("task/") ? run.branch.slice(5) : "";
     if (!TASK_ID.test(id) || !SHA.test(run.baseSha)) throw new Error("任务分支记录不正确");
     const location = await this.#location(repo, id);
@@ -180,7 +185,9 @@ export class TaskGit implements TaskGitPort {
     if (run.worktreePath !== owner.worktreePath || run.baseSha !== owner.baseSha) throw new Error("任务执行记录与工作树不一致");
     await this.#assertWorktree(repo, owner);
     await this.#clean(run.worktreePath, "任务工作树有未提交或未跟踪的内容，请在 T3 中提交后重新检查");
-    await this.#ancestor(repo, run.baseSha, await this.#sha(run.worktreePath, "HEAD"), "任务分支已重写起点，请人工检查");
+    const headSha = await this.#sha(run.worktreePath, "HEAD");
+    if (!(await this.#isAncestor(repo, run.baseSha, headSha))) throw new Error("任务分支已重写起点，请人工检查");
+    return headSha;
   }
 
   async #assertWorktree(repo: string, owner: Owner): Promise<void> {
@@ -213,6 +220,16 @@ export class TaskGit implements TaskGitPort {
     return this.#sha(repo, "refs/heads/develop");
   }
 
+  async #reviewBase(repo: string, taskBase: string, headSha: string): Promise<string> {
+    const developRef = "refs/heads/develop";
+    if (!(await this.#hasRef(repo, developRef))) return taskBase;
+    const common = await this.#git(repo, ["merge-base", developRef, headSha], { allowFailure: true });
+    if (common.code === 1) return taskBase;
+    const commonSha = common.text.trim();
+    if (common.code !== 0 || !SHA.test(commonSha)) throw new Error("无法读取任务对比基线");
+    return commonSha === taskBase || !(await this.#isAncestor(repo, taskBase, commonSha)) ? taskBase : commonSha;
+  }
+
   async #sha(repo: string, ref: string): Promise<string> {
     const sha = (await this.#git(repo, ["rev-parse", "--verify", `${ref}^{commit}`])).text.trim();
     if (!SHA.test(sha)) throw new Error("Git 提交编号不正确");
@@ -230,9 +247,10 @@ export class TaskGit implements TaskGitPort {
     if ((await this.#git(path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])).text !== "") throw new Error(message);
   }
 
-  async #ancestor(repo: string, base: string, head: string, message: string): Promise<void> {
+  async #isAncestor(repo: string, base: string, head: string): Promise<boolean> {
     const result = await this.#git(repo, ["merge-base", "--is-ancestor", base, head], { allowFailure: true });
-    if (result.code !== 0) throw new Error(message);
+    if (result.code !== 0 && result.code !== 1) throw new Error("无法检查 Git 提交关系，已保留现场");
+    return result.code === 0;
   }
 
   async #safeChanges(repo: string, base: string, head: string): Promise<void> {

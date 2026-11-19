@@ -320,7 +320,7 @@ function TaskReviewDialog({ task, onClose, onChanged }: { task: DevelopmentTask;
     <Button disabled={busy || !review || !feedback.trim()} onClick={() => void act("reject")}>{t("tasksReject")}</Button>
     <Button variant="primary" loading={busy} disabled={!review || !acknowledged} onClick={() => void act("approve")}>{t("tasksApprove")}</Button>
   </>}>
-    {error && <Banner tone="danger" action={<Button size="sm" disabled={busy} onClick={() => setRevision((value) => value + 1)}>{t("retry")}</Button>}>{error}</Banner>}
+    {error && <Banner tone="danger" action={<Button size="sm" disabled={busy} onClick={() => setRevision((value) => value + 1)}>{t(review ? "reload" : "retry")}</Button>}>{error}</Banner>}
     {!review && !error && <div className="tasks-loading" role="status"><Spinner />{t("tasksLoadingReview")}</div>}
     {review && <div className="tasks-review-content">
       <header className="tasks-review-task"><h3>{review.task.title}</h3><ThreadLink task={review.task} /></header>
