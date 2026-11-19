@@ -52,7 +52,14 @@ if (!(await exists(app))) {
   process.exit(2);
 }
 
-// Stop the running copy so its files can be replaced.
+async function running(pattern: string): Promise<boolean> {
+  const child = Bun.spawn(["pgrep", "-f", pattern], { stdout: "ignore", stderr: "ignore" });
+  return (await child.exited) === 0;
+}
+
+// 整个 App（桌面壳 + daemon）都要停：壳活着会在 daemon 退出后立刻用替换到一半的文件重新拉起它。
+// 停之前记下壳在不在跑，装完再打开，免得装完 App 整个消失、daemon 也没人拉起。
+const shellWasRunning = await running(`${app}/Contents/MacOS/you-brain-desktop`);
 await run(["pkill", "-TERM", "-f", `${app}/Contents/MacOS/you-brain`]).catch(() => undefined);
 await Bun.sleep(3_000);
 
@@ -97,4 +104,11 @@ await run([
 
 await run(["codesign", "--force", "--deep", "--sign", "-", app]);
 await run(["codesign", "--verify", "--deep", "--strict", app]);
-console.log(JSON.stringify({ app, triple, signed: "ad-hoc" }));
+if (shellWasRunning) {
+  // 等旧壳彻底退出，否则 open 只会激活正在退出的那个实例。
+  for (let waited = 0; waited < 10_000 && (await running(`${app}/Contents/MacOS/you-brain-desktop`)); waited += 500) {
+    await Bun.sleep(500);
+  }
+  await run(["open", app]);
+}
+console.log(JSON.stringify({ app, triple, signed: "ad-hoc", reopened: shellWasRunning }));

@@ -10,6 +10,7 @@ import { sourceLabel } from "../../lib/format.js";
 import { toggleMember } from "./logic.js";
 import { NotionSection } from "./notion.js";
 import { SearchKeySection } from "./search-key.js";
+import { TelegramSection } from "./telegram.js";
 import { WebhookSection } from "./webhook.js";
 
 /** Only CLI tools with a managed global instructions file support auto-injecting coding.md. */
@@ -61,6 +62,7 @@ export function IntegrationsSection({
         </Card>
       </Section>
       <WebhookSection />
+      <TelegramSection />
       <NotionSection />
       <SearchKeySection />
     </div>

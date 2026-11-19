@@ -241,8 +241,10 @@ import { UploadService } from "../upload/upload-service.js";
 import type { UploadIndex } from "../upload/types.js";
 import { NotionService } from "../notion/service.js";
 import { DeckService, type DeckServiceOptions } from "../deck/index.js";
+import { telegramRelayKeyStore, telegramTokenStore } from "../auth/telegram-secrets.js";
 import { DEFAULT_T3_URL, normalizeT3Url } from "../deck/t3/index.js";
 import { T3Automation } from "../deck/t3/automation.js";
+import { T3ThreadWatcher } from "../deck/t3/watch.js";
 import { TaskGit } from "../tasks/git.js";
 import { TaskService } from "../tasks/service.js";
 import { TERMINAL_NOTIFY_PREF_KEY } from "../deck/session-notices.js";
@@ -786,6 +788,8 @@ export class YouBrainDaemon {
   #deck: DeckService | null = null;
   #tasks: TaskService | null = null;
   #taskAutomation: T3Automation | null = null;
+  /** T3 会话监视：Telegram 已绑定时把「做完一轮 / 等你处理」推到手机。 */
+  #t3Watch: T3ThreadWatcher | null = null;
   #uiPrefs: UiPrefsStore | null = null;
   #uploader: UploadService | null = null;
   #portrait: PortraitService | null = null;
@@ -1297,6 +1301,9 @@ export class YouBrainDaemon {
     if (this.#revokeJob) {
       await Promise.race([this.#revokeJob, delay(BACKGROUND_STOP_MS)]);
     }
+    this.#t3Watch?.stop();
+    this.#t3Watch = null;
+    this.#deck?.telegram?.attachT3(null);
     this.#deck?.stop();
     await this.#tasks?.stop();
     await this.#taskAutomation?.close();
@@ -3570,6 +3577,7 @@ export class YouBrainDaemon {
         },
       });
       this.#tasks.start();
+      this.#startT3Watch(this.#taskAutomation);
     }
     return {
       today: () => readers.today(),
@@ -3957,6 +3965,24 @@ export class YouBrainDaemon {
     };
   }
 
+  /** 把 T3 会话接到 Telegram：推送做完一轮 / 等你处理，手机回复排进会话。 */
+  #startT3Watch(automation: T3Automation): void {
+    const telegram = this.#deck?.telegram;
+    if (!telegram || this.#t3Watch) return;
+    const watch = new T3ThreadWatcher({
+      list: () => automation.threadStates(),
+      enabled: () => telegram.bound(),
+      onNotice: (notice) => telegram.pushT3(notice),
+    });
+    telegram.attachT3({
+      send: (threadId, text, requestId) => automation.sendMessage(threadId, text, requestId),
+      status: (threadId) => watch.statusOf(threadId),
+      answer: (threadId) => automation.latestAnswer(threadId),
+    });
+    this.#t3Watch = watch;
+    watch.start();
+  }
+
   #deckOptions(): DeckServiceOptions {
     const paths = this.#paths;
     if (!paths) throw new YouBrainError("INVALID_INPUT", "paths is not open");
@@ -3972,6 +3998,9 @@ export class YouBrainDaemon {
       noticesEnabled: async () => (await this.#uiPrefsStore().read())[TERMINAL_NOTIFY_PREF_KEY] !== "0",
       onNotices: () => this.changes.publish("deck", this.#clock.now().toISOString()),
       noticeLlm: async () => this.#llm,
+      telegramToken: telegramTokenStore({ platform: this.#platform, backend: this.#secretBackend }),
+      telegramRelayKey: telegramRelayKeyStore({ platform: this.#platform, backend: this.#secretBackend }),
+      onTelegram: () => this.changes.publish("deck", this.#clock.now().toISOString()),
     };
   }
 
@@ -4025,6 +4054,12 @@ export class YouBrainDaemon {
       museAction: (body) => deck.muse.action(body),
       museSend: (body) => deck.muse.send(body),
       museSubscribe: (listener) => deck.muse.subscribeStream(listener),
+      ...(deck.telegram === null
+        ? {}
+        : {
+            telegramStatus: async () => deck.telegram!.status(),
+            telegramAction: (body) => deck.telegram!.action(body),
+          }),
     };
   }
 

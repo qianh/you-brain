@@ -97,6 +97,8 @@ import type {
   DeckMuseStreamEvent,
   DeckNoticeDismissBody,
   DeckNoticesResponse,
+  DeckTelegramActionBody,
+  DeckTelegramStatusResponse,
   DeckTty7RenameBody,
   DeckTty7ViewingBody,
   DeckTty7ScreenResponse,
@@ -258,4 +260,7 @@ export interface DeckHttpPort {
   museAction?(body: DeckMuseActionBody): Promise<DeckMuseActionResponse>;
   museSend?(body: DeckMuseSendBody): Promise<DeckMuseSendResponse>;
   museSubscribe?(listener: (event: DeckMuseStreamEvent) => void): () => void;
+  /** Telegram 桥：推送「等你回复」、回复提醒即输入。可选，旧测试替身可不提供。 */
+  telegramStatus?(): Promise<DeckTelegramStatusResponse>;
+  telegramAction?(body: DeckTelegramActionBody): Promise<DeckTelegramStatusResponse>;
 }

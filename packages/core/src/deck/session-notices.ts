@@ -275,8 +275,8 @@ export class SessionNoticeWatcher {
     }
     if (!this.#started) return;
     if (summary?.task) this.#tasks.set(item.pane, summary.task);
-    // 分析期间会话状态变了（又开始工作、已关闭）或用户已经在看，这条就不用记了。
-    if (this.#snapshot?.get(item.pane) !== item.kind || this.#viewingPane() === item.pane || this.#muted.has(item.pane)) return;
+    // 分析期间会话状态变了（又开始工作、已关闭）或被忽略，这条就不用记了；用户正在看时仍记下（见 #push）。
+    if (this.#snapshot?.get(item.pane) !== item.kind || this.#muted.has(item.pane)) return;
     const text = summary?.body.trim() ?? "";
     const task = summary?.task ?? null;
     this.#push([
@@ -296,8 +296,10 @@ export class SessionNoticeWatcher {
         existing.status = "closed";
       }
     }
+    const viewing = this.#viewingPane();
     for (const item of found) {
-      this.#notices.push({ seq: ++this.#seq, status: "open", ...item, at });
+      // 用户正在整屏看的会话：桌面不用弹（直接已关闭），但 Telegram 照样推送。
+      this.#notices.push({ seq: ++this.#seq, status: item.pane === viewing ? "closed" : "open", ...item, at });
     }
     if (this.#notices.length > NOTICES_KEPT) this.#notices.splice(0, this.#notices.length - NOTICES_KEPT);
     try {
@@ -335,7 +337,8 @@ export class SessionNoticeWatcher {
       for (const pane of [...this.#muted]) if (!live.has(pane)) this.#muted.delete(pane);
       for (const pane of [...this.#tasks.keys()]) if (!live.has(pane)) this.#tasks.delete(pane);
       const reconciled = reconcileOpenNotices(this.#notices, view.sessions, viewing);
-      const found = enabled ? diffNotices(this.#snapshot, view.sessions, viewing, this.#muted) : [];
+      // 正在看的会话也记下（Telegram 照样推送），由 #push 直接标为已关闭，桌面不弹。
+      const found = enabled ? diffNotices(this.#snapshot, view.sessions, null, this.#muted) : [];
       this.#snapshot = new Map(view.sessions.map((session) => [session.pane, session.status]));
       if (found.length === 0) {
         if (reconciled) {

@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "test": "bun test",
-    "typecheck": "bunx tsc --noEmit -p packages/protocol && bunx tsc --noEmit -p packages/core && bunx tsc --noEmit -p packages/cli && bunx tsc --noEmit -p apps/web",
+    "typecheck": "bunx tsc --noEmit -p packages/protocol && bunx tsc --noEmit -p packages/core && bunx tsc --noEmit -p packages/cli && bunx tsc --noEmit -p apps/web && bunx tsc --noEmit -p services/telegram-relay",
     "check:desktop": "bun run --cwd apps/desktop check && bun run --cwd apps/desktop test && bun run --cwd apps/desktop test:bundle:linux",
     "build:daemon": "bun scripts/build-daemon.ts",
     "build:dsh": "bun scripts/build-dsh.ts",

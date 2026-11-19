@@ -1,5 +1,6 @@
 export * from "./dsh/index.js";
 export * from "./muse/index.js";
+export * from "./telegram/index.js";
 export {
   GUI_APPS,
   accessibilityGranted,

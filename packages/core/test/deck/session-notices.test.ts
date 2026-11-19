@@ -248,7 +248,8 @@ describe("SessionNoticeWatcher", () => {
     h.set(view([session(1, "done")]));
     h.line();
     await settle();
-    expect(h.watcher.list().notices).toEqual([]); // 还在看
+    // 还在看：照样记下（Telegram 要推送），但一出生就是已关闭，桌面不弹。
+    expect(h.watcher.list().notices.map((n) => [n.kind, n.status])).toEqual([["done", "closed"]]);
 
     h.set(view([session(1, "working")]));
     h.line();
@@ -257,7 +258,10 @@ describe("SessionNoticeWatcher", () => {
     h.set(view([session(1, "done")]));
     h.line();
     await settle();
-    expect(h.watcher.list().notices.map((n) => n.kind)).toEqual(["done"]);
+    expect(h.watcher.list().notices.map((n) => [n.kind, n.status])).toEqual([
+      ["done", "closed"],
+      ["done", "open"],
+    ]);
     h.watcher.stop();
   });
 

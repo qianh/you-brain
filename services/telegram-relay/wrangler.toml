@@ -1,0 +1,13 @@
+# U-Brain Telegram 中转。部署步骤见 README.md。
+name = "u-brain-telegram-relay"
+main = "src/worker.ts"
+compatibility_date = "2025-09-01"
+
+[[durable_objects.bindings]]
+name = "RELAY"
+class_name = "Relay"
+
+# 免费套餐只能用 SQLite 存储的 Durable Object。
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Relay"]

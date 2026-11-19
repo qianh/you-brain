@@ -93,6 +93,22 @@ function isThreadState(value: unknown): value is T3ThreadState {
     (value.worktreePath === null || typeof value.worktreePath === "string") && typeof value.itemCount === "number";
 }
 
+export interface T3ThreadBrief {
+  threadId: string;
+  title: string;
+  status: string;
+  latestRunId: string | null;
+  snoozed: boolean;
+  /** T3 给的网页链接（可在手机上打开）；没有时为 null。 */
+  link: string | null;
+}
+
+function isThreadBrief(value: unknown): value is { threadId: string; title: string; status: string; latestRunId: string | null; parentThreadId: string | null; snoozed?: boolean; link?: unknown } {
+  return object(value) && text(value.threadId) && typeof value.title === "string" && typeof value.status === "string" &&
+    (value.latestRunId === null || typeof value.latestRunId === "string") &&
+    (value.parentThreadId === null || value.parentThreadId === undefined || typeof value.parentThreadId === "string");
+}
+
 function isItem(value: unknown): value is T3Item {
   return object(value) && typeof value.position === "number" && typeof value.type === "string" &&
     (value.runId === null || typeof value.runId === "string") && (value.text === null || typeof value.text === "string") &&
@@ -211,6 +227,37 @@ export class T3Automation implements TaskAutomationPort {
     // 新消息已写入但新一轮尚未投影时，不能把上一轮 completed 当作返工完成。
     if (!answer || (lastUser && lastUser.position > answer.position)) return { state: "running", summary: "" };
     return { state: "ready", summary: (answer.text ?? "").slice(0, 32_000) };
+  }
+
+  /** 全部项目的顶层会话及状态（最新的 100 个）：给手机推送监视「做完一轮 / 等你处理」用，不读会话内容。 */
+  async threadStates(): Promise<T3ThreadBrief[]> {
+    const value = await this.#call("t3_thread_list", { allProjects: true, limit: 100 });
+    if (!object(value) || !Array.isArray(value.threads) || !value.threads.every(isThreadBrief)) invalidResponse();
+    return value.threads
+      .filter((thread) => !thread.parentThreadId)
+      .map((thread) => ({
+        threadId: thread.threadId,
+        title: thread.title,
+        status: thread.status,
+        latestRunId: thread.latestRunId,
+        snoozed: thread.snoozed === true,
+        link: typeof thread.link === "string" ? thread.link : null,
+      }));
+  }
+
+  /** 会话最后一条助手回答（推送正文用）；没有时返回空串。 */
+  async latestAnswer(threadId: string): Promise<string> {
+    const { thread } = await this.#read(threadId, { limit: 1, runLimit: 1 });
+    const answer = (await this.#tail(thread)).filter((item) => item.type === "assistant_message").at(-1);
+    return answer?.text ?? "";
+  }
+
+  /** 从手机发一条消息：会话空闲就开始新一轮，正在执行就排到下一轮，不打断。返回 T3 的投递结果。 */
+  async sendMessage(threadId: string, message: string, requestId: string): Promise<string> {
+    if (message.trim() === "") throw new T3AutomationError("INVALID_INPUT", "消息不能为空。");
+    const sent = await this.#call("t3_thread_send", { threadId, message, mode: "queue", clientRequestId: `u-brain-telegram-${requestId}` });
+    if (!object(sent) || !text(sent.delivery)) invalidResponse();
+    return sent.delivery;
   }
 
   /** daemon 退出时撤销由此适配器签发的凭据；外部注入凭据不动。 */

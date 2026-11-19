@@ -89,6 +89,8 @@ import type {
   DeckNoticeDismissBody,
   DeckNoticesResponse,
   DeckT3WebResponse,
+  DeckTelegramActionBody,
+  DeckTelegramStatusResponse,
   DeckTty7PasteImageResponse,
   DeckTty7ScreenResponse,
   DeckTty7SendBody,
@@ -238,6 +240,8 @@ export interface BrowserDaemon
   /** 告诉 daemon 正在整屏看哪个会话（null 表示没在看），这个会话的完成提醒会被跳过。 */
   deckTty7Viewing(pane: number | null): Promise<{ ok: true }>;
   deckNotices(): Promise<DeckNoticesResponse>;
+  deckTelegram(): Promise<DeckTelegramStatusResponse>;
+  deckTelegramAction(body: DeckTelegramActionBody): Promise<DeckTelegramStatusResponse>;
   deckNoticeDismiss(body: DeckNoticeDismissBody): Promise<{ ok: true }>;
   deckTty7Screen(pane: number, lines?: number): Promise<DeckTty7ScreenResponse>;
   deckTty7Send(body: DeckTty7SendBody): Promise<{ ok: true }>;
@@ -430,6 +434,8 @@ export function createBrowserDaemon(options?: {
     deckTty7Rename: (pane: number, name: string) => request<{ ok: true }>("POST", "/api/deck/tty7/rename", { pane, name }),
     deckTty7Viewing: (pane: number | null) => request<{ ok: true }>("POST", "/api/deck/tty7/viewing", { pane }),
     deckNotices: () => request<DeckNoticesResponse>("GET", "/api/deck/notices"),
+    deckTelegram: () => request<DeckTelegramStatusResponse>("GET", "/api/deck/telegram"),
+    deckTelegramAction: (body) => request<DeckTelegramStatusResponse>("POST", "/api/deck/telegram", body),
     deckNoticeDismiss: (body: DeckNoticeDismissBody) =>
       request<{ ok: true }>("POST", "/api/deck/notices/dismiss", body),
     deckTty7Screen: (pane: number, lines?: number) =>

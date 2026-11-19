@@ -57,4 +57,4 @@ open -a /Applications/U-Brain.app
 
 ## 只换 daemon 时
 
-`bun run install:app` 只替换 daemon、`web`、`vendor`、`dsh`，不重建桌面外壳，且要先跑过 `build:daemon`（同样要设镜像）。改过 `apps/desktop` 必须走上面的完整流程。
+`bun run install:app` 只替换 daemon、`web`、`vendor`、`dsh`，不重建桌面外壳，且要先跑过 `build:daemon`（同样要设镜像）。它会先停掉整个 App（壳活着会用替换到一半的文件重新拉起 daemon），装完若原来开着就自动重新打开。改过 `apps/desktop` 必须走上面的完整流程。

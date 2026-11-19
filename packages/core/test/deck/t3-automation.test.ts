@@ -231,3 +231,15 @@ describe("T3 TODO automation MCP adapter", () => {
     expect(cli.at(-1)).toEqual(["auth", "session", "revoke", "current"]);
   });
 });
+
+describe("T3 adapter for phone notices", () => {
+  test("lists thread states across projects, reads the latest answer and queues a message", async () => {
+    const { client, sends } = harness({ threads: [fakeThread({ threadId: "a", title: "Alpha", status: "running", latestRunId: "run-1" })] });
+    expect(await client.threadStates()).toEqual([
+      { threadId: "a", title: "Alpha", status: "running", latestRunId: "run-1", snoozed: false, link: "https://app.t3.codes/threads/env/a" },
+    ]);
+    expect(await client.latestAnswer("a")).toBe("Implemented and tested.");
+    expect(await client.sendMessage("a", "继续", "c-1")).toBe("started");
+    expect(sends().at(-1)?.args).toEqual({ threadId: "a", message: "继续", mode: "queue", clientRequestId: "u-brain-telegram-c-1" });
+  });
+});

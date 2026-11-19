@@ -1,6 +1,9 @@
 import type { LlmProvider } from "@you-brain/protocol";
 
+import { join } from "node:path";
+
 import type { SearchProvider } from "../auth/search-secrets.js";
+import type { SecretStore } from "../auth/secret-store.js";
 import type { LlmBackend } from "../llm/types.js";
 import type { DshLoginProviderId, DshLoginView } from "./dsh/login.js";
 import { DshRuntime, type DshRuntimeOptions } from "./dsh/runtime.js";
@@ -14,6 +17,7 @@ import {
   type SessionNoticeList,
 } from "./session-notices.js";
 import { startT3Proxy, type T3Proxy } from "./t3/proxy.js";
+import { TelegramBridge, type TelegramFetch } from "./telegram/index.js";
 import { Tty7, type Tty7SessionsView } from "./tty7.js";
 import {
   GUI_APPS,
@@ -56,6 +60,13 @@ export interface DeckServiceOptions {
   onNotices?: () => void;
   /** 当前可用的模型；有就用它把提醒正文写成分析后的结论和建议，没有就用会话自报的状态。 */
   noticeLlm?: () => Promise<Pick<LlmBackend, "complete"> | null>;
+  /** Telegram 桥的 Bot Token 存储（daemon 传钥匙串）；不传就不启用 Telegram 桥。 */
+  telegramToken?: SecretStore;
+  /** Telegram 中转的设备密钥存储；不传就不能用中转。 */
+  telegramRelayKey?: SecretStore;
+  /** Telegram 桥状态变了（连接、绑定）。 */
+  onTelegram?: () => void;
+  telegramFetch?: TelegramFetch;
   dsh?: {
     runtime?: Pick<DshRuntime, "close" | "webState" | "loginView" | "loginAction"> & Partial<Pick<DshRuntime, "refresh">>;
     sidecarDir?: string;
@@ -85,6 +96,8 @@ export class DeckService {
   readonly activity: ActivityMonitor;
   /** Muse SDK 会话桥：配对、主对话同步与独立子会话。 */
   readonly muse: MuseDeckRuntime;
+  /** Telegram 桥：把「等你回复」推到手机，回复提醒即输入到会话；没配 Token 存储时为 null。 */
+  readonly telegram: TelegramBridge | null;
 
   constructor(options: DeckServiceOptions) {
     this.#options = options;
@@ -97,7 +110,10 @@ export class DeckService {
       sessions: () => this.tty7.sessions(),
       subscribe: (onLine) => this.tty7.events(onLine),
       enabled: options.noticesEnabled ?? (async () => true),
-      onNotice: () => options.onNotices?.(),
+      onNotice: () => {
+        options.onNotices?.();
+        this.telegram?.noticesChanged();
+      },
       ...(options.noticeLlm === undefined
         ? {}
         : {
@@ -112,6 +128,22 @@ export class DeckService {
             },
           }),
     });
+    this.telegram =
+      options.telegramToken === undefined
+        ? null
+        : new TelegramBridge({
+            configPath: join(options.dataDir, "deck", "telegram.json"),
+            token: options.telegramToken,
+            ...(options.telegramRelayKey ? { relayKey: options.telegramRelayKey } : {}),
+            notices: () => this.notices.list(),
+            sessions: () => this.tty7.sessions(),
+            send: (input) => this.tty7.send(input),
+            dismiss: (input) => {
+              this.notices.dismiss(input);
+            },
+            ...(options.onTelegram ? { onChange: options.onTelegram } : {}),
+            ...(options.telegramFetch ? { fetch: options.telegramFetch } : {}),
+          });
     this.activity = new ActivityMonitor({
       sessions: () => this.tty7.sessions({ withActivity: false }),
       procs: (pane) => this.tty7.procs(pane),
@@ -152,6 +184,7 @@ export class DeckService {
     this.#t3Proxy?.stop();
     this.#t3Proxy = null;
     this.notices.stop();
+    this.telegram?.stop();
     this.activity.stop();
     this.muse.stop();
     void this.#dsh.close().catch(() => undefined);
@@ -175,6 +208,7 @@ export class DeckService {
     this.notices.start();
     this.tty7.setActivity((pane) => this.activity.detail(pane));
     this.activity.start();
+    void this.telegram?.start().catch(() => undefined);
   }
 
   /** 终端会话列表：在 tty7 的会话上补上最近一轮的任务名。 */

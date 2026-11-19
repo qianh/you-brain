@@ -62,6 +62,15 @@ export function fakeT3(input: { projects: FakeProject[]; threads?: FakeThread[];
       return result({ ...project, createdAt: "2026-11-16T00:00:00.000Z" });
     }
     if (name === "t3_thread_list") {
+      if (args.allProjects === true) {
+        return result({
+          projectId: null,
+          currentThreadId: null,
+          threads: threads.map((thread) => ({ ...summary(thread), parentThreadId: null, snoozed: false, link: `https://app.t3.codes/threads/env/${thread.threadId}` })),
+          nextCursor: null,
+          total: threads.length,
+        });
+      }
       if (typeof args.projectId !== "string") return failure("target_required", "Pass projectId");
       const filter = typeof args.titleContains === "string" ? args.titleContains : "";
       return result({ projectId: args.projectId, threads: threads.filter((thread) => thread.projectId === args.projectId && thread.title.includes(filter)).map(summary), nextCursor: null });

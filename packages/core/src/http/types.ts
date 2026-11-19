@@ -1346,6 +1346,28 @@ export const DeckMuseSendBodySchema = z
 
 export type DeckMuseSendBody = z.infer<typeof DeckMuseSendBodySchema>;
 
+/** POST /api/deck/telegram 的请求体。 */
+export const DeckTelegramActionBodySchema = z.discriminatedUnion("action", [
+  z.object({ action: z.literal("set-token"), token: z.string().trim().min(1).max(200) }).strict(),
+  z.object({ action: z.literal("clear-token") }).strict(),
+  z.object({ action: z.literal("pair") }).strict(),
+  z.object({ action: z.literal("unbind") }).strict(),
+  z.object({ action: z.literal("test") }).strict(),
+  z
+    .object({
+      action: z.literal("set-relay"),
+      url: z.string().trim().min(1).max(300),
+      key: z.string().trim().min(1).max(300),
+      name: z.string().trim().max(40).optional(),
+    })
+    .strict(),
+  z.object({ action: z.literal("clear-relay") }).strict(),
+]);
+
+export type DeckTelegramActionBody = z.infer<typeof DeckTelegramActionBodySchema>;
+
+export type DeckTelegramStatusResponse = import("../deck/telegram/bridge.js").TelegramStatus;
+
 
 /** PUT /api/ui-prefs 的请求体。长度限制由存储层判断，超限返回 413 而不是 400。 */
 export const UiPrefsPatchBodySchema = z

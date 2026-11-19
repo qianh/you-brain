@@ -18,6 +18,7 @@ import {
 import { YouBrainError } from "../domain/errors.js";
 import { UiPrefsLimitError, type UiPrefsPatch } from "../ui-prefs/store.js";
 import { MuseError } from "../deck/muse/sdk/errors.js";
+import { TelegramApiError } from "../deck/telegram/api.js";
 import { TaskError } from "../tasks/service.js";
 import { TaskActionSchema, TaskCreateSchema, TaskUpdateSchema } from "../tasks/schema.js";
 import { probeT3Web } from "../deck/t3/probe.js";
@@ -89,6 +90,7 @@ import {
   DeckTty7RenameBodySchema,
   DeckTty7ViewingBodySchema,
   DeckNoticeDismissBodySchema,
+  DeckTelegramActionBodySchema,
   DeckTty7SendBodySchema,
   DeckTty7StartBodySchema,
   ReferenceKindSchema,
@@ -159,6 +161,7 @@ export class HttpError extends Error {
 export function errorResponse(error: unknown): Response {
   if (error instanceof TaskError) return apiError(error.status, "TASK_REJECTED", error.message);
   if (error instanceof MuseError) return apiError(400, "MUSE_ERROR", error.message);
+  if (error instanceof TelegramApiError) return apiError(502, "TELEGRAM_ERROR", error.message);
   if (error instanceof HttpError) return apiError(error.status, error.code, error.message);
   if (error instanceof z.ZodError) {
     return apiError(400, "INVALID_INPUT", error.message);
@@ -551,6 +554,21 @@ export async function handleApi(
       if (!port.museSend) notSupported();
       const body = DeckMuseSendBodySchema.parse(await readJson(request));
       return json(await port.museSend(body));
+    });
+  }
+  if (path === "/api/deck/telegram") {
+    if (request.method === "GET") {
+      return method(request, "GET", async () => {
+        const port = deck(context);
+        if (!port.telegramStatus) notSupported();
+        return json(await port.telegramStatus());
+      });
+    }
+    return method(request, "POST", async () => {
+      const port = deck(context);
+      if (!port.telegramAction) notSupported();
+      const body = DeckTelegramActionBodySchema.parse(await readJson(request));
+      return json(await port.telegramAction(body));
     });
   }
   if (path === "/api/deck/muse/stream") {
