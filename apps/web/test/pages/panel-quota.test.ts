@@ -3,13 +3,16 @@ import type { QuotaAccount, QuotaTokenUsage, QuotaView } from "@you-brain/core/h
 
 import {
   minutesAgo,
-  quotaCards,
+  quotaCards as buildQuotaCards,
+  quotaSelection,
   quotaTone,
   resetIn,
   shortWindowLabel,
   tokenCount,
   windowLabel,
+  type QuotaCaptures,
 } from "../../src/pages/panel/quota.js";
+import type { Language } from "../../src/lib/format.js";
 
 const NOW = Date.parse("2026-11-16T12:00:00Z");
 const DAY = 24 * 60 * 60_000;
@@ -29,6 +32,8 @@ const claude: QuotaAccount = {
   ],
 };
 const grok: QuotaAccount = { id: "g1", readAt: READ, stale: false, agent: "grok", plan: null, active: true, windows: [{ name: "7 days", used: 2, resetsAt: null }] };
+const cursor: QuotaAccount = { id: "cursor-test", readAt: READ, stale: false, agent: "cursor", plan: "pro", active: true,
+  windows: [{ name: "30 days", used: 42, resetsAt: "2026-12-01T00:00:00Z" }] };
 const codexTokens: QuotaTokenUsage = {
   today: { calls: 12, input: 9537980, output: 1386395, cacheRead: 170604150, total: 181528525 },
   threeDays: { calls: 40, input: 13177456, output: 1670765, cacheRead: 261297792, total: 276146013 },
@@ -39,6 +44,29 @@ const view = (
   tokens: Record<string, QuotaTokenUsage> = {},
 ): Pick<QuotaView, "accounts" | "tokens"> => ({ accounts, tokens });
 const captured = (source: string): Array<{ source: string; lastCaptureAt: string | null }> => [{ source, lastCaptureAt: recent(0) }];
+const quotaCards = (quota: Parameters<typeof buildQuotaCards>[0], captures: QuotaCaptures, nowMs: number, language: Language) =>
+  buildQuotaCards(quota, quotaSelection(null, captures, nowMs), nowMs, language);
+
+describe("quota selection", () => {
+  test("defaults to recent capture sources, including Cursor", () => {
+    expect([...quotaSelection(null, captured("cursor"), NOW)]).toEqual(["cursor"]);
+    expect([...quotaSelection("not-json", captured("cursor"), NOW)]).toEqual(["cursor"]);
+  });
+
+  test("an explicit selection overrides activity including when all items are unchecked", () => {
+    expect([...quotaSelection('["cursor","cursor","retired",1]', captured("claude-code"), NOW)]).toEqual(["cursor"]);
+    expect([...quotaSelection("[]", captured("claude-code"), NOW)]).toEqual([]);
+    expect(buildQuotaCards(view([claude]), quotaSelection("[]", captured("claude-code"), NOW), NOW, "zh")).toEqual([]);
+  });
+
+  test("shows selected Cursor subscription data without a capture, never a placeholder quota", () => {
+    const selected = quotaSelection('["cursor"]', undefined, NOW);
+    const cards = buildQuotaCards(view([claude, cursor]), selected, NOW, "zh");
+    expect(cards.map((card) => card.label)).toEqual(["Cursor"]);
+    expect(cards[0]?.windows[0]).toMatchObject({ used: 42, resetsAt: "2026-12-01T00:00:00Z", label: "30 天" });
+    expect(buildQuotaCards(view([claude, { ...cursor, windows: [] }]), selected, NOW, "zh")).toEqual([]);
+  });
+});
 
 describe("quotaCards", () => {
   test("shows only agents whose source captured something in the last 7 days", () => {

@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { TaskMergeBlockedError, TaskNoCommitError } from "../../src/tasks/git.js";
+import { TaskAlreadyMergedError, TaskMergeBlockedError, TaskNoCommitError } from "../../src/tasks/git.js";
 import { TaskService } from "../../src/tasks/service.js";
 import { TaskStore } from "../../src/tasks/store.js";
 import type { TaskAutomationPort, TaskGitPort } from "../../src/tasks/types.js";
@@ -56,6 +56,7 @@ async function setup() {
   };
   const git: TaskGitPort = {
     async prepare(_project, taskId) { return { branch: `task/${taskId}`, worktreePath: `/tasks/${taskId}`, baseSha: BASE }; },
+    async isMerged() { return false; },
     async review() { return { headSha: SHA, baseSha: BASE, stat: "1 file", diff: "+change", truncated: false }; },
     async merge(_project, taskRun, approvedSha) {
       expect(taskRun.reviewSha).toBe(approvedSha);
@@ -233,6 +234,43 @@ describe("T3 TODO serial queue", () => {
     expect((await f.service.review(blocked.id)).task).toMatchObject({ status: "review", error: null, run: { threadId: blocked.run?.threadId } });
     expect(f.starts).toHaveLength(1);
     expect(f.followups).toHaveLength(0);
+    expect(f.merges).toHaveLength(0);
+  }));
+
+  test("recovers a saved false failure when the task is already merged outside the board", () => fixture(async (f) => {
+    await f.service.create({ title: "first", projectId: "one" });
+    await f.service.create({ title: "second", projectId: "one" });
+    await enable(f.service);
+    const task = await f.ready();
+    f.options.git.review = async () => { throw new TaskNoCommitError(); };
+    await expect(f.service.review(task.id)).rejects.toThrow("没有可核对的提交");
+    expect((await f.board()).tasks[0]?.status).toBe("failed");
+    await f.service.stop();
+
+    f.options.git.isMerged = async (_project, run) => run.branch === task.run?.branch;
+    const resumed = new TaskService(f.options);
+    try {
+      await resumed.tick();
+      expect((await resumed.board()).tasks[0]).toMatchObject({ status: "done", error: null, run: { error: null, summary: "验证结果" } });
+      expect(f.merges).toHaveLength(0);
+      expect(f.followups).toHaveLength(0);
+      await resumed.tick();
+      expect(f.starts.map((item) => item.title)).toEqual(["first", "second"]);
+    } finally { await resumed.stop(); }
+  }));
+
+  test.each(["completed turn", "opened review"])("records an external merge found on %s", (stage) => fixture(async (f) => {
+    const task = (await f.service.create({ title: "task", projectId: "one" })).tasks[0]!;
+    await enable(f.service);
+    if (stage === "opened review") await f.ready();
+    f.options.git.review = async () => { throw new TaskAlreadyMergedError(); };
+
+    if (stage === "opened review") {
+      await expect(f.service.review(task.id)).rejects.toThrow("任务提交已合入本地 develop");
+    } else {
+      await f.ready();
+    }
+    expect((await f.board()).tasks[0]).toMatchObject({ status: "done", error: null, run: { error: null, summary: "验证结果" } });
     expect(f.merges).toHaveLength(0);
   }));
 

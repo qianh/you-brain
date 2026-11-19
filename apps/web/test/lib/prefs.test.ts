@@ -140,6 +140,8 @@ describe("prefs", () => {
     expect(isPrefKey("knowledge-sidebar-w")).toBe(true);
     expect(isPrefKey("you-brain:knowledge:db-view:abc")).toBe(true);
     expect(isPrefKey("you-brain.deck.terminal-font")).toBe(true);
+    expect(isPrefKey("you-brain.quota-display")).toBe(true);
+    expect(isPrefKey("you-brain.deck.tty7-order")).toBe(true);
     expect(isPrefKey("you-brain.memory.x")).toBe(true);
     expect(isPrefKey("you-brain.boot-snapshot")).toBe(false);
     expect(isPrefKey("you-brain:knowledge:v1")).toBe(false);

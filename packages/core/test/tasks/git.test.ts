@@ -147,7 +147,26 @@ describe("TaskGit", () => {
   test("develop 前进但任务没有提交，仍然等待任务提交", async () => {
     const run = await task();
     commit(repo, "other.txt", "other work\n");
+    expect(await git.isMerged(project, run)).toBe(false);
     await expect(git.review(project, run)).rejects.toThrow("没有可核对的提交");
+  });
+
+  test("识别外部的非快进合并，保留 develop 原来的合并提交", async () => {
+    const run = await task();
+    const head = commit(run.worktreePath);
+    commit(repo, "other.txt", "other work\n");
+    expect(await git.isMerged(project, run)).toBe(false);
+    command(repo, ["merge", "--no-ff", "--no-edit", run.branch]);
+    const merged = command(repo, ["rev-parse", "develop"]);
+    expect(merged).not.toBe(head);
+    expect(await git.isMerged(project, run)).toBe(true);
+    await expect(git.review(project, run)).rejects.toThrow("任务提交已合入本地 develop");
+    await git.merge(project, { ...run, reviewSha: head }, head);
+    expect(command(repo, ["rev-parse", "develop"])).toBe(merged);
+
+    const next = commit(run.worktreePath, "task.txt", "unmerged changes\n");
+    expect(await git.isMerged(project, { ...run, reviewSha: head })).toBe(false);
+    expect((await git.review(project, run)).headSha).toBe(next);
   });
 
   test("develop 被移走或退回到任务起点之前，仍按任务起点核对", async () => {

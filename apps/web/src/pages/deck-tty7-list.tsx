@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type FormEvent } from "react";
 import type { DeckTty7SessionsResponse } from "@you-brain/core/http/types.js";
 
 import { Button, IconButton } from "../components/button.js";
@@ -7,7 +7,10 @@ import { InlineRename, type InlineRenameHandle } from "../components/inline-rena
 import { Toggle } from "../components/toggle.js";
 import { useDaemon } from "../daemon-context.js";
 import { prefs } from "../lib/prefs.js";
-import { baseName, sessionLabel, sessionTitle, type Session } from "./deck-tty7-sessions.js";
+import {
+  baseName, canMoveTty7Item, sessionLabel, sessionTitle, tty7GroupKey, tty7SessionKey, visibleTty7Groups,
+  type MoveTty7Item, type Session, type Tty7DropPlacement, type Tty7Order, type Tty7OrderTarget,
+} from "./deck-tty7-sessions.js";
 
 const HARNESS_KEY = "you-brain.deck.tty7-harness";
 const ACTIVE_ONLY_KEY = "you-brain.deck.tty7-active-only";
@@ -25,8 +28,14 @@ export const STATUS_LABEL = {
   idle: "deckTty7StatusIdle",
 } as const;
 
-/** 等你回复的排最前，其次是刚干完的；其余保持 tty7 的 tab 顺序。 */
-const STATUS_RANK: Record<string, number> = { waiting: 0, done: 1 };
+function dropPlacement(event: DragEvent<HTMLElement>): Tty7DropPlacement {
+  const { top, height } = event.currentTarget.getBoundingClientRect();
+  return event.clientY < top + height / 2 ? "before" : "after";
+}
+
+function sameTarget(left: Tty7OrderTarget, right: Tty7OrderTarget): boolean {
+  return left.group === right.group && left.session === right.session;
+}
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -78,8 +87,10 @@ export function readGroupColors(): Record<string, string> {
  * 会话列表：按项目分组，组可收起、可选色，支持筛选和「只看活跃」。
  * 右侧面板和整屏终端的下拉共用；compact 用于下拉（不带删除，更紧凑）。
  */
-export function DeckTty7SessionList({ sessions, filter, onFilterChange, onOpen, onRename, onRenameError, onDelete, onStart, compact = false, activePane = null, busy = false }: {
+export function DeckTty7SessionList({ sessions, order, onMove, filter, onFilterChange, onOpen, onRename, onRenameError, onDelete, onStart, compact = false, activePane = null, busy = false }: {
   sessions: readonly Session[];
+  order: Tty7Order;
+  onMove: MoveTty7Item;
   filter: string;
   onFilterChange: (value: string) => void;
   onOpen: (pane: number) => void;
@@ -103,46 +114,70 @@ export function DeckTty7SessionList({ sessions, filter, onFilterChange, onOpen, 
   const [colorPickerFor, setColorPickerFor] = useState<string | null>(null);
   /** 各行的改名句柄：铅笔按钮用它让该行进入编辑，不触发打开。 */
   const renamers = useRef(new Map<number, InlineRenameHandle>());
+  const dragSource = useRef<Tty7OrderTarget | null>(null);
+  const [drop, setDrop] = useState<{ target: Tty7OrderTarget; placement: Tty7DropPlacement } | null>(null);
 
-  const visible = useMemo(() => {
-    const needle = filter.trim().toLowerCase();
-    const ordered = sessions
-      .map((session, index) => ({ session, index }))
-      .sort((a, b) => (STATUS_RANK[a.session.status ?? ""] ?? 2) - (STATUS_RANK[b.session.status ?? ""] ?? 2) || a.index - b.index)
-      .map((item) => item.session);
-    // 默认只看活跃的：有 agent 状态上报、或当前没在 tty7 里休眠的会话。
-    const active = activeOnly
-      ? ordered.filter((session) => session.status !== null || !session.hibernated)
-      : ordered;
-    if (needle === "") return active;
-    return active.filter((session) =>
-      [session.tabLabel ?? "", session.task ?? "", session.agent ?? "", session.status ?? "", session.cwd, `%${session.pane}`].some((field) =>
-        field.toLowerCase().includes(needle),
-      ),
-    );
-  }, [sessions, filter, activeOnly]);
-  /** 按项目（cwd 目录名）分组；组内等待回复的在前。 */
-  const groups = useMemo(() => {
-    const map = new Map<string, Session[]>();
-    for (const session of visible) {
-      const label = session.cwd === "" ? t("deckTty7GroupOther") : baseName(session.cwd);
-      const list = map.get(label);
-      if (list === undefined) map.set(label, [session]);
-      else list.push(session);
-    }
-    const rank = (items: Session[]): number => Math.min(...items.map((item) => STATUS_RANK[item.status ?? ""] ?? 2));
-    return [...map.entries()].sort((a, b) => rank(a[1]) - rank(b[1]) || a[0].localeCompare(b[0]));
-  }, [visible, t]);
+  const groups = useMemo(() => visibleTty7Groups(sessions, order, filter, activeOnly), [sessions, order, filter, activeOnly]);
   // 项目运行状态不受搜索条件影响，收起分组后也保留提示。
   const workingCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const session of sessions) {
       if (session.status !== "working" || session.hibernated) continue;
-      const label = session.cwd === "" ? t("deckTty7GroupOther") : baseName(session.cwd);
-      counts.set(label, (counts.get(label) ?? 0) + 1);
+      const group = tty7GroupKey(session);
+      counts.set(group, (counts.get(group) ?? 0) + 1);
     }
     return counts;
-  }, [sessions, t]);
+  }, [sessions]);
+
+  const endDrag = (): void => {
+    dragSource.current = null;
+    setDrop(null);
+  };
+
+  const dragHandle = (item: Tty7OrderTarget, name: string) => (
+    <span
+      className="deck-tty7-grip"
+      draggable
+      title={t("deckTty7DragToReorder", { name })}
+      onDragStart={(event) => {
+        dragSource.current = item;
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("application/x-you-brain-tty7-order", "move");
+        const row = event.currentTarget.parentElement;
+        if (row !== null) {
+          const { left, top } = row.getBoundingClientRect();
+          event.dataTransfer.setDragImage(row, event.clientX - left, event.clientY - top);
+        }
+      }}
+      onDragEnd={endDrag}
+    >
+      <Icon name="grip" />
+    </span>
+  );
+
+  const marking = (item: Tty7OrderTarget) => drop !== null && sameTarget(drop.target, item) ? drop.placement : undefined;
+
+  const dropHandlers = (target: Tty7OrderTarget) => ({
+    onDragOver(event: DragEvent<HTMLElement>) {
+      const source = dragSource.current;
+      if (source === null || !canMoveTty7Item(source, target)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      const placement = dropPlacement(event);
+      setDrop((current) => current?.placement === placement && sameTarget(current.target, target) ? current : { target, placement });
+    },
+    onDragLeave(event: DragEvent<HTMLElement>) {
+      if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+      setDrop((current) => current !== null && sameTarget(current.target, target) ? null : current);
+    },
+    onDrop(event: DragEvent<HTMLElement>) {
+      const source = dragSource.current;
+      if (source === null || !canMoveTty7Item(source, target)) return;
+      event.preventDefault();
+      onMove(source, target, dropPlacement(event));
+      endDrag();
+    },
+  });
 
   const toggleGroup = (label: string): void => {
     setColorPickerFor(null);
@@ -165,12 +200,15 @@ export function DeckTty7SessionList({ sessions, filter, onFilterChange, onOpen, 
     });
   };
 
-  const row = (session: Session) => {
+  const row = (group: string, session: Session) => {
     const title = sessionTitle(session);
     const label = sessionLabel(session);
     const open = (): void => onOpen(session.pane);
+    const id = tty7SessionKey(session);
+    const item = { group, session: id };
     return (
-      <li key={session.pane} className="deck-tty7-item">
+      <li key={id} className="deck-tty7-item" data-drop={marking(item)} {...dropHandlers(item)}>
+        {dragHandle(item, title)}
         {/* 用 div 而不是 button：行内要放改名输入框，button 里不能放输入框。 */}
         <div
           role="button"
@@ -258,15 +296,18 @@ export function DeckTty7SessionList({ sessions, filter, onFilterChange, onOpen, 
         <span>{t("deckTty7ActiveOnly")}</span>
       </div>
       <ul className="deck-tty7-list">
-        {groups.map(([label, items]) => {
+        {groups.map(([group, items]) => {
+          const label = group === "" ? t("deckTty7GroupOther") : group;
           // 搜索时强制展开，免得目标会话被收起的组挡住。
           const isOpen = expanded.has(label) || filter.trim() !== "";
           const color = groupColors[label];
-          const workingCount = workingCounts.get(label) ?? 0;
+          const workingCount = workingCounts.get(group) ?? 0;
           const workingHint = workingCount > 0 ? t("deckTty7GroupWorking", { count: workingCount }) : undefined;
+          const item = { group };
           return (
-            <Fragment key={label}>
-              <li className="deck-tty7-group-head">
+            <li key={group} className="deck-tty7-group-item" data-drop={marking(item)}>
+              <div className="deck-tty7-group-head" {...dropHandlers(item)}>
+                {dragHandle(item, label)}
                 <button
                   type="button"
                   className={["deck-tty7-group", color === undefined ? "" : "with-color", workingCount > 0 ? "is-working" : ""].filter(Boolean).join(" ")}
@@ -303,9 +344,9 @@ export function DeckTty7SessionList({ sessions, filter, onFilterChange, onOpen, 
                     <Icon name="plus" />
                   </IconButton>
                 )}
-              </li>
+              </div>
               {colorPickerFor === label && (
-                <li className="deck-tty7-colors">
+                <div className="deck-tty7-colors">
                   {GROUP_PALETTE.map((swatch) => (
                     <button
                       key={swatch}
@@ -325,13 +366,13 @@ export function DeckTty7SessionList({ sessions, filter, onFilterChange, onOpen, 
                   >
                     ✕
                   </button>
-                </li>
+                </div>
               )}
-              {isOpen && items.map(row)}
-            </Fragment>
+              {isOpen && <ul className="deck-tty7-group-items">{items.map((session) => row(group, session))}</ul>}
+            </li>
           );
         })}
-        {visible.length === 0 && <li className="deck-tty7-empty">{t("deckTty7Empty")}</li>}
+        {groups.length === 0 && <li className="deck-tty7-empty">{t("deckTty7Empty")}</li>}
       </ul>
     </div>
   );

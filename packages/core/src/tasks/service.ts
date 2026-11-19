@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { TaskActionSchema, TaskCreateSchema, TaskUpdateSchema, type TaskState } from "./schema.js";
-import { TaskMergeBlockedError, TaskNoCommitError } from "./git.js";
+import { TaskAlreadyMergedError, TaskMergeBlockedError, TaskNoCommitError } from "./git.js";
 import { TaskStore } from "./store.js";
 import type {
   DevelopmentTask, TaskActionInput, TaskAutomationPort, TaskBoard, TaskCreateInput,
@@ -243,14 +243,15 @@ export class TaskService implements TaskHttpPort {
         await this.#save(task);
         return { task: structuredClone(task), ...result };
       } catch (error) {
-        await this.#fail(task, error);
+        if (error instanceof TaskAlreadyMergedError) await this.#complete(task);
+        else await this.#fail(task, error);
         throw new TaskError(409, message(error));
       }
     });
   }
 
   async #advance(project: TaskProject | null, task: DevelopmentTask): Promise<void> {
-    if (task.status === "failed" || task.status === "review") await this.#resume(task);
+    if (task.status === "failed" || task.status === "review") await this.#resume(project, task);
     else if (task.status === "preparing") await this.#dispatch(project, task);
     else if (task.status === "planning" || task.status === "running") await this.#inspect(project, task);
     else if (project && task.status === "merging") await this.#merge(project, task);
@@ -302,6 +303,11 @@ export class TaskService implements TaskHttpPort {
     if (project && task.run.branch !== null) {
       try { review = await this.options.git.review(project, task.run); }
       catch (error) {
+        if (error instanceof TaskAlreadyMergedError) {
+          task.run.summary = result.summary;
+          await this.#complete(task);
+          return;
+        }
         if (!(error instanceof TaskNoCommitError)) throw error;
         // 这一轮停下但还没提交：AI 在等用户在 T3 里确认或回答，按“需求确认”继续等，不报错。
         if (task.status !== "planning") {
@@ -322,11 +328,17 @@ export class TaskService implements TaskHttpPort {
    * 标成“需要处理”或“待人工核对”后，用户直接在 T3 里回复让它继续干：会话又跑起来就回到进行中，
    * 不必再点重试；之前核对的版本作废，等这一轮做完重新核对。
    */
-  async #resume(task: DevelopmentTask): Promise<void> {
+  async #resume(project: TaskProject | null, task: DevelopmentTask): Promise<void> {
     if (!task.run?.threadId || task.run.pendingFeedback) return;
     let live: Awaited<ReturnType<TaskAutomationPort["inspect"]>>;
     try { live = await this.options.automation.inspect(task.run.threadId, task.manual); }
     catch { return; }
+    if (live.state === "ready" && project && task.run.branch !== null &&
+      await this.options.git.isMerged(project, task.run).catch(() => false)) {
+      if (live.summary) task.run.summary = live.summary;
+      await this.#complete(task);
+      return;
+    }
     if (live.state !== "planning" && live.state !== "running") return;
     task.status = live.state;
     task.error = null;
@@ -349,9 +361,13 @@ export class TaskService implements TaskHttpPort {
     const live = await this.options.automation.inspect(task.run.threadId, task.manual);
     if (live.state !== "ready") throw new Error("T3 会话在核对后发生变化，请完成处理并重新核对。");
     await this.options.git.merge(project, task.run, task.run.reviewSha);
+    await this.#complete(task);
+  }
+
+  async #complete(task: DevelopmentTask): Promise<void> {
     task.status = "done";
     task.error = null;
-    task.run.error = null;
+    if (task.run) task.run.error = null;
     await this.#save(task);
   }
 

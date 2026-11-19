@@ -107,6 +107,8 @@ export function DeckTty7Panel({ sessions: shared, onClose, onOpen, activePane, o
       {view?.available === true && (
         <DeckTty7SessionList
           sessions={sessions}
+          order={shared.order}
+          onMove={shared.move}
           filter={filter}
           onFilterChange={setFilter}
           onOpen={(pane) => {

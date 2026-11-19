@@ -107,6 +107,7 @@ export interface TaskHttpPort {
 
 export interface TaskGitPort {
   prepare(project: TaskProject, taskId: string): Promise<Pick<TaskWorktreeRun, "branch" | "worktreePath" | "baseSha">>;
+  isMerged(project: TaskProject, run: TaskWorktreeRun): Promise<boolean>;
   review(project: TaskProject, run: TaskWorktreeRun): Promise<Omit<TaskReview, "task">>;
   merge(project: TaskProject, run: TaskWorktreeRun, approvedSha: string): Promise<void>;
 }

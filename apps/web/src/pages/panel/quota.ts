@@ -1,21 +1,37 @@
-import type { QuotaAccount, QuotaTokenUsage, QuotaView } from "@you-brain/core/http/types.js";
+import type { QuotaTokenUsage, QuotaView } from "@you-brain/core/http/types.js";
 
 import type { Language } from "../../lib/format.js";
 
 /**
- * magpie's agent id → the session sources U-Brain captures it under. Only agents listed
- * here can be shown: without a capture source there is no way to tell whether the
- * subscription is in use. Codex sessions also run inside T3 Code (`t3-code`).
+ * magpie's agent id → label and capture sources used for the default selection.
  */
-export const QUOTA_AGENTS: ReadonlyArray<{ agent: string; sources: readonly string[]; label: string }> = [
+export const QUOTA_AGENTS = [
   { agent: "claude", sources: ["claude-code"], label: "Claude Code" },
   { agent: "codex", sources: ["codex", "t3-code"], label: "Codex" },
+  { agent: "cursor", sources: ["cursor"], label: "Cursor" },
   { agent: "grok", sources: ["grok-build"], label: "Grok" },
   { agent: "zcode", sources: ["zcode"], label: "ZCode" },
-];
+] as const;
+
+export type QuotaAgent = (typeof QUOTA_AGENTS)[number]["agent"];
+export type QuotaCaptures = ReadonlyArray<{ source: string; lastCaptureAt: string | null }> | undefined;
 
 /** A source counts as in use when it captured a session this recently. */
 export const QUOTA_RECENT_MS = 7 * 24 * 60 * 60_000;
+
+export function quotaSelection(stored: string | null, captures: QuotaCaptures, nowMs: number): Set<QuotaAgent> {
+  if (stored !== null) {
+    try {
+      const value: unknown = JSON.parse(stored);
+      if (Array.isArray(value)) return new Set(QUOTA_AGENTS.filter(({ agent }) => value.includes(agent)).map(({ agent }) => agent));
+    } catch {
+      return quotaSelection(null, captures, nowMs);
+    }
+  }
+  const recent = new Set(captures?.filter(({ lastCaptureAt }) => lastCaptureAt !== null &&
+    nowMs - Date.parse(lastCaptureAt) <= QUOTA_RECENT_MS).map(({ source }) => source));
+  return new Set(QUOTA_AGENTS.filter(({ sources }) => sources.some((source) => recent.has(source))).map(({ agent }) => agent));
+}
 
 export type QuotaTone = "ok" | "warn" | "danger";
 
@@ -90,28 +106,20 @@ export function resetIn(resetsAt: string | null, nowMs: number, language: Langua
 }
 
 /**
- * Which subscriptions the panel shows, in a fixed order: known agents whose source
- * captured a session in the last 7 days, using the account magpie marks active.
- * An agent with no subscription but mapped token usage (Codex rides the dzg gateway)
- * still gets a card, showing what its traffic cost in tokens. Without capture data
- * nothing is shown.
+ * Show selected agents in a fixed order, using the account magpie marks active.
+ * An agent without a subscription can still show measured gateway token usage.
  */
 export function quotaCards(
   quota: Pick<QuotaView, "accounts" | "tokens"> | null,
-  captures: ReadonlyArray<{ source: string; lastCaptureAt: string | null }> | undefined,
+  selected: ReadonlySet<QuotaAgent>,
   nowMs: number,
   language: Language,
 ): QuotaCardView[] {
   const accounts = quota?.accounts ?? [];
   const tokens = quota?.tokens ?? {};
   const cards: QuotaCardView[] = [];
-  for (const { agent, sources, label } of QUOTA_AGENTS) {
-    const active = sources.some((source) => {
-      const last = captures?.find((item) => item.source === source)?.lastCaptureAt;
-      const at = last ? Date.parse(last) : Number.NaN;
-      return !Number.isNaN(at) && nowMs - at <= QUOTA_RECENT_MS;
-    });
-    if (!active) continue;
+  for (const { agent, label } of QUOTA_AGENTS) {
+    if (!selected.has(agent)) continue;
     const account = accounts.find((item) => item.agent === agent && item.active && item.windows.length > 0);
     const agentTokens = tokens[agent];
     if (account === undefined && agentTokens === undefined) continue;

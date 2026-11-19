@@ -3,6 +3,7 @@ import type { QuotaView } from "@you-brain/core/http/types.js";
 
 import { useDaemon } from "../../daemon-context.js";
 import { quotaCards, type QuotaCardView } from "./quota.js";
+import { useQuotaSelection } from "./use-quota-selection.js";
 
 /**
  * Polls `/api/quota` and turns it into the cards to show. The daemon's first read takes
@@ -12,6 +13,7 @@ export function useQuota(): { quota: QuotaView | null; cards: QuotaCardView[]; n
   const { client, status, language } = useDaemon();
   const [quota, setQuota] = useState<QuotaView | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const { selected } = useQuotaSelection(status?.captures, nowMs);
   const reload = useCallback(async (): Promise<void> => {
     try {
       setQuota(await client.quota());
@@ -27,8 +29,8 @@ export function useQuota(): { quota: QuotaView | null; cards: QuotaCardView[]; n
     return () => clearInterval(timer);
   }, [reload, loaded]);
   const cards = useMemo(
-    () => quotaCards(quota, status?.captures, nowMs, language),
-    [quota, status?.captures, nowMs, language],
+    () => quotaCards(quota, selected, nowMs, language),
+    [quota, selected, nowMs, language],
   );
   return { quota, cards, nowMs, reload };
 }

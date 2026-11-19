@@ -247,6 +247,8 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
           <DeckTty7SessionList
             compact
             sessions={sessions}
+            order={shared.order}
+            onMove={shared.move}
             filter={filter}
             onFilterChange={setFilter}
             onOpen={(pane) => {

@@ -51,6 +51,8 @@ const PREF_KEYS: ReadonlySet<string> = new Set([
   "you-brain.deck.tty7-active-only",
   "you-brain.deck.tty7-expanded",
   "you-brain.deck.tty7-group-colors",
+  "you-brain.deck.tty7-order",
+  "you-brain.quota-display",
   "you-brain:knowledge:collapsed:v1",
   "you-brain:knowledge:open-toggles:v1",
   "knowledge-sidebar-w",

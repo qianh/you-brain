@@ -90,6 +90,23 @@
 .settings-row.settings-control-toggle .row-trail,
 .settings-row.settings-control-wide .row-trail { width: auto; }
 
+.settings-quota-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-3);
+  max-width: 100%;
+  font-size: var(--fs-sm);
+}
+.settings-quota-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-height: var(--h-ctl-sm);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.settings-quota-options input { margin: 0; accent-color: var(--accent); }
+
 .settings-google {
   display: inline-flex;
   align-items: center;

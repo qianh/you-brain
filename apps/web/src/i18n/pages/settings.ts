@@ -1,5 +1,6 @@
 export const zh = {
-  settingsLead: "除外观与语言外，改动先留在草稿里，确认后再写入本机配置。",
+  settingsLead: "外观、语言和额度展示即时生效，其他改动需保存。",
+  settingsQuotaDisplay: "额度展示",
   navCapture: "来源与采集",
   navRefine: "提炼与话题",
   navConsolidation: "沉淀与提醒",
@@ -118,7 +119,8 @@ export const zh = {
 } as const;
 
 export const en = {
-  settingsLead: "Changes stay in a draft until you save. Appearance and language apply immediately.",
+  settingsLead: "Appearance, language, and usage display apply immediately. Other changes need to be saved.",
+  settingsQuotaDisplay: "Usage display",
   navCapture: "Sources and capture",
   navRefine: "Refine and topics",
   navConsolidation: "Consolidation and reminders",

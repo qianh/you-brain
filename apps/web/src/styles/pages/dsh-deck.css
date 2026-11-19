@@ -126,8 +126,35 @@
   overflow-y: auto;
 }
 
-.deck-tty7-item { display: flex; align-items: center; gap: 2px; }
+.deck-tty7-item { position: relative; display: flex; align-items: center; gap: 2px; }
 .deck-tty7-item .deck-tty7-row { flex: 1; min-width: 0; }
+.deck-tty7-grip {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 26px;
+  border-radius: 4px;
+  color: var(--text-3);
+  cursor: grab;
+  user-select: none;
+}
+.deck-tty7-grip:hover { color: var(--text); background: var(--hover); }
+.deck-tty7-grip:active { cursor: grabbing; }
+.deck-tty7-grip svg { pointer-events: none; }
+.deck-tty7-list [data-drop="before"]::before,
+.deck-tty7-list [data-drop="after"]::after {
+  content: "";
+  position: absolute;
+  z-index: 1;
+  inset-inline: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.deck-tty7-list [data-drop="before"]::before { top: 0; }
+.deck-tty7-list [data-drop="after"]::after { bottom: 0; }
 .deck-tty7-rename { flex: none; color: var(--text-3); }
 .deck-tty7-rename:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
 .deck-tty7-row .inline-rename-input { width: 100%; background: var(--surface); color: var(--text); }
@@ -384,8 +411,10 @@
 
 /* 项目分组头：底色胶囊 + 箭头 + 会话数，和会话行拉开层次；点击展开/收起。
    配了颜色的组用色点 + color-mix 底色，不同项目一眼区分。 */
-.deck-tty7-group-head { display: flex; align-items: center; gap: 4px; margin-top: 8px; }
-.deck-tty7-list > .deck-tty7-group-head:first-child { margin-top: 0; }
+.deck-tty7-group-item { position: relative; }
+.deck-tty7-group-item + .deck-tty7-group-item { margin-top: 8px; }
+.deck-tty7-group-head { display: flex; align-items: center; gap: 4px; }
+.deck-tty7-group-items { margin: 0; padding: 0; list-style: none; }
 .deck-tty7-group-new { color: var(--text-3); }
 .deck-tty7-group-new:hover:not(:disabled) { color: var(--accent); background: var(--accent-soft); }
 .deck-tty7-group {

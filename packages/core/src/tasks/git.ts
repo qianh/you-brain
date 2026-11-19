@@ -31,6 +31,13 @@ export class TaskNoCommitError extends Error {
 
 export class TaskMergeBlockedError extends Error {}
 
+export class TaskAlreadyMergedError extends Error {
+  constructor() {
+    super("任务提交已合入本地 develop");
+    this.name = "TaskAlreadyMergedError";
+  }
+}
+
 export class TaskGit implements TaskGitPort {
   readonly #options: { dataDir: string; env?: NodeJS.ProcessEnv };
   readonly #queues = new Map<string, Promise<unknown>>();
@@ -85,6 +92,18 @@ export class TaskGit implements TaskGitPort {
     });
   }
 
+  async isMerged(project: TaskProject, run: TaskWorktreeRun): Promise<boolean> {
+    this.#assertProject(project, run);
+    const repo = await this.#repo(project);
+    return this.#serialize(repo, async () => {
+      const developRef = "refs/heads/develop";
+      if (!(await this.#hasRef(repo, developRef))) return false;
+      const headSha = await this.#sha(repo, `refs/heads/${run.branch}`);
+      if (headSha === run.baseSha || !(await this.#isAncestor(repo, headSha, developRef))) return false;
+      return (await this.#verifyRun(repo, run)) === headSha && await this.#isAncestor(repo, headSha, developRef);
+    });
+  }
+
   async review(project: TaskProject, run: TaskWorktreeRun): Promise<Omit<TaskReview, "task">> {
     this.#assertProject(project, run);
     const repo = await this.#repo(project);
@@ -92,7 +111,7 @@ export class TaskGit implements TaskGitPort {
       const headSha = await this.#verifyRun(repo, run);
       if (run.baseSha === headSha) throw new TaskNoCommitError();
       const baseSha = await this.#reviewBase(repo, run.baseSha, headSha);
-      if (baseSha === headSha) throw new TaskNoCommitError();
+      if (baseSha === headSha) throw new TaskAlreadyMergedError();
       await this.#safeChanges(repo, baseSha, headSha);
       const stat = (await this.#git(repo, ["diff", "--no-ext-diff", "--no-textconv", "--stat", baseSha, headSha, "--"])).text;
       const diff = await this.#git(repo, ["diff", "--no-ext-diff", "--no-textconv", "--no-color", baseSha, headSha, "--"], { limit: DIFF_LIMIT });
@@ -114,6 +133,7 @@ export class TaskGit implements TaskGitPort {
       // 崩溃可能发生在 Git 成功后、队列写回前。相同提交可以安全补记完成。
       if (develop === approvedSha) return;
       if (!(await this.#isAncestor(repo, develop, approvedSha))) {
+        if (approvedSha !== run.baseSha && await this.#isAncestor(repo, approvedSha, develop)) return;
         throw new TaskMergeBlockedError("任务分支尚未包含最新的 develop。请在 T3 中将本地 develop 同步到任务分支，再重新核对。");
       }
       if (!(await this.#isAncestor(repo, run.baseSha, develop))) {

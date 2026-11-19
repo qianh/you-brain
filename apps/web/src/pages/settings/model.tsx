@@ -11,6 +11,8 @@ import { useDaemon } from "../../daemon-context.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { providerLabel, providerNeedsKey, LLM_PROVIDER_IDS } from "../../lib/format.js";
 import { ProviderTile } from "../../components/tile.js";
+import { QUOTA_AGENTS } from "../panel/quota.js";
+import { useQuotaSelection } from "../panel/use-quota-selection.js";
 import {
   cliCommand,
   cliProbe,
@@ -62,6 +64,7 @@ export function ModelSection({
   onStored: (provider: string) => void;
 }) {
   const { t, language, client, status } = useDaemon();
+  const { selected, setChecked } = useQuotaSelection(status?.captures);
   const provider = draft.llm.provider;
   const cli = isCliProvider(provider);
   const magpie = provider === "magpie";
@@ -208,6 +211,16 @@ export function ModelSection({
           </SettingRow>
         </>
       )}
+      <SettingRow title={t("settingsQuotaDisplay")} control="wide">
+        <span className="settings-quota-options" role="group" aria-label={t("settingsQuotaDisplay")}>
+          {QUOTA_AGENTS.map(({ agent, label }) => (
+            <label key={agent}>
+              <input type="checkbox" checked={selected.has(agent)} onChange={(event) => setChecked(agent, event.target.checked)} />
+              {label}
+            </label>
+          ))}
+        </span>
+      </SettingRow>
       <div className="settings-actions">
         <Button
           loading={testing}
