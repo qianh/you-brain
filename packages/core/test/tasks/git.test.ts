@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
 import { TaskGit } from "../../src/tasks/git.js";
-import type { TaskProject, TaskRun } from "../../src/tasks/types.js";
+import type { TaskProject, TaskWorktreeRun } from "../../src/tasks/types.js";
 
 let dir: string;
 let repo: string;
@@ -25,7 +25,7 @@ function commit(cwd: string, name = "task.txt", text = "implemented\n"): string 
   return command(cwd, ["rev-parse", "HEAD"]);
 }
 
-async function task(id = "one"): Promise<TaskRun> {
+async function task(id = "one"): Promise<TaskWorktreeRun> {
   return { ...await git.prepare(project, id), projectCwd: project.cwd, threadId: null, threadUrl: null, reviewSha: null, summary: "", error: null };
 }
 

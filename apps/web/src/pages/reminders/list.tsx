@@ -191,13 +191,14 @@ function DigestCard({ reminder, busy, locked, t, onAction, loadDetail, summary }
       {suggestions.length > 0 ? (
         <span className="digest-follow">
           <span className="digest-label">{t("digestFollow")}</span>
-          <span className="digest-chips">
-            {suggestions.map((name) => (
-              <span key={name} className="digest-chip" title={name}>
-                {name}
-              </span>
+          <ol className="digest-follow-list">
+            {suggestions.map((name, index) => (
+              <li key={name} className="digest-follow-item" title={name}>
+                <span className="digest-follow-rank">{index + 1}</span>
+                <span className="digest-follow-name">{name}</span>
+              </li>
             ))}
-          </span>
+          </ol>
         </span>
       ) : null}
       {detailOpen && detail ? (

@@ -3,7 +3,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { access } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, join } from "node:path";
+import { basename, delimiter, isAbsolute, join, resolve } from "node:path";
 
 import type { TaskAutomationPort } from "../../tasks/types.js";
 import { normalizeT3Url } from "./index.js";
@@ -35,6 +35,7 @@ interface T3ThreadState {
   latestRunId: string | null;
   pendingRequestCount: number;
   archived: boolean;
+  interactionMode?: "plan" | "default";
   worktreePath: string | null;
   itemCount: number;
 }
@@ -146,26 +147,27 @@ export class T3Automation implements TaskAutomationPort {
       throw new T3AutomationError("INVALID_INPUT", "任务必须有工作目录、派发编号和任务说明。");
     }
     const url = await this.#url();
-    const project = (await this.#projects()).find((item) => item.id === input.projectId);
+    const projects = await this.#projects();
+    const project = input.projectId === null
+      ? await this.#directoryProject(input.cwd, projects)
+      : projects.find((item) => item.id === input.projectId);
     if (!project) throw new T3AutomationError("INVALID_INPUT", "T3 中已找不到这个项目，请重新选择项目。");
 
-    // T3 只在同一个 MCP 凭据内按 clientRequestId 去重，daemon 重启后凭据会换新；
-    // 先按标题和任务工作树找回已建的会话，避免重复派发。
-    const recovered = await this.#launched(project.id, input.title, input.cwd);
+    const launchReference = input.branch === null ? `U-Brain TODO 派发编号：${input.requestId}\n\n` : null;
+    const recovered = await this.#launched(project.id, input.title, input.branch === null ? null : input.cwd, launchReference);
     if (recovered) return { threadId: recovered, threadUrl: await this.#threadUrl(url, recovered) };
 
     const history = await this.#threads(project.id);
     const latest = history.find((thread) => text(thread.providerInstanceId) && text(thread.model));
     const selection = model(project.defaultModelSelection) ? project.defaultModelSelection
       : latest ? { instanceId: latest.providerInstanceId, model: latest.model } : undefined;
-    if (!selection) throw new T3AutomationError("INVALID_INPUT", "请先在 T3 中为这个项目选择模型或创建一次会话，再启动 TODO。");
-    // 沿用用户在 T3 已选择的权限；无历史配置时使用自动审批模式，不提升为 full-access。
-    const mode = runtimeMode(history.find((thread) => runtimeMode(thread.runtimeMode))?.runtimeMode) ?? "auto";
+    if (!selection && !input.plan) throw new T3AutomationError("INVALID_INPUT", "请先在 T3 中为这个项目选择模型或创建一次会话，再启动 TODO。");
+    const mode = runtimeMode(history.find((thread) => runtimeMode(thread.runtimeMode))?.runtimeMode) ?? (input.branch === null ? "approval-required" : "auto");
 
     const launched = await this.#call("t3_thread_launch", {
-      projectId: project.id, title: input.title, message: input.prompt,
-      modelSelection: selection, runtimeMode: mode, interactionMode: "default",
-      workspaceStrategy: { type: "existing_worktree", worktreePath: input.cwd, branch: input.branch },
+      projectId: project.id, title: input.title, message: `${launchReference ?? ""}${input.prompt}`,
+      ...(selection ? { modelSelection: selection } : {}), runtimeMode: mode, interactionMode: input.plan ? "plan" : "default",
+      workspaceStrategy: input.branch === null ? { type: "root" } : { type: "existing_worktree", worktreePath: input.cwd, branch: input.branch },
       clientRequestId: `u-brain-todo-start-${input.requestId}`,
     }, 60_000);
     if (!object(launched) || !text(launched.threadId)) invalidResponse();
@@ -185,16 +187,21 @@ export class T3Automation implements TaskAutomationPort {
     await this.#call("t3_thread_send", { threadId, message: prompt, mode: "queue", clientRequestId: `u-brain-todo-feedback-${commandId}` });
   }
 
-  async inspect(threadId: string): Promise<Awaited<ReturnType<TaskAutomationPort["inspect"]>>> {
-    let thread: T3ThreadState;
-    try { thread = (await this.#read(threadId, { limit: 1, runLimit: 1 })).thread; }
+  async inspect(threadId: string, requirementsFirst = false): Promise<Awaited<ReturnType<TaskAutomationPort["inspect"]>>> {
+    let initial: T3ThreadRead;
+    try { initial = await this.#read(threadId, { limit: requirementsFirst ? 8 : 1, runLimit: 1 }); }
     catch (error) {
       if (error instanceof T3AutomationError && error.code === "NOT_FOUND") return { state: "failed", summary: "", error: "T3 会话已删除或归档，请人工检查。" };
       throw error;
     }
+    const { thread } = initial;
     if (thread.archived) return { state: "failed", summary: "", error: "T3 会话已删除或归档，请人工检查。" };
     if (thread.status === "failed") return { state: "failed", summary: "", error: "T3 任务执行失败，请在 T3 中检查。" };
     if (STOPPED_STATUSES.has(thread.status)) return { state: "failed", summary: "", error: "T3 任务已中断，请在 T3 中检查后重试。" };
+    if (requirementsFirst) {
+      const firstRun = initial.items.find((item) => item.type === "user_message")?.runId;
+      if (thread.interactionMode !== "default" || !firstRun || firstRun === thread.latestRunId) return { state: "planning", summary: "" };
+    }
     if (thread.status !== "completed" || thread.activeRunId || thread.pendingRequestCount > 0) return { state: "running", summary: "" };
 
     const tail = await this.#tail(thread);
@@ -235,6 +242,13 @@ export class T3Automation implements TaskAutomationPort {
     return projects;
   }
 
+  async #directoryProject(cwd: string, projects: T3Project[]): Promise<T3Project> {
+    const existing = projects.find((project) => resolve(project.workspaceRoot) === resolve(cwd));
+    if (existing) return existing;
+    const created = await this.createProject({ name: basename(cwd), cwd });
+    return { id: created.id, title: created.name, workspaceRoot: created.cwd };
+  }
+
   /** 项目最近的会话，新的在前；只取模型与权限，不读会话内容。 */
   async #threads(projectId: string, titleContains?: string): Promise<T3ThreadSummary[]> {
     const value = await this.#call("t3_thread_list", { projectId, limit: 20, ...(titleContains ? { titleContains } : {}) });
@@ -242,10 +256,11 @@ export class T3Automation implements TaskAutomationPort {
     return value.threads;
   }
 
-  async #launched(projectId: string, title: string, cwd: string): Promise<string | null> {
+  async #launched(projectId: string, title: string, worktreePath: string | null, launchReference: string | null): Promise<string | null> {
     for (const candidate of (await this.#threads(projectId, title)).filter((thread) => thread.title === title)) {
-      const { thread } = await this.#read(candidate.threadId, { limit: 1, runLimit: 1 });
-      if (!thread.archived && thread.worktreePath === cwd) return thread.threadId;
+      const { thread, items } = await this.#read(candidate.threadId, { limit: launchReference ? 8 : 1, runLimit: 1 });
+      if (!thread.archived && thread.worktreePath === worktreePath &&
+        (!launchReference || items.find((item) => item.type === "user_message")?.text?.startsWith(launchReference))) return thread.threadId;
     }
     return null;
   }

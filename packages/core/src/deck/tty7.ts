@@ -266,6 +266,7 @@ interface RawTab { id: string; name: string | null; label: string | null; agent:
 
 /** `tty7 procs` 里一个进程（只取判断是否在执行用得到的字段）。 */
 interface RawProc { pid: number; depth: number; foreground: boolean; cpu_ns: number }
+interface RawPort { pid: number }
 
 export type Tty7ActivityValue = Tty7AgentStatus | { status: Tty7AgentStatus; message?: string | null } | null;
 
@@ -382,12 +383,23 @@ export class Tty7 {
   }
 
   /** 一个会话的进程树，用来判断它是不是在执行。 */
-  async procs(pane: number): Promise<{ atPrompt: boolean; procs: Array<{ pid: number; depth: number; foreground: boolean; cpuNs: number }> }> {
+  async procs(pane: number): Promise<{
+    atPrompt: boolean;
+    procs: Array<{ pid: number; depth: number; foreground: boolean; cpuNs: number; server: boolean }>;
+  }> {
     const out = await this.#run(["procs", assertPane(pane), "--json"]);
-    const raw = parse<{ procs: RawProc[]; context?: { at_prompt?: boolean } | null }>(out);
+    const raw = parse<{ procs: RawProc[]; ports?: RawPort[] | null; context?: { at_prompt?: boolean } | null }>(out);
+    // 监听端口的进程是会话里跑着的服务（开发服务器、后端应用），活动判断要把它和 AI CLI 本身分开。
+    const servers = new Set((raw.ports ?? []).map((port) => port.pid));
     return {
       atPrompt: raw.context?.at_prompt === true,
-      procs: raw.procs.map((proc) => ({ pid: proc.pid, depth: proc.depth, foreground: proc.foreground, cpuNs: proc.cpu_ns })),
+      procs: raw.procs.map((proc) => ({
+        pid: proc.pid,
+        depth: proc.depth,
+        foreground: proc.foreground,
+        cpuNs: proc.cpu_ns,
+        server: servers.has(proc.pid),
+      })),
     };
   }
 

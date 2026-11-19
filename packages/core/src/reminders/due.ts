@@ -63,6 +63,8 @@ export interface ComputeDueInput {
   now: string;
   timeZoneOffsetMinutes: number;
   mergeLines?: readonly { fromName: string; intoName: string; reason: string }[];
+  /** 当天早报已发过也按当前数据重算一份(同一 id 再发,折叠时覆盖正文)。 */
+  regenerateMorningDigest?: boolean;
 }
 
 interface RankedTopic {
@@ -123,7 +125,7 @@ export function computeDueReminders(input: ComputeDueInput): ReminderIssuedData[
 
   if (timeReached(parts, input.morningDigestTime)) {
     const morningId = `morning:${localDateKey(parts)}`;
-    if (!existing.has(morningId)) {
+    if (input.regenerateMorningDigest === true || !existing.has(morningId)) {
       due.push({
         reminderId: morningId,
         kind: REMINDER_KIND.morningDigest,
@@ -240,6 +242,9 @@ function markOrder(kind: "session" | "reset" | "mute" | "ignore"): number {
   }
 }
 
+/** 早报「建议跟进」只列优先级最高的几个话题。 */
+const DIGEST_SUGGESTION_LIMIT = 5;
+
 function morningBody(
   input: ComputeDueInput,
   topics: readonly ZonedTopic[],
@@ -257,7 +262,7 @@ function morningBody(
     .map((item) => item.text);
   const openTodoCount = input.book.todos.filter((todo) => todo.status === "open").length;
   const suggestions = rankSuggestions(topics, openTodos, nowMs)
-    .slice(0, 3)
+    .slice(0, DIGEST_SUGGESTION_LIMIT)
     .map((topic) => topic.name);
   return digestText({ conclusions, openTodoCount, suggestions });
 }

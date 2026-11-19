@@ -9,6 +9,8 @@ import type { Tty7AgentStatus, Tty7SessionsView } from "./tty7.js";
  *   若前台进程 CPU 连续静默且屏幕末尾出现确认/密码/输入提示（如 `[y/N]`、`Password:`、`继续吗？`），判为 `waiting`。
  * - AI CLI（识别出 agent）：它停在输入框时也一直在前台，所以改看进程树的 CPU 时间有没有在涨；
  *   停涨超过 QUIET_MS 才算停下（模型思考、等网络时 CPU 会短暂不涨），此时若屏幕末尾是交互提问则给 `waiting`，否则给 `done`。
+ *   监听端口的服务进程（AI CLI 起的开发服务器，或 AI CLI 退出后会话里留下的后端应用）不计入：
+ *   服务处理请求、打日志时 CPU 一阵一阵地涨，算进来会被当成 AI 跑完了一轮，反复提醒。
  * - 有 hooks 状态的会话不在这里判断（hooks 更准，自带状态说明）。
  *
  * 产出的状态有 working、waiting 和 done：
@@ -92,6 +94,8 @@ export interface ActivityProc {
   depth: number;
   foreground: boolean;
   cpuNs: number;
+  /** 监听着端口的服务进程；AI CLI 的活动判断不计它的 CPU。 */
+  server?: boolean;
 }
 
 export interface ActivityInput {
@@ -140,7 +144,10 @@ export class ActivityTracker {
     const children = input.procs.filter((proc) => proc.depth > 0);
     let delta = 0;
     if (state.initialized) {
-      for (const proc of children) delta += Math.max(0, proc.cpuNs - (state.cpu.get(proc.pid) ?? 0));
+      for (const proc of children) {
+        if (input.agent && proc.server === true) continue;
+        delta += Math.max(0, proc.cpuNs - (state.cpu.get(proc.pid) ?? 0));
+      }
     }
     const cpuActive = delta >= CPU_ACTIVE_NS;
     const raw = input.agent ? cpuActive : !input.atPrompt && children.some((proc) => proc.foreground);

@@ -91,6 +91,7 @@ export type {
   SearchResponse,
   StatusResponse,
   SyncActionResult,
+  MorningDigestRegenerateResult,
   TodayResponse,
   TodaySession,
   TodoActionBody,

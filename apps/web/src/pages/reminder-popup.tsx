@@ -26,7 +26,7 @@ function formatIssuedTime(iso: string): string {
 /**
  * 置顶提醒弹框（桌面壳的独立小窗，路由 /reminder-popup）：
  * 统一承载「聊到时记忆提醒」与「tty7 终端会话提醒（等你回复 / 已完成）」。
- * 页面轮询待处理队列，支持查看终端屏幕尾部快照、直接输入回车发往原终端、一键跳转打开终端，
+ * 页面轮询待处理队列；终端提醒只给一句话，详情去原终端看，也可直接输入回车发往原终端，
  * 或将记忆提醒加入 TODO / 回复 / 确认 / 忽略；队列清空后自动收起。
  */
 export function ReminderPopupPage() {
@@ -243,7 +243,8 @@ export function ReminderPopupPage() {
       setBusy(action);
       setError(null);
       try {
-        await client.deckNoticeDismiss({ seq: notice.seq });
+        // 忽略 = 这个会话之后不再提醒（直到会话关闭）；知道了 = 只关这一条。
+        await client.deckNoticeDismiss(action === "ignore" ? { seq: notice.seq, mute: true } : { seq: notice.seq });
         await settle(action);
       } catch (caught) {
         setError(caught instanceof Error && caught.message !== "" ? caught.message : t("actionFailed"));
@@ -346,7 +347,10 @@ export function ReminderPopupPage() {
                 {issuedClock ? <time className="popup-time">{issuedClock}</time> : null}
               </span>
             </div>
-            <p className="popup-text">
+            <p
+              className="popup-text popup-term-line"
+              title={current.notice.body !== "" ? current.notice.body : current.notice.title}
+            >
               {current.notice.body !== "" ? current.notice.body : current.notice.title}
             </p>
           </section>

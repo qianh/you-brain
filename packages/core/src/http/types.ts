@@ -583,6 +583,12 @@ export interface SyncActionResult {
   at: string;
 }
 
+/** 重新生成今天的早报:沿用原 id,返回新正文。 */
+export interface MorningDigestRegenerateResult {
+  reminderId: string;
+  text: string;
+}
+
 export const ConsolidateActionBodySchema = z.object({
   force: z.boolean().optional(),
 });
@@ -1245,11 +1251,12 @@ export const DeckTty7RenameBodySchema = z
 /** 网页正在整屏看哪个会话；null 表示没在看。 */
 export const DeckTty7ViewingBodySchema = z.object({ pane: z.number().int().nonnegative().nullable() }).strict();
 
-/** 关闭一条终端会话提醒（按序号或按会话编号）。 */
+/** 关闭一条终端会话提醒（按序号或按会话编号）；mute=true 表示忽略，这个会话之后不再提醒。 */
 export const DeckNoticeDismissBodySchema = z
   .object({
     seq: z.number().int().positive().optional(),
     pane: z.number().int().nonnegative().optional(),
+    mute: z.boolean().optional(),
   })
   .strict()
   .refine((body) => body.seq !== undefined || body.pane !== undefined, {

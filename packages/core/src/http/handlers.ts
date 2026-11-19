@@ -621,6 +621,9 @@ export async function handleApi(
     return method(request, "POST", () => reminderReply(request, context));
   }
   if (path === "/api/actions/sync") return method(request, "POST", () => sync(context));
+  if (path === "/api/actions/morning-digest") {
+    return method(request, "POST", () => regenerateMorningDigest(context));
+  }
   if (path === "/api/actions/webhook-test") {
     return method(request, "POST", () => sendWebhookTest(context));
   }
@@ -1460,6 +1463,13 @@ async function applyReorganize(request: Request, context: ApiContext): Promise<R
   const body = TopicReorganizeApplyBodySchema.parse(await readJson(request));
   const result = await context.deps.applyTopicReorganization(body);
   publish(context.hub, ["topics", "today"]);
+  return json(result);
+}
+
+async function regenerateMorningDigest(context: ApiContext): Promise<Response> {
+  if (!context.deps.regenerateMorningDigest) notSupported();
+  const result = await context.deps.regenerateMorningDigest();
+  publish(context.hub, ["status", "today"]);
   return json(result);
 }
 

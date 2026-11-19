@@ -55,7 +55,7 @@ const mockTaskBoard: TaskBoard = {
     { id: "demo-review", title: "[演示] 优化搜索结果空状态", description: "无匹配结果时展示筛选建议，并保留当前搜索词。", projectId: "demo-u-brain", priority: 1, status: "review", createdAt: ago(4 * HOUR), updatedAt: ago(10 * MINUTE), run: { projectCwd: "/demo/u-brain", branch: "task/demo-review", worktreePath: "/demo/worktrees/demo-review", baseSha: "b".repeat(40), threadId: "demo-thread", threadUrl: null, reviewSha: "a".repeat(40), summary: "[演示数据] 已补充空状态建议，并验证搜索词保持不变。此结果仅用于界面验收。", error: null } },
     { id: "demo-urgent", title: "[演示] 修复重连后的任务状态刷新", description: "网络恢复后重新获取队列，避免覆盖正在编辑的表单。", projectId: "demo-u-brain", priority: 0, status: "queued", createdAt: ago(2 * HOUR), updatedAt: ago(2 * HOUR), run: null },
     { id: "demo-normal", title: "[演示] 为项目增加快捷筛选", description: "支持按关联项目与执行状态查看任务。", projectId: "demo-notes", priority: 2, status: "queued", createdAt: ago(HOUR), updatedAt: ago(HOUR), run: null },
-    { id: "demo-unassigned", title: "[演示] 整理下周的改进想法", description: "先记录任务，确定所属项目后再开始处理。", projectId: null, priority: 3, status: "queued", createdAt: ago(20 * MINUTE), updatedAt: ago(20 * MINUTE), run: null },
+    { id: "demo-unassigned", title: "[演示] 整理下周的改进想法", description: "梳理改进项并列出建议优先级。", projectId: null, priority: 3, status: "queued", createdAt: ago(20 * MINUTE), updatedAt: ago(20 * MINUTE), run: null },
   ],
 };
 
@@ -1241,7 +1241,19 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
     } else {
       const task = mockTaskBoard.tasks.find((task) => task.id === input.id);
       if (!task) return fail(404, "NOT_FOUND", "演示任务不存在");
-      if (input.action === "approve") {
+      if (input.action === "start") {
+        if (task.status !== "queued") return fail(409, "INVALID_STATE", "只能开始待处理任务");
+        const project = mockTaskBoard.projects.find((item) => item.id === task.projectId);
+        if (project && mockTaskBoard.tasks.some((item) => item.projectId === project.id && item.status !== "queued" && item.status !== "done")) {
+          return fail(409, "INVALID_STATE", "项目已有待完成的 TODO");
+        }
+        task.status = "planning";
+        task.manual = true;
+        task.run = {
+          ...(project ? { branch: `task/${task.id}`, worktreePath: `/demo/worktrees/${task.id}`, baseSha: "b".repeat(40) } : { branch: null, worktreePath: null, baseSha: null }),
+          projectCwd: project?.cwd ?? "/demo/home", threadId: `demo-${task.id}`, threadUrl: null, reviewSha: null, summary: "", error: null,
+        };
+      } else if (input.action === "approve") {
         if (task.status !== "review" || input.reviewSha !== task.run?.reviewSha) return fail(409, "STALE_REVIEW", "提交已有变化，请重新核对");
         task.status = "done";
         if (task.projectId) simulateNextTask(task.projectId);

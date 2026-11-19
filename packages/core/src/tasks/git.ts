@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 
-import type { TaskGitPort, TaskProject, TaskReview, TaskRun } from "./types.js";
+import type { TaskGitPort, TaskProject, TaskReview, TaskWorktreeRun } from "./types.js";
 
 const DIFF_LIMIT = 128 * 1024;
 const COMMAND_LIMIT = 1024 * 1024;
@@ -29,7 +29,7 @@ export class TaskGit implements TaskGitPort {
     this.#options = options;
   }
 
-  async prepare(project: TaskProject, taskId: string): Promise<Pick<TaskRun, "branch" | "worktreePath" | "baseSha">> {
+  async prepare(project: TaskProject, taskId: string): Promise<Pick<TaskWorktreeRun, "branch" | "worktreePath" | "baseSha">> {
     if (!TASK_ID.test(taskId)) throw new Error("任务编号不正确");
     const repo = await this.#repo(project);
     return this.#serialize(repo, async () => {
@@ -75,7 +75,7 @@ export class TaskGit implements TaskGitPort {
     });
   }
 
-  async review(project: TaskProject, run: TaskRun): Promise<Omit<TaskReview, "task">> {
+  async review(project: TaskProject, run: TaskWorktreeRun): Promise<Omit<TaskReview, "task">> {
     this.#assertProject(project, run);
     const repo = await this.#repo(project);
     return this.#serialize(repo, async () => {
@@ -91,7 +91,7 @@ export class TaskGit implements TaskGitPort {
     });
   }
 
-  async merge(project: TaskProject, run: TaskRun, approvedSha: string): Promise<void> {
+  async merge(project: TaskProject, run: TaskWorktreeRun, approvedSha: string): Promise<void> {
     this.#assertProject(project, run);
     if (!SHA.test(approvedSha)) throw new Error("核对提交编号不正确");
     if (run.reviewSha === null) throw new Error("任务尚未核对，请先核对提交后再合并");
@@ -133,7 +133,7 @@ export class TaskGit implements TaskGitPort {
     return root;
   }
 
-  #assertProject(project: TaskProject, run: TaskRun): void {
+  #assertProject(project: TaskProject, run: TaskWorktreeRun): void {
     if (project.cwd !== run.projectCwd) throw new Error("T3 项目目录已变化，不能操作原任务分支");
   }
 
@@ -162,7 +162,7 @@ export class TaskGit implements TaskGitPort {
     }
   }
 
-  async #verifyRun(repo: string, run: TaskRun): Promise<void> {
+  async #verifyRun(repo: string, run: TaskWorktreeRun): Promise<void> {
     const id = run.branch.startsWith("task/") ? run.branch.slice(5) : "";
     if (!TASK_ID.test(id) || !SHA.test(run.baseSha)) throw new Error("任务分支记录不正确");
     const location = await this.#location(repo, id);

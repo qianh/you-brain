@@ -1,7 +1,13 @@
 import type { Event } from "@you-brain/protocol";
 
 import { foldEventsCached } from "../topics/book-cache.js";
-import { computeDueReminders, type ReminderActionFact, type ReminderIssuedData } from "./due.js";
+import {
+  REMINDER_KIND,
+  computeDueReminders,
+  type ComputeDueInput,
+  type ReminderActionFact,
+  type ReminderIssuedData,
+} from "./due.js";
 import { foldReminders } from "./fold.js";
 
 export interface DueDeviceInput {
@@ -22,9 +28,32 @@ export interface DueDeviceInput {
 }
 
 export function dueRemindersForDevice(input: DueDeviceInput): ReminderIssuedData[] {
-  if (input.mainDevice === null || input.mainDevice !== input.deviceId) return [];
+  if (!isMainDevice(input)) return [];
+  return computeDueReminders(computeInput(input));
+}
+
+/**
+ * 按当前数据重算今天的早报,沿用原 id。只有主设备生成;还没到早报时间时为 null。
+ * 只返回早报这一条,其余到期提醒仍由定时任务发。
+ */
+export function regenerateMorningDigestForDevice(
+  input: DueDeviceInput,
+): ReminderIssuedData | null {
+  if (!isMainDevice(input)) return null;
+  return (
+    computeDueReminders({ ...computeInput(input), regenerateMorningDigest: true }).find(
+      (item) => item.kind === REMINDER_KIND.morningDigest,
+    ) ?? null
+  );
+}
+
+export function isMainDevice(input: Pick<DueDeviceInput, "deviceId" | "mainDevice">): boolean {
+  return input.mainDevice !== null && input.mainDevice === input.deviceId;
+}
+
+function computeInput(input: DueDeviceInput): ComputeDueInput {
   void input.notifications;
-  return computeDueReminders({
+  return {
     book: foldEventsCached(input.events),
     sessionUpdatedAt: input.sessionUpdatedAt,
     reminders: foldReminders(input.events),
@@ -37,7 +66,7 @@ export function dueRemindersForDevice(input: DueDeviceInput): ReminderIssuedData
     now: input.now,
     timeZoneOffsetMinutes: input.timeZoneOffsetMinutes,
     ...(input.mergeLines ? { mergeLines: input.mergeLines } : {}),
-  });
+  };
 }
 
 export function reminderActions(events: readonly Event[]): ReminderActionFact[] {

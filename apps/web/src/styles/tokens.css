@@ -118,10 +118,11 @@
  * 继承浅色的全部变量,只覆盖色彩;正文保持深梅色,对比度不低于浅色主题。
  */
 [data-theme="dopamine"] {
-  --bg: #fff6ea;
-  --surface: #ffffff;
-  --surface-2: #fff0f5;
-  --surface-3: #ffe2ee;
+  /* 底色用桃色奶油,卡片用浅奶油而不是纯白,框和底能分出层次又不发白。 */
+  --bg: #ffeedd;
+  --surface: #fff8ef;
+  --surface-2: #ffe9f1;
+  --surface-3: #ffd8e8;
   --hover: rgba(230, 36, 122, 0.06);
   --pressed: rgba(230, 36, 122, 0.12);
   --border: rgba(110, 30, 80, 0.12);
@@ -184,9 +185,9 @@
   --swatch-7-ink: #15803d;
   --swatch-8: #5e4466;
   --swatch-8-ink: #3d2645;
-  --dopamine-glow-1: rgba(255, 61, 139, 0.10);
-  --dopamine-glow-2: rgba(255, 180, 0, 0.12);
-  --dopamine-glow-3: rgba(47, 91, 255, 0.08);
+  --dopamine-glow-1: rgba(255, 61, 139, 0.16);
+  --dopamine-glow-2: rgba(255, 180, 0, 0.18);
+  --dopamine-glow-3: rgba(47, 91, 255, 0.12);
 }
 
 [data-theme="dark"] {

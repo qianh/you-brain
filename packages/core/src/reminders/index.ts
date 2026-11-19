@@ -25,7 +25,13 @@ export {
   presentReminders,
   type ReminderTopicName,
 } from "./present.js";
-export { dueRemindersForDevice, reminderActions, type DueDeviceInput } from "./run.js";
+export {
+  dueRemindersForDevice,
+  isMainDevice,
+  regenerateMorningDigestForDevice,
+  reminderActions,
+  type DueDeviceInput,
+} from "./run.js";
 export { reminderDetail } from "./detail.js";
 export { digestText, historyText, staleText, textLength, weeklyText } from "./text.js";
 export {

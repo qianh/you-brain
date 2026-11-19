@@ -16,7 +16,9 @@ import { useToast } from "../components/toast.js";
 import { useDaemon } from "../daemon-context.js";
 import { usePageActive } from "../page-active.js";
 import { formatRelative } from "../lib/format.js";
-import { projectTask, TASK_PRIORITY_KEYS, TASK_STATUS_KEYS, taskThreadUrl, visibleTasks } from "./tasks/logic.js";
+import { deckT3ThreadHref } from "../lib/route.js";
+import { useRoute } from "../router.js";
+import { isTaskActive, projectTask, TASK_PRIORITY_KEYS, TASK_STATUS_KEYS, taskThreadUrl, visibleTasks } from "./tasks/logic.js";
 import { ProjectPicker, type ProjectChoice } from "./tasks/project-picker.js";
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -31,6 +33,7 @@ function ThreadLink({ task }: { task: DevelopmentTask }) {
 
 export function TasksPage() {
   const { client, t, language, timeZone } = useDaemon();
+  const { navigate } = useRoute();
   const pageActive = usePageActive();
   const { push } = useToast();
   const [board, setBoard] = useState<TaskBoard | null>(null);
@@ -43,6 +46,7 @@ export function TasksPage() {
   const [editor, setEditor] = useState<{ task: DevelopmentTask | null } | null>(null);
   const [reviewing, setReviewing] = useState<DevelopmentTask | null>(null);
   const [starting, setStarting] = useState<TaskProject | null>(null);
+  const [launchingId, setLaunchingId] = useState<string | null>(null);
   const version = useRef(0);
   const mounted = useRef(false);
   const polling = useRef(false);
@@ -95,7 +99,7 @@ export function TasksPage() {
     };
   }, [load, pageActive]);
 
-  const mutate = async (work: () => Promise<TaskBoard>, success?: string): Promise<boolean> => {
+  const mutate = async (work: () => Promise<TaskBoard>, success?: string, after?: (board: TaskBoard) => void): Promise<boolean> => {
     if (mutating.current) return false;
     mutating.current = true;
     version.current += 1;
@@ -105,6 +109,7 @@ export function TasksPage() {
       if (mounted.current) {
         acceptBoard(next);
         if (success) push({ message: success, tone: "success" });
+        after?.(next);
       }
       return true;
     } catch (error) {
@@ -117,12 +122,24 @@ export function TasksPage() {
   };
 
   const act = (input: TaskActionInput): Promise<boolean> => mutate(() => client.taskAction(input));
+  const startTask = async (id: string): Promise<void> => {
+    if (mutating.current) return;
+    setLaunchingId(id);
+    try {
+      await mutate(() => client.taskAction({ action: "start", id }), undefined, (next) => {
+        const href = taskThreadUrl(next.tasks.find((task) => task.id === id)?.run?.threadUrl);
+        if (href && document.visibilityState !== "hidden" && window.location.pathname.replace(/\/$/u, "") === "/todos") navigate(deckT3ThreadHref(href));
+      });
+    } finally {
+      if (mounted.current) setLaunchingId(null);
+    }
+  };
   const tasks = board?.tasks ?? [];
   const projects = board?.projects ?? [];
   const filtered = visibleTasks(tasks, project, status);
   const counts = {
     queued: tasks.filter((task) => task.status === "queued").length,
-    active: tasks.filter((task) => ["preparing", "running", "merging"].includes(task.status)).length,
+    active: tasks.filter((task) => isTaskActive(task.status)).length,
     review: tasks.filter((task) => task.status === "review").length,
     done: tasks.filter((task) => task.status === "done").length,
   };
@@ -202,12 +219,13 @@ export function TasksPage() {
               return <li className={`tasks-item is-${task.status}`} key={task.id}>
                 <span className={`tasks-priority is-p${task.priority}`} title={t(TASK_PRIORITY_KEYS[task.priority])}>P{task.priority}</span>
                 <div className="tasks-item-body">
-                  <div className="tasks-item-title"><h3>{task.title}</h3><span className={`tasks-status is-${task.status}`}>{t(TASK_STATUS_KEYS[task.status])}</span></div>
+                  <div className="tasks-item-title"><h3>{task.title}</h3><span className={`tasks-status is-${task.status}`}>{t(task.status === "done" && task.projectId !== null ? "tasksMerged" : TASK_STATUS_KEYS[task.status])}</span></div>
                   {task.description && <p className="tasks-description">{task.description}</p>}
                   <div className="tasks-item-meta"><span><Icon name="folder" size={12} />{linked?.name ?? t(task.projectId ? "tasksUnknownProject" : "tasksUnassigned")}</span>{task.run?.branch && <code>{task.run.branch}</code>}<span>{t("tasksUpdated", { when: formatRelative(task.updatedAt, language, timeZone) })}</span></div>
                   {(task.error ?? task.run?.error) && <p className="tasks-item-error" role="alert">{task.error ?? task.run?.error}</p>}
                 </div>
                 <div className="tasks-item-actions">
+                  {task.status === "queued" && <Button size="sm" disabled={busy || !!board?.connectionError} loading={launchingId === task.id} onClick={() => void startTask(task.id)} icon={<Icon name="play" size={13} />}>{t("tasksStartOne")}</Button>}
                   {task.status === "queued" && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditor({ task })} icon={<Icon name="pencil" size={13} />}>{t("tasksEdit")}</Button>}
                   {task.status === "review" && <Button size="sm" variant="primary" disabled={busy} onClick={() => setReviewing(task)}>{t("tasksInspect")}</Button>}
                   {task.status === "failed" && <Button size="sm" disabled={busy} onClick={() => void act({ action: "retry", id: task.id })}>{t("tasksRetry")}</Button>}

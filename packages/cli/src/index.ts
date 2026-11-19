@@ -417,6 +417,23 @@ program
     }
   });
 
+const remindersCommand = program.command("reminders").description("提醒相关操作");
+
+remindersCommand
+  .command("regenerate-digest")
+  .description("按当前数据重新生成今天的早报（只在主设备执行，沿用原提醒）")
+  .action(async () => {
+    try {
+      const client = await connectDaemon();
+      if (!client.regenerateMorningDigest) throw new Error("当前 daemon 不支持重新生成早报");
+      const result = await client.regenerateMorningDigest();
+      console.log(`已重新生成 ${result.reminderId}`);
+      console.log(result.text);
+    } catch (error) {
+      fail(error);
+    }
+  });
+
 program
   .command("integrations")
   .description("列出、应用或撤销 MCP、CLI 注入和 skill")

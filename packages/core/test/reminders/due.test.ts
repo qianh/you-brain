@@ -7,6 +7,7 @@ import {
   WEEKLY_FOLLOW_UPS,
   computeDueReminders,
   dueRemindersForDevice,
+  regenerateMorningDigestForDevice,
   staleText,
   textLength,
   type ComputeDueInput,
@@ -18,11 +19,16 @@ import {
   timeZoneOffsetMinutes,
   weekdayReached,
 } from "../../src/reminders/time.js";
-import { sessionKey } from "../topics/helpers.js";
+import { buildEvent, sessionKey } from "../topics/helpers.js";
 import { DAY, KEY_A, KEY_B, KEY_C, at, topicEvents } from "./fixture.js";
 
 const NOW = "2026-10-21T16:30:00.000Z";
 const NOW_MS = Date.parse(NOW);
+
+function reminderIssued(item: { reminderId: string; kind: string; topicId: string | null; text: string } | undefined) {
+  if (!item) throw new Error("missing reminder");
+  return buildEvent({ type: "reminder.issued", data: item, device: "device-a", ts: NOW, seq: 9_999 });
+}
 
 function due(
   events: ComputeDueInput["book"] extends never ? never : Parameters<typeof foldEvents>[0],
@@ -279,6 +285,23 @@ describe("computeDueReminders", () => {
     expect(isoWeekKey(localParts(Date.parse("2026-01-08T00:00:00.000Z"), 0))).toBe("2026-W02");
   });
 
+  it("lists the five highest-priority follow-up topics", () => {
+    const names = ["一", "二", "三", "四", "五", "六"];
+    const keys = names.map((_, index) => sessionKey(60 + index));
+    const events = names.flatMap((name, index) =>
+      topicEvents({ topicId: `t${index}`, name, key: keys[index] ?? "", at: at(NOW_MS - (index + 1) * DAY) }),
+    );
+    const items = due(events, {
+      sessionUpdatedAt: Object.fromEntries(keys.map((key, index) => [key, at(NOW_MS - (index + 1) * DAY)])),
+      morningDigestTime: "08:00",
+      weeklyReviewDay: 7,
+      weeklyReviewTime: "23:59",
+    });
+    const digest = items.find((item) => item.kind === "morning_digest");
+    expect(digest?.text).toContain("建议跟进：一、二、三、四、五。");
+    expect(digest?.text).not.toContain("六");
+  });
+
   it("suggests open-todo topics, preferring recent stale and follow-up", () => {
     const events = [
       ...topicEvents({
@@ -341,6 +364,40 @@ describe("computeDueReminders", () => {
       for (const line of item.text.split("\n")) expect(textLength(line)).toBeLessThanOrEqual(80);
     }
     expect(staleText("   ", 1)).toContain("未命名话题");
+  });
+
+  it("regenerates today's digest with the same id even after it was issued", () => {
+    const last = at(NOW_MS - DAY);
+    const events = topicEvents({ topicId: "topic", name: "方案", key: KEY_A, at: last });
+    const base = {
+      deviceId: "device-a",
+      mainDevice: "device-a" as string | null,
+      notifications: false,
+      events,
+      sessionUpdatedAt: { [KEY_A]: last },
+      activeLimit: 10,
+      historyDays: 30,
+      morningDigestTime: "08:00",
+      weeklyReviewDay: 7,
+      weeklyReviewTime: "23:59",
+      now: NOW,
+      timeZoneOffsetMinutes: 0,
+    };
+    const first = dueRemindersForDevice(base).find((item) => item.kind === "morning_digest");
+    expect(first?.reminderId).toBe("morning:2026-10-21");
+    const issued = [
+      ...events,
+      ...topicEvents({ topicId: "other", name: "其他", key: KEY_B, at: last }),
+    ];
+    const withDigest = { ...base, events: [...issued, reminderIssued(first)] };
+    expect(dueRemindersForDevice(withDigest).some((item) => item.kind === "morning_digest")).toBe(false);
+    const again = regenerateMorningDigestForDevice(withDigest);
+    expect(again?.reminderId).toBe("morning:2026-10-21");
+    expect(again?.text).toContain("方案");
+    expect(again?.text).toContain("其他");
+    expect(again?.text).not.toBe(first?.text);
+    expect(regenerateMorningDigestForDevice({ ...withDigest, mainDevice: "device-b" })).toBeNull();
+    expect(regenerateMorningDigestForDevice({ ...withDigest, morningDigestTime: "23:59" })).toBeNull();
   });
 
   it("lets only the main device generate, and ignores the notification flag", () => {

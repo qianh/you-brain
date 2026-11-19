@@ -19,6 +19,37 @@ window.__ModuleLoader__.load({
 			"hero.preview": { zh: "", en: "" },
 		};
 
+		// 多巴胺：与 apps/web/src/styles/tokens.css 的 [data-theme="dopamine"] 同一套底色。
+		// 只换底色不换文字色；DSH 自己是深色时文字是浅色，套亮底会看不清，所以不覆盖。
+		const DOPAMINE = 'html[data-ub-theme="dopamine"] body:not([data-ds-dark-theme])';
+		const DOPAMINE_CSS =
+			'html[data-ub-theme="dopamine"]:has(body:not([data-ds-dark-theme])){background:#ffeedd}' +
+			DOPAMINE + "{" +
+			"--dsw-alias-bg-base:#ffeedd;" +
+			"--dsw-alias-bg-layer-1:#fff8ef;" +
+			"--dsw-alias-bg-layer-2:#fff8ef;" +
+			"--dsw-alias-bg-layer-3:#fff8ef;" +
+			"--dsw-alias-bg-document-preview:#fff8ef;" +
+			"--dsw-alias-bg-module-platform:#ffe9f1;" +
+			"--dsw-alias-bg-overlay:#ffd8e8;" +
+			"--dsw-alias-markdown-code-block:#ffe9f1;" +
+			"--dsw-alias-markdown-code-block-banner:#ffe0ec;" +
+			"--dsw-alias-markdown-code-segment-selected:#fff8ef;" +
+			"--dsw-alias-markdown-code-segment-unselected:#ffe0ec;" +
+			"--dsw-alias-interactive-bg-hover:rgba(230,36,122,0.06);" +
+			"--dsw-alias-interactive-bg-active:rgba(230,36,122,0.12);" +
+			"--dsw-alias-interactive-bg-hover-solid:#ffe0ec;" +
+			"--dsw-specific-sidebar-fill:#ffe9f1;" +
+			"--dsw-specific-sidebar-nav-item-hover:rgba(230,36,122,0.06);" +
+			"--dsw-specific-sidebar-nav-item-active:rgba(230,36,122,0.12);" +
+			"--dsw-specific-sidebar-nav-item-active-accent:rgba(230,36,122,0.16);" +
+			"--dsw-specific-input-major:#fff8ef;" +
+			"--dsw-specific-bubble:#ffd8e8;" +
+			"--dsw-specific-bubble-highlight:#ffc2db;" +
+			"--dsw-specific-selector:#ffe9f1;" +
+			"--dsw-specific-tip:#ffe9f1;" +
+			"background-color:#ffeedd}";
+
 		function Mark(props) {
 			const size = props.size || 24;
 			return h("img", { src: LOGO, alt: "", width: size, height: size, className: props.className, style: { borderRadius: Math.round(size * 0.24), display: "block" } });
@@ -47,11 +78,25 @@ window.__ModuleLoader__.load({
 				return translate.call(this, ns, key, params);
 			};
 			const style = document.createElement("style");
-			style.textContent = '[class*="previewBadge"]:empty{display:none}';
+			style.textContent = '[class*="previewBadge"]:empty{display:none}' + DOPAMINE_CSS;
 			document.head.appendChild(style);
+
+			// 跟随 U-Brain 宿主的主题：DSH 跨源读不到宿主，开口要一次，之后宿主切主题会主动推。
+			const root = document.documentElement;
+			const receiveTheme = (event) => {
+				if (event.source !== window.parent || event.data?.type !== "u-brain:theme") return;
+				const theme = event.data.theme;
+				if (theme === "dopamine") root.dataset.ubTheme = theme;
+				else delete root.dataset.ubTheme;
+			};
+			window.addEventListener("message", receiveTheme);
+			if (window.parent !== window) window.parent.postMessage({ type: "u-brain:theme:request" }, "*");
+
 			ctx.effect(() => () => {
 				locale.translate = translate;
 				style.remove();
+				window.removeEventListener("message", receiveTheme);
+				delete root.dataset.ubTheme;
 			}, "u-brain-brand: restore");
 		};
 		return module.exports;

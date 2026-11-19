@@ -7,6 +7,7 @@ import { Dialog } from "../components/dialog.js";
 import { Input } from "../components/input.js";
 import { Spinner } from "../components/spinner.js";
 import { useDaemon } from "../daemon-context.js";
+import { t3ThreadFrameUrl } from "../lib/route.js";
 
 const T3_URL_KEY = "you-brain.deck.t3-url";
 const SETTINGS_FORM = "deck-t3-settings";
@@ -27,12 +28,14 @@ export function DeckT3Panel({
   onSettingsChange,
   onReload,
   frameRef,
+  threadUrl,
 }: {
   reloadVersion: number;
   settingsOpen: boolean;
   onSettingsChange: (open: boolean) => void;
   onReload: () => void;
   frameRef?: RefObject<HTMLIFrameElement | null>;
+  threadUrl: string | null;
 }) {
   const { client, t } = useDaemon();
   const [url, setUrl] = useState(savedUrl);
@@ -74,7 +77,7 @@ export function DeckT3Panel({
         <iframe
           ref={frameRef}
           className="dsh-frame"
-          src={view.url}
+          src={t3ThreadFrameUrl(view.url, threadUrl)}
           title={t("dshDeckT3FrameTitle")}
           allow="clipboard-read; clipboard-write"
           referrerPolicy="no-referrer"

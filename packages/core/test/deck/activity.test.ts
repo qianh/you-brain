@@ -78,6 +78,30 @@ describe("ActivityTracker · AI CLI", () => {
     expect(tracker.status(1, 24_000)).toBe("done");
   });
 
+  it("监听端口的服务进程 CPU 不算 AI 在工作（服务打日志、处理请求不提醒）", () => {
+    const tracker = new ActivityTracker();
+    const server = (cpuMs: number): ActivityProc => ({ pid: 30, depth: 2, foreground: true, cpuNs: cpuMs * MS, server: true });
+    let cpu = 1_000;
+    for (let at = 0; at <= 60_000; at += 3_000) {
+      // 服务一阵一阵地涨 CPU，AI CLI 本身不动。
+      if ((at / 3_000) % 5 < 3) cpu += 500;
+      tracker.observe(1, { agent: true, atPrompt: false, procs: [shell, agentProc(1_000), server(cpu)] }, at);
+      expect(tracker.status(1, at)).toBeNull();
+    }
+  });
+
+  it("AI CLI 自己在涨 CPU 时，旁边跑着服务也照常判断", () => {
+    const tracker = new ActivityTracker();
+    const server: ActivityProc = { pid: 30, depth: 2, foreground: true, cpuNs: 0, server: true };
+    let cpu = 1_000;
+    tracker.observe(1, { agent: true, atPrompt: false, procs: [shell, agentProc(cpu), server] }, 0);
+    for (let at = 3_000; at <= 15_000; at += 3_000) {
+      cpu += 300;
+      tracker.observe(1, { agent: true, atPrompt: false, procs: [shell, agentProc(cpu), server] }, at);
+    }
+    expect(tracker.status(1, 15_000)).toBe("working");
+  });
+
   it("第一次采样只建基线，不算动静", () => {
     const tracker = new ActivityTracker();
     tracker.observe(1, { agent: true, atPrompt: false, procs: [shell, agentProc(50_000)] }, 0);

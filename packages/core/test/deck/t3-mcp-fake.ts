@@ -15,6 +15,7 @@ export interface FakeThread {
   providerInstanceId: string;
   model: string;
   runtimeMode: string;
+  interactionMode: "plan" | "default";
   items: FakeItem[];
 }
 
@@ -25,7 +26,7 @@ export function fakeThread(overrides: Partial<FakeThread> = {}): FakeThread {
     threadId: "task-thread", projectId: "project-1", title: "Task", status: "completed",
     activeRunId: null, latestRunId: "run-1", pendingRequestCount: 0, archived: false,
     worktreePath: "/worktrees/task", branch: "todo/task", providerInstanceId: "codex", model: "configured-model",
-    runtimeMode: "approval-required",
+    runtimeMode: "approval-required", interactionMode: "default",
     items: [{ type: "user_message", runId: "run-1", text: "Do it" }, { type: "assistant_message", runId: "run-1", text: "Implemented and tested." }],
     ...overrides,
   };
@@ -82,12 +83,13 @@ export function fakeT3(input: { projects: FakeProject[]; threads?: FakeThread[];
       const threadId = `thread-${String(args.clientRequestId)}`;
       if (!find(threadId)) {
         const runId = `run-${++runs}`;
-        const strategy = args.workspaceStrategy as { worktreePath: string; branch: string };
-        const selection = args.modelSelection as { instanceId: string; model: string };
+        const strategy = args.workspaceStrategy as { type: string; worktreePath?: string; branch?: string };
+        const selection = args.modelSelection as { instanceId: string; model: string } | undefined;
         threads.unshift({
           threadId, projectId: String(args.projectId), title: String(args.title), status: "running", activeRunId: runId, latestRunId: runId,
-          pendingRequestCount: 0, archived: false, worktreePath: strategy.worktreePath, branch: strategy.branch,
-          providerInstanceId: selection.instanceId, model: selection.model, runtimeMode: String(args.runtimeMode),
+          pendingRequestCount: 0, archived: false, worktreePath: strategy.worktreePath ?? null, branch: strategy.branch ?? null,
+          providerInstanceId: selection?.instanceId ?? "default-provider", model: selection?.model ?? "default-model", runtimeMode: String(args.runtimeMode),
+          interactionMode: args.interactionMode === "plan" ? "plan" : "default",
           items: [{ type: "user_message", runId, text: String(args.message) }],
         });
       }

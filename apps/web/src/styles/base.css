@@ -14,6 +14,8 @@ html[data-theme="dopamine"] {
     radial-gradient(60vw 50vh at 60% 100%, var(--dopamine-glow-3), transparent 70%);
   background-attachment: fixed;
 }
+/* body 默认铺实色 --bg,会盖住 html 上的光晕;多巴胺下让它透明。 */
+html[data-theme="dopamine"] body { background: transparent; }
 
 /* The menu-bar panel is a transparent window; its frame draws the rounded corners. */
 html:has(.panel-page), html:has(.panel-page) body { background: transparent; }

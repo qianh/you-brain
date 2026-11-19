@@ -27,6 +27,7 @@ import {
   type SearchResponse,
   type StatusResponse,
   type SyncActionResult,
+  type MorningDigestRegenerateResult,
   type TodayResponse,
   type TodoActionBody,
   type TopicDetail,
@@ -148,6 +149,7 @@ export interface DaemonClient {
   topicReorganizeStatus?(): Promise<TopicReorganizeStatus>;
   applyTopicReorganization?(body: TopicReorganizeApplyBody): Promise<TopicReorganizeResult>;
   sync(): Promise<SyncActionResult>;
+  regenerateMorningDigest?(): Promise<MorningDigestRegenerateResult>;
   upload(body?: UploadActionInput): Promise<UploadActionResult>;
   todo(body: TodoActionBody): Promise<ActionResponse>;
   conclusion(body: ConclusionActionBody): Promise<ActionResponse>;
@@ -300,6 +302,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     quota: () => request("GET", "/api/quota"),
     reminders: (all) => request("GET", all ? "/api/reminders?all=1" : "/api/reminders"),
     reminderAction: (body) => request("POST", "/api/actions/reminder", body),
+    regenerateMorningDigest: () => request("POST", "/api/actions/morning-digest"),
     reminderReply: (body) => request("POST", "/api/actions/reminder-reply", body),
     consolidate: (body) => request("POST", "/api/actions/consolidate", body ?? {}),
     planTopicReorganization: (body) => request("POST", "/api/actions/topics-reorganize/plan", body ?? {}),

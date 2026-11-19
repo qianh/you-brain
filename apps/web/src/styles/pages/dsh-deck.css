@@ -12,9 +12,9 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  /* .main 的 12px 顶 padding 会叠在 topbar 自带的 12px 上，
-     白底 iframe 页上显成「tab 栏下方空一格」，这里抵消掉。 */
-  padding-top: 0;
+  /* .main 的 12px 顶 padding 叠在 topbar 下方显得空一格，这里收小；
+     但完全去掉会让 T3 / DSH / Muse 切换栏贴着顶栏，留 8px。 */
+  padding-top: var(--sp-2);
   padding-bottom: var(--sp-3);
 }
 

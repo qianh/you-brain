@@ -3,6 +3,7 @@ import { describe, expect, it, test } from "bun:test";
 import {
   MEMORY_NAV,
   deckPaneHref,
+  deckT3ThreadHref,
   isMemoryPath,
   isNavActive,
   isPrimaryNavActive,
@@ -13,6 +14,7 @@ import {
   readQuery,
   searchHref,
   settingsHref,
+  t3ThreadFrameUrl,
   topicHref,
 } from "../../src/lib/route.js";
 import { openFullWindow, quitShell } from "../../src/lib/window.js";
@@ -63,6 +65,16 @@ describe("routes", () => {
     expect(isPrimaryNavActive("/topics", "/topics")).toBe(true);
     expect(isPrimaryNavActive("/today", "/topics")).toBe(false);
     expect(isPrimaryNavActive("/status", "/status")).toBe(true);
+  });
+
+  test("routes launched TODOs into the configured T3 frame only", () => {
+    const baseUrl = "http://127.0.0.1:3773/";
+    const threadUrl = `${baseUrl}local-env/mcp%3Alaunch%3Akey`;
+    expect(readQuery(deckT3ThreadHref(threadUrl), "t3Thread")).toBe(threadUrl);
+    expect(t3ThreadFrameUrl(baseUrl, threadUrl)).toBe(threadUrl);
+    for (const invalid of [null, "javascript:alert(1)", "http://127.0.0.1:3774/env/thread", "http://user:pass@127.0.0.1:3773/env/thread", `${baseUrl}env/thread?token=sample`, `${baseUrl}env/thread/extra`]) {
+      expect(t3ThreadFrameUrl(baseUrl, invalid)).toBe(baseUrl);
+    }
   });
 });
 

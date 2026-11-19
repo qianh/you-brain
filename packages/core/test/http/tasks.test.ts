@@ -30,13 +30,15 @@ test("TODO routes require auth, validate mutations and retain manual approval bo
     expect((await request("/api/tasks", "POST", { title: "x", priority: -1 })).status).toBe(400);
     expect((await request("/api/tasks", "PUT", { id: "x", status: "done" })).status).toBe(400);
     expect((await request("/api/tasks/action", "GET")).status).toBe(405);
+    expect((await request("/api/tasks/action", "POST", { action: "start", id: "x", cwd: "/override" })).status).toBe(400);
     expect((await request("/api/tasks/action", "POST", { action: "approve", id: "x" })).status).toBe(400);
     expect((await request("/api/tasks/action", "POST", { action: "reject", id: "x", feedback: " " })).status).toBe(400);
     expect((await request("/api/tasks/review", "GET")).status).toBe(400);
     expect(calls).toEqual([]);
     expect((await request("/api/tasks", "GET")).status).toBe(200);
     expect((await request("/api/tasks", "POST", { title: "new", projectId: null, priority: 1 })).status).toBe(200);
+    expect((await request("/api/tasks/action", "POST", { action: "start", id: "x" })).status).toBe(200);
     expect((await request("/api/tasks/action", "POST", { action: "approve", id: "x", reviewSha: "a".repeat(40) })).status).toBe(200);
-    expect(calls).toEqual(["board", "create", "approve"]);
+    expect(calls).toEqual(["board", "create", "start", "approve"]);
   } finally { await server.stop(); await rm(dir, { recursive: true, force: true }); }
 });

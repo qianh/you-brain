@@ -8,12 +8,14 @@ import { Segmented } from "../components/segmented.js";
 import { Spinner } from "../components/spinner.js";
 import { useToast } from "../components/toast.js";
 import { useDaemon } from "../daemon-context.js";
-import { parseDeckPane } from "../lib/route.js";
+import { parseDeckPane, readQuery } from "../lib/route.js";
 import { isTextEntry, modLabel, shortcutMod } from "../lib/shortcuts.js";
 import { usePageActive } from "../page-active.js";
 import { useRoute } from "../router.js";
 import { createDshCookiePreparer } from "../lib/dsh-cookies.js";
 import { terminalReferenceMessage, type TerminalReference } from "../lib/terminal-reference.js";
+import { dshThemeMessage, isDshThemeRequest } from "../lib/dsh-theme.js";
+import { useTheme } from "../theme-context.js";
 import { isReferenceShortcut } from "./deck-reference-logic.js";
 import { DeckReferencePicker } from "./deck-reference-picker.js";
 import { DeckTerminalScreen } from "./deck-terminal-screen.js";
@@ -69,6 +71,15 @@ export function DshDeckPage() {
     });
   }, [requestedPane, pageActive, navigate, reloadSessions, openPane, push, t]);
   const [t3Visited, setT3Visited] = useState(activePage === "t3");
+  const [t3Thread, setT3Thread] = useState<string | null>(null);
+  const requestedT3Thread = readQuery(href, "t3Thread");
+  useEffect(() => {
+    if (!requestedT3Thread || !pageActive) return;
+    setT3Thread(requestedT3Thread);
+    setT3Visited(true);
+    setActivePage("t3");
+    navigate("/deck", "replace");
+  }, [requestedT3Thread, pageActive, navigate]);
   const [t3SettingsOpen, setT3SettingsOpen] = useState(false);
   const [t3ReloadVersion, setT3ReloadVersion] = useState(0);
   const [t3RefPickerOpen, setT3RefPickerOpen] = useState(false);
@@ -80,6 +91,10 @@ export function DshDeckPage() {
   const [view, setView] = useState<DshWebView>({ state: "starting" });
   const [attempt, setAttempt] = useState(0);
   const frame = useRef<HTMLIFrameElement>(null);
+  // DSH 跨源读不到宿主主题，由 u-brain-brand 插件来要，宿主切主题时也主动推一次。
+  const { resolved: theme } = useTheme();
+  const themeRef = useRef(theme);
+  themeRef.current = theme;
   // 每次拿到新的会话列表，就去掉 tty7 里已经不存在的会话标签。
   // 列表不可用（tty7 没起、读取失败）时不动标签，免得一次故障把标签全清掉。
   const sessionView = sessions.view;
@@ -137,6 +152,10 @@ export function DshDeckPage() {
   useEffect(() => {
     if (readyUrl === null) return;
     const receive = (event: MessageEvent): void => {
+      if (isDshThemeRequest(event, frame.current?.contentWindow, readyUrl)) {
+        frame.current?.contentWindow?.postMessage(dshThemeMessage(themeRef.current), new URL(readyUrl).origin);
+        return;
+      }
       const message = terminalReferenceMessage(event, frame.current?.contentWindow, readyUrl);
       if (message === null) return;
       if (message.type === "ready") {
@@ -149,6 +168,11 @@ export function DshDeckPage() {
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
   }, [readyUrl]);
+
+  useEffect(() => {
+    if (readyUrl === null) return;
+    frame.current?.contentWindow?.postMessage(dshThemeMessage(theme), new URL(readyUrl).origin);
+  }, [readyUrl, theme]);
 
   // 切到别的菜单（常驻但隐藏）时不确认；切回时立即确认一次，地址变了就换。
   useEffect(() => {
@@ -277,6 +301,7 @@ export function DshDeckPage() {
             {t3Visited ? (
               <DeckT3Panel
                 frameRef={t3Frame}
+                threadUrl={t3Thread}
                 reloadVersion={t3ReloadVersion}
                 settingsOpen={t3SettingsOpen}
                 onSettingsChange={setT3SettingsOpen}

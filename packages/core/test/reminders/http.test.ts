@@ -103,6 +103,7 @@ async function withHttp(
   const replyLog = options.withReply === true
     ? createReminderReplyLog(join(dir, "reminder-replies.jsonl"))
     : null;
+  let digestRuns = 0;
   const deps: HttpDeps = {
     uiPrefs: { read: async () => ({}), patch: async () => ({}) },
     today: () => readers.today(),
@@ -132,6 +133,12 @@ async function withHttp(
       throw new Error("unused");
     },
     sync: async () => ({ started: false, at: now.value }),
+    regenerateMorningDigest: async () => {
+      digestRuns += 1;
+      const item = { reminderId: "morning:2026-10-21", kind: "morning_digest", topicId: null, text: `第 ${digestRuns} 版早报` };
+      await deps.events.emit("reminder.issued", item);
+      return { reminderId: item.reminderId, text: item.text };
+    },
     upload: async () => ({ dryRun: true, scanned: 0, uploaded: 0, warnings: [] }),
     reminders: async (all) => {
       const body = await readers.reminders(all);
@@ -196,6 +203,18 @@ function api(server: DaemonHttpServer, path: string, init: RequestInit = {}): Pr
 }
 
 describe("reminder HTTP", () => {
+  it("regenerates today's morning digest in place under the same id", async () => {
+    await withHttp(async ({ server }) => {
+      const client = createDaemonClient({ port: server.port, token: server.token });
+      expect(await client.regenerateMorningDigest?.()).toEqual({ reminderId: "morning:2026-10-21", text: "第 1 版早报" });
+      expect(await client.regenerateMorningDigest?.()).toEqual({ reminderId: "morning:2026-10-21", text: "第 2 版早报" });
+      const digests = (await client.reminders()).reminders.filter((item) => item.reminderId === "morning:2026-10-21");
+      expect(digests).toHaveLength(1);
+      expect(digests[0]?.text).toBe("第 2 版早报");
+      expect(digests[0]?.status).toBe("open");
+    });
+  });
+
   it("lists open reminders and applies ignore, snooze, and topic actions", async () => {
     await withHttp(async ({ server, now }) => {
       const client = createDaemonClient({ port: server.port, token: server.token });

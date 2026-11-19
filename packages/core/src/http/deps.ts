@@ -24,6 +24,7 @@ import type {
   LlmModelsView,
   ConsolidateActionResult,
   SyncActionResult,
+  MorningDigestRegenerateResult,
   TodayResponse,
   TodoView,
   TopicDetail,
@@ -151,6 +152,8 @@ export interface HttpDeps {
   reportActivity(at: string): Promise<{ at: string }>;
   now(): Date;
   sync(): Promise<SyncActionResult>;
+  /** 可选,旧测试替身可不实现。daemon 总会提供。 */
+  regenerateMorningDigest?(): Promise<MorningDigestRegenerateResult>;
   upload(input: UploadActionInput): Promise<UploadActionResult>;
   /** Optional so older test doubles keep compiling. The daemon always supplies it. */
   consolidate?(input: { force?: boolean }): Promise<ConsolidateActionResult>;

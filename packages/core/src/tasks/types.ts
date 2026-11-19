@@ -6,15 +6,12 @@ export interface TaskProject {
   enabled: boolean;
 }
 
-export type TaskStatus = "queued" | "preparing" | "running" | "review" | "merging" | "done" | "failed";
+export type TaskStatus = "queued" | "preparing" | "planning" | "running" | "review" | "merging" | "done" | "failed";
 export type TaskPriority = 0 | 1 | 2 | 3;
 
-export interface TaskRun {
+interface TaskRunDetails {
   /** 领取任务时的项目目录；T3 中更换目录后不得继续操作原任务。 */
   projectCwd: string;
-  branch: string;
-  worktreePath: string;
-  baseSha: string;
   /** 派发编号：T3 用它对同一次派发去重。会话编号由 T3 分配，派发成功后才写入 threadId。 */
   requestId?: string | undefined;
   threadId: string | null;
@@ -25,6 +22,18 @@ export interface TaskRun {
   /** 返工投递失败时以同一命令重试，避免重复 turn 或把旧结果当作返工完成。 */
   pendingFeedback?: { commandId: string; prompt: string } | undefined;
 }
+
+export interface TaskWorktreeRun extends TaskRunDetails {
+  branch: string;
+  worktreePath: string;
+  baseSha: string;
+}
+
+export type TaskRun = TaskWorktreeRun | (TaskRunDetails & {
+  branch: null;
+  worktreePath: null;
+  baseSha: null;
+});
 
 export interface DevelopmentTask {
   id: string;
@@ -37,6 +46,7 @@ export interface DevelopmentTask {
   createdAt: string;
   updatedAt: string;
   run: TaskRun | null;
+  manual?: true | undefined;
   error?: string | null | undefined;
 }
 
@@ -73,6 +83,7 @@ export interface TaskUpdateInput {
 
 export type TaskActionInput =
   | { action: "project"; projectId: string; enabled: boolean }
+  | { action: "start"; id: string }
   | { action: "retry"; id: string }
   | { action: "approve"; id: string; reviewSha: string }
   | { action: "reject"; id: string; feedback: string };
@@ -95,15 +106,20 @@ export interface TaskHttpPort {
 }
 
 export interface TaskGitPort {
-  prepare(project: TaskProject, taskId: string): Promise<Pick<TaskRun, "branch" | "worktreePath" | "baseSha">>;
-  review(project: TaskProject, run: TaskRun): Promise<Omit<TaskReview, "task">>;
-  merge(project: TaskProject, run: TaskRun, approvedSha: string): Promise<void>;
+  prepare(project: TaskProject, taskId: string): Promise<Pick<TaskWorktreeRun, "branch" | "worktreePath" | "baseSha">>;
+  review(project: TaskProject, run: TaskWorktreeRun): Promise<Omit<TaskReview, "task">>;
+  merge(project: TaskProject, run: TaskWorktreeRun, approvedSha: string): Promise<void>;
 }
+
+type TaskLaunchInput = { title: string; prompt: string; cwd: string; requestId: string } & (
+  | { projectId: string; branch: string; plan?: true | undefined }
+  | { projectId: null; branch: null; plan: true }
+);
 
 export interface TaskAutomationPort {
   projects(): Promise<Array<Omit<TaskProject, "enabled">>>;
   createProject(input: TaskNewProject): Promise<Omit<TaskProject, "enabled">>;
-  start(input: { projectId: string; title: string; prompt: string; cwd: string; branch: string; requestId: string }): Promise<{ threadId: string; threadUrl: string }>;
-  inspect(threadId: string): Promise<{ state: "running" | "ready" | "failed"; summary: string; error?: string }>;
+  start(input: TaskLaunchInput): Promise<{ threadId: string; threadUrl: string }>;
+  inspect(threadId: string, requirementsFirst?: boolean): Promise<{ state: "planning" | "running" | "ready" | "failed"; summary: string; error?: string }>;
   followup(threadId: string, prompt: string, commandId: string): Promise<void>;
 }

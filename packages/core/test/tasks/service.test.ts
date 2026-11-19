@@ -21,7 +21,7 @@ async function setup() {
   const starts: Array<Parameters<TaskAutomationPort["start"]>[0]> = [];
   const followups: Array<{ threadId: string; prompt: string; commandId: string }> = [];
   const merges: string[] = [];
-  const states = new Map<string, "running" | "ready" | "failed">();
+  const states = new Map<string, "planning" | "running" | "ready" | "failed">();
   let startFailure = false;
   let followupFailure = false;
   let online = true;
@@ -43,7 +43,7 @@ async function setup() {
       starts.push(input);
       if (startFailure) throw new Error("dispatch uncertain");
       const threadId = `thread-${input.requestId}`;
-      states.set(threadId, "running");
+      states.set(threadId, input.plan ? "planning" : "running");
       return { threadId, threadUrl: `http://127.0.0.1:3773/env/${threadId}` };
     },
     async inspect(threadId) { return { state: states.get(threadId) ?? "running", summary: "验证结果" }; },
@@ -62,7 +62,7 @@ async function setup() {
     },
   };
   const options = {
-    dataDir: dir, automation, git,
+    dataDir: dir, automation, git, homeDir: "/Users/hong",
     id: () => `task-${++counter}`,
     now: () => new Date("2026-11-16T00:00:00Z"),
     store: {
@@ -111,6 +111,44 @@ describe("T3 TODO serial queue", () => {
     await f.service.tick();
     expect(f.starts).toHaveLength(1);
     expect((await f.board()).tasks[0]?.status).toBe("queued");
+  }));
+
+  test("manual start picks the clicked TODO in a paused project and blocks the rest while confirming requirements", () => fixture(async (f) => {
+    const first = (await f.service.create({ title: "automatic priority", projectId: "one", priority: 0 })).tasks[0]!;
+    const selected = (await f.service.create({ title: "user selected", description: "验收说明", projectId: "one", priority: 3 })).tasks[1]!;
+    const started = await f.service.action({ action: "start", id: selected.id });
+    expect(started.projects.find((item) => item.id === "one")?.enabled).toBe(false);
+    expect(started.tasks[1]).toMatchObject({ status: "planning", run: { worktreePath: `/tasks/${selected.id}`, threadUrl: expect.stringContaining("http://127.0.0.1") } });
+    expect(f.starts[0]).toMatchObject({ projectId: "one", title: selected.title, cwd: `/tasks/${selected.id}`, plan: true });
+    expect(f.starts[0]?.prompt).toContain("验收说明");
+    expect(f.starts[0]?.prompt).toContain("明确确认需求和计划");
+    await expect(f.service.action({ action: "start", id: selected.id })).rejects.toThrow("只有待处理");
+    await expect(f.service.action({ action: "start", id: first.id })).rejects.toThrow("项目已有");
+    await enable(f.service);
+    expect(f.starts).toHaveLength(1);
+    expect((await f.board()).tasks.map((task) => task.status)).toEqual(["queued", "planning"]);
+  }));
+
+  test("unassigned manual start persists its home directory and never uses Git", () => fixture(async (f) => {
+    f.options.git.prepare = async () => { throw new Error("unexpected git prepare"); };
+    f.options.git.review = async () => { throw new Error("unexpected git review"); };
+    const queued = (await f.service.create({ title: "文档梳理" })).tasks[0]!;
+    f.setStartFailure(true);
+    const failed = (await f.service.action({ action: "start", id: queued.id })).tasks[0]!;
+    expect(failed.status).toBe("failed");
+    const first = f.starts[0]!;
+    expect(first).toMatchObject({ projectId: null, branch: null, cwd: "/Users/hong", plan: true });
+    f.setStartFailure(false);
+    await f.service.action({ action: "retry", id: queued.id });
+    await f.service.tick();
+    expect(f.starts[1]?.requestId).toBe(first.requestId);
+    const planning = (await f.board()).tasks[0]!;
+    expect(planning).toMatchObject({ projectId: null, status: "planning", run: { branch: null, worktreePath: null, projectCwd: "/Users/hong" } });
+    await expect(f.service.action({ action: "approve", id: queued.id, reviewSha: SHA })).rejects.toThrow("不参与代码核对和合并");
+    f.states.set(planning.run!.threadId!, "ready");
+    await f.service.tick();
+    expect((await f.board()).tasks[0]).toMatchObject({ status: "done", run: { summary: "验证结果", reviewSha: null } });
+    expect(f.merges).toHaveLength(0);
   }));
 
   test("a TODO can register a new T3 project; a folder already in T3 is reused instead", () => fixture(async (f) => {

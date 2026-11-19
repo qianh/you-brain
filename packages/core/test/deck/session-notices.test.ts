@@ -400,6 +400,61 @@ describe("SessionNoticeWatcher", () => {
     expect(h.watcher.list().notices[0]?.status).toBe("closed");
     h.watcher.stop();
   });
+
+  it("忽略（mute）后这个会话不再提醒，别的会话照常；会话关闭后解除", async () => {
+    const h = harness();
+    h.set(view([session(1, "working"), session(2, "working")]));
+    h.watcher.start();
+    await settle();
+    h.set(view([session(1, "done"), session(2, "working")]));
+    h.line();
+    await settle();
+    expect(h.watcher.dismiss({ seq: 1, mute: true })).toBe(true);
+    expect(h.watcher.list().notices[0]?.status).toBe("closed");
+
+    // 会话 1 又跑了一轮：不再提醒；会话 2 跑完照常提醒。
+    h.set(view([session(1, "working"), session(2, "working")]));
+    h.line();
+    await settle();
+    h.set(view([session(1, "done"), session(2, "done")]));
+    h.line();
+    await settle();
+    expect(h.watcher.list().notices.map((n) => [n.pane, n.status])).toEqual([
+      [1, "closed"],
+      [2, "open"],
+    ]);
+
+    // 会话 1 关闭后，同一个编号的新会话照常提醒。
+    h.set(view([session(2, "done")]));
+    h.line();
+    await settle();
+    h.set(view([session(1, "working"), session(2, "done")]));
+    h.line();
+    await settle();
+    h.set(view([session(1, "done"), session(2, "done")]));
+    h.line();
+    await settle();
+    expect(h.watcher.list().notices.filter((n) => n.pane === 1 && n.status === "open")).toHaveLength(1);
+    h.watcher.stop();
+  });
+
+  it("只确认（不 mute）时，同一会话下次跑完仍提醒", async () => {
+    const h = harness();
+    h.watcher.start();
+    await settle();
+    h.set(view([session(1, "done")]));
+    h.line();
+    await settle();
+    h.watcher.dismiss({ seq: 1 });
+    h.set(view([session(1, "working")]));
+    h.line();
+    await settle();
+    h.set(view([session(1, "done")]));
+    h.line();
+    await settle();
+    expect(h.watcher.list().notices.map((n) => n.status)).toEqual(["closed", "open"]);
+    h.watcher.stop();
+  });
 });
 
 /** 假的事件流进程。 */

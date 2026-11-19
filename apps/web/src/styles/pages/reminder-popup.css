@@ -306,10 +306,6 @@
   border-left-color: var(--success);
 }
 
-.popup-terminal-card {
-  justify-content: flex-start;
-}
-
 .popup-meta-right {
   display: inline-flex;
   align-items: center;
@@ -349,6 +345,19 @@
 .popup-status-pill[data-kind="done"] {
   background: var(--success-soft);
   color: var(--success-text);
+}
+
+.popup-terminal-card {
+  justify-content: center;
+}
+
+/* 终端提醒只给一句话：小窗里放终端输出会折行变形，详情去「打开终端」看。 */
+.popup-term-line {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
 }
 
 .popup-state {

@@ -85,6 +85,7 @@ import type {
   GoogleLoginResult,
   GoogleLogoutResult,
   LlmTestResult,
+  MorningDigestRegenerateResult,
   OAuthClientPublic,
   OAuthClientPutBody,
   SearchRequest,
@@ -143,7 +144,13 @@ import {
   readReminderReplies,
   type ReminderReplyRecord,
 } from "../reminders/replies.js";
-import { dueRemindersForDevice, reminderActions } from "../reminders/run.js";
+import {
+  dueRemindersForDevice,
+  isMainDevice,
+  regenerateMorningDigestForDevice,
+  reminderActions,
+  type DueDeviceInput,
+} from "../reminders/run.js";
 import {
   QuotaService,
   readClaudeAccessToken,
@@ -2722,15 +2729,38 @@ export class YouBrainDaemon {
   }
 
   async #issueReminders(): Promise<void> {
+    if (this.#stopped || !this.#store || !this.#log) return;
+    const due = dueRemindersForDevice(this.#reminderInput(this.#store));
+    for (const item of due) {
+      if (this.#stopped) return;
+      await this.#emitUser("reminder.issued", item);
+    }
+  }
+
+  /** 按当前数据重算今天的早报并用原 id 再发一次,各设备折叠时覆盖旧正文。 */
+  async #regenerateMorningDigest(): Promise<MorningDigestRegenerateResult> {
     const store = this.#store;
-    if (this.#stopped || !store || !this.#log) return;
+    if (this.#stopped || !store || !this.#log) {
+      throw new HttpError(503, "NOT_READY", "daemon 还没准备好");
+    }
+    const input = this.#reminderInput(store);
+    if (!isMainDevice(input)) {
+      throw new HttpError(409, "NOT_MAIN_DEVICE", "早报只在主设备生成，请在主设备上重新生成");
+    }
+    const item = regenerateMorningDigestForDevice(input);
+    if (!item) throw new HttpError(409, "NOT_DUE", "还没到今天的早报时间");
+    await this.#emitUser("reminder.issued", item);
+    return { reminderId: item.reminderId, text: item.text };
+  }
+
+  #reminderInput(store: SqliteStore): DueDeviceInput {
     const now = this.#clock.now();
     const sessionUpdatedAt: Record<string, string> = {};
     for (const session of store.listSessions()) {
       if (session.updatedAt !== null) sessionUpdatedAt[session.sessionKey] = session.updatedAt;
     }
     const events = store.listEvents();
-    const due = dueRemindersForDevice({
+    return {
       deviceId: this.#local.deviceId,
       mainDevice: this.#roles.mainDevice,
       notifications: this.#shared.reminders.notifications,
@@ -2747,11 +2777,7 @@ export class YouBrainDaemon {
         parseMergeSuggestions(store.getCursor(MERGE_SUGGESTIONS_CURSOR)),
         foldEventsCached(events).topics,
       ),
-    });
-    for (const item of due) {
-      if (this.#stopped) return;
-      await this.#emitUser("reminder.issued", item);
-    }
+    };
   }
 
   /** A disabled file with no cursor must not backfill events from before this start. */
@@ -3531,6 +3557,7 @@ export class YouBrainDaemon {
       });
       this.#tasks = new TaskService({
         dataDir: this.#paths.dataDir,
+        homeDir: this.#homeDir,
         automation: this.#taskAutomation,
         git: new TaskGit({ dataDir: this.#paths.dataDir, env: this.#env }),
         now: () => this.#clock.now(),
@@ -3844,6 +3871,7 @@ export class YouBrainDaemon {
         return flight;
       },
       sync: () => this.#syncNow(),
+      regenerateMorningDigest: () => this.#regenerateMorningDigest(),
       upload: (input) => this.#uploadNow(input),
       consolidate: (input) => this.#run(() => this.#consolidate({ manual: true, force: input.force === true })),
       // Stays out of `#run`: a model call this long must not hold up capture and sync.

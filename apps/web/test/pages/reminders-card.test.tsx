@@ -94,6 +94,9 @@ describe("ReminderCard", () => {
       expect(html).toContain(">384<");
       expect(html).toContain(">727<");
       expect(html).toContain("货代产品能力");
+      expect(html).toContain('<ol class="digest-follow-list">');
+      expect(html).toContain('<span class="digest-follow-rank">2</span><span class="digest-follow-name">货代产品能力</span>');
+      expect(html).not.toContain("digest-chip");
       expect(html).not.toContain("本…");
       expect(html).not.toContain("展开");
       expect(html).toContain("忽略（已读）");

@@ -180,19 +180,39 @@
   line-height: var(--lh-sm);
   color: var(--text-2);
 }
-.digest-chips {
+.digest-follow-list {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.digest-chip {
-  max-width: 100%;
-  padding: 2px 8px;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
   border-radius: var(--r-chip);
   background: color-mix(in srgb, var(--surface) 70%, transparent);
   border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
+  overflow: hidden;
+}
+.digest-follow-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 10px;
   font-size: var(--fs-base);
   line-height: var(--lh-base);
+}
+.digest-follow-item + .digest-follow-item {
+  border-top: 1px solid color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.digest-follow-rank {
+  flex: none;
+  min-width: 1em;
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+  text-align: center;
+}
+.digest-follow-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -250,7 +270,7 @@
 /* 多巴胺主题下,早报的数字和话题标签轮流用撞色,其余主题保持单一强调色。 */
 [data-theme="dopamine"] .digest-stat:nth-child(1) .digest-stat-value { color: var(--swatch-6-ink); }
 [data-theme="dopamine"] .digest-stat:nth-child(2) .digest-stat-value { color: var(--swatch-3-ink); }
-[data-theme="dopamine"] .digest-chip:nth-child(4n + 1) { border-color: var(--swatch-1); background: color-mix(in srgb, var(--swatch-1) 12%, var(--surface)); }
-[data-theme="dopamine"] .digest-chip:nth-child(4n + 2) { border-color: var(--swatch-2); background: color-mix(in srgb, var(--swatch-2) 12%, var(--surface)); }
-[data-theme="dopamine"] .digest-chip:nth-child(4n + 3) { border-color: var(--swatch-5); background: color-mix(in srgb, var(--swatch-5) 14%, var(--surface)); }
-[data-theme="dopamine"] .digest-chip:nth-child(4n + 4) { border-color: var(--swatch-4); background: color-mix(in srgb, var(--swatch-4) 12%, var(--surface)); }
+[data-theme="dopamine"] .digest-follow-item:nth-child(4n + 1) .digest-follow-rank { color: var(--swatch-1-ink); }
+[data-theme="dopamine"] .digest-follow-item:nth-child(4n + 2) .digest-follow-rank { color: var(--swatch-2-ink); }
+[data-theme="dopamine"] .digest-follow-item:nth-child(4n + 3) .digest-follow-rank { color: var(--swatch-5-ink); }
+[data-theme="dopamine"] .digest-follow-item:nth-child(4n + 4) .digest-follow-rank { color: var(--swatch-4-ink); }

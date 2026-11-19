@@ -14,10 +14,10 @@ describe("TODO queue presentation", () => {
     expect(tasks[0]?.id).toBe("p3");
   });
 
-  test("review and failures are blockers rather than active execution", () => {
-    const tasks = [task("waiting", { status: "review" }), task("running", { status: "running", projectId: "two" }), task("preparing", { status: "preparing", projectId: "three" }), task("done", { status: "done" })];
+  test("planning counts as active, unlike review and failures", () => {
+    const tasks = [task("waiting", { status: "review" }), task("running", { status: "running", projectId: "two" }), task("preparing", { status: "preparing", projectId: "three" }), task("planning", { status: "planning", projectId: null }), task("failed", { status: "failed" }), task("done", { status: "done" })];
     expect(projectTask(tasks, "one")?.id).toBe("waiting");
-    expect(visibleTasks(tasks, "all", "active").map((item) => item.id)).toEqual(["running", "preparing"]);
+    expect(visibleTasks(tasks, "all", "active").map((item) => item.id)).toEqual(["running", "preparing", "planning"]);
     expect(visibleTasks(tasks, "one", "review").map((item) => item.id)).toEqual(["waiting"]);
   });
 

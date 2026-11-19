@@ -25,6 +25,8 @@ export interface SessionNotice {
 export interface SessionNoticeDismissInput {
   seq?: number | undefined;
   pane?: number | undefined;
+  /** 用户点了「忽略」：这个会话之后不再提醒，直到会话关闭（daemon 重启也会恢复）。 */
+  mute?: boolean | undefined;
 }
 
 export interface SessionNoticeList {
@@ -62,19 +64,20 @@ export type SessionNoticeDraft = Pick<
 /**
  * 比较前后两次快照，产生这一轮的提醒。
  * `previous` 为 null 是第一次快照，只建立基线、不提醒（重启后不补弹）。
- * 只有「上一次是 working、这一次是 waiting 或 done」才提醒；正在看的会话不提醒。
+ * 只有「上一次是 working、这一次是 waiting 或 done」才提醒；正在看的会话和已忽略的会话不提醒。
  */
 export function diffNotices(
   previous: ReadonlyMap<number, string | null> | null,
   sessions: readonly Tty7Session[],
   viewing: number | null,
+  muted: ReadonlySet<number> = new Set(),
 ): SessionNoticeDraft[] {
   if (previous === null) return [];
   const result: SessionNoticeDraft[] = [];
   for (const session of sessions) {
     if (previous.get(session.pane) !== "working") continue;
     if (session.status !== "waiting" && session.status !== "done") continue;
-    if (session.pane === viewing) continue;
+    if (session.pane === viewing || muted.has(session.pane)) continue;
     const name = sessionTitle(session);
     result.push({
       pane: session.pane,
@@ -154,6 +157,8 @@ export class SessionNoticeWatcher {
   #again = false;
   /** 正在分析、还没记下的会话；同一会话分析期间再次触发不重复分析。 */
   readonly #summarizing = new Set<number>();
+  /** 用户点了「忽略」的会话；会话关闭后移除（pane 编号可能被新会话复用）。 */
+  readonly #muted = new Set<number>();
 
   constructor(options: SessionNoticeWatcherOptions) {
     this.#options = options;
@@ -196,14 +201,20 @@ export class SessionNoticeWatcher {
     }
   }
 
-  /** 用户在置顶弹框里确认、忽略或跳转到终端后关闭对应提醒。 */
+  /** 用户在置顶弹框里确认、忽略或跳转到终端后关闭对应提醒；忽略（mute）时这个会话之后也不再提醒。 */
   dismiss(input: SessionNoticeDismissInput): boolean {
+    if (input.mute === true) {
+      if (input.pane !== undefined) this.#muted.add(input.pane);
+      const bySeq = input.seq === undefined ? undefined : this.#notices.find((notice) => notice.seq === input.seq);
+      if (bySeq !== undefined) this.#muted.add(bySeq.pane);
+    }
     let changed = false;
     for (const notice of this.#notices) {
       if (notice.status !== "open") continue;
       const matchSeq = input.seq !== undefined && notice.seq === input.seq;
       const matchPane = input.pane !== undefined && notice.pane === input.pane;
-      if (matchSeq || matchPane) {
+      const matchMuted = input.mute === true && this.#muted.has(notice.pane);
+      if (matchSeq || matchPane || matchMuted) {
         notice.status = "closed";
         changed = true;
       }
@@ -254,7 +265,7 @@ export class SessionNoticeWatcher {
     }
     if (!this.#started) return;
     // 分析期间会话状态变了（又开始工作、已关闭）或用户已经在看，这条就不用记了。
-    if (this.#snapshot?.get(item.pane) !== item.kind || this.#viewingPane() === item.pane) return;
+    if (this.#snapshot?.get(item.pane) !== item.kind || this.#viewingPane() === item.pane || this.#muted.has(item.pane)) return;
     const text = summary?.trim() ?? "";
     this.#push([text === "" ? item : { ...item, body: text }]);
   }
@@ -302,8 +313,10 @@ export class SessionNoticeWatcher {
         enabled = false;
       }
       const viewing = this.#viewingPane();
+      const live = new Set(view.sessions.map((session) => session.pane));
+      for (const pane of [...this.#muted]) if (!live.has(pane)) this.#muted.delete(pane);
       const reconciled = reconcileOpenNotices(this.#notices, view.sessions, viewing);
-      const found = enabled ? diffNotices(this.#snapshot, view.sessions, viewing) : [];
+      const found = enabled ? diffNotices(this.#snapshot, view.sessions, viewing, this.#muted) : [];
       this.#snapshot = new Map(view.sessions.map((session) => [session.pane, session.status]));
       if (found.length === 0) {
         if (reconciled) {

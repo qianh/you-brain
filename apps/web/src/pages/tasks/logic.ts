@@ -4,6 +4,7 @@ import type { MessageKey } from "../../i18n/messages.js";
 export const TASK_STATUS_KEYS: Record<TaskStatus, MessageKey> = {
   queued: "tasksQueued",
   preparing: "tasksPreparing",
+  planning: "tasksPlanning",
   running: "tasksRunning",
   review: "tasksReview",
   merging: "tasksMerging",
@@ -13,10 +14,14 @@ export const TASK_STATUS_KEYS: Record<TaskStatus, MessageKey> = {
 
 export const TASK_PRIORITY_KEYS = ["tasksPriority0", "tasksPriority1", "tasksPriority2", "tasksPriority3"] as const;
 
+export function isTaskActive(status: TaskStatus): boolean {
+  return status === "preparing" || status === "planning" || status === "running" || status === "merging";
+}
+
 export function visibleTasks(tasks: DevelopmentTask[], project: string, status: string): DevelopmentTask[] {
   return tasks.filter((task) =>
     (project === "all" || (project === "unassigned" ? task.projectId === null : task.projectId === project)) &&
-    (status === "all" || (status === "active" ? ["preparing", "running", "merging"].includes(task.status) : task.status === status)),
+    (status === "all" || (status === "active" ? isTaskActive(task.status) : task.status === status)),
   ).sort((left, right) => left.priority - right.priority || left.createdAt.localeCompare(right.createdAt));
 }
 

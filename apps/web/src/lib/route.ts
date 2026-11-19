@@ -79,6 +79,19 @@ export function parseDeckPane(href: string): number | null {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
+export function deckT3ThreadHref(threadUrl: string): string {
+  return `/deck?t3Thread=${encodeURIComponent(threadUrl)}`;
+}
+
+export function t3ThreadFrameUrl(baseUrl: string, threadUrl: string | null): string {
+  if (!threadUrl) return baseUrl;
+  try {
+    const target = new URL(threadUrl);
+    if (target.origin === new URL(baseUrl).origin && !target.username && !target.password && !target.search && !target.hash && /^\/[^/]+\/[^/]+$/u.test(target.pathname)) return target.href;
+  } catch { return baseUrl; }
+  return baseUrl;
+}
+
 /** 话题页地址;带 `session` 时话题详情会滚到并标出那段会话。 */
 export function topicHref(zone: "active" | "history", id?: string, session?: string | null): string {
   const path = zone === "history" ? "/topics/history" : "/topics";

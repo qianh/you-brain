@@ -304,20 +304,22 @@ describe("Tty7.procs 与终端活动状态", () => {
       procs: [
         { pid: 1, name: "zsh", depth: 0, foreground: false, rss: 1, cpu_ns: 5, started: 1 },
         { pid: 2, name: "node", depth: 1, foreground: true, rss: 1, cpu_ns: 9000, started: 2 },
+        { pid: 3, name: "python3.12", depth: 2, foreground: true, rss: 1, cpu_ns: 700, started: 3 },
       ],
-      ports: [],
+      ports: [{ port: 8003, pid: 3, name: "python3.12", addr: "*" }],
       probe: { state: "ok" },
       context: { at_prompt: false },
     },
   };
 
-  it("procs 取出前台进程、累计 CPU 和是否在提示符", async () => {
+  it("procs 取出前台进程、累计 CPU、是否在提示符和哪些进程在监听端口", async () => {
     const { tty7 } = fake(replies);
     expect(await tty7.procs(5)).toEqual({
       atPrompt: false,
       procs: [
-        { pid: 1, depth: 0, foreground: false, cpuNs: 5 },
-        { pid: 2, depth: 1, foreground: true, cpuNs: 9000 },
+        { pid: 1, depth: 0, foreground: false, cpuNs: 5, server: false },
+        { pid: 2, depth: 1, foreground: true, cpuNs: 9000, server: false },
+        { pid: 3, depth: 2, foreground: true, cpuNs: 700, server: true },
       ],
     });
   });

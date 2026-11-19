@@ -61,6 +61,45 @@ describe("T3 TODO automation MCP adapter", () => {
     expect(launches()).toHaveLength(0);
   });
 
+  test("starts a manual project TODO in plan mode in the owned worktree", async () => {
+    const { client, launches } = harness();
+    await client.start({ ...startInput, plan: true });
+    expect(launches()[0]?.args).toMatchObject({
+      projectId: project.id, interactionMode: "plan",
+      workspaceStrategy: { type: "existing_worktree", worktreePath: "/worktrees/new", branch: "todo/new" },
+    });
+    expect(launches()[0]?.args).not.toHaveProperty("modelSelection");
+  });
+
+  test("reuses the existing home folder without a worktree and recovers by dispatch reference, not title alone", async () => {
+    const { client, t3, launches } = harness();
+    const homeTask = { ...startInput, projectId: null, branch: null, cwd: "/Users/hong", plan: true } as const;
+    const first = await client.start(homeTask);
+    expect(t3.calls.filter((call) => call.name === "t3_project_create").map((call) => call.args)).toEqual([
+      { title: "hong", workspaceRoot: "/Users/hong", createWorkspaceRootIfMissing: false },
+    ]);
+    expect(launches()[0]?.args).toMatchObject({ projectId: "project-2", interactionMode: "plan", workspaceStrategy: { type: "root" } });
+    expect(launches()[0]?.args).not.toHaveProperty("modelSelection");
+    const second = await client.start({ ...homeTask, requestId: "other-todo" });
+    expect(second.threadId).not.toBe(first.threadId);
+    const resumed = new T3Automation({ getUrl: async () => baseUrl, getToken: async () => t3.token, fetch: t3.fetch });
+    expect(await resumed.start(homeTask)).toEqual(first);
+    expect(launches()).toHaveLength(2);
+    expect(t3.calls.filter((call) => call.name === "t3_project_create")).toHaveLength(1);
+  });
+
+  test("manual TODO waits in plan mode or after changing mode without starting a new turn", async () => {
+    const { client, t3 } = harness({ threads: [fakeThread({ interactionMode: "plan" })] });
+    const thread = t3.threads[0]!;
+    expect((await client.inspect(thread.threadId, true)).state).toBe("planning");
+    thread.interactionMode = "default";
+    expect((await client.inspect(thread.threadId, true)).state).toBe("planning");
+    await client.followup(thread.threadId, "需求和计划已确认，开始执行", "user-confirmed");
+    expect((await client.inspect(thread.threadId, true)).state).toBe("running");
+    t3.complete(thread.threadId, "已按计划完成");
+    expect(await client.inspect(thread.threadId, true)).toEqual({ state: "ready", summary: "已按计划完成" });
+  });
+
   test("new tasks inherit the latest project model and permission mode, default to auto without history", async () => {
     for (const [threads, expected] of [
       [[fakeThread({ threadId: "latest", runtimeMode: "auto-accept-edits", title: "x" }), fakeThread({ threadId: "older", runtimeMode: "full-access", title: "y" })], "auto-accept-edits"],
