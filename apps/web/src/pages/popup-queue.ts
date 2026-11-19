@@ -11,9 +11,10 @@ export type PopupItem =
 export function buildPopupQueue(
   reminders: readonly ReminderView[],
   notices: readonly DeckSessionNotice[],
+  silentNotifications = false,
 ): PopupItem[] {
   const items: PopupItem[] = [];
-  for (const reminder of reminders) {
+  for (const reminder of silentNotifications ? [] : reminders) {
     if (reminder.kind !== "recall" || reminder.status !== "open") continue;
     items.push({
       type: "reminder",
@@ -24,6 +25,7 @@ export function buildPopupQueue(
   }
   for (const notice of notices) {
     if (notice.status !== "open") continue;
+    if (silentNotifications && notice.kind !== "waiting") continue;
     items.push({
       type: "terminal",
       key: `terminal:${notice.seq}`,

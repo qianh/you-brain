@@ -65,6 +65,7 @@ pub enum CommandError {
 pub struct ShellFile {
     pub shortcut: Option<String>,
     pub autostart: Option<bool>,
+    pub silent_notifications: bool,
 }
 
 pub fn resolve_data_dir(
@@ -378,7 +379,30 @@ pub fn parse_shell_file(text: &str) -> ShellFile {
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
         autostart: value.get("autostart").and_then(serde_json::Value::as_bool),
+        silent_notifications: value
+            .get("silentNotifications")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     }
+}
+
+pub fn save_silent_notifications(data_dir: &Path, enabled: bool) -> std::io::Result<()> {
+    let path = shell_file(data_dir);
+    let mut fields: serde_json::Map<String, serde_json::Value> = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(error) => return Err(error),
+    };
+    fields.insert("silentNotifications".into(), enabled.into());
+    let bytes = serde_json::to_vec_pretty(&fields)?;
+    std::fs::create_dir_all(data_dir)?;
+    let tmp = data_dir.join(".shell.json.tmp");
+    std::fs::write(&tmp, bytes)?;
+    if let Err(error) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub fn shared_shortcut(config_json: &serde_json::Value) -> Option<String> {
@@ -466,10 +490,8 @@ mod tests {
     use super::*;
     use std::process::Command;
 
-    #[cfg(unix)]
     struct TempDir(PathBuf);
 
-    #[cfg(unix)]
     impl Drop for TempDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
@@ -821,7 +843,34 @@ mod tests {
         let file = parse_shell_file(r#"{"shortcut":"Ctrl+Alt+Y","autostart":false}"#);
         assert_eq!(file.shortcut.as_deref(), Some("Ctrl+Alt+Y"));
         assert_eq!(file.autostart, Some(false));
+        assert!(!file.silent_notifications);
         assert_eq!(parse_shell_file("{"), ShellFile::default());
+    }
+
+    #[test]
+    fn silent_notifications_roundtrip_preserves_other_shell_settings() {
+        let dir =
+            TempDir(std::env::temp_dir().join(format!("you-brain-shell-{}", uuid::Uuid::new_v4())));
+        let path = shell_file(&dir.0);
+        save_silent_notifications(&dir.0, true).unwrap();
+        assert!(parse_shell_file(&std::fs::read_to_string(&path).unwrap()).silent_notifications);
+
+        std::fs::write(
+            &path,
+            r#"{"autostart":false,"silentNotifications":true,"other":[1]}"#,
+        )
+        .unwrap();
+        save_silent_notifications(&dir.0, false).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let file = parse_shell_file(&contents);
+        assert!(!file.silent_notifications);
+        assert_eq!(file.autostart, Some(false));
+        let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(value["other"], serde_json::json!([1]));
+
+        std::fs::write(&path, "{").unwrap();
+        assert!(save_silent_notifications(&dir.0, true).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{");
     }
 
     #[test]

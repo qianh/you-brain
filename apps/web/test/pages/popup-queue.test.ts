@@ -57,4 +57,18 @@ describe("buildPopupQueue", () => {
       "reminder:r-old",
     ]);
   });
+
+  test("silent mode only shows open terminal notices that need input", () => {
+    const queue = buildPopupQueue(
+      [reminder("r-new", "2026-11-18T08:10:00.000Z")],
+      [
+        notice(1, "2026-11-18T08:02:00.000Z"),
+        notice(2, "2026-11-18T08:07:00.000Z", { status: "closed" }),
+        notice(3, "2026-11-18T08:08:00.000Z", { kind: "done" }),
+        notice(4, "2026-11-18T08:09:00.000Z"),
+      ],
+      true,
+    );
+    expect(queue.map((item) => item.key)).toEqual(["terminal:4", "terminal:1"]);
+  });
 });

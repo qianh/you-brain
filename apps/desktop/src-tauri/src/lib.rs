@@ -25,6 +25,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 use crate::client::LoopbackClient;
 use crate::daemon::{DaemonEndpoint, EndpointState, LaunchSequence};
+use crate::notices::NotificationKind;
 use crate::status_view::TrayPresentation;
 
 const PANEL: &str = "panel";
@@ -50,6 +51,7 @@ const STATUS_POLL: Duration = Duration::from_secs(30);
 struct ShellState {
     endpoint: Mutex<Option<DaemonEndpoint>>,
     shortcut: Mutex<String>,
+    silent_notifications: Mutex<bool>,
     attention: Mutex<Option<String>>,
     panel_target: Mutex<Option<String>>,
     main_target: Mutex<Option<String>>,
@@ -102,6 +104,8 @@ pub fn run() {
             quit_now,
             open_local_path,
             hide_reminder_popup,
+            get_silent_notifications,
+            set_silent_notifications,
             cookies::prepare_dsh_cookies
         ])
         .setup(|app| {
@@ -109,9 +113,12 @@ pub fn run() {
             // 常驻 Dock 图标:应用是用户的主入口,不再隐藏为纯菜单栏进程。
             app.set_activation_policy(tauri::ActivationPolicy::Regular);
 
+            let data_dir = current_data_dir();
+            let shell = read_shell(&data_dir);
             app.manage(ShellState {
                 endpoint: Mutex::new(None),
                 shortcut: Mutex::new(String::new()),
+                silent_notifications: Mutex::new(shell.silent_notifications),
                 attention: Mutex::new(None),
                 panel_target: Mutex::new(None),
                 main_target: Mutex::new(None),
@@ -122,8 +129,6 @@ pub fn run() {
                 notice_cursor: Mutex::new(None),
             });
             install_tray(app)?;
-            let data_dir = current_data_dir();
-            let shell = read_shell(&data_dir);
             apply_autostart(app.handle(), shell.autostart.unwrap_or(true));
             let initial = shortcut::effective_shortcut(None, shell.shortcut.as_deref());
             register_shortcut(app.handle(), &initial);
@@ -528,9 +533,17 @@ fn notify_session_notices(app: &tauri::AppHandle, client: &LoopbackClient) {
     if selected.is_empty() {
         return;
     }
-    show_reminder_popup(app);
+    let popup_kind = if selected
+        .iter()
+        .any(|item| item.kind == NotificationKind::NeedsInput)
+    {
+        NotificationKind::NeedsInput
+    } else {
+        NotificationKind::Routine
+    };
+    show_reminder_popup(app, popup_kind);
     for item in selected {
-        notify(app, &item.title, &item.body);
+        notify_with_kind(app, &item.title, &item.body, item.kind);
     }
 }
 
@@ -562,7 +575,7 @@ fn notify_due_reminders(
     // 聊到时提醒额外弹置顶弹框；系统通知照旧，两层都到，弹框是主要入口。
     let (recall, _others) = reminders::partition_recall(&selected);
     if !recall.is_empty() {
-        show_reminder_popup(app);
+        show_reminder_popup(app, NotificationKind::Routine);
     }
     let body = reminders::notification_text(&selected);
     if body.is_empty() {
@@ -576,9 +589,12 @@ fn notify_due_reminders(
 
 /// 有新的聊到时提醒：把记忆提醒弹框带到屏幕上方居中、置顶并获得焦点。
 /// 页面自己拉提醒队列并渲染，回复/忽略后没有剩余时经 `hide_reminder_popup` 收起。
-fn show_reminder_popup(app: &tauri::AppHandle) {
+fn show_reminder_popup(app: &tauri::AppHandle, kind: NotificationKind) {
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
+        if !kind.allows_interrupt(silent_notifications(&app)) {
+            return;
+        }
         let Some(endpoint) = current_endpoint(&app) else {
             return;
         };
@@ -929,6 +945,37 @@ fn hide_reminder_popup(app: tauri::AppHandle) {
             let _ = window.hide();
         }
     });
+}
+
+#[tauri::command]
+fn get_silent_notifications(app: tauri::AppHandle) -> bool {
+    silent_notifications(&app)
+}
+
+#[tauri::command]
+fn set_silent_notifications(window: WebviewWindow, enabled: bool) -> Result<(), String> {
+    if window.label() != PANEL {
+        return Err("只能从托盘面板修改静默通知设置".into());
+    }
+    let app = window.app_handle();
+    let state = app.state::<ShellState>();
+    let mut silent = state
+        .silent_notifications
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if *silent == enabled {
+        return Ok(());
+    }
+    daemon::save_silent_notifications(&current_data_dir(), enabled)
+        .map_err(|error| error.to_string())?;
+    *silent = enabled;
+    drop(silent);
+    if let Some(window) = app.get_webview_window(REMINDER_POPUP) {
+        let _ = window.eval(
+            "window.dispatchEvent(new Event('you-brain-silent-notifications-changed'))",
+        );
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1290,13 +1337,26 @@ fn shrink_tray_title(tray: &tauri::tray::TrayIcon) {
 }
 
 fn notify(app: &tauri::AppHandle, title: &str, body: &str) {
+    notify_with_kind(app, title, body, NotificationKind::Routine);
+}
+
+fn notify_with_kind(app: &tauri::AppHandle, title: &str, body: &str, kind: NotificationKind) {
     use tauri_plugin_notification::NotificationExt;
     let title = title.to_string();
     let body = body.to_string();
     let app = app.clone();
     let _ = app.clone().run_on_main_thread(move || {
-        let _ = app.notification().builder().title(title).body(body).show();
+        if kind.allows_interrupt(silent_notifications(&app)) {
+            let _ = app.notification().builder().title(title).body(body).show();
+        }
     });
+}
+
+fn silent_notifications(app: &tauri::AppHandle) -> bool {
+    *app.state::<ShellState>()
+        .silent_notifications
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
 }
 
 fn set_endpoint(app: &tauri::AppHandle, endpoint: Option<DaemonEndpoint>) {

@@ -63,6 +63,18 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.panel-page .panel-notification-setting {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  min-height: var(--h-row-compact);
+  padding: var(--sp-1) var(--sp-3);
+  border-top: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: var(--fs-base);
+}
 .panel-page .panel-footer {
   padding: var(--sp-2) var(--sp-3) var(--sp-3);
   border-top: 1px solid var(--border);

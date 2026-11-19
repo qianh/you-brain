@@ -1,10 +1,23 @@
 //! 终端会话提醒：daemon 把「会话等你回复 / 已完成」记成带序号的条目，
 //! 壳每次刷新时取一次，只处理自己还没弹过的待处理（open）条目：发系统通知并拉起置顶弹框。
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationKind {
+    Routine,
+    NeedsInput,
+}
+
+impl NotificationKind {
+    pub fn allows_interrupt(self, silent: bool) -> bool {
+        !silent || self == Self::NeedsInput
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeckNotice {
     pub seq: u64,
     pub open: bool,
+    pub kind: NotificationKind,
     pub title: String,
     pub body: String,
 }
@@ -58,6 +71,10 @@ pub fn parse_deck_notices(text: &str) -> Result<DeckNotices, ()> {
         notices.push(DeckNotice {
             seq,
             open: item.get("status").and_then(serde_json::Value::as_str) != Some("closed"),
+            kind: match item.get("kind").and_then(serde_json::Value::as_str) {
+                Some("waiting") => NotificationKind::NeedsInput,
+                _ => NotificationKind::Routine,
+            },
             title: title.to_string(),
             body: item
                 .get("body")
@@ -111,6 +128,7 @@ mod tests {
         DeckNotice {
             seq,
             open: true,
+            kind: NotificationKind::Routine,
             title: format!("会话 {seq} 已完成"),
             body: String::new(),
         }
@@ -180,10 +198,30 @@ mod tests {
             vec![DeckNotice {
                 seq: 2,
                 open: true,
+                kind: NotificationKind::NeedsInput,
                 title: "账本 在等你回复".into(),
                 body: "继续吗？".into()
             }]
         );
+    }
+
+    #[test]
+    fn silence_only_allows_notices_that_need_input_and_cursor_still_advances() {
+        let parsed = parse_deck_notices(
+            r#"{"epoch":"e1","latest":4,"notices":[{"seq":2,"kind":"waiting","title":"待回复"},{"seq":3,"kind":"done","title":"已完成"},{"seq":4,"title":"其他通知"}]}"#,
+        )
+        .unwrap();
+        let (selected, next) = select_notices(Some(&cursor("e1", 1)), &parsed);
+        assert!(selected.iter().all(|item| item.kind.allows_interrupt(false)));
+        assert_eq!(
+            selected
+                .iter()
+                .filter(|item| item.kind.allows_interrupt(true))
+                .map(|item| item.seq)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(select_notices(Some(&next), &parsed).0.is_empty());
     }
 
     #[test]

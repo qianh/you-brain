@@ -9,6 +9,7 @@ import { BrandMark, Icon } from "../components/icons.js";
 import { SkeletonRow } from "../components/skeleton.js";
 import { StatusCapsule } from "../components/status-capsule.js";
 import { useToast } from "../components/toast.js";
+import { Toggle } from "../components/toggle.js";
 import { useDelayed } from "../components/use-delayed.js";
 import { capsuleFromStatus, capsuleWarningCount, type CapsuleKind, type CapsuleStatus } from "../lib/health.js";
 import { formatDateTime, type Language } from "../lib/format.js";
@@ -210,6 +211,7 @@ export function PanelPage() {
           </>
         ) : null}
       </PanelScroll>
+      <SilentNotificationsSetting t={t} />
       <footer className="panel-footer">
         <Button size="sm" variant="ghost" icon={<Icon name="refresh" />} loading={syncing} onClick={() => void sync()}>
           {t("cmdSync")}
@@ -229,6 +231,43 @@ export function PanelPage() {
           </Button>
         </div>
       </footer>
+    </div>
+  );
+}
+
+function SilentNotificationsSetting({ t }: { t: (key: MessageKey) => string }) {
+  const { push } = useToast();
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    void browserWindowBridge().invoke?.("get_silent_notifications")
+      .then((value) => {
+        if (typeof value === "boolean") setEnabled(value);
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const save = async (next: boolean) => {
+    const invoke = browserWindowBridge().invoke;
+    if (!invoke) return;
+    setSaving(true);
+    try {
+      await invoke("set_silent_notifications", { enabled: next });
+      setEnabled(next);
+    } catch {
+      push({ message: t("panelSilentNotificationsSaveFailed"), tone: "danger" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (enabled === null) return null;
+  const label = t("panelSilentNotifications");
+  return (
+    <div className="panel-notification-setting">
+      <span>{label}</span>
+      <Toggle checked={enabled} label={label} disabled={saving} onChange={(next) => void save(next)} />
     </div>
   );
 }

@@ -12,6 +12,8 @@
     "allow-open-local-path",
     "allow-prepare-dsh-cookies",
     "allow-hide-reminder-popup",
+    "allow-read-silent-notifications",
+    "allow-set-silent-notifications",
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize",
     "dialog:allow-open"

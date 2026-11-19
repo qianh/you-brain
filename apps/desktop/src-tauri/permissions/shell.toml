@@ -27,3 +27,13 @@ commands.allow = ["prepare_dsh_cookies"]
 identifier = "allow-hide-reminder-popup"
 description = "Lets the reminder popup hide itself once its queue is handled."
 commands.allow = ["hide_reminder_popup"]
+
+[[permission]]
+identifier = "allow-read-silent-notifications"
+description = "Lets the tray panel and reminder popup read the local notification mode."
+commands.allow = ["get_silent_notifications"]
+
+[[permission]]
+identifier = "allow-set-silent-notifications"
+description = "Lets the tray panel update the local notification mode."
+commands.allow = ["set_silent_notifications"]

@@ -213,6 +213,18 @@
           "markdownDescription": "Lets the Web UI finish quitting after pending saves are written."
         },
         {
+          "description": "Lets the tray panel and reminder popup read the local notification mode.",
+          "type": "string",
+          "const": "allow-read-silent-notifications",
+          "markdownDescription": "Lets the tray panel and reminder popup read the local notification mode."
+        },
+        {
+          "description": "Lets the tray panel update the local notification mode.",
+          "type": "string",
+          "const": "allow-set-silent-notifications",
+          "markdownDescription": "Lets the tray panel update the local notification mode."
+        },
+        {
           "description": "This permission set configures if your\napplication can enable or disable auto\nstarting the application on boot.\n\n#### Granted Permissions\n\nIt allows all to check, enable and\ndisable the automatic start on boot.\n\n\n#### This default permission set includes:\n\n- `allow-enable`\n- `allow-disable`\n- `allow-is-enabled`",
           "type": "string",
           "const": "autostart:default",

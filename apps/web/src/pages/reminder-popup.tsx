@@ -72,14 +72,20 @@ export function ReminderPopupPage() {
     async (options: { withConfig?: boolean } = {}): Promise<PopupItem[]> => {
       try {
         const [listed, deckNotices] = await Promise.all([
-          client.reminders(),
+          client.reminders().catch(() => null),
           client.deckNotices().catch((): { notices: DeckSessionNotice[] } => ({ notices: [] })),
         ]);
         if (options.withConfig === true) {
           const config = await client.config();
           setLanguage(config.ui.language);
         }
-        const merged = buildPopupQueue(listed.reminders, deckNotices.notices);
+        const silentNotifications = (await browserWindowBridge().invoke?.("get_silent_notifications")
+          .catch(() => false)) === true;
+        if (listed === null && !silentNotifications) {
+          setOffline(true);
+          return [];
+        }
+        const merged = buildPopupQueue(listed?.reminders ?? [], deckNotices.notices, silentNotifications);
         setQueue(merged);
         setOffline(false);
         return merged;
@@ -101,10 +107,15 @@ export function ReminderPopupPage() {
       if (settledRef.current !== null) return;
       void refresh();
     };
+    const onNotificationModeChange = (): void => {
+      void refresh();
+    };
     window.addEventListener("focus", onFocus);
+    window.addEventListener("you-brain-silent-notifications-changed", onNotificationModeChange);
     return () => {
       clearInterval(timer);
       window.removeEventListener("focus", onFocus);
+      window.removeEventListener("you-brain-silent-notifications-changed", onNotificationModeChange);
     };
   }, [refresh]);
 
