@@ -556,6 +556,13 @@ export async function handleApi(
       return json(await port.museSend(body));
     });
   }
+  if (path === "/api/deck/telegram/invite") {
+    return method(request, "POST", async () => {
+      const port = deck(context);
+      if (!port.telegramInvite) notSupported();
+      return json(await port.telegramInvite());
+    });
+  }
   if (path === "/api/deck/telegram") {
     if (request.method === "GET") {
       return method(request, "GET", async () => {

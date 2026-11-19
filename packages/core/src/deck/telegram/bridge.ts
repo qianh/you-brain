@@ -23,6 +23,7 @@ import {
   type RelaySocketFactory,
   type TelegramRelayState,
 } from "./relay.js";
+import { encodeRelayInvite } from "./invite.js";
 
 /**
  * Telegram 桥：把「终端会话在等你回复」推到绑定的 Telegram 私聊；
@@ -691,6 +692,14 @@ export class TelegramBridge {
       message,
       delivery === "queued" ? `✓ 已排队到 T3「${target.name}」：它还在执行，做完这一轮就处理` : `✓ 已发送到 T3「${target.name}」`,
     );
+  }
+
+  /** 中转连接信息（地址 + 密钥），给另一台电脑粘贴用；没用中转时报错。 */
+  async relayInvite(): Promise<string> {
+    const relay = this.#stored.relay;
+    const key = relay ? ((await this.#options.relayKey?.get().catch(() => null))?.trim() ?? "") : "";
+    if (!relay || !key) throw new YouBrainError("INVALID_INPUT", "这台电脑还没有连接中转");
+    return encodeRelayInvite(relay.url, key);
   }
 
   /** daemon 的 T3 适配器就绪后挂上；null 表示卸下。 */

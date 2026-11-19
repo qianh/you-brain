@@ -30,7 +30,10 @@ async function withServer(run: (server: DaemonHttpServer, actions: DeckTelegramA
       if (body.action === "test") throw new YouBrainError("INVALID_INPUT", "还没有绑定 Telegram");
       return STATUS;
     },
-  } as Pick<DeckHttpPort, "telegramStatus" | "telegramAction"> as DeckHttpPort;
+    async telegramInvite() {
+      return { invite: "u-brain-relay:abc" };
+    },
+  } as Pick<DeckHttpPort, "telegramStatus" | "telegramAction" | "telegramInvite"> as DeckHttpPort;
   const server = await startDaemonHttp({ dataDir: dir, deps: { deck } as HttpDeps });
   try {
     await run(server, actions);
@@ -40,8 +43,8 @@ async function withServer(run: (server: DaemonHttpServer, actions: DeckTelegramA
   }
 }
 
-function call(server: DaemonHttpServer, method: string, body?: unknown) {
-  return fetch(server.baseUrl + "/api/deck/telegram", {
+function call(server: DaemonHttpServer, method: string, body?: unknown, path = "/api/deck/telegram") {
+  return fetch(server.baseUrl + path, {
     method,
     headers: { authorization: `Bearer ${server.token}`, "content-type": "application/json" },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -65,5 +68,14 @@ it("reads status and forwards validated actions", async () => {
     const failed = await call(server, "POST", { action: "test" });
     expect(failed.status).toBe(400);
     expect(((await failed.json()) as { error: { message: string } }).error.message).toContain("还没有绑定");
+  });
+});
+
+it("hands out the relay connection info only by POST", async () => {
+  await withServer(async (server) => {
+    const invite = await call(server, "POST", undefined, "/api/deck/telegram/invite");
+    expect(invite.status).toBe(200);
+    expect(await invite.json()).toEqual({ invite: "u-brain-relay:abc" });
+    expect((await call(server, "GET", undefined, "/api/deck/telegram/invite")).status).toBe(405);
   });
 });

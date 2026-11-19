@@ -4059,6 +4059,7 @@ export class YouBrainDaemon {
         : {
             telegramStatus: async () => deck.telegram!.status(),
             telegramAction: (body) => deck.telegram!.action(body),
+            telegramInvite: async () => ({ invite: await deck.telegram!.relayInvite() }),
           }),
     };
   }

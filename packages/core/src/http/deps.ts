@@ -263,4 +263,6 @@ export interface DeckHttpPort {
   /** Telegram 桥：推送「等你回复」、回复提醒即输入。可选，旧测试替身可不提供。 */
   telegramStatus?(): Promise<DeckTelegramStatusResponse>;
   telegramAction?(body: DeckTelegramActionBody): Promise<DeckTelegramStatusResponse>;
+  /** 中转连接信息（含密钥），给另一台电脑粘贴用。 */
+  telegramInvite?(): Promise<{ invite: string }>;
 }

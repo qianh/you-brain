@@ -242,6 +242,7 @@ export interface BrowserDaemon
   deckNotices(): Promise<DeckNoticesResponse>;
   deckTelegram(): Promise<DeckTelegramStatusResponse>;
   deckTelegramAction(body: DeckTelegramActionBody): Promise<DeckTelegramStatusResponse>;
+  deckTelegramInvite(): Promise<{ invite: string }>;
   deckNoticeDismiss(body: DeckNoticeDismissBody): Promise<{ ok: true }>;
   deckTty7Screen(pane: number, lines?: number): Promise<DeckTty7ScreenResponse>;
   deckTty7Send(body: DeckTty7SendBody): Promise<{ ok: true }>;
@@ -436,6 +437,7 @@ export function createBrowserDaemon(options?: {
     deckNotices: () => request<DeckNoticesResponse>("GET", "/api/deck/notices"),
     deckTelegram: () => request<DeckTelegramStatusResponse>("GET", "/api/deck/telegram"),
     deckTelegramAction: (body) => request<DeckTelegramStatusResponse>("POST", "/api/deck/telegram", body),
+    deckTelegramInvite: () => request<{ invite: string }>("POST", "/api/deck/telegram/invite"),
     deckNoticeDismiss: (body: DeckNoticeDismissBody) =>
       request<{ ok: true }>("POST", "/api/deck/notices/dismiss", body),
     deckTty7Screen: (pane: number, lines?: number) =>

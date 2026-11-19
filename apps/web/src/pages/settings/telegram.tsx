@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 
+import { decodeRelayInvite } from "@you-brain/core/deck/telegram/invite.js";
 import type { DeckTelegramActionBody, DeckTelegramStatusResponse } from "@you-brain/core/http/types.js";
 
 import { Banner } from "../../components/banner.js";
@@ -19,6 +20,7 @@ export function TelegramSection() {
   const [relayUrl, setRelayUrl] = useState("");
   const [relayKey, setRelayKey] = useState("");
   const [relayName, setRelayName] = useState("");
+  const [invite, setInvite] = useState("");
   const [status, setStatus] = useState<DeckTelegramStatusResponse | null>(null);
   const [unsupported, setUnsupported] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -74,6 +76,29 @@ export function TelegramSection() {
         }[status.connection];
 
   const relay = status?.relay ?? null;
+  const inviteInvalid = invite.trim() !== "" && decodeRelayInvite(invite) === null;
+
+  const pasteInvite = (value: string) => {
+    setInvite(value);
+    const decoded = decodeRelayInvite(value);
+    if (decoded) {
+      setRelayUrl(decoded.url);
+      setRelayKey(decoded.key);
+    }
+  };
+
+  const copyInvite = async () => {
+    setBusy(true);
+    try {
+      const { invite: text } = await client.deckTelegramInvite();
+      await navigator.clipboard.writeText(text);
+      push({ message: t("telegramRelayInviteCopied"), tone: "success" });
+    } catch (error) {
+      push({ message: error instanceof Error ? error.message : String(error), tone: "danger" });
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <Section title={t("telegramTitle")}>
@@ -179,13 +204,33 @@ export function TelegramSection() {
         <div className="notion-form">
           <span className="notion-label">{t("telegramRelayTitle")}</span>
           {relay ? (
-            <div className="notion-token-row">
-              <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run({ action: "clear-relay" })}>
-                {t("telegramRelayClear")}
-              </Button>
-            </div>
+            <>
+              <div className="notion-token-row">
+                <Button size="sm" disabled={busy} onClick={() => void copyInvite()}>
+                  {t("telegramRelayCopyInvite")}
+                </Button>
+                <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run({ action: "clear-relay" })}>
+                  {t("telegramRelayClear")}
+                </Button>
+              </div>
+              <span className="notion-label">{t("telegramRelayInviteHint")}</span>
+            </>
           ) : (
             <>
+              <label className="notion-label" htmlFor="telegram-relay-invite">
+                {t("telegramRelayInvite")}
+              </label>
+              <input
+                id="telegram-relay-invite"
+                className="notion-input"
+                type="password"
+                autoComplete="off"
+                placeholder="u-brain-relay:…"
+                value={invite}
+                onChange={(event) => pasteInvite(event.target.value)}
+              />
+              {inviteInvalid ? <span className="notion-label">{t("telegramRelayInviteInvalid")}</span> : null}
+              <span className="notion-label">{t("telegramRelayManual")}</span>
               <label className="notion-label" htmlFor="telegram-relay-url">
                 {t("telegramRelayUrl")}
               </label>
@@ -235,7 +280,10 @@ export function TelegramSection() {
                       },
                       () => t("telegramRelaySaved"),
                     ).then((ok) => {
-                      if (ok) setRelayKey("");
+                      if (ok) {
+                        setRelayKey("");
+                        setInvite("");
+                      }
                     })
                   }
                 >

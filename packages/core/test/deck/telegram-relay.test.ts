@@ -7,6 +7,7 @@ import { MemorySecretStore } from "../../src/auth/secret-store.js";
 import type { SessionNotice, SessionNoticeList } from "../../src/deck/session-notices.js";
 import { TelegramBridge } from "../../src/deck/telegram/bridge.js";
 import { normalizeRelayUrl, type RelaySocketLike } from "../../src/deck/telegram/relay.js";
+import { decodeRelayInvite, encodeRelayInvite } from "../../src/deck/telegram/invite.js";
 import type { Tty7Session, Tty7SendInput } from "../../src/deck/tty7.js";
 import { RelayCore, type RelaySocket, type TgMessage } from "../../../../services/telegram-relay/src/core.js";
 
@@ -214,6 +215,27 @@ describe("TelegramBridge 中转模式", () => {
     await until(() => mac.sends.length === 2, "plain to mac");
     expect(mini.sends).toHaveLength(0);
 
+    mac.bridge.stop();
+    mini.bridge.stop();
+  });
+
+  it("连接信息：已连中转的电脑导出地址和密钥，新电脑粘贴即可连上", async () => {
+    expect(decodeRelayInvite("随便")).toBeNull();
+    expect(decodeRelayInvite("u-brain-relay:!!!")).toBeNull();
+    expect(decodeRelayInvite(` ${encodeRelayInvite(URL_, KEY)}\n`)).toEqual({ url: URL_, key: KEY });
+
+    const relay = new FakeRelay();
+    const mac = await device(relay, "MacBook");
+    await expect(mac.bridge.relayInvite()).rejects.toThrow("还没有连接中转");
+    await mac.bridge.action({ action: "set-relay", url: URL_, key: KEY });
+    const invite = await mac.bridge.relayInvite();
+    expect(invite.startsWith("u-brain-relay:")).toBe(true);
+    expect(invite).not.toContain(KEY);
+
+    const mini = await device(relay, "Mac mini");
+    const decoded = decodeRelayInvite(invite)!;
+    await mini.bridge.action({ action: "set-relay", url: decoded.url, key: decoded.key, name: "Mac mini" });
+    await until(() => mini.bridge.status().connection === "ok", "mini connected");
     mac.bridge.stop();
     mini.bridge.stop();
   });

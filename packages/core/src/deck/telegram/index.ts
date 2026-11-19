@@ -10,6 +10,7 @@ export {
   type TelegramT3Notice,
   type TelegramT3Port,
 } from "./bridge.js";
+export { decodeRelayInvite, encodeRelayInvite } from "./invite.js";
 export {
   TelegramRelayClient,
   checkRelay,

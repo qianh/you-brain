@@ -116,6 +116,12 @@ export const zh = {
   telegramRelayDevices: "设备",
   telegramRelaySelf: "本机",
   telegramRelayOffline: "离线",
+  telegramRelayCopyInvite: "复制连接信息",
+  telegramRelayInviteCopied: "已复制。到另一台电脑的「设置 → 集成 → Telegram」里粘贴，再点「连接中转」",
+  telegramRelayInviteHint: "要加另一台电脑：点「复制连接信息」，到那台电脑上粘贴即可。连接信息含密钥，别发到聊天软件里。",
+  telegramRelayInvite: "连接信息（从已连接中转的电脑复制，粘贴后自动填好地址和密钥）",
+  telegramRelayInviteInvalid: "这不是 U-Brain 的中转连接信息",
+  telegramRelayManual: "或手动填写：",
 } as const;
 
 export const en = {
@@ -236,4 +242,10 @@ export const en = {
   telegramRelayDevices: "Devices",
   telegramRelaySelf: "this device",
   telegramRelayOffline: "offline",
+  telegramRelayCopyInvite: "Copy connection info",
+  telegramRelayInviteCopied: "Copied. Paste it in Settings → Integrations → Telegram on the other computer, then click Connect relay",
+  telegramRelayInviteHint: "To add another computer, click Copy connection info and paste it there. It contains the key, so don't send it through chat apps.",
+  telegramRelayInvite: "Connection info (copied from a computer already on the relay; fills in URL and key)",
+  telegramRelayInviteInvalid: "This isn't U-Brain relay connection info",
+  telegramRelayManual: "Or enter manually:",
 } as const;

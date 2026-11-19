@@ -26,6 +26,7 @@
       "@you-brain/core/notion/markdown-text.js": ["../../packages/core/src/notion/markdown-text.ts"],
       "@you-brain/core/deck/index.js": ["../../packages/core/src/deck/index.ts"],
       "@you-brain/core/deck/t3/index.js": ["../../packages/core/src/deck/t3/index.ts"],
+      "@you-brain/core/deck/telegram/invite.js": ["../../packages/core/src/deck/telegram/invite.ts"],
       "@you-brain/protocol": ["../../packages/protocol/src/index.ts"]
     }
   },
