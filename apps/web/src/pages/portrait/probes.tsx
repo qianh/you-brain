@@ -12,7 +12,7 @@ export function PortraitProbes() {
   const { push } = useToast();
   const [rows, setRows] = useState<PortraitProbeView[]>([]);
   const [listError, setListError] = useState<string | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
+  const [busy, setBusy] = useState<{ id: string; action: "keep" | "drop" } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -34,8 +34,8 @@ export function PortraitProbes() {
   }, [client, t]);
 
   async function act(probe: PortraitProbeView, action: "keep" | "drop"): Promise<void> {
-    if (busyId !== null) return;
-    setBusyId(probe.id);
+    if (busy !== null) return;
+    setBusy({ id: probe.id, action });
     try {
       const result = await client.reviewPortraitProbe({ id: probe.id, action });
       setRows(result.probes);
@@ -49,7 +49,7 @@ export function PortraitProbes() {
         caught instanceof BrowserDaemonError && caught.message !== "" ? caught.message : t("actionFailed");
       push({ message, tone: "danger" });
     } finally {
-      setBusyId(null);
+      setBusy(null);
     }
   }
 
@@ -66,7 +66,7 @@ export function PortraitProbes() {
       {rows.length > 0 ? (
         <ul className="portrait-correction-list">
           {rows.map((probe) => {
-            const isBusy = busyId === probe.id;
+            const busyAction = busy?.id === probe.id ? busy.action : null;
             return (
               <li key={probe.id} className="portrait-correction">
                 <div className="portrait-correction-head">
@@ -88,8 +88,8 @@ export function PortraitProbes() {
                     type="button"
                     variant="primary"
                     size="sm"
-                    loading={isBusy}
-                    disabled={busyId !== null}
+                    loading={busyAction === "keep"}
+                    disabled={busy !== null}
                     onClick={() => {
                       void act(probe, "keep");
                     }}
@@ -100,7 +100,8 @@ export function PortraitProbes() {
                     type="button"
                     variant="ghost"
                     size="sm"
-                    disabled={busyId !== null}
+                    loading={busyAction === "drop"}
+                    disabled={busy !== null}
                     onClick={() => {
                       void act(probe, "drop");
                     }}
