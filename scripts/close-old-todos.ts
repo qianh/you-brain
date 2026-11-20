@@ -3,12 +3,14 @@
  * recently. Todos accumulate: a library built by backfilling history held hundreds of
  * open ones, most of them long done or never going to happen, and nothing closed them.
  *
- * They are closed as `dropped`, not `done`: nobody checked whether the work happened.
+ * They are closed as `dropped` by default, not `done`: nobody checked whether the work
+ * happened. `--status done` is for when the owner says the backlog is finished.
  * The change is an event (`todo.status_changed`, `by: "auto"`), which does not make the
  * topic look recently active and does not override a todo the user changed by hand.
  *
  * Stop the daemon first. Run with `--apply`; without it the script only reports.
- * Usage: bun scripts/close-old-todos.ts <state.sqlite> [--days 7] [--apply]
+ * `--days 0` closes every open todo.
+ * Usage: bun scripts/close-old-todos.ts <state.sqlite> [--days 7] [--status dropped|done] [--apply]
  */
 import { Database } from "bun:sqlite";
 import { existsSync, readFileSync } from "node:fs";
@@ -24,14 +26,20 @@ const dbPath = process.argv.find((arg) => arg.endsWith(".sqlite"));
 const apply = process.argv.includes("--apply");
 const daysIndex = process.argv.indexOf("--days");
 const days = daysIndex >= 0 ? Number(process.argv[daysIndex + 1]) : 7;
+const statusIndex = process.argv.indexOf("--status");
+const status = statusIndex >= 0 ? process.argv[statusIndex + 1] : "dropped";
 if (!dbPath) {
   console.error(
-    "usage: bun scripts/close-old-todos.ts <state.sqlite> [--days 7] [--apply]",
+    "usage: bun scripts/close-old-todos.ts <state.sqlite> [--days 7] [--status dropped|done] [--apply]",
   );
   process.exit(2);
 }
-if (!Number.isFinite(days) || days <= 0) {
-  console.error("--days must be a positive number");
+if (!Number.isFinite(days) || days < 0) {
+  console.error("--days must be zero or a positive number");
+  process.exit(2);
+}
+if (status !== "dropped" && status !== "done") {
+  console.error("--status must be dropped or done");
   process.exit(2);
 }
 
@@ -73,7 +81,7 @@ const keptTopics = new Set(kept.map((todo) => todo.topicId));
 
 console.log(`开放待办共 ${openTotal} 条`);
 console.log(`条件：状态开放、本人没改过、创建早于 ${days} 天前`);
-console.log(`将作废：${stale.length} 条`);
+console.log(`将${status === "done" ? "标为完成" : "作废"}：${stale.length} 条`);
 console.log(`保留：${kept.length} 条，分布在 ${keptTopics.size} 个话题`);
 const largest = [...perTopic.entries()].sort((left, right) => right[1] - left[1]).slice(0, 5);
 for (const [topicId, count] of largest) {
@@ -108,7 +116,7 @@ const log = new EventLog(store, deviceId, { now: () => new Date() });
 const added = stale.map((todo) =>
   log.allocate("todo.status_changed", {
     todoId: todo.todoId,
-    status: "dropped",
+    status,
     by: "auto",
   }),
 );

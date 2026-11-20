@@ -102,14 +102,21 @@ describe("consolidation across two devices", () => {
       await clock.advance(INTERVALS.consolidationMs);
       await daemonA.settled();
       await daemonB.settled();
+      // Today's 03:00 run works on yesterday, which had nothing.
+      expect(summaryCalls).toBe(0);
+      expect(await leaseDate(drive)).toBe("2026-10-18");
+
+      // The next night's run picks up today's session.
+      await clock.advance(17 * 60 * 60 * 1000);
+      await daemonA.settled();
+      await daemonB.settled();
 
       expect(summaryCalls).toBe(1);
-      expect(await leaseDate(drive)).toBe("2026-10-18");
+      expect(await leaseDate(drive)).toBe("2026-10-19");
       const finished = (await readStatus(daemonA)).consolidation.lastFinishedAt;
       expect(finished).toBeTruthy();
       expect((await readStatus(daemonB)).consolidation.lastFinishedAt).toBe(finished);
       expect((await topicSummary(daemonA)).summary).toBe(SUMMARY);
-      expect((await topicSummary(daemonB)).summary).not.toBe(SUMMARY);
 
       await clock.advance(INTERVALS.flushMs);
       await daemonA.settled();

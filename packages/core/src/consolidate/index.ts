@@ -84,6 +84,7 @@ export {
   localDayKey,
   nextBackoffMs,
   planConsolidationDays,
+  finishedDayOf,
   shiftDateKey,
   type ConsolidationBlock,
 } from "./schedule.js";
@@ -128,6 +129,7 @@ export {
   TODO_REVIEW_SYSTEM_PROMPT,
   TODO_REVIEW_TRANSCRIPT_CHARS,
   buildTodoReviewPrompt,
+  fitSessionBlocks,
   fitTranscriptTail,
   quoteAppearsInTranscript,
   type TodoReviewRecord,

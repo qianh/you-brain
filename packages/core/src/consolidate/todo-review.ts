@@ -1,6 +1,7 @@
 import { isLlmAbortError } from "../llm/errors.js";
 import { completeJsonWithRetry } from "./llm-json.js";
 import { parseTodoReview } from "./normalize.js";
+import { finishedDayOf } from "./schedule.js";
 import { TODO_REVIEW_JSON_SCHEMA } from "./schema.js";
 import { selectTopicsChangedOnDay } from "./select.js";
 import type { ConsolidationContext, ConsolidationStep } from "./steps.js";
@@ -45,6 +46,47 @@ export function fitTranscriptTail(raw: string, maxChars = TODO_REVIEW_TRANSCRIPT
   return chars.slice(-maxChars).join("");
 }
 
+/**
+ * Joins per-session blocks within `maxChars`, sharing the budget evenly so one long
+ * session cannot push the others out. A block that is cut keeps its `### title` line
+ * and the end of its text, where completion shows up.
+ */
+export function fitSessionBlocks(
+  blocks: readonly string[],
+  maxChars = TODO_REVIEW_TRANSCRIPT_CHARS,
+): string {
+  const separator = "\n\n";
+  const lengths = blocks.map((block) => Array.from(block).length);
+  const total = lengths.reduce((sum, length) => sum + length, 0) + separator.length * Math.max(0, blocks.length - 1);
+  if (total <= maxChars) return blocks.join(separator);
+
+  const budget = maxChars - separator.length * Math.max(0, blocks.length - 1);
+  if (budget <= 0) return fitTranscriptTail(blocks.join(separator), maxChars);
+  const allowance = new Array<number>(blocks.length).fill(0);
+  const order = lengths.map((length, index) => ({ length, index })).sort((a, b) => a.length - b.length);
+  let remaining = budget;
+  order.forEach((item, position) => {
+    const share = Math.floor(remaining / (order.length - position));
+    const given = Math.min(item.length, share);
+    allowance[item.index] = given;
+    remaining -= given;
+  });
+
+  const fitted = blocks.map((block, index) => {
+    const allowed = allowance[index] ?? 0;
+    const chars = Array.from(block);
+    if (chars.length <= allowed) return block;
+    const newline = block.indexOf("\n");
+    const header = newline === -1 ? "" : block.slice(0, newline + 1);
+    const headerLength = Array.from(header).length;
+    const marker = "…";
+    const keep = allowed - headerLength - marker.length;
+    if (keep <= 0) return allowed > 0 ? chars.slice(-allowed).join("") : "";
+    return `${header}${marker}${chars.slice(-keep).join("")}`;
+  });
+  return fitTranscriptTail(fitted.join(separator), maxChars);
+}
+
 export function buildTodoReviewPrompt(input: {
   day: string;
   topicName: string;
@@ -76,11 +118,12 @@ export const todoReviewStep: ConsolidationStep = {
     const readTranscripts = ctx.topicTranscripts;
     if (!readTranscripts) return;
 
+    const reviewDay = finishedDayOf(ctx.day);
     const loaded = ctx.load();
     const changed = selectTopicsChangedOnDay({
       book: loaded.book,
       sessionUpdatedAt: loaded.sessionUpdatedAt,
-      day: ctx.day,
+      day: reviewDay,
       timeZone: ctx.timeZone,
       now: ctx.now().toISOString(),
       activeLimit: ctx.zone.activeLimit,
@@ -101,12 +144,12 @@ export const todoReviewStep: ConsolidationStep = {
     });
 
     if (candidates.length === 0) {
-      ctx.cursors.set(TODO_REVIEW_CURSOR, JSON.stringify({ day: ctx.day, closed: [] }));
+      ctx.cursors.set(TODO_REVIEW_CURSOR, JSON.stringify({ day: ctx.day, reviewedDay: reviewDay, closed: [] }));
       return;
     }
 
     const outcomes = await mapWithLimit(candidates, TOPIC_CONCURRENCY, (candidate) =>
-      reviewOneTopic(ctx, readTranscripts, candidate),
+      reviewOneTopic(ctx, reviewDay, readTranscripts, candidate),
     );
 
     const closed: TodoReviewRecord[] = [];
@@ -131,7 +174,7 @@ export const todoReviewStep: ConsolidationStep = {
       }
     }
 
-    ctx.cursors.set(TODO_REVIEW_CURSOR, JSON.stringify({ day: ctx.day, closed }));
+    ctx.cursors.set(TODO_REVIEW_CURSOR, JSON.stringify({ day: ctx.day, reviewedDay: reviewDay, closed }));
     if (attemptedCount > 0 && failedCount === attemptedCount) {
       throw new Error("待办核对全部失败");
     }
@@ -140,6 +183,7 @@ export const todoReviewStep: ConsolidationStep = {
 
 async function reviewOneTopic(
   ctx: ConsolidationContext,
+  reviewDay: string,
   readTranscripts: NonNullable<ConsolidationContext["topicTranscripts"]>,
   candidate: {
     topicId: string;
@@ -154,14 +198,14 @@ async function reviewOneTopic(
   closed: TodoReviewRecord[];
 }> {
   const transcript = fitTranscriptTail(
-    await readTranscripts({ day: ctx.day, sessionKeys: candidate.sessionKeys }),
+    await readTranscripts({ day: reviewDay, sessionKeys: candidate.sessionKeys }),
   );
   if (transcript === "") {
     return { topicId: candidate.topicId, attempted: false, failed: false, closed: [] };
   }
 
   const prompt = buildTodoReviewPrompt({
-    day: ctx.day,
+    day: reviewDay,
     topicName: candidate.topicName,
     todos: candidate.openTodos,
     transcript,

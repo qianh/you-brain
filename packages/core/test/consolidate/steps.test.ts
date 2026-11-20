@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import {
   MERGE_SUGGESTIONS_CURSOR,
   TODO_REVIEW_CURSOR,
+  fitSessionBlocks,
   TOPIC_SUMMARY_JSON_SCHEMA,
   consolidationSteps,
   mergeSuggestionsStep,
@@ -56,6 +57,10 @@ function conclusion(id: string, topicId: string, session: string, text = "当天
   );
 }
 
+// The nightly run fires on the morning after LOCAL_DAY and works on LOCAL_DAY.
+const RUN_DAY = "2026-10-24";
+const RUN_AT = "2026-10-23T19:30:00.000Z";
+
 async function settle(options: {
   events: Event[];
   complete: (request: LlmCompleteRequest) => string | Promise<string>;
@@ -72,9 +77,9 @@ async function settle(options: {
   const requests: LlmCompleteRequest[] = [];
   const cursors = options.cursors ?? memCursor();
   const result = await runConsolidation({
-    day: options.day ?? LOCAL_DAY,
+    day: options.day ?? RUN_DAY,
     timeZone: options.timeZone ?? SHANGHAI,
-    now: () => new Date(options.now ?? LATER),
+    now: () => new Date(options.now ?? RUN_AT),
     load: () => ({ book: fold(events), sessionUpdatedAt: options.updated ?? {} }),
     zone: options.zone ?? ZONE,
     llm: fakeBackend(async (request) => {
@@ -82,7 +87,7 @@ async function settle(options: {
       return options.complete(request);
     }),
     emit: async (type, data) => {
-      events.push(ev(type, data, options.now ?? LATER));
+      events.push(ev(type, data, options.now ?? RUN_AT));
     },
     cursors,
     steps: options.steps ?? [topicSummariesStep],
@@ -348,7 +353,7 @@ describe("merge suggestions", () => {
       expect(requests).toHaveLength(1);
       expect(result.ok).toBe(true);
       expect(JSON.parse(store.getCursor(MERGE_SUGGESTIONS_CURSOR) ?? "")).toEqual({
-        day: LOCAL_DAY,
+        day: RUN_DAY,
         pairs: [
           { fromTopicId: "a", intoTopicId: "b", reason: "第一" },
           { fromTopicId: "a", intoTopicId: "c", reason: "第二" },
@@ -393,7 +398,7 @@ describe("merge suggestions", () => {
     expect(requests).toEqual([]);
     expect(result.ok).toBe(true);
     expect(JSON.parse(cursors.get(MERGE_SUGGESTIONS_CURSOR) ?? "")).toEqual({
-      day: LOCAL_DAY,
+      day: RUN_DAY,
       pairs: [],
     });
   });
@@ -540,6 +545,7 @@ describe("step runner", () => {
 describe("todo review", () => {
   it("closes done and dropped todos only when a verbatim quote matches the transcript, and skips locked todos", async () => {
     const sessionA = key(11);
+    const transcriptDays: string[] = [];
     const { result, events, cursors } = await settle({
       events: [
         ...topic("a", "法务审批", sessionA),
@@ -553,8 +559,10 @@ describe("todo review", () => {
       ],
       updated: { [sessionA]: DAY_OF },
       steps: [todoReviewStep],
-      topicTranscripts: async () =>
-        "[user]\n旧版同步开关已经取消不做了，回归测试跑完吗？\n\n[assistant]\n补齐回归测试已经全部跑通并通过。",
+      topicTranscripts: async ({ day }) => {
+        transcriptDays.push(day);
+        return "[user]\n旧版同步开关已经取消不做了，回归测试跑完吗？\n\n[assistant]\n补齐回归测试已经全部跑通并通过。";
+      },
       complete: () =>
         JSON.stringify({
           items: [
@@ -574,7 +582,57 @@ describe("todo review", () => {
       { id: "t-done", status: "done" },
       { id: "t-drop", status: "dropped" },
     ]);
-    expect(JSON.parse(cursors.get(TODO_REVIEW_CURSOR) ?? "{}").closed).toHaveLength(2);
+    expect(transcriptDays).toEqual([LOCAL_DAY]);
+    const cursor = JSON.parse(cursors.get(TODO_REVIEW_CURSOR) ?? "{}");
+    expect(cursor.closed).toHaveLength(2);
+    expect(cursor.reviewedDay).toBe(LOCAL_DAY);
+  });
+
+  it("does not review the run day itself, only the finished day before it", async () => {
+    const sessionA = key(12);
+    const { requests, cursors } = await settle({
+      events: [
+        ...topic("a", "法务审批", sessionA),
+        ev("todo.added", { todoId: "t-1", topicId: "a", text: "补齐回归测试", sessionKey: sessionA, confidence: 0.9 }, DAY_BEFORE),
+      ],
+      // Updated on the run day (03:00 has just passed); belongs to tomorrow's review.
+      updated: { [sessionA]: RUN_AT },
+      steps: [todoReviewStep],
+      topicTranscripts: async () => "[assistant]\n补齐回归测试已经全部跑通并通过。",
+      complete: () => JSON.stringify({ items: [] }),
+    });
+    expect(requests).toHaveLength(0);
+    expect(JSON.parse(cursors.get(TODO_REVIEW_CURSOR) ?? "{}")).toEqual({
+      day: RUN_DAY,
+      reviewedDay: LOCAL_DAY,
+      closed: [],
+    });
+  });
+});
+
+describe("fitSessionBlocks", () => {
+  it("keeps everything when it fits", () => {
+    expect(fitSessionBlocks(["### a\n一", "### b\n二"], 100)).toBe("### a\n一\n\n### b\n二");
+  });
+
+  it("shares the budget so a long session cannot push short ones out, keeping each ending", () => {
+    const long = `### 长\n${"开头".repeat(500)}长会话结尾已完成`;
+    const short = "### 短\n短会话里说取消不做了";
+    const fitted = fitSessionBlocks([short, long], 200);
+    expect(Array.from(fitted).length).toBeLessThanOrEqual(200);
+    expect(fitted).toContain(short);
+    expect(fitted).toContain("### 长\n…");
+    expect(fitted).toContain("长会话结尾已完成");
+  });
+
+  it("splits evenly between several long sessions", () => {
+    const blocks = ["a", "b", "c"].map((name) => `### ${name}\n${"x".repeat(1_000)}${name}-end`);
+    const fitted = fitSessionBlocks(blocks, 300);
+    expect(Array.from(fitted).length).toBeLessThanOrEqual(300);
+    for (const name of ["a", "b", "c"]) {
+      expect(fitted).toContain(`### ${name}\n…`);
+      expect(fitted).toContain(`${name}-end`);
+    }
   });
 });
 

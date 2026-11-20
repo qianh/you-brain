@@ -111,6 +111,41 @@ describe("normalize refine output", () => {
     expect(normalized.todos_completed).toEqual(["todo-1"]);
   });
 
+  it("drops todos already open on the target topic, already added by this session, or repeated in the batch", () => {
+    const normalized = normalizeRefineOutput(
+      output({
+        todos_added: [
+          { text: "在真实 App 验收 ⌘K 搜索。", confidence: 0.9 },
+          { text: "补齐回归测试", confidence: 0.9 },
+          { text: "接入 Magpie 模型", confidence: 0.9 },
+          { text: "接入magpie模型！", confidence: 0.9 },
+          { text: "写部署说明", confidence: 0.9 },
+          { text: "另一个话题的待办", confidence: 0.9 },
+        ],
+      }),
+      {
+        topics,
+        openTodos: [
+          { todoId: "todo-1", topicId: "topic-1", text: "在真实App验收⌘K搜索" },
+          { todoId: "todo-2", topicId: "topic-other", text: "另一个话题的待办" },
+        ],
+        previous: {
+          title: "旧",
+          summary: "旧",
+          conclusions: [],
+          todos: [{ id: "todo-0", text: "补齐回归测试。" }],
+          topicId: "topic-1",
+        },
+        ids: { topicId: () => "unused" },
+      },
+    );
+    expect(normalized.todos_added.map((todo) => todo.text)).toEqual([
+      "接入 Magpie 模型",
+      "写部署说明",
+      "另一个话题的待办",
+    ]);
+  });
+
   it("names a create from the title when the model leaves the name blank", () => {
     const normalized = normalizeRefineOutput(
       output({

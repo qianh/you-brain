@@ -7,7 +7,7 @@ import { partitionTopics } from "../topics/zones.js";
 import { completeJsonWithRetry } from "./llm-json.js";
 import { normalizeMergePairs, parseTopicRewrite } from "./normalize.js";
 import { buildMergeSuggestionsPrompt, buildTopicSummaryPrompt } from "./prompt.js";
-import { instantOnLocalDay } from "./schedule.js";
+import { finishedDayOf, instantOnLocalDay } from "./schedule.js";
 import { MERGE_SUGGESTIONS_JSON_SCHEMA, TOPIC_SUMMARY_JSON_SCHEMA } from "./schema.js";
 import {
   recentTopicSessions,
@@ -179,18 +179,19 @@ export function consolidationSteps(): ConsolidationStep[] {
 export const topicSummariesStep: ConsolidationStep = {
   id: "topic_summaries",
   async run(ctx) {
+    const day = finishedDayOf(ctx.day);
     const loaded = ctx.load();
     const changed = selectChangedTopics({
       book: loaded.book,
       sessionUpdatedAt: loaded.sessionUpdatedAt,
-      day: ctx.day,
+      day,
       timeZone: ctx.timeZone,
       now: ctx.now().toISOString(),
       activeLimit: ctx.zone.activeLimit,
       historyDays: ctx.zone.historyDays,
     });
     const outcomes = await mapWithLimit(changed, TOPIC_CONCURRENCY, (item) =>
-      rewriteTopic(ctx, loaded, item.topic.topicId),
+      rewriteTopic(ctx, day, loaded, item.topic.topicId),
     );
     let failed = 0;
     for (const outcome of outcomes) {
@@ -277,6 +278,7 @@ interface RewriteOutcome {
 
 async function rewriteTopic(
   ctx: ConsolidationContext,
+  day: string,
   loaded: ReturnType<ConsolidationContext["load"]>,
   topicId: string,
 ): Promise<RewriteOutcome> {
@@ -288,20 +290,20 @@ async function rewriteTopic(
     book: loaded.book,
     topicId,
     sessionUpdatedAt: loaded.sessionUpdatedAt,
-    day: ctx.day,
+    day,
     timeZone: ctx.timeZone,
   });
   const sessionIds = new Set(sessions.map((session) => session.sessionKey));
   const conclusionsBySession = new Map<string, string[]>();
   for (const conclusion of loaded.book.conclusions) {
     if (conclusion.topicId !== topicId || !sessionIds.has(conclusion.sessionKey)) continue;
-    if (!instantOnLocalDay(conclusion.ts, ctx.day, ctx.timeZone)) continue;
+    if (!instantOnLocalDay(conclusion.ts, day, ctx.timeZone)) continue;
     const list = conclusionsBySession.get(conclusion.sessionKey) ?? [];
     list.push(conclusion.text);
     conclusionsBySession.set(conclusion.sessionKey, list);
   }
   const prompt = buildTopicSummaryPrompt({
-    day: ctx.day,
+    day,
     name: topic.name,
     aliases: topic.aliases,
     summary: topic.summary,

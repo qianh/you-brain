@@ -15,6 +15,7 @@ export {
 export {
   MIN_TODO_CONFIDENCE,
   normalizeConclusion,
+  normalizeTodoText,
   normalizeRefineOutput,
   normalizeTopicName,
   type NormalizeContext,

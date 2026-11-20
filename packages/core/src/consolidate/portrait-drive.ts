@@ -18,7 +18,7 @@ import type {
   TwinProbe,
   TwinSnapshotRef,
 } from "./steps.js";
-import { TODO_REVIEW_TRANSCRIPT_CHARS, fitTranscriptTail } from "./todo-review.js";
+import { TODO_REVIEW_TRANSCRIPT_CHARS, fitSessionBlocks } from "./todo-review.js";
 import { TWIN_LAYERS, type TwinLayer } from "./twin.js";
 
 const MARKDOWN = "text/markdown";
@@ -332,7 +332,7 @@ export async function readTopicTranscripts(input: {
       blocks.push(`### ${session.title || session.sessionKey}\n${formatted}`);
     });
   }
-  return fitTranscriptTail(blocks.join("\n\n"), TODO_REVIEW_TRANSCRIPT_CHARS);
+  return fitSessionBlocks(blocks, TODO_REVIEW_TRANSCRIPT_CHARS);
 }
 
 export function pendingCorrections(

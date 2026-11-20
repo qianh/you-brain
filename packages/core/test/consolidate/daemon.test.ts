@@ -245,7 +245,7 @@ describe("consolidation daemon", () => {
       (
         await putRoles(daemon, {
           mainDevice: id,
-          consolidation: { enabled: true, time: "23:00" },
+          consolidation: { enabled: false, time: "23:00" },
         })
       ).status,
     ).toBe(200);
@@ -255,6 +255,10 @@ describe("consolidation daemon", () => {
     expect(uploaded.uploaded).toBeGreaterThan(0);
     // Refine is a separate pass now, so the topic has to exist before consolidating.
     await refineNow(clock, daemon);
+    await nextMorning(clock, daemon);
+    expect(
+      (await putRoles(daemon, { mainDevice: id, consolidation: { enabled: true, time: "23:00" } })).status,
+    ).toBe(200);
 
     const kinds: string[] = [];
     const unsubscribe = daemon.changes.subscribe((event) => kinds.push(event.kind));
@@ -271,7 +275,7 @@ describe("consolidation daemon", () => {
     const status = await readStatus(daemon);
     expect(status.consolidation.lastFinishedAt).toBeNull();
     expect(status.consolidation.lastRun).toMatchObject({
-      day: "2026-10-18",
+      day: "2026-10-19",
       ok: false,
       error: "部分话题概要没有写完",
     });
@@ -430,6 +434,7 @@ describe("consolidation daemon", () => {
     const id = (await readStatus(daemon)).deviceId;
     await postJson<{ uploaded: number }>(daemon, "/api/actions/upload", { backfill: true });
     await refineNow(clock, daemon);
+    await nextMorning(clock, daemon);
     expect(
       (await putRoles(daemon, { mainDevice: id, consolidation: { enabled: true, time: "00:00" } })).status,
     ).toBe(200);
@@ -493,6 +498,7 @@ describe("consolidation daemon", () => {
     const id = (await readStatus(daemon)).deviceId;
     await postJson<{ uploaded: number }>(daemon, "/api/actions/upload", { backfill: true });
     await refineNow(clock, daemon);
+    await nextMorning(clock, daemon);
     expect(
       (await putRoles(daemon, { mainDevice: id, consolidation: { enabled: true, time: "23:00" } })).status,
     ).toBe(200);
@@ -563,6 +569,7 @@ describe("consolidation daemon", () => {
     const id = (await readStatus(daemon)).deviceId;
     await postJson<{ uploaded: number }>(daemon, "/api/actions/upload", { backfill: true });
     await refineNow(clock, daemon);
+    await nextMorning(clock, daemon);
     expect(
       (await putRoles(daemon, { mainDevice: id, consolidation: { enabled: true, time: "23:00" } })).status,
     ).toBe(200);
@@ -607,6 +614,7 @@ describe("consolidation daemon", () => {
     const id = (await readStatus(daemon)).deviceId;
     await postJson<{ uploaded: number }>(daemon, "/api/actions/upload", { backfill: true });
     await refineNow(clock, daemon);
+    await nextMorning(clock, daemon);
     expect(
       (await putRoles(daemon, { mainDevice: id, consolidation: { enabled: true, time: "23:00" } })).status,
     ).toBe(200);
@@ -648,6 +656,7 @@ describe("consolidation daemon", () => {
     const id = (await readStatus(daemon)).deviceId;
     await postJson<{ uploaded: number }>(daemon, "/api/actions/upload", { backfill: true });
     await refineNow(clock, daemon);
+    await nextMorning(clock, daemon);
     expect(
       (await putRoles(daemon, { mainDevice: id, consolidation: { enabled: true, time: "23:00" } })).status,
     ).toBe(200);
@@ -768,6 +777,7 @@ describe("consolidation daemon", () => {
     const id = (await readStatus(daemon1)).deviceId;
     await postJson<{ uploaded: number }>(daemon1, "/api/actions/upload", { backfill: true });
     await refineNow(clock, daemon1);
+    await nextMorning(clock, daemon1);
     expect(
       (await putRoles(daemon1, { mainDevice: id, consolidation: { enabled: true, time: "23:00" } })).status,
     ).toBe(200);
@@ -791,6 +801,9 @@ describe("consolidation daemon", () => {
     ]);
     await postJson<{ uploaded: number }>(daemon1, "/api/actions/upload", { backfill: true });
     await refineNow(clock, daemon1);
+    // The new turn is reviewed by the next night's run.
+    await clock.advance(24 * 60 * 60 * 1000);
+    await daemon1.settled();
     const failRes = await postConsolidate(daemon1, { force: true });
     expect(failRes.status).toBe(200);
     const afterFail = await readStatus(daemon1);
@@ -805,6 +818,12 @@ describe("consolidation daemon", () => {
     expect(restartedStatus.consolidation.lastFinishedAt).toBe(savedFinished);
   });
 });
+
+/** The nightly run works on the finished day before; move to 01:00 the next day. */
+async function nextMorning(clock: ReturnType<typeof testClock>, daemon: YouBrainDaemon): Promise<void> {
+  await clock.advance(15 * 60 * 60 * 1000);
+  await daemon.settled();
+}
 
 function daemonClient(daemon: YouBrainDaemon) {
   return createDaemonClient({ port: daemon.port, token: daemon.token });

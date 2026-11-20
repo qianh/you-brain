@@ -15,6 +15,11 @@ export function normalizeConclusion(text: string): string {
   return text.normalize("NFKC").trim().replace(/\s+/gu, " ").toLowerCase();
 }
 
+/** Ignores case, width, spacing and punctuation, which the model varies between rounds. */
+export function normalizeTodoText(text: string): string {
+  return text.normalize("NFKC").toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, "");
+}
+
 function cleanAliases(aliases: readonly string[]): string[] {
   const seen = new Set<string>();
   const cleaned: string[] = [];
@@ -95,9 +100,23 @@ export function normalizeRefineOutput(
     conclusions.push(text);
   }
 
-  const todos = (hasTopic ? output.todos_added : [])
-    .map((todo) => ({ text: todo.text.trim(), confidence: todo.confidence }))
-    .filter((todo) => todo.text !== "" && todo.confidence >= MIN_TODO_CONFIDENCE);
+  // Same wording as an open todo of the target topic, an earlier todo of this session,
+  // or another todo in this batch is the same todo: adding it again only inflates the count.
+  const seenTodoTexts = new Set<string>([
+    ...context.openTodos
+      .filter((todo) => todo.topicId === topic.topicId)
+      .map((todo) => normalizeTodoText(todo.text)),
+    ...(context.previous?.todos ?? []).map((todo) => normalizeTodoText(todo.text)),
+  ]);
+  const todos: { text: string; confidence: number }[] = [];
+  for (const todo of hasTopic ? output.todos_added : []) {
+    const text = todo.text.trim();
+    if (text === "" || todo.confidence < MIN_TODO_CONFIDENCE) continue;
+    const key = normalizeTodoText(text);
+    if (key === "" || seenTodoTexts.has(key)) continue;
+    seenTodoTexts.add(key);
+    todos.push({ text, confidence: todo.confidence });
+  }
 
   const allowed = new Set(context.openTodos.map((todo) => todo.todoId));
   const seenTodos = new Set<string>();

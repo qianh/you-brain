@@ -92,6 +92,15 @@ export function instantOnLocalDay(iso: string, day: string, timeZone: string): b
   }
 }
 
+/**
+ * The day a run on `day` works on. The nightly run fires early on `day` (03:00 by
+ * default), when that day has barely begun; the day before is complete, and stepping
+ * back one day reviews every day exactly once, catch-up included.
+ */
+export function finishedDayOf(day: string): string {
+  return shiftDateKey(day, -1);
+}
+
 export function shiftDateKey(day: string, days: number): string {
   const match = DAY.exec(day);
   if (!match) throw new Error("invalid day");
