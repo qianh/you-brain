@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { TaskAlreadyMergedError, TaskMergeBlockedError, TaskNoCommitError } from "../../src/tasks/git.js";
+import { TaskAlreadyMergedError, TaskDirtyWorktreeError, TaskMergeBlockedError, TaskNoCommitError } from "../../src/tasks/git.js";
 import { TaskService } from "../../src/tasks/service.js";
 import { TaskStore } from "../../src/tasks/store.js";
 import type { TaskAutomationPort, TaskGitPort } from "../../src/tasks/types.js";
@@ -178,6 +178,29 @@ describe("T3 TODO serial queue", () => {
     expect(f.starts[0]?.title).toBe("first");
   }));
 
+  test("manual completion persists offline without touching Git or the task session", () => fixture(async (f) => {
+    const task = (await f.service.create({ title: "manual completion", projectId: "one" })).tasks[0]!;
+    const started = (await f.service.action({ action: "start", id: task.id })).tasks[0]!;
+    f.states.set(started.run!.threadId!, "failed");
+    await f.service.tick();
+    const failed = (await f.board()).tasks[0]!;
+    expect(failed.status).toBe("failed");
+    let externalCalls = 0;
+    const unavailable = async (): Promise<never> => { externalCalls += 1; throw new Error("offline"); };
+    f.options.automation.projects = unavailable;
+    f.options.automation.inspect = unavailable;
+    f.options.git.isMerged = unavailable;
+    f.options.git.review = unavailable;
+    f.options.git.merge = unavailable;
+    const completed = (await f.service.action({ action: "complete", id: task.id })).tasks[0]!;
+    expect(completed).toMatchObject({ status: "done", completedManually: true, error: null });
+    expect(completed.run).toEqual({ ...failed.run!, error: null });
+    expect((await f.options.store.read()).tasks[0]).toEqual(completed);
+    expect(externalCalls).toBe(0);
+    expect(f.starts).toHaveLength(1);
+    expect(f.followups).toHaveLength(0);
+  }));
+
   test("completed turn waits for exact manual approval, then next TODO starts", () => fixture(async (f) => {
     await f.service.create({ title: "first", projectId: "one" });
     await f.service.create({ title: "second", projectId: "one" });
@@ -191,9 +214,33 @@ describe("T3 TODO serial queue", () => {
     expect(f.merges).toHaveLength(0);
     const detail = await f.service.review(review.id);
     await f.service.action({ action: "approve", id: review.id, reviewSha: detail.headSha });
+    expect((await f.service.action({ action: "complete", id: review.id })).tasks[0]?.completedManually).toBeUndefined();
     await f.service.tick();
     expect(f.merges).toEqual([SHA]);
     expect(f.starts.map((item) => item.title)).toEqual(["first", "second"]);
+  }));
+
+  test("refreshes the old worktree error and clears the counts when T3 resumes", () => fixture(async (f) => {
+    const legacyError = "任务工作树有未提交或未跟踪的内容，请在 T3 中提交后重新检查";
+    const counts = { uncommitted: 0, untracked: 1 };
+    await f.service.create({ title: "first", projectId: "one" });
+    await f.service.create({ title: "second", projectId: "one" });
+    await enable(f.service);
+    f.options.git.review = async () => { throw new Error(legacyError); };
+    const task = await f.ready();
+    expect(task).toMatchObject({ status: "failed", error: legacyError });
+    expect(task.worktreeBlock).toBeUndefined();
+
+    f.options.git.review = async () => { throw new TaskDirtyWorktreeError(counts); };
+    await f.service.tick();
+    expect((await f.options.store.read()).tasks[0]).toMatchObject({ status: "failed", worktreeBlock: counts });
+    expect(f.starts).toHaveLength(1);
+
+    f.states.set(task.run!.threadId!, "running");
+    await f.service.tick();
+    const running = (await f.board()).tasks[0]!;
+    expect(running).toMatchObject({ status: "running", error: null, run: { error: null } });
+    expect(running.worktreeBlock).toBeUndefined();
   }));
 
   test("develop blocking merge leaves the task reviewable until it is synced and reapproved", () => fixture(async (f) => {
@@ -459,6 +506,7 @@ describe("T3 TODO serial queue", () => {
     expect(f.merges).toHaveLength(1);
     expect((await f.board()).tasks[0]?.status).toBe("merging");
     expect((await f.board()).tasks[0]?.run?.reviewSha).toBe(SHA);
+    await expect(f.service.action({ action: "complete", id: task.id })).rejects.toThrow("合并中");
     await f.service.tick();
     expect((await f.board()).tasks[0]?.status).toBe("done");
     expect(f.merges).toEqual([SHA, SHA]);

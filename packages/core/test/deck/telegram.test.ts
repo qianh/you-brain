@@ -157,13 +157,14 @@ async function setup(options: { token?: string | null } = {}) {
 }
 
 /** 配好 Token 并完成绑定。 */
-async function paired() {
+async function paired(notifications = true) {
   const ctx = await setup();
   await ctx.bridge.start();
   await ctx.bridge.action({ action: "set-token", token: TOKEN });
   const status = await ctx.bridge.action({ action: "pair" });
   ctx.telegram.say(OWNER, `/start ${status.pairing!.code}`);
   await until(() => ctx.telegram.sent.some((item) => item.text.includes("已绑定")), "bound");
+  if (notifications) await ctx.bridge.action({ action: "set-notifications", enabled: true });
   ctx.telegram.sent = [];
   return ctx;
 }
@@ -175,9 +176,75 @@ function push(ctx: Awaited<ReturnType<typeof setup>>, item: SessionNotice): void
 }
 
 describe("TelegramBridge", () => {
+  it("defaults to off, persists the device switch, and never backfills disabled notices", async () => {
+    const ctx = await paired(false);
+    const thread = { threadId: "t-1", title: "本轮完成", kind: "done", link: null } as const;
+    try {
+      expect(ctx.bridge.status().notificationsEnabled).toBe(false);
+      expect(ctx.bridge.bound()).toBe(true);
+      push(ctx, notice(1, 3));
+      ctx.bridge.pushT3(thread);
+      await ctx.bridge.flush();
+      expect(ctx.telegram.sent).toHaveLength(0);
+      await ctx.bridge.action({ action: "test" });
+      expect(ctx.telegram.sent[0]?.text).toContain("测试消息");
+      ctx.telegram.sent = [];
+
+      expect((await ctx.bridge.action({ action: "set-notifications", enabled: true })).notificationsEnabled).toBe(true);
+      ctx.bridge.stop();
+      await ctx.bridge.start();
+      expect(ctx.bridge.status().notificationsEnabled).toBe(true);
+      ctx.bridge.noticesChanged();
+      await ctx.bridge.flush();
+      expect(ctx.telegram.sent).toHaveLength(0);
+      push(ctx, notice(2, 3));
+      await ctx.bridge.flush();
+      const pushedId = 500 + ctx.telegram.nextId - 1;
+      ctx.bridge.pushT3(thread);
+      await ctx.bridge.flush();
+      expect(ctx.telegram.sent.map((item) => item.chat_id)).toEqual([OWNER, OWNER]);
+
+      ctx.setSessions([session(3, "waiting")]);
+      expect((await ctx.bridge.action({ action: "set-notifications", enabled: false })).notificationsEnabled).toBe(false);
+      push(ctx, notice(3, 3));
+      ctx.bridge.pushT3(thread);
+      await ctx.bridge.flush();
+      expect(ctx.telegram.sent).toHaveLength(2);
+      ctx.telegram.say(OWNER, "继续", pushedId);
+      await until(() => ctx.sends.length === 1, "reply still works with notifications off");
+      expect(ctx.sends[0]).toEqual({ pane: 3, text: "继续", enter: true });
+    } finally {
+      ctx.bridge.stop();
+    }
+  });
+
+  it("does not send an in-flight T3 notice after turning notifications off and on", async () => {
+    const ctx = await paired();
+    const started = Promise.withResolvers<void>();
+    const answer = Promise.withResolvers<string>();
+    try {
+      ctx.bridge.attachT3({
+        send: async () => "started",
+        status: () => "completed",
+        answer: () => { started.resolve(); return answer.promise; },
+      });
+      ctx.bridge.pushT3({ threadId: "t-1", title: "本轮完成", kind: "done", link: null });
+      await started.promise;
+      await ctx.bridge.action({ action: "set-notifications", enabled: false });
+      await ctx.bridge.action({ action: "set-notifications", enabled: true });
+      answer.resolve("旧通知");
+      await ctx.bridge.flush();
+      expect(ctx.telegram.sent).toHaveLength(0);
+    } finally {
+      answer.resolve("");
+      ctx.bridge.stop();
+    }
+  });
+
   it("rejects a malformed or unknown token and keeps nothing", async () => {
     const ctx = await setup();
     await ctx.bridge.start();
+    await expect(ctx.bridge.action({ action: "set-notifications", enabled: true })).rejects.toThrow("还没有绑定 Telegram");
     await expect(ctx.bridge.action({ action: "set-token", token: "nope" })).rejects.toThrow("格式不对");
     ctx.telegram.getMeStatus = 401;
     await expect(ctx.bridge.action({ action: "set-token", token: TOKEN })).rejects.toThrow("不认这个 Bot Token");

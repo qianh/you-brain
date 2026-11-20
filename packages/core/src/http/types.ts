@@ -1355,6 +1355,7 @@ export const DeckTelegramActionBodySchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("pair") }).strict(),
   z.object({ action: z.literal("unbind") }).strict(),
   z.object({ action: z.literal("test") }).strict(),
+  z.object({ action: z.literal("set-notifications"), enabled: z.boolean() }).strict(),
   z
     .object({
       action: z.literal("set-relay"),

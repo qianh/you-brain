@@ -2,11 +2,11 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { TaskActionSchema, TaskCreateSchema, TaskUpdateSchema, type TaskState } from "./schema.js";
-import { TaskAlreadyMergedError, TaskMergeBlockedError, TaskNoCommitError } from "./git.js";
+import { TaskAlreadyMergedError, TaskDirtyWorktreeError, TaskMergeBlockedError, TaskNoCommitError } from "./git.js";
 import { TaskStore } from "./store.js";
 import type {
   DevelopmentTask, TaskActionInput, TaskAutomationPort, TaskBoard, TaskCreateInput,
-  TaskGitPort, TaskHttpPort, TaskNewProject, TaskProject, TaskReview, TaskStatus, TaskUpdateInput,
+  TaskGitPort, TaskHttpPort, TaskNewProject, TaskProject, TaskReview, TaskRun, TaskStatus, TaskUpdateInput,
 } from "./types.js";
 
 export class TaskError extends Error {
@@ -31,6 +31,7 @@ export interface TaskServiceOptions {
 }
 
 const ACTIVE = new Set<TaskStatus>(["preparing", "planning", "running", "review", "merging", "failed"]);
+const LEGACY_DIRTY_WORKTREE = "任务工作树有未提交或未跟踪的内容，请在 T3 中提交后重新检查";
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const samePath = (a: string, b: string): boolean => a.replace(/\/+$/u, "") === b.replace(/\/+$/u, "");
 
@@ -171,6 +172,14 @@ export class TaskService implements TaskHttpPort {
         await this.#save();
       } else {
         const task = await this.#task(body.id);
+        if (body.action === "complete") {
+          if (task.status === "merging") throw new TaskError(409, "TODO 正在合并中，请等待处理结束。");
+          if (task.status !== "done") {
+            task.completedManually = true;
+            await this.#complete(task);
+          }
+          return this.#board();
+        }
         if (body.action === "start" && task.status !== "queued") throw new TaskError(409, "只有待处理的 TODO 可以开始。");
         if (task.projectId === null && (body.action === "approve" || body.action === "reject")) {
           throw new TaskError(409, "未关联项目的 TODO 不参与代码核对和合并。");
@@ -299,12 +308,16 @@ export class TaskService implements TaskHttpPort {
       }
       return;
     }
+    await this.#reviewReady(project, task, task.run, result.summary);
+  }
+
+  async #reviewReady(project: TaskProject | null, task: DevelopmentTask, run: TaskRun, summary: string): Promise<void> {
     let review: Awaited<ReturnType<TaskGitPort["review"]>> | null = null;
-    if (project && task.run.branch !== null) {
-      try { review = await this.options.git.review(project, task.run); }
+    if (project && run.branch !== null) {
+      try { review = await this.options.git.review(project, run); }
       catch (error) {
         if (error instanceof TaskAlreadyMergedError) {
-          task.run.summary = result.summary;
+          run.summary = summary;
           await this.#complete(task);
           return;
         }
@@ -312,14 +325,17 @@ export class TaskService implements TaskHttpPort {
         // 这一轮停下但还没提交：AI 在等用户在 T3 里确认或回答，按“需求确认”继续等，不报错。
         if (task.status !== "planning") {
           task.status = "planning";
+          task.error = null;
+          run.error = null;
           await this.#save(task);
         }
         return;
       }
     }
-    task.run.summary = result.summary;
-    task.run.reviewSha = review?.headSha ?? null;
-    task.run.error = null;
+    run.summary = summary;
+    run.reviewSha = review?.headSha ?? null;
+    run.error = null;
+    task.error = null;
     task.status = review ? "review" : "done";
     await this.#save(task);
   }
@@ -333,6 +349,11 @@ export class TaskService implements TaskHttpPort {
     let live: Awaited<ReturnType<TaskAutomationPort["inspect"]>>;
     try { live = await this.options.automation.inspect(task.run.threadId, task.manual); }
     catch { return; }
+    if (live.state === "ready" && project && task.run.branch !== null && task.status === "failed" &&
+      (task.error ?? task.run.error) === LEGACY_DIRTY_WORKTREE) {
+      await this.#reviewReady(project, task, task.run, live.summary);
+      return;
+    }
     if (live.state === "ready" && project && task.run.branch !== null &&
       await this.options.git.isMerged(project, task.run).catch(() => false)) {
       if (live.summary) task.run.summary = live.summary;
@@ -475,7 +496,10 @@ export class TaskService implements TaskHttpPort {
   #board(): TaskBoard { return structuredClone({ projects: this.#state!.projects, tasks: this.#state!.tasks, connectionError: this.#connectionError }); }
 
   async #save(task?: DevelopmentTask): Promise<void> {
-    if (task) task.updatedAt = this.#now();
+    if (task) {
+      if (task.status !== "failed") delete task.worktreeBlock;
+      task.updatedAt = this.#now();
+    }
     try { await this.#store.write(this.#state!); }
     catch {
       // 内存不能领先于磁盘。尤其 merging 已获批准，Git 成功后写 done 失败时
@@ -489,6 +513,8 @@ export class TaskService implements TaskHttpPort {
   async #fail(task: DevelopmentTask, error: unknown): Promise<void> {
     if (error instanceof TaskPersistenceError) throw error;
     task.status = task.status === "merging" && error instanceof TaskMergeBlockedError ? "review" : "failed";
+    if (error instanceof TaskDirtyWorktreeError) task.worktreeBlock = error.counts;
+    else delete task.worktreeBlock;
     task.error = message(error);
     if (task.run) task.run.error = message(error);
     await this.#save(task);

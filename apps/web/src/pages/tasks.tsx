@@ -18,10 +18,13 @@ import { usePageActive } from "../page-active.js";
 import { formatRelative } from "../lib/format.js";
 import { deckT3ThreadHref } from "../lib/route.js";
 import { useRoute } from "../router.js";
-import { isTaskActive, projectTask, TASK_PRIORITY_KEYS, TASK_STATUS_KEYS, taskThreadUrl, visibleTasks } from "./tasks/logic.js";
+import { projectTask, TASK_PRIORITY_KEYS, TASK_STATUS_KEYS, taskCounts, taskStatusKey, taskThreadUrl, taskWorktreeHint, visibleTasks } from "./tasks/logic.js";
 import { ProjectPicker, type ProjectChoice } from "./tasks/project-picker.js";
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
+const TASK_METRICS = [
+  ["all", "tasksAll"], ["queued", "tasksQueued"], ["active", "tasksActive"], ["review", "tasksReview"], ["done", "tasksDone"],
+] as const;
 
 function ThreadLink({ task }: { task: DevelopmentTask }) {
   const { t } = useDaemon();
@@ -45,6 +48,7 @@ export function TasksPage() {
   const [tab, setTab] = useState<"tasks" | "projects">("tasks");
   const [editor, setEditor] = useState<{ task: DevelopmentTask | null } | null>(null);
   const [reviewing, setReviewing] = useState<DevelopmentTask | null>(null);
+  const [completing, setCompleting] = useState<DevelopmentTask | null>(null);
   const [starting, setStarting] = useState<TaskProject | null>(null);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const version = useRef(0);
@@ -137,12 +141,7 @@ export function TasksPage() {
   const tasks = board?.tasks ?? [];
   const projects = board?.projects ?? [];
   const filtered = visibleTasks(tasks, project, status);
-  const counts = {
-    queued: tasks.filter((task) => task.status === "queued").length,
-    active: tasks.filter((task) => isTaskActive(task.status)).length,
-    review: tasks.filter((task) => task.status === "review").length,
-    done: tasks.filter((task) => task.status === "done").length,
-  };
+  const counts = taskCounts(tasks, project);
   // 还没拿到数据时数字显示「—」：0 会被读成「没有任务」。
   const pendingBoard = board === null;
   const shown = (value: number): string => (pendingBoard ? "—" : String(value));
@@ -193,8 +192,8 @@ export function TasksPage() {
       </div> : <>
         <div className="tasks-flow"><span className="tasks-flow-label">T3 → develop</span><span>{t("tasksWorkflow")}</span></div>
         <div className="tasks-metrics">
-          {(["queued", "active", "review", "done"] as const).map((key) => <button type="button" className={`tasks-metric is-${key}${status === key ? " is-selected" : ""}`} key={key} onClick={() => setStatus(status === key ? "all" : key)} aria-pressed={status === key}>
-            <span>{t(key === "active" ? "tasksActive" : key === "review" ? "tasksReview" : key === "done" ? "tasksDone" : "tasksQueued")}</span><strong className={pendingBoard ? "is-pending" : undefined}>{shown(counts[key])}</strong>
+          {TASK_METRICS.map(([key, label]) => <button type="button" className={`tasks-metric is-${key}${status === key ? " is-selected" : ""}`} key={key} onClick={() => setStatus(status === key ? "all" : key)} aria-pressed={status === key}>
+            <span>{t(label)}</span><strong className={pendingBoard ? "is-pending" : undefined}>{shown(counts[key])}</strong>
           </button>)}
         </div>
         <section className="tasks-queue" aria-label={t("navTasks")}>
@@ -216,19 +215,23 @@ export function TasksPage() {
           {loading && !board ? <div className="tasks-loading" role="status"><Spinner /><span>{t("tasksLoadingBoard")}</span></div> : filtered.length === 0 ? <EmptyState title={t(tasks.length === 0 ? "tasksNoTasks" : "tasksNoMatches")} {...(tasks.length === 0 ? { description: t("tasksNoTasksHint"), action: <Button onClick={() => setEditor({ task: null })}>{t("tasksNew")}</Button> } : {})} /> : <ul className="tasks-list">
             {filtered.map((task) => {
               const linked = projects.find((item) => item.id === task.projectId);
+              const worktreeBlock = task.status === "failed" ? task.worktreeBlock : undefined;
+              const taskError = task.error ?? task.run?.error;
               return <li className={`tasks-item is-${task.status}`} key={task.id}>
                 <span className={`tasks-priority is-p${task.priority}`} title={t(TASK_PRIORITY_KEYS[task.priority])}>P{task.priority}</span>
                 <div className="tasks-item-body">
-                  <div className="tasks-item-title"><h3>{task.title}</h3><span className={`tasks-status is-${task.status}`}>{t(task.status === "done" && task.projectId !== null ? "tasksMerged" : TASK_STATUS_KEYS[task.status])}</span></div>
+                  <div className="tasks-item-title"><h3>{task.title}</h3><span className={`tasks-status is-${worktreeBlock ? "worktree-blocked" : task.status}`}>{t(taskStatusKey(task))}</span></div>
                   {task.description && <p className="tasks-description">{task.description}</p>}
                   <div className="tasks-item-meta"><span><Icon name="folder" size={12} />{linked?.name ?? t(task.projectId ? "tasksUnknownProject" : "tasksUnassigned")}</span>{task.run?.branch && <code>{task.run.branch}</code>}<span>{t("tasksUpdated", { when: formatRelative(task.updatedAt, language, timeZone) })}</span></div>
-                  {(task.error ?? task.run?.error) && <p className="tasks-item-error" role="alert">{task.error ?? task.run?.error}</p>}
+                  {worktreeBlock ? <p className="tasks-item-error is-worktree-blocked" role="status">{taskWorktreeHint(worktreeBlock, language)}</p>
+                    : taskError && <p className="tasks-item-error" role="alert">{taskError}</p>}
                 </div>
                 <div className="tasks-item-actions">
                   {task.status === "queued" && <Button size="sm" disabled={busy || !!board?.connectionError} loading={launchingId === task.id} onClick={() => void startTask(task.id)} icon={<Icon name="play" size={13} />}>{t("tasksStartOne")}</Button>}
                   {task.status === "queued" && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditor({ task })} icon={<Icon name="pencil" size={13} />}>{t("tasksEdit")}</Button>}
                   {task.status === "review" && <Button size="sm" variant="primary" disabled={busy} onClick={() => setReviewing(task)}>{t("tasksInspect")}</Button>}
                   {task.status === "failed" && <Button size="sm" disabled={busy} onClick={() => void act({ action: "retry", id: task.id })}>{t("tasksRetry")}</Button>}
+                  {task.status !== "done" && task.status !== "merging" && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setCompleting(task)} icon={<Icon name="check" size={13} />}>{t("tasksComplete")}</Button>}
                   <ThreadLink task={task} />
                 </div>
               </li>;
@@ -243,6 +246,9 @@ export function TasksPage() {
       if (ok) setEditor(null);
     }} />}
     {reviewing && <TaskReviewDialog key={reviewing.id} task={reviewing} onClose={() => setReviewing(null)} onChanged={acceptBoard} />}
+    <ConfirmDialog open={completing !== null} title={completing ? `${t("tasksComplete")} · ${completing.title}` : t("tasksComplete")} description={t("tasksCompleteHint")} confirmLabel={t("tasksComplete")} cancelLabel={t("cancel")} loading={busy} onClose={() => { if (!busy) setCompleting(null); }} onConfirm={() => {
+      if (completing) void mutate(() => client.taskAction({ action: "complete", id: completing.id }), t("tasksCompleted")).then((ok) => { if (ok) setCompleting(null); });
+    }} />
     <ConfirmDialog open={starting !== null} title={starting ? `${t("tasksStart")} · ${starting.name}` : t("tasksStart")} description={t("tasksStartHint")} confirmLabel={t("tasksStart")} cancelLabel={t("cancel")} loading={busy} onClose={() => { if (!busy) setStarting(null); }} onConfirm={() => {
       if (starting) void act({ action: "project", projectId: starting.id, enabled: true }).then((ok) => { if (ok) setStarting(null); });
     }} />

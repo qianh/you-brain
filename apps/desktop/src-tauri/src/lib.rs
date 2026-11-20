@@ -8,6 +8,8 @@ mod reminders;
 mod shortcut;
 mod sse;
 mod status_view;
+#[cfg(target_os = "macos")]
+mod terminal_file_drop;
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -1268,7 +1270,7 @@ fn build_main(app: &tauri::AppHandle, url: WebviewUrl) -> tauri::Result<WebviewW
         .inner_size(MAIN_WIDTH, MAIN_HEIGHT)
         .resizable(true)
         .visible(false)
-        // 把拖进窗口的文件交给网页处理(知识库拖图片/文件进页面直接上传),外壳自己不接。
+        // 保留知识库和 Muse 的原生网页拖放；终端单独补上文件路径。
         .disable_drag_drop_handler()
         .center();
     // The Web UI's top bar shares the row with the traffic lights; the bar is 56px in
@@ -1280,6 +1282,8 @@ fn build_main(app: &tauri::AppHandle, url: WebviewUrl) -> tauri::Result<WebviewW
         .hidden_title(true)
         .traffic_light_position(tauri::LogicalPosition::new(16.0, 26.0));
     let window = builder.build()?;
+    #[cfg(target_os = "macos")]
+    terminal_file_drop::install(&window)?;
     let main = window.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {

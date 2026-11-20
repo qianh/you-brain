@@ -1,5 +1,6 @@
-import type { DevelopmentTask, TaskProject, TaskStatus } from "@you-brain/core/tasks/types.js";
-import type { MessageKey } from "../../i18n/messages.js";
+import type { DevelopmentTask, TaskProject, TaskStatus, TaskWorktreeBlock } from "@you-brain/core/tasks/types.js";
+import { translate, type MessageKey } from "../../i18n/messages.js";
+import type { Language } from "../../lib/format.js";
 
 export const TASK_STATUS_KEYS: Record<TaskStatus, MessageKey> = {
   queued: "tasksQueued",
@@ -14,13 +15,39 @@ export const TASK_STATUS_KEYS: Record<TaskStatus, MessageKey> = {
 
 export const TASK_PRIORITY_KEYS = ["tasksPriority0", "tasksPriority1", "tasksPriority2", "tasksPriority3"] as const;
 
-export function isTaskActive(status: TaskStatus): boolean {
+export function isTaskActive(status: TaskStatus): status is "preparing" | "planning" | "running" | "merging" {
   return status === "preparing" || status === "planning" || status === "running" || status === "merging";
+}
+
+function matchesProject(task: DevelopmentTask, project: string): boolean {
+  return project === "all" || task.projectId === (project === "unassigned" ? null : project);
+}
+
+export function taskCounts(tasks: readonly DevelopmentTask[], project: string) {
+  const counts = { all: 0, queued: 0, active: 0, review: 0, done: 0 };
+  for (const task of tasks) {
+    if (!matchesProject(task, project)) continue;
+    counts.all += 1;
+    if (isTaskActive(task.status)) counts.active += 1;
+    else if (task.status !== "failed") counts[task.status] += 1;
+  }
+  return counts;
+}
+
+export function taskStatusKey(task: DevelopmentTask): MessageKey {
+  if (task.status === "failed" && task.worktreeBlock) return "tasksWorktreeBlocked";
+  return task.status === "done" && task.projectId !== null && !task.completedManually ? "tasksMerged" : TASK_STATUS_KEYS[task.status];
+}
+
+export function taskWorktreeHint({ uncommitted, untracked }: TaskWorktreeBlock, language: Language): string {
+  const key = uncommitted > 0 ? (untracked > 0 ? "tasksWorktreeMixed" : "tasksWorktreeUncommitted") : "tasksWorktreeUntracked";
+  const detail = translate(language, key, { uncommitted, untracked });
+  return `${detail}${language === "en" ? " " : ""}${translate(language, "tasksWorktreeRecheck")}`;
 }
 
 export function visibleTasks(tasks: DevelopmentTask[], project: string, status: string): DevelopmentTask[] {
   return tasks.filter((task) =>
-    (project === "all" || (project === "unassigned" ? task.projectId === null : task.projectId === project)) &&
+    matchesProject(task, project) &&
     (status === "all" || (status === "active" ? isTaskActive(task.status) : task.status === status)),
   ).sort((left, right) => left.priority - right.priority || left.createdAt.localeCompare(right.createdAt));
 }

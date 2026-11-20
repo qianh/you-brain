@@ -48,6 +48,18 @@
 
 .settings-main.has-dirty { padding-bottom: 84px; }
 
+@media (min-width: 960px) {
+  .settings-page.is-portrait { height: calc(100dvh - var(--h-topbar) - var(--sp-3) * 2); }
+  .settings-page.is-portrait .settings-layout {
+    flex: 1;
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr);
+    align-items: stretch;
+  }
+  .settings-page.is-portrait .settings-main { min-height: 0; }
+  .settings-page.is-portrait .settings-nav { position: static; overflow-y: auto; }
+}
+
 .settings-section-head { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .settings-section-head h2 { font-size: var(--fs-lg); font-weight: 600; line-height: var(--lh-lg); }
 .settings-section-head p { color: var(--text-2); font-size: var(--fs-sm); line-height: var(--lh-sm); }

@@ -6,13 +6,23 @@
   min-height: calc(100dvh - var(--h-topbar) - var(--sp-3) - var(--sp-3));
 }
 
+.portrait-page.is-embedded { min-height: 0; }
+
 .portrait-layout {
   display: grid;
   /* 文档列吃满剩余宽度,目录列保持紧凑——正文随窗口自适应。 */
-  grid-template-columns: minmax(0, 1fr) minmax(calc(var(--sp-10) * 5), calc(var(--sp-10) * 6 + var(--sp-5)));
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--sp-6);
   align-items: start;
   justify-content: center;
+  min-width: 0;
+}
+
+.portrait-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  width: 100%;
   min-width: 0;
 }
 
@@ -40,9 +50,6 @@
 .portrait-skeleton .skeleton:first-child { margin-bottom: var(--sp-2); }
 
 .portrait-side {
-  position: sticky;
-  top: calc(var(--h-topbar) + var(--sp-3));
-  align-self: start;
   min-width: 0;
 }
 
@@ -112,11 +119,6 @@
   list-style: none;
   margin: 0;
   padding: 0;
-}
-
-.portrait-toc {
-  max-height: calc(100dvh - var(--h-topbar) - var(--sp-10) * 6);
-  overflow: auto;
 }
 
 .portrait-toc a {
@@ -494,6 +496,20 @@
 .portrait-prose > :last-child { margin-bottom: 0; }
 
 @media (min-width: 960px) {
+  .portrait-page:not(.is-embedded) { height: calc(100dvh - var(--h-topbar) - var(--sp-3) * 2); }
+  .portrait-page.is-embedded { flex: 1; }
+  .portrait-layout {
+    flex: 1;
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr);
+    align-items: stretch;
+  }
+  .portrait-layout.has-side {
+    grid-template-columns: minmax(0, 1fr) minmax(calc(var(--sp-10) * 5), calc(var(--sp-10) * 6 + var(--sp-5)));
+  }
+  .portrait-main, .portrait-side { overflow-y: auto; overscroll-behavior-y: contain; }
+  .portrait-main > * { flex-shrink: 0; }
+  .portrait-prose :is(h1, h2, h3) { scroll-margin-top: var(--sp-3); }
   .portrait-side-fold > summary { display: none; }
   .portrait-side-fold:not([open])::details-content {
     display: block;
@@ -503,11 +519,10 @@
 }
 
 @media (max-width: 959px) {
-  .portrait-layout { grid-template-columns: minmax(0, 1fr); justify-items: center; }
-  .portrait-side { position: static; order: -1; width: 100%; max-width: var(--read-max); }
+  .portrait-layout { justify-items: center; }
+  .portrait-side { order: -1; width: 100%; max-width: var(--read-max); }
   .portrait-side-fold > summary { display: flex; }
   .portrait-side-fold:not([open]) > .portrait-side-body { display: none; }
-  .portrait-toc { max-height: none; }
   .card.portrait-doc { padding: var(--sp-5); }
 }
 

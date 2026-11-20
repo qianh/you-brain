@@ -21,7 +21,7 @@ import { StartGuide } from "./today/guide.js";
 import { emptyCaptureView, guideSteps } from "./today/model.js";
 import { panelShortcut } from "./panel/model.js";
 import { minutesAgo, resetIn, tokenCount, type QuotaCardView } from "./panel/quota.js";
-import type { QuotaTokenUsage } from "@you-brain/core/http/types.js";
+import type { DeckTelegramStatusResponse, QuotaTokenUsage } from "@you-brain/core/http/types.js";
 import { useQuota } from "./panel/use-quota.js";
 import { openAppPath } from "./panel/open.js";
 import { ReminderList } from "./reminders/list.js";
@@ -212,6 +212,7 @@ export function PanelPage() {
         ) : null}
       </PanelScroll>
       <SilentNotificationsSetting t={t} />
+      <MobileNotificationsSetting onConfigure={() => openMain(settingsHref("integrations"))} />
       <footer className="panel-footer">
         <Button size="sm" variant="ghost" icon={<Icon name="refresh" />} loading={syncing} onClick={() => void sync()}>
           {t("cmdSync")}
@@ -268,6 +269,58 @@ function SilentNotificationsSetting({ t }: { t: (key: MessageKey) => string }) {
     <div className="panel-notification-setting">
       <span>{label}</span>
       <Toggle checked={enabled} label={label} disabled={saving} onChange={(next) => void save(next)} />
+    </div>
+  );
+}
+
+function MobileNotificationsSetting({ onConfigure }: { onConfigure: () => void }) {
+  const { client, t } = useDaemon();
+  const { push } = useToast();
+  const [status, setStatus] = useState<DeckTelegramStatusResponse | null>(null);
+  const [saving, setSaving] = useState(false);
+  const revision = useRef(0);
+
+  useEffect(() => {
+    const refresh = () => {
+      const current = ++revision.current;
+      void client.deckTelegram().then((next) => {
+        if (current === revision.current) setStatus(next);
+      }, () => {
+        if (current === revision.current) setStatus(null);
+      });
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
+    return () => {
+      revision.current += 1;
+      window.removeEventListener("focus", refresh);
+    };
+  }, [client]);
+
+  const save = async (enabled: boolean) => {
+    revision.current += 1;
+    setSaving(true);
+    try {
+      const updated = await client.deckTelegramAction({ action: "set-notifications", enabled });
+      revision.current += 1;
+      setStatus(updated);
+    } catch {
+      push({ message: t("panelMobileNotificationsSaveFailed"), tone: "danger" });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const enabled = status?.notificationsEnabled === true;
+  const needsBinding = status !== null && status.bound === null;
+  const label = t("panelMobileNotifications");
+  return (
+    <div className="panel-notification-setting">
+      <span>{label}</span>
+      <div className="panel-notification-controls">
+        {needsBinding && <Button size="sm" variant="ghost" onClick={onConfigure}>{t("panelMobileNotificationsBind")}</Button>}
+        <Toggle checked={enabled} label={label} disabled={status === null || saving || (needsBinding && !enabled)} onChange={(next) => void save(next)} />
+      </div>
     </div>
   );
 }

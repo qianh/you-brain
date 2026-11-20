@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { DevelopmentTask } from "../../../../packages/core/src/tasks/types.js";
-import { folderName, projectPickerRows, projectTask, taskThreadUrl, visibleTasks } from "../../src/pages/tasks/logic.js";
+import { folderName, projectPickerRows, projectTask, taskCounts, taskStatusKey, taskThreadUrl, taskWorktreeHint, visibleTasks } from "../../src/pages/tasks/logic.js";
 
 function task(id: string, patch: Partial<DevelopmentTask> = {}): DevelopmentTask {
   return { id, title: id, description: "", priority: 2, projectId: "one", status: "queued", createdAt: "2026-11-16T00:00:00Z", updatedAt: "2026-11-16T00:00:00Z", run: null, ...patch };
@@ -19,6 +19,30 @@ describe("TODO queue presentation", () => {
     expect(projectTask(tasks, "one")?.id).toBe("waiting");
     expect(visibleTasks(tasks, "all", "active").map((item) => item.id)).toEqual(["running", "preparing", "planning"]);
     expect(visibleTasks(tasks, "one", "review").map((item) => item.id)).toEqual(["waiting"]);
+  });
+
+  test("all counts every status within the selected project", () => {
+    const tasks = [task("queued"), task("failed", { status: "failed" }), task("review", { status: "review" }), task("merging", { status: "merging" }), task("done", { status: "done", projectId: "two" }), task("unassigned", { projectId: null })];
+    expect(taskCounts(tasks, "all")).toEqual({ all: 6, queued: 2, active: 1, review: 1, done: 1 });
+    expect(taskCounts(tasks, "one")).toEqual({ all: 4, queued: 1, active: 1, review: 1, done: 0 });
+    expect(taskCounts(tasks, "unassigned")).toEqual({ all: 1, queued: 1, active: 0, review: 0, done: 0 });
+    expect(visibleTasks(tasks, "one", "all").map((item) => item.id)).toContain("failed");
+  });
+
+  test("manual completion is not reported as a merge", () => {
+    expect(taskStatusKey(task("manual", { status: "done", completedManually: true }))).toBe("tasksDone");
+    expect(taskStatusKey(task("merged", { status: "done", manual: true }))).toBe("tasksMerged");
+    expect(taskStatusKey(task("no-project", { status: "done", projectId: null }))).toBe("tasksDone");
+  });
+
+  test("worktree blockers show the ended run and exact counts, unlike T3 failures", () => {
+    const onlyUntracked = { uncommitted: 0, untracked: 1 };
+    expect(taskStatusKey(task("blocked", { status: "failed", worktreeBlock: onlyUntracked }))).toBe("tasksWorktreeBlocked");
+    expect(taskStatusKey(task("failed", { status: "failed" }))).toBe("tasksFailed");
+    expect(taskWorktreeHint(onlyUntracked, "zh")).toBe("等待处理 1 个未跟踪文件。请在 T3 中确认后重新检查。");
+    expect(taskWorktreeHint({ uncommitted: 2, untracked: 0 }, "zh")).toContain("等待处理 2 个有未提交改动的文件");
+    expect(taskWorktreeHint({ uncommitted: 2, untracked: 3 }, "zh")).toContain("2 个有未提交改动的文件和 3 个未跟踪文件");
+    expect(taskWorktreeHint(onlyUntracked, "en")).toBe("Resolve untracked files (1). Check these files in T3, then recheck.");
   });
 
   test("only offers local HTTP T3 links without embedded credentials", () => {

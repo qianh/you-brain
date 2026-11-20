@@ -1,7 +1,7 @@
 .tasks-page { display: flex; flex-direction: column; gap: var(--sp-4); }
 .tasks-flow { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-3); color: var(--text-2); font-size: var(--fs-sm); }
 .tasks-flow-label { font-family: var(--mono); color: var(--accent); font-weight: 600; padding: 3px 8px; background: var(--accent-soft); border-radius: var(--r-chip); }
-.tasks-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-3); }
+.tasks-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--sp-3); }
 .tasks-metric { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-2); padding: var(--sp-4); border: 1px solid var(--border); border-radius: var(--r-card); background: var(--surface); color: var(--text-2); text-align: left; cursor: pointer; transition: border-color var(--ease-color), background var(--ease-color); }
 .tasks-metric strong { color: var(--text); font: 500 var(--fs-stat)/var(--lh-stat) var(--mono); font-variant-numeric: tabular-nums; }
 .tasks-metric strong.is-pending { color: var(--text-3); }
@@ -124,6 +124,7 @@
 .tasks-thread-link { display: inline-flex; align-items: center; gap: 4px; color: var(--accent); text-decoration: none; font-size: var(--fs-sm); white-space: nowrap; }
 .tasks-thread-link:hover { text-decoration: underline; }
 .tasks-item-error { margin-top: var(--sp-2); color: var(--danger-text); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-sm); }
+.tasks-status.is-worktree-blocked, .tasks-item-error.is-worktree-blocked { color: var(--warn-text); }
 .tasks-queue-note { display: flex; align-items: flex-start; gap: var(--sp-2); padding: var(--sp-3) var(--sp-4); border-top: 1px solid var(--border); color: var(--text-3); font-size: var(--fs-sm); line-height: var(--lh-zh); }
 .tasks-queue-note > svg { flex-shrink: 0; margin-top: 2px; }
 .tasks-loading { display: flex; align-items: center; justify-content: center; gap: var(--sp-3); min-height: 150px; padding: var(--sp-5); color: var(--text-2); }
@@ -177,7 +178,8 @@
 }
 @media (max-width: 640px) {
   .tasks-projects-grid { grid-template-columns: minmax(0, 1fr); }
-  .tasks-metrics { gap: var(--sp-2); }
+  .tasks-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-2); }
+  .tasks-metric.is-all { grid-column: 1 / -1; }
   .tasks-metric { padding: var(--sp-3); font-size: var(--fs-sm); }
   .tasks-metric strong { font-size: 20px; }
   .tasks-review-meta > div { grid-template-columns: minmax(0, 1fr); gap: 2px; }

@@ -6,7 +6,7 @@ import type { DeckTerminalSize } from "@you-brain/core/http/types.js";
 import "@xterm/xterm/css/xterm.css";
 
 import { useDaemon } from "../daemon-context.js";
-import { isReferenceTrigger, preserveTerminalImeInput } from "./deck-terminal-input.js";
+import { isReferenceTrigger, preserveTerminalImeInput, terminalDroppedPaths } from "./deck-terminal-input.js";
 import { createLatencyProbe } from "./deck-terminal-latency.js";
 import { createBatchedTerminalOutput } from "./deck-terminal-output.js";
 import { muteReplayReplies } from "./deck-terminal-replies.js";
@@ -55,6 +55,8 @@ export function DeckTty7Terminal({
   const liveRef = useRef<LiveTerminal | null>(null);
   const activeRef = useRef(active);
   activeRef.current = active;
+  const translateRef = useRef(t);
+  translateRef.current = t;
   const handledPasteRef = useRef(0);
   const onReferenceKeyRef = useRef(onReferenceKey);
   onReferenceKeyRef.current = onReferenceKey;
@@ -282,6 +284,18 @@ export function DeckTty7Terminal({
       })();
     };
     host.addEventListener("paste", onPaste, true);
+    const onFileDrop = (event: Event): void => {
+      if (!connected || !activeRef.current) return;
+      const text = terminalDroppedPaths((event as CustomEvent<unknown>).detail);
+      if (text === null) {
+        setError(translateRef.current("deckTty7DropInvalid"));
+        return;
+      }
+      setError(null);
+      terminal.paste(text);
+      terminal.focus();
+    };
+    host.addEventListener("you-brain:terminal-file-drop", onFileDrop);
     const focusFrame = activeRef.current ? requestAnimationFrame(() => terminal.focus()) : 0;
     return () => {
       disposed = true;
@@ -297,6 +311,7 @@ export function DeckTty7Terminal({
       host.removeEventListener("focusout", onBlur);
       host.removeEventListener("keydown", preserveTerminalImeInput, true);
       host.removeEventListener("paste", onPaste, true);
+      host.removeEventListener("you-brain:terminal-file-drop", onFileDrop);
       socket.close();
       data.dispose();
       binary.dispose();
@@ -360,7 +375,15 @@ export function DeckTty7Terminal({
     ].filter(Boolean).join(" ")}>
       <div ref={hostRef} className="deck-tty7-xterm" aria-label={t("deckTty7ScreenLabel")}
         // xterm 已编码这些按键；不要让应用快捷键再处理。
-        onKeyDown={(event) => event.stopPropagation()} />
+        onKeyDown={(event) => event.stopPropagation()}
+        onDragOver={(event) => {
+          if (!event.dataTransfer.types.includes("Files")) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = active && status === "ready" && window.__TAURI__ && navigator.platform.startsWith("Mac") ? "copy" : "none";
+        }}
+        onDrop={(event) => {
+          if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+        }} />
       {/* 状态悬浮在终端右下角，只在有内容时出现，不占终端的行列。 */}
       {hasFloat && <div className="deck-tty7-float">
         {connectionText !== null && <p className="deck-tty7-float-item" role="status">

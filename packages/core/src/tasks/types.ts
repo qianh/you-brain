@@ -9,6 +9,11 @@ export interface TaskProject {
 export type TaskStatus = "queued" | "preparing" | "planning" | "running" | "review" | "merging" | "done" | "failed";
 export type TaskPriority = 0 | 1 | 2 | 3;
 
+export interface TaskWorktreeBlock {
+  uncommitted: number;
+  untracked: number;
+}
+
 interface TaskRunDetails {
   /** 领取任务时的项目目录；T3 中更换目录后不得继续操作原任务。 */
   projectCwd: string;
@@ -47,7 +52,9 @@ export interface DevelopmentTask {
   updatedAt: string;
   run: TaskRun | null;
   manual?: true | undefined;
+  completedManually?: true | undefined;
   error?: string | null | undefined;
+  worktreeBlock?: TaskWorktreeBlock | undefined;
 }
 
 export interface TaskBoard {
@@ -84,6 +91,7 @@ export interface TaskUpdateInput {
 export type TaskActionInput =
   | { action: "project"; projectId: string; enabled: boolean }
   | { action: "start"; id: string }
+  | { action: "complete"; id: string }
   | { action: "retry"; id: string }
   | { action: "approve"; id: string; reviewSha: string }
   | { action: "reject"; id: string; feedback: string };

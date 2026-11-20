@@ -16,6 +16,7 @@ const STATUS: DeckTelegramStatusResponse = {
   bound: null,
   pairing: null,
   relay: null,
+  notificationsEnabled: false,
 };
 
 async function withServer(run: (server: DaemonHttpServer, actions: DeckTelegramActionBody[]) => Promise<void>) {
@@ -63,7 +64,12 @@ it("reads status and forwards validated actions", async () => {
 
     expect((await call(server, "POST", { action: "set-token" })).status).toBe(400);
     expect((await call(server, "POST", { action: "rm -rf" })).status).toBe(400);
+    expect((await call(server, "POST", { action: "set-notifications", enabled: "true" })).status).toBe(400);
     expect(actions).toHaveLength(1);
+
+    const toggle = await call(server, "POST", { action: "set-notifications", enabled: true });
+    expect(toggle.status).toBe(200);
+    expect(actions.at(-1)).toEqual({ action: "set-notifications", enabled: true });
 
     const failed = await call(server, "POST", { action: "test" });
     expect(failed.status).toBe(400);

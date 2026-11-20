@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 
-import type { TaskGitPort, TaskProject, TaskReview, TaskWorktreeRun } from "./types.js";
+import type { TaskGitPort, TaskProject, TaskReview, TaskWorktreeBlock, TaskWorktreeRun } from "./types.js";
 
 const DIFF_LIMIT = 128 * 1024;
 const COMMAND_LIMIT = 1024 * 1024;
@@ -30,6 +30,12 @@ export class TaskNoCommitError extends Error {
 }
 
 export class TaskMergeBlockedError extends Error {}
+
+export class TaskDirtyWorktreeError extends Error {
+  constructor(readonly counts: TaskWorktreeBlock) {
+    super("任务工作树有未提交或未跟踪的内容，请在 T3 中确认后重新检查");
+  }
+}
 
 export class TaskAlreadyMergedError extends Error {
   constructor() {
@@ -204,7 +210,15 @@ export class TaskGit implements TaskGitPort {
     this.#assertOwner(owner, repo, run.branch, location.worktreePath);
     if (run.worktreePath !== owner.worktreePath || run.baseSha !== owner.baseSha) throw new Error("任务执行记录与工作树不一致");
     await this.#assertWorktree(repo, owner);
-    await this.#clean(run.worktreePath, "任务工作树有未提交或未跟踪的内容，请在 T3 中提交后重新检查");
+    const status = await this.#git(run.worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames"]);
+    if (status.truncated) throw new Error("任务工作树变更过多，请在 T3 中确认未提交或未跟踪的内容后重新检查");
+    if (status.text !== "") {
+      const counts = { uncommitted: 0, untracked: 0 };
+      for (const entry of status.text.split("\0")) {
+        if (entry) counts[entry.startsWith("?? ") ? "untracked" : "uncommitted"] += 1;
+      }
+      throw new TaskDirtyWorktreeError(counts);
+    }
     const headSha = await this.#sha(run.worktreePath, "HEAD");
     if (!(await this.#isAncestor(repo, run.baseSha, headSha))) throw new Error("任务分支已重写起点，请人工检查");
     return headSha;

@@ -75,6 +75,12 @@
   color: var(--text-2);
   font-size: var(--fs-base);
 }
+.panel-page .panel-notification-controls {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--sp-2);
+}
 .panel-page .panel-footer {
   padding: var(--sp-2) var(--sp-3) var(--sp-3);
   border-top: 1px solid var(--border);

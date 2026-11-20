@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Terminal } from "@xterm/xterm";
 
-import { isReferenceTrigger, preserveTerminalImeInput } from "../../src/pages/deck-terminal-input.js";
+import { isReferenceTrigger, preserveTerminalImeInput, terminalDroppedPaths } from "../../src/pages/deck-terminal-input.js";
 
 // 运行真实 xterm 的按键编码和 input 去重逻辑；仅替代未挂载 DOM 的渲染与组词服务。
 interface XtermInputCore {
@@ -101,5 +101,21 @@ describe("isReferenceTrigger", () => {
     expect(isReferenceTrigger("%", true, false, "x")).toBe(true);
     expect(isReferenceTrigger("50%", true, false)).toBe(false);
     expect(isReferenceTrigger("%", true, true)).toBe(false);
+  });
+});
+
+describe("terminal file drops", () => {
+  test("pastes multiple original paths as shell words without submitting", () => {
+    expect(terminalDroppedPaths(["/tmp/合同.pdf", "/tmp/My File.png", "/tmp/it's & $file"])).toBe(
+      "/tmp/合同.pdf '/tmp/My File.png' '/tmp/it'\\''s & $file' ",
+    );
+  });
+
+  test("rejects paths that could send Enter, Escape, or other terminal controls", () => {
+    for (const name of ["/tmp/a\nb", "/tmp/a\rb", "/tmp/a\tb", "/tmp/a\x1b[201~", "/tmp/a\u009b201~"]) {
+      expect(terminalDroppedPaths(["/tmp/valid.txt", name])).toBeNull();
+    }
+    expect(terminalDroppedPaths(["relative.txt"])).toBeNull();
+    expect(terminalDroppedPaths("/tmp/valid.txt")).toBeNull();
   });
 });

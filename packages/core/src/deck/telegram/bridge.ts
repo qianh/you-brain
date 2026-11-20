@@ -40,6 +40,7 @@ export interface TelegramStatus {
   connection: "off" | "connecting" | "ok" | "error";
   error: string | null;
   bound: { name: string } | null;
+  notificationsEnabled: boolean;
   pairing: { code: string; link: string; expiresAt: string } | null;
   /** 用中转时：地址、本机在中转里的名字、中转见过的设备。 */
   relay: { url: string; name: string; devices: Array<{ name: string; online: boolean; self: boolean }> } | null;
@@ -51,6 +52,7 @@ export type TelegramAction =
   | { action: "pair" }
   | { action: "unbind" }
   | { action: "test" }
+  | { action: "set-notifications"; enabled: boolean }
   | { action: "set-relay"; url: string; key: string; name?: string | undefined }
   | { action: "clear-relay" };
 
@@ -83,6 +85,7 @@ const StoredSchema = z.object({
   chatId: z.number().int().nullable().default(null),
   chatName: z.string().nullable().default(null),
   offset: z.number().int().nonnegative().default(0),
+  notificationsEnabled: z.boolean().default(false),
   relay: z
     .object({ url: z.string(), deviceId: z.string(), name: z.string() })
     .nullable()
@@ -90,7 +93,8 @@ const StoredSchema = z.object({
 });
 type Stored = z.infer<typeof StoredSchema>;
 
-const EMPTY: Stored = { botId: null, chatId: null, chatName: null, offset: 0, relay: null };
+const EMPTY_BINDING = { botId: null, chatId: null, chatName: null, offset: 0 };
+const EMPTY: Stored = { ...EMPTY_BINDING, relay: null, notificationsEnabled: false };
 const RELAY_KEY_MIN = 16;
 
 function defaultDeviceName(): string {
@@ -187,6 +191,8 @@ export function noticeText(kind: SessionNotice["kind"], title: string, body: str
 export class TelegramBridge {
   readonly #options: TelegramBridgeOptions;
   #stored: Stored = { ...EMPTY };
+  #saveChain: Promise<void> = Promise.resolve();
+  #notificationRevision = 0;
   #api: TelegramApi | null = null;
   #bot: { id: number; username: string; name: string } | null = null;
   #connection: TelegramStatus["connection"] = "off";
@@ -239,6 +245,7 @@ export class TelegramBridge {
 
   stop(): void {
     this.#started = false;
+    this.#notificationRevision += 1;
     this.#loop?.abort();
     this.#loop = null;
     this.#api = null;
@@ -256,6 +263,7 @@ export class TelegramBridge {
       connection: this.#connection,
       error: this.#error,
       bound: this.#stored.chatId === null ? null : { name: this.#stored.chatName ?? String(this.#stored.chatId) },
+      notificationsEnabled: this.#stored.notificationsEnabled,
       pairing:
         pair && this.#bot
           ? {
@@ -277,6 +285,7 @@ export class TelegramBridge {
       connection: this.#connection,
       error: this.#error,
       bound: state?.bound ?? null,
+      notificationsEnabled: this.#stored.notificationsEnabled,
       pairing: pair,
       relay: {
         url: relay.url,
@@ -291,6 +300,12 @@ export class TelegramBridge {
   }
 
   async action(input: TelegramAction): Promise<TelegramStatus> {
+    if (input.action === "set-notifications") {
+      if (input.enabled && !this.bound()) throw new YouBrainError("INVALID_INPUT", "还没有绑定 Telegram");
+      await this.#save({ notificationsEnabled: input.enabled });
+      this.#changed();
+      return this.status();
+    }
     if (input.action === "set-relay") {
       await this.#setRelay(input);
       this.#changed();
@@ -326,7 +341,7 @@ export class TelegramBridge {
         this.#connection = "off";
         this.#error = null;
         await this.#options.token.delete();
-        await this.#save({ ...EMPTY, relay: this.#stored.relay });
+        await this.#save(EMPTY_BINDING);
         break;
       case "pair":
         if (!this.#api || !this.#bot) throw new YouBrainError("INVALID_INPUT", "请先填写 Bot Token");
@@ -334,7 +349,7 @@ export class TelegramBridge {
         break;
       case "unbind":
         this.#pair = null;
-        await this.#save({ ...this.#stored, chatId: null, chatName: null });
+        await this.#save({ chatId: null, chatName: null });
         this.#sent.clear();
         this.#recent = null;
         break;
@@ -361,7 +376,7 @@ export class TelegramBridge {
     });
     await this.#options.token.set(token);
     // 换了一个 Bot：原来的绑定和收消息进度都作废。
-    if (this.#stored.botId !== me.id) await this.#save({ ...EMPTY, botId: me.id, relay: this.#stored.relay });
+    if (this.#stored.botId !== me.id) await this.#save({ ...EMPTY_BINDING, botId: me.id });
     this.#pair = null;
     this.#run(token, me);
   }
@@ -406,7 +421,7 @@ export class TelegramBridge {
     this.#pair = null;
     this.#sent.clear();
     this.#recent = null;
-    await this.#save({ ...this.#stored, chatId: null, chatName: null, relay });
+    await this.#save({ chatId: null, chatName: null, relay });
     if (this.#started) this.#runRelay(relay, key);
   }
 
@@ -420,7 +435,7 @@ export class TelegramBridge {
     this.#sent.clear();
     this.#recent = null;
     await this.#options.relayKey?.delete();
-    await this.#save({ ...this.#stored, relay: null });
+    await this.#save({ relay: null });
     // 还留着 Bot Token 就回到直连。
     const token = (await this.#options.token.get().catch(() => null))?.trim() ?? "";
     if (token && this.#started) this.#run(token);
@@ -468,9 +483,15 @@ export class TelegramBridge {
     return code;
   }
 
-  async #save(next: Stored): Promise<void> {
-    this.#stored = next;
-    await writeJsonFile(this.#options.configPath, next);
+  #save(patch: Partial<Stored>): Promise<void> {
+    const write = this.#saveChain.then(async () => {
+      const next = { ...this.#stored, ...patch };
+      await writeJsonFile(this.#options.configPath, next);
+      if (next.notificationsEnabled !== this.#stored.notificationsEnabled) this.#notificationRevision += 1;
+      this.#stored = next;
+    });
+    this.#saveChain = write.catch(() => undefined);
+    return write;
   }
 
   #run(token: string, me?: { id: number; username?: string; first_name?: string }): void {
@@ -493,7 +514,7 @@ export class TelegramBridge {
         if (!this.#bot) {
           const me = await api.getMe(signal);
           this.#bot = { id: me.id, username: me.username ?? "", name: me.first_name ?? "" };
-          if (this.#stored.botId !== me.id) await this.#save({ ...EMPTY, botId: me.id, relay: this.#stored.relay });
+          if (this.#stored.botId !== me.id) await this.#save({ ...EMPTY_BINDING, botId: me.id });
         }
         if (this.#connection !== "ok") {
           this.#connection = "ok";
@@ -506,7 +527,7 @@ export class TelegramBridge {
         if (updates.length === 0) continue;
         // 先记下进度再处理：宁可漏处理一条，也不要重启后把旧回复再打进终端。
         const last = updates[updates.length - 1]!.update_id;
-        await this.#save({ ...this.#stored, offset: last + 1 });
+        await this.#save({ offset: last + 1 });
         for (const update of updates) {
           if (signal.aborted) return;
           if (update.message) await this.#handle(update.message).catch(() => undefined);
@@ -613,7 +634,7 @@ export class TelegramBridge {
       return;
     }
     this.#pair = null;
-    await this.#save({ ...this.#stored, chatId: message.chat.id, chatName: displayName(message) });
+    await this.#save({ chatId: message.chat.id, chatName: displayName(message) });
     this.#changed();
     await this.#reply(
       message,
@@ -712,13 +733,20 @@ export class TelegramBridge {
     return this.#canPush();
   }
 
+  #canNotify(revision: number): boolean {
+    return revision === this.#notificationRevision && this.#stored.notificationsEnabled && this.#canPush();
+  }
+
   /** T3 会话做完一轮、等你处理或失败时调用：推到绑定的私聊，做完时带上最后一条回答。 */
   pushT3(notice: TelegramT3Notice): void {
-    if (!this.#canPush()) return;
+    const revision = this.#notificationRevision;
+    if (!this.#canNotify(revision)) return;
     const t3 = this.#t3;
     this.#pushChain = this.#pushChain.then(async () => {
+      if (!this.#canNotify(revision)) return;
       try {
         const body = notice.kind === "done" && t3 ? await t3.answer(notice.threadId).catch(() => "") : "";
+        if (!this.#canNotify(revision)) return;
         const sent = await this.#push(t3NoticeText(notice, body));
         const target: SentNotice = { kind: "t3", threadId: notice.threadId, name: notice.title };
         this.#sent.set(sent, target);
@@ -738,9 +766,11 @@ export class TelegramBridge {
     this.#cursor = { epoch: list.epoch, seq: Math.max(from, list.latest) };
     // 不看 status：用户正在电脑上看的会话，提醒一出生就是已关闭（桌面不弹），Telegram 仍要推送。
     const fresh = list.notices.filter((notice) => notice.seq > from && pushable(notice));
-    if (fresh.length === 0 || !this.#canPush()) return;
+    const revision = this.#notificationRevision;
+    if (fresh.length === 0 || !this.#canNotify(revision)) return;
     this.#pushChain = this.#pushChain.then(async () => {
       for (const notice of fresh) {
+        if (!this.#canNotify(revision)) return;
         try {
           const sent = await this.#push(noticeText(notice.kind, notice.title, notice.body));
           const target: SentNotice = { kind: "tty7", pane: notice.pane, cwd: notice.cwd, name: notice.task ?? notice.sessionName };

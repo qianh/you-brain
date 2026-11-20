@@ -40,7 +40,7 @@ export function PortraitSide({
   const { t, language, timeZone } = useDaemon();
   const showToc = shouldShowToc(toc);
   return (
-    <aside className="portrait-side">
+    <aside className="portrait-side" tabIndex={0} aria-label={t("portraitSideSummary")}>
       <details className="portrait-side-fold">
         <summary>
           <span>{t("portraitSideSummary")}</span>

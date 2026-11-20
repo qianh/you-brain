@@ -122,6 +122,18 @@ describe("TaskGit", () => {
     expect(command(repo, ["rev-parse", "develop"])).toBe(run.baseSha);
   });
 
+  test("核对只统计任务工作树的未提交和未跟踪文件", async () => {
+    const run = await task();
+    commit(run.worktreePath);
+    writeFileSync(join(repo, "unrelated.txt"), "outside the task\n");
+    writeFileSync(join(run.worktreePath, "untracked\nfile.txt"), "untracked\n");
+    await expect(git.review(project, run)).rejects.toMatchObject({ counts: { uncommitted: 0, untracked: 1 } });
+    writeFileSync(join(run.worktreePath, "task.txt"), "staged\n");
+    command(run.worktreePath, ["add", "task.txt"]);
+    writeFileSync(join(run.worktreePath, "task.txt"), "unstaged\n");
+    await expect(git.review(project, run)).rejects.toMatchObject({ counts: { uncommitted: 1, untracked: 1 } });
+  });
+
   test("develop 分叉不影响任务核对，只有合并才要求同步", async () => {
     const run = await task();
     const head = commit(run.worktreePath);

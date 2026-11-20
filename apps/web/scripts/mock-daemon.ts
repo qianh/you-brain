@@ -77,7 +77,12 @@ function simulateNextTask(projectId: string): void {
   next.status = "running";
   next.updatedAt = new Date().toISOString();
   next.run = { projectCwd: mockTaskBoard.projects.find((project) => project.id === projectId)!.cwd, branch: `task/${next.id}`, worktreePath: `/demo/worktrees/${next.id}`, baseSha: "b".repeat(40), threadId: `demo-${next.id}`, threadUrl: null, reviewSha: null, summary: "[演示数据] 这是模拟执行结果，不会操作 T3 或 Git。", error: null };
-  setTimeout(() => { next.status = "review"; next.run!.reviewSha = "a".repeat(40); next.updatedAt = new Date().toISOString(); }, 1_500);
+  setTimeout(() => {
+    if (next.status !== "running") return;
+    next.status = "review";
+    next.run!.reviewSha = "a".repeat(40);
+    next.updatedAt = new Date().toISOString();
+  }, 1_500);
 }
 
 interface SessionRow {
@@ -1242,7 +1247,15 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
     } else {
       const task = mockTaskBoard.tasks.find((task) => task.id === input.id);
       if (!task) return fail(404, "NOT_FOUND", "演示任务不存在");
-      if (input.action === "start") {
+      if (input.action === "complete") {
+        if (task.status === "merging") return fail(409, "INVALID_STATE", "任务正在合并中");
+        if (task.status === "done") return json(mockTaskBoard);
+        task.status = "done";
+        task.completedManually = true;
+        task.error = null;
+        if (task.run) task.run.error = null;
+        if (task.projectId) simulateNextTask(task.projectId);
+      } else if (input.action === "start") {
         if (task.status !== "queued") return fail(409, "INVALID_STATE", "只能开始待处理任务");
         const project = mockTaskBoard.projects.find((item) => item.id === task.projectId);
         if (project && mockTaskBoard.tasks.some((item) => item.projectId === project.id && item.status !== "queued" && item.status !== "done")) {
@@ -1261,7 +1274,11 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
       } else if (input.action === "reject") {
         if (task.status !== "review" || !input.feedback.trim()) return fail(409, "INVALID_STATE", "请填写核对反馈");
         task.status = "running";
-        setTimeout(() => { task.status = "review"; task.run!.summary = "[演示数据] 已根据反馈调整，请重新核对。"; }, 1_500);
+        setTimeout(() => {
+          if (task.status !== "running") return;
+          task.status = "review";
+          task.run!.summary = "[演示数据] 已根据反馈调整，请重新核对。";
+        }, 1_500);
       } else {
         task.status = task.run ? "review" : "queued";
       }

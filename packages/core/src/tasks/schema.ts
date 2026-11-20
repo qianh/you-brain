@@ -33,6 +33,7 @@ export const TaskUpdateSchema = z.object({
 export const TaskActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("project"), projectId: id, enabled: z.boolean() }).strict(),
   z.object({ action: z.literal("start"), id }).strict(),
+  z.object({ action: z.literal("complete"), id }).strict(),
   z.object({ action: z.literal("retry"), id }).strict(),
   z.object({ action: z.literal("approve"), id, reviewSha: z.string().regex(/^[a-f0-9]{40,64}$/u) }).strict(),
   z.object({ action: z.literal("reject"), id, feedback: z.string().trim().min(1).max(10_000) }).strict(),
@@ -50,7 +51,9 @@ export const TaskRecordSchema = z.object({
   status: z.enum(["queued", "preparing", "planning", "running", "review", "merging", "done", "failed"]),
   createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
   error: z.string().nullable().optional(),
+  worktreeBlock: z.object({ uncommitted: z.number().int().nonnegative(), untracked: z.number().int().nonnegative() }).optional(),
   manual: z.literal(true).optional(),
+  completedManually: z.literal(true).optional(),
   run: z.union([
     runDetails.extend({ branch: z.string(), worktreePath: z.string(), baseSha: z.string() }),
     runDetails.extend({ branch: z.null(), worktreePath: z.null(), baseSha: z.null() }),

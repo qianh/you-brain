@@ -42,7 +42,7 @@ uuid = "=1.26.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSFont", "NSControl", "NSButton", "NSStatusItem", "NSStatusBarButton", "NSResponder", "NSView"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSFont", "NSControl", "NSButton", "NSStatusItem", "NSStatusBarButton", "NSResponder", "NSView", "NSDragging", "NSPasteboard", "NSPasteboardItem"] }
 
 [features]
 default = []

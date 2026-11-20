@@ -197,10 +197,16 @@ describe("TelegramBridge 中转模式", () => {
       ]),
     );
 
+    await mac.bridge.action({ action: "set-notifications", enabled: true });
+    const before = relay.sent.length;
+    mini.push(notice(1, 1, "mini 未开启通知"));
+    await mini.bridge.flush();
+    expect(relay.sent).toHaveLength(before);
     mac.push(notice(1, 1, "mac 在等你"));
     await until(() => relay.sent.some((item) => item.text.startsWith("💻 MacBook\n⏳ mac 在等你")), "mac push");
     const macPush = relay.nextId - 1;
-    mini.push(notice(1, 1, "mini 在等你"));
+    await mini.bridge.action({ action: "set-notifications", enabled: true });
+    mini.push(notice(2, 1, "mini 在等你"));
     await until(() => relay.sent.some((item) => item.text.startsWith("💻 Mac mini\n⏳ mini 在等你")), "mini push");
 
     // 回复 mac 的提醒：只打进 mac 的终端。

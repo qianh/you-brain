@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import type { PortraitResponse, PortraitSnapshot } from "@you-brain/core/http/types.js";
 
 import { useDaemon } from "../daemon-context.js";
@@ -29,8 +29,7 @@ const DEFAULT_VARIANTS = [
 
 const SKELETON_WIDTHS = ["100%", "96%", "92%", "84%", "100%", "70%"];
 
-function useActiveHeading(ids: readonly string[]): [string | null, (id: string) => void] {
-  const key = ids.join("\n");
+function useActiveHeading(ids: readonly string[], pane: RefObject<HTMLElement | null>): [string | null, (id: string) => void] {
   const [active, setActive] = useState<string | null>(ids[0] ?? null);
   useEffect(() => {
     setActive(ids[0] ?? null);
@@ -38,25 +37,33 @@ function useActiveHeading(ids: readonly string[]): [string | null, (id: string) 
       .map((id) => document.getElementById(id))
       .filter((node): node is HTMLElement => node !== null);
     if (nodes.length === 0) return;
-    const visible = new Map<string, number>();
-    const observer = new IntersectionObserver(
-      (entries) => {
+    const split = window.matchMedia("(min-width: 960px)");
+    let observer: IntersectionObserver;
+    const observe = () => {
+      observer?.disconnect();
+      const root = split.matches ? pane.current : null;
+      const visible = new Set<string>();
+      observer = new IntersectionObserver((entries) => {
         for (const entry of entries) {
-          if (entry.isIntersecting) visible.set(entry.target.id, entry.boundingClientRect.top);
+          if (entry.isIntersecting) visible.add(entry.target.id);
           else visible.delete(entry.target.id);
         }
-        const next = [...visible.entries()].sort((left, right) => left[1] - right[1])[0]?.[0];
+        const next = ids.find((id) => visible.has(id));
         if (next) setActive(next);
-      },
-      { rootMargin: "-80px 0px -55% 0px", threshold: [0, 1] },
-    );
-    for (const node of nodes) observer.observe(node);
-    return () => observer.disconnect();
-  }, [key, ids]);
+      }, { root, rootMargin: root ? "0px" : "-80px 0px 0px", threshold: [0, 1] });
+      for (const node of nodes) observer.observe(node);
+    };
+    observe();
+    split.addEventListener("change", observe);
+    return () => {
+      observer.disconnect();
+      split.removeEventListener("change", observe);
+    };
+  }, [ids, pane]);
   return [active, setActive];
 }
 
-export function PortraitPage({ embedded = false }: { embedded?: boolean } = {}) {
+export function PortraitPage({ embedded = false, fileSettings }: { embedded?: boolean; fileSettings?: ReactNode } = {}) {
   const { t, language, config, client, status, roles } = useDaemon();
   const { navigate } = useRoute();
   const { push } = useToast();
@@ -106,7 +113,8 @@ export function PortraitPage({ embedded = false }: { embedded?: boolean } = {}) 
   const toc = useMemo(() => extractToc(parsePortraitMarkdown(content)), [content]);
   // 虚拟父项与组首子项共用锚点;高亮追踪只观察真实标题。
   const ids = useMemo(() => toc.filter((item) => !item.virtual).map((item) => item.id), [toc]);
-  const [activeId, setActiveId] = useActiveHeading(ids);
+  const mainRef = useRef<HTMLElement>(null);
+  const [activeId, setActiveId] = useActiveHeading(ids, mainRef);
   const words = formatReadingCount(countReadingChars(content), language);
   const emptyCopy = portraitEmptyCopy({ consolidation: status?.consolidation, time: roles?.consolidation.time });
 
@@ -125,7 +133,7 @@ export function PortraitPage({ embedded = false }: { embedded?: boolean } = {}) 
   );
 
   const pageBody = (
-    <div className="portrait-page">
+    <div className={`portrait-page${embedded ? " is-embedded" : ""}`}>
         {/* 独立路由用完整页头;嵌入设置页时区块标题在外层,这里只补变体切换器。 */}
         {embedded ? (
           <div className="portrait-embedded-head">{variantSwitcher}</div>
@@ -136,61 +144,66 @@ export function PortraitPage({ embedded = false }: { embedded?: boolean } = {}) 
           actions={variantSwitcher}
         />
         )}
-        {error ? (
-          <Banner
-            tone="danger"
-            action={
-              <Button variant="ghost" size="sm" onClick={() => setAttempt((value) => value + 1)}>
-                {t("retry")}
-              </Button>
-            }
-          >
-            {error}
-          </Banner>
-        ) : null}
-        {!error && !ready && showSkeleton ? (
-          <Card className="portrait-doc portrait-skeleton" aria-hidden="true">
-            <Skeleton width="48%" height={24} />
-            {SKELETON_WIDTHS.map((width, index) => (
-              <Skeleton key={index} width={width} height={12} />
-            ))}
-          </Card>
-        ) : null}
-        {!error && !ready && !showSkeleton ? <div className="portrait-hold" aria-hidden="true" /> : null}
-        {empty ? (
-          <div className="portrait-empty">
-            <EmptyState
-              icon="user"
-              title={t("portraitEmptyTitle")}
-              description={
-                emptyCopy.kind === "off"
-                  ? t("portraitEmptyOffBody")
-                  : emptyCopy.kind === "scheduled"
-                    ? t("portraitEmptyBodyAt", { time: emptyCopy.time })
-                    : t("portraitEmptyBody")
-              }
-              action={
-                emptyCopy.kind === "off" ? (
-                  <Button variant="primary" onClick={() => navigate(settingsHref("consolidation"))}>
-                    {t("portraitEnableConsolidation")}
+        <div className={ready && !empty ? "portrait-layout has-side" : "portrait-layout"}>
+          <section className="portrait-main" ref={mainRef} tabIndex={0} aria-label={t("portrait")}>
+            {error ? (
+              <Banner
+                tone="danger"
+                action={
+                  <Button variant="ghost" size="sm" onClick={() => setAttempt((value) => value + 1)}>
+                    {t("retry")}
                   </Button>
-                ) : (
-                  <Button variant="primary" onClick={() => navigate("/status")}>
-                    {t("portraitViewStatus")}
-                  </Button>
-                )
-              }
-            />
-            {variant === "coding" ? (
-              <PortraitProposals onApplied={() => setAttempt((value) => value + 1)} />
+                }
+              >
+                {error}
+              </Banner>
             ) : null}
-          </div>
-        ) : null}
-        {ready && body && !empty ? (
-          <div className="portrait-layout">
-            <Card className="portrait-doc">
-              <PortraitMarkdown source={body.content} />
-            </Card>
+            {!error && !ready && showSkeleton ? (
+              <Card className="portrait-doc portrait-skeleton" aria-hidden="true">
+                <Skeleton width="48%" height={24} />
+                {SKELETON_WIDTHS.map((width, index) => (
+                  <Skeleton key={index} width={width} height={12} />
+                ))}
+              </Card>
+            ) : null}
+            {!error && !ready && !showSkeleton ? <div className="portrait-hold" aria-hidden="true" /> : null}
+            {empty ? (
+              <div className="portrait-empty">
+                <EmptyState
+                  icon="user"
+                  title={t("portraitEmptyTitle")}
+                  description={
+                    emptyCopy.kind === "off"
+                      ? t("portraitEmptyOffBody")
+                      : emptyCopy.kind === "scheduled"
+                        ? t("portraitEmptyBodyAt", { time: emptyCopy.time })
+                        : t("portraitEmptyBody")
+                  }
+                  action={
+                    emptyCopy.kind === "off" ? (
+                      <Button variant="primary" onClick={() => navigate(settingsHref("consolidation"))}>
+                        {t("portraitEnableConsolidation")}
+                      </Button>
+                    ) : (
+                      <Button variant="primary" onClick={() => navigate("/status")}>
+                        {t("portraitViewStatus")}
+                      </Button>
+                    )
+                  }
+                />
+                {variant === "coding" ? (
+                  <PortraitProposals onApplied={() => setAttempt((value) => value + 1)} />
+                ) : null}
+              </div>
+            ) : null}
+            {ready && body && !empty ? (
+              <Card className="portrait-doc">
+                <PortraitMarkdown source={body.content} />
+              </Card>
+            ) : null}
+            {fileSettings}
+          </section>
+          {ready && body && !empty ? (
             <PortraitSide
               variant={variant}
               toc={toc}
@@ -208,8 +221,8 @@ export function PortraitPage({ embedded = false }: { embedded?: boolean } = {}) 
               }}
               onPortraitChanged={() => setAttempt((value) => value + 1)}
             />
-          </div>
-        ) : null}
+          ) : null}
+        </div>
       </div>
   );
   return embedded ? pageBody : <Page>{pageBody}</Page>;

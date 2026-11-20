@@ -72,7 +72,7 @@ export function SettingsPage() {
 
   return (
     <Page>
-      <div className="settings-page">
+      <div className={section === "portrait" ? "settings-page is-portrait" : "settings-page"}>
         <PageHeader title={t("settings")} description={t("settingsLead")} />
         <div className="settings-layout">
           <SettingsNav section={section} onOpen={openSection} />
@@ -159,14 +159,13 @@ function SectionBody({
   if (!draft || !rolesDraft) return null;
   if (section === "portrait") {
     return (
-      <>
-        <PortraitPage embedded />
+      <PortraitPage embedded fileSettings={(
         <PortraitSection
           draft={draft}
           issues={draftApi.issues}
           onDraft={draftApi.editDraft}
         />
-      </>
+      )} />
     );
   }
   if (section === "account") {

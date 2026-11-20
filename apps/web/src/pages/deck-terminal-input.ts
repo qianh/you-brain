@@ -26,3 +26,13 @@ export function isReferenceTrigger(text: string, enabled: boolean, passthrough: 
 export function preserveTerminalImeInput(event: Pick<KeyboardEvent, "key" | "stopPropagation">): void {
   if (event.key === "Shift") event.stopPropagation();
 }
+
+export function terminalDroppedPaths(paths: unknown): string | null {
+  if (!Array.isArray(paths) || paths.length === 0) return null;
+  const words: string[] = [];
+  for (const path of paths) {
+    if (typeof path !== "string" || !path.startsWith("/") || /\p{Cc}/u.test(path)) return null;
+    words.push(/^[\p{L}\p{N}/._-]+$/u.test(path) ? path : `'${path.replaceAll("'", "'\\''")}'`);
+  }
+  return `${words.join(" ")} `;
+}
