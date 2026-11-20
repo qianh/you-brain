@@ -946,6 +946,9 @@ async function mergeOnce(llm: LlmBackend, input: MergeInput): Promise<MergeResul
   };
 }
 
+/** Max wait for an advisory-only fix pass before falling back to the valid merged text. */
+const ADVISORY_FIX_TIMEOUT_MS = 90_000;
+
 async function fixOnce(
   llm: LlmBackend,
   texts: TwinTexts,
@@ -953,19 +956,28 @@ async function fixOnce(
   signal?: AbortSignal,
   complete?: StageCompleter,
 ): Promise<TwinTexts> {
-  const hasProjectsProblem = problems.some((problem) => problem.includes("projects"));
+  const hasFullProblem = problems.some((problem) => /\bfull\b/u.test(problem));
+  const hasCodingProblem = problems.some((problem) => /\bcoding\b/u.test(problem));
+  const hasProjectsProblem = problems.some((problem) => /\bprojects\b/u.test(problem));
+  const projectsOnly = hasProjectsProblem && !hasFullProblem && !hasCodingProblem;
   const isLargeProjects = byteSize(texts.projects) > 16_384;
   const omitLargeProjects = isLargeProjects && !hasProjectsProblem;
   const scopedProjects =
     isLargeProjects && hasProjectsProblem ? scopeProblemProjects(texts.projects, problems) : texts.projects;
-  const promptDocs = omitLargeProjects ? { ...texts, projects: "" } : { ...texts, projects: scopedProjects };
+  const promptDocs: TwinTexts = {
+    full: projectsOnly ? "" : texts.full,
+    coding: projectsOnly ? "" : texts.coding,
+    projects: omitLargeProjects ? "" : scopedProjects,
+  };
   const prompt = buildTwinFixPrompt({ docs: promptDocs, problems });
   const update: TwinEditsUpdate = complete
     ? await complete("fix", llm, prompt, TWIN_EDITS_JSON_SCHEMA, parseTwinEdits, signal)
     : await completeJson(llm, prompt, TWIN_EDITS_JSON_SCHEMA, parseTwinEdits, signal);
-  const safeEdits = omitLargeProjects
-    ? update.edits.filter((edit) => edit.layer !== "projects")
-    : update.edits;
+  const safeEdits = update.edits.filter((edit) => {
+    if (projectsOnly && edit.layer !== "projects") return false;
+    if (omitLargeProjects && edit.layer === "projects") return false;
+    return true;
+  });
   return applyEditsWithIndex(texts, safeEdits);
 }
 
@@ -1170,6 +1182,20 @@ function checkWithStandard(before: TwinTexts, texts: TwinTexts, changed: Readonl
   return check;
 }
 
+function shrinkSkipReason(
+  before: TwinTexts,
+  texts: TwinTexts,
+  changed: ReadonlySet<TwinLayer>,
+): string | null {
+  for (const layer of changed) {
+    const previous = twinBody(before[layer]);
+    if (previous !== "" && textUnits(twinBody(texts[layer])) * 2 < textUnits(previous)) {
+      return `数字分身 ${layer} 输出不到原来的一半，已跳过`;
+    }
+  }
+  return null;
+}
+
 /** Checks before writing, with one fix pass. Unchanged layers come back byte for byte. */
 async function finishTwin(
   llm: LlmBackend,
@@ -1181,26 +1207,56 @@ async function finishTwin(
   let changed = changedLayers(before, texts);
   if (changed.size === 0) return { texts: before, changed, warnings: [], sizes: checkTwin(before, changed).sizes };
   let check = checkWithStandard(before, texts, changed);
-  if (check.blocking.length > 0 || check.warnings.length > 0) {
+  const extraWarnings: string[] = [];
+  if (check.blocking.length > 0) {
     texts = await fixOnce(llm, texts, [...check.blocking, ...check.warnings], options.signal, options.complete);
     changed = changedLayers(before, texts);
     check = checkWithStandard(before, texts, changed);
+  } else if (check.warnings.length > 0) {
+    // Blocking checks already pass: treat the warning-only fix pass as best-effort so a slow or
+    // failing optimization rewrite never blocks writing the valid merged portrait.
+    const advisoryController = new AbortController();
+    const onParentAbort = () => advisoryController.abort(options.signal?.reason);
+    if (options.signal?.aborted) {
+      advisoryController.abort(options.signal.reason);
+    } else {
+      options.signal?.addEventListener("abort", onParentAbort, { once: true });
+    }
+    const timer = setTimeout(() => advisoryController.abort(new Error("优化修正超时")), ADVISORY_FIX_TIMEOUT_MS);
+    try {
+      const candidate = await fixOnce(llm, texts, check.warnings, advisoryController.signal, options.complete);
+      const candidateChanged = changedLayers(before, candidate);
+      const candidateCheck = checkWithStandard(before, candidate, candidateChanged);
+      const candidateShrink = options.guardShrink
+        ? shrinkSkipReason(before, candidate, candidateChanged)
+        : null;
+      if (candidateCheck.blocking.length === 0 && candidateCheck.scanHits.length === 0 && candidateShrink === null) {
+        texts = candidate;
+        changed = candidateChanged;
+        check = candidateCheck;
+      } else {
+        extraWarnings.push("数字分身优化修正未通过检查，已保留原合并结果写入");
+      }
+    } catch (error) {
+      if (options.signal?.aborted) throw error;
+      const detail = error instanceof Error ? error.message.split("\n")[0] ?? "" : String(error);
+      extraWarnings.push(`数字分身优化修正未完成，已保留原合并结果写入${detail ? `（${detail}）` : ""}`);
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", onParentAbort);
+    }
   }
   if (check.blocking.length > 0) return { skip: `数字分身没有通过写入前检查，已跳过：${check.blocking.join("；")}` };
   if (check.scanHits.length > 0) {
     return { skip: `数字分身里发现疑似敏感信息，已跳过：${check.scanHits.join("、")}` };
   }
   if (options.guardShrink) {
-    for (const layer of changed) {
-      const previous = twinBody(before[layer]);
-      if (previous !== "" && textUnits(twinBody(texts[layer])) * 2 < textUnits(previous)) {
-        return { skip: `数字分身 ${layer} 输出不到原来的一半，已跳过` };
-      }
-    }
+    const shrinkSkip = shrinkSkipReason(before, texts, changed);
+    if (shrinkSkip !== null) return { skip: shrinkSkip };
   }
   const kept = { ...texts };
   for (const layer of TWIN_LAYERS) if (!changed.has(layer)) kept[layer] = before[layer];
-  return { texts: kept, changed, warnings: check.warnings, sizes: check.sizes };
+  return { texts: kept, changed, warnings: [...check.warnings, ...extraWarnings], sizes: check.sizes };
 }
 
 interface WrittenTwin {

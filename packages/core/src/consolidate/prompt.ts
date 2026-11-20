@@ -389,7 +389,7 @@ ${TWIN_LAYOUT}
 2. 删掉例子、解释和理由，把过长句子拆成独立的一条一事短规则。
 3. 只对某个项目、系统或公司基建成立的规则移到 projects 对应小节（同时输出 projects 的 edits）。
 4. 仍然超预算，删掉最少触发、影响最小的细则。
-需要修正的层，把改动小节按完整新内容输出；参考「各节字节数」先压最大的节。没有问题的层不删仍然成立的规则。
+需要修正的层，把改动小节按完整新内容输出；参考「各节字节数」先压最大的节，不要在思考中逐字精确计算 UTF-8 字节数，直接合并重复条目、删除过时口径并快速输出 JSON。没有问题的层不删仍然成立的规则。
 
 ${TWIN_WRITING}
 
@@ -401,11 +401,17 @@ export function buildTwinFixPrompt(input: {
   docs: { full: string; coding: string; projects: string };
   problems: readonly string[];
 }): { system: string; user: string } {
+  const sizes = [
+    ...sectionSizes("full", input.docs.full),
+    ...sectionSizes("coding", input.docs.coding),
+    ...(input.docs.full.trim() === "" && input.docs.coding.trim() === ""
+      ? sectionSizes("projects", input.docs.projects)
+      : []),
+  ];
   const user = [
     ...docBlock(input.docs),
     "## 各节字节数",
-    ...sectionSizes("full", input.docs.full),
-    ...sectionSizes("coding", input.docs.coding),
+    ...sizes,
     "",
     "## 需要修正的问题",
     input.problems.map((problem) => `- ${problem}`).join("\n"),

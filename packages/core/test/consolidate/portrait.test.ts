@@ -1703,4 +1703,103 @@ describe("portrait budget early-stop and stage cache", () => {
     expect(conflictResult.warnings.some((w) => w.includes("别处更新"))).toBe(true);
     expect(conflictBox.cursors.get(PORTRAIT_STAGE_CURSOR)).toBe("");
   });
+
+  it("omits unrelated resident layers during projects-only fix and falls back to merged text when advisory fix fails", async () => {
+    const box = await world();
+    const bigProjects = [
+      `# 数字分身 · 项目决定\n${VERSION_LINE}`,
+      `## 甲 · 规则一\n${"甲一".repeat(1200)}`,
+      `## 甲 · 规则二\n${"甲二".repeat(1200)}`,
+    ].join("\n\n");
+    await seedTwin(box, { full: FULL_TEXT, coding: CODING_TEXT, projects: bigProjects });
+    box.sessions = [{ sessionKey: "s-proj-warn", title: "甲更新", turns: ["甲项目新增一条约定"] }];
+
+    let fixPromptUser = "";
+    const result = await run(box, async (request) => {
+      if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          claims: [{ layer: "project", project: "甲", confidence: "high", text: "甲项目必须按新口径核对。" }],
+        });
+      }
+      if (request.system === TWIN_PROJECT_MERGE_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          bump: "minor",
+          changelog: ["projects · 甲：补充核对口径"],
+          edits: [
+            {
+              layer: "projects",
+              heading: "## 甲 · 规则二",
+              text: `## 甲 · 规则二\n${"甲二".repeat(1200)}\n- 必须按新口径核对。`,
+            },
+          ],
+        });
+      }
+      if (request.system === TWIN_FIX_SYSTEM_PROMPT) {
+        fixPromptUser = request.user;
+        throw new Error("请求超时");
+      }
+      return "{}";
+    });
+
+    expect(result.ok).toBe(true);
+    expect(fixPromptUser).toContain("## 当前人格分身 full\n（空）");
+    expect(fixPromptUser).toContain("## 当前编码分身 coding\n（空）");
+    expect(fixPromptUser).toContain("- projects ## 甲 · 规则二：");
+    expect(result.warnings.some((w) => w.includes("优化修正未完成"))).toBe(true);
+    const text = await textAt(box.drive, PROJECTS);
+    expect(text).toContain("必须按新口径核对。");
+    expect(box.cursors.get(PORTRAIT_STAGE_CURSOR)).toBe("");
+  });
+
+  it("falls back to merged text when an advisory-only fix introduces a blocking error", async () => {
+    const box = await world();
+    const bigProjects = [
+      `# 数字分身 · 项目决定\n${VERSION_LINE}`,
+      `## 甲 · 规则一\n${"甲一".repeat(1200)}`,
+      `## 甲 · 规则二\n${"甲二".repeat(1200)}`,
+    ].join("\n\n");
+    await seedTwin(box, { full: FULL_TEXT, coding: CODING_TEXT, projects: bigProjects });
+    box.sessions = [{ sessionKey: "s-proj-bad-fix", title: "甲更新", turns: ["甲项目新增一条约定"] }];
+
+    const result = await run(box, async (request) => {
+      if (request.system === TWIN_CLAIMS_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          claims: [{ layer: "project", project: "甲", confidence: "high", text: "甲项目改用 V2 口径。" }],
+        });
+      }
+      if (request.system === TWIN_PROJECT_MERGE_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          bump: "minor",
+          changelog: ["projects · 甲：改用 V2 口径"],
+          edits: [
+            {
+              layer: "projects",
+              heading: "## 甲 · 规则二",
+              text: `## 甲 · 规则二\n${"甲二".repeat(1200)}\n- 改用 V2 口径。`,
+            },
+          ],
+        });
+      }
+      if (request.system === TWIN_FIX_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          bump: "patch",
+          changelog: [],
+          edits: [
+            {
+              layer: "projects",
+              heading: "## 甲 · 规则二",
+              text: "## 甲 · 规则二\n- 样本数 5，待确认。",
+            },
+          ],
+        });
+      }
+      return "{}";
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.warnings.some((w) => w.includes("优化修正未通过检查"))).toBe(true);
+    const text = await textAt(box.drive, PROJECTS);
+    expect(text).toContain("改用 V2 口径。");
+    expect(text).not.toContain("样本数");
+  });
 });
