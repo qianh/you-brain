@@ -129,7 +129,19 @@
 .tasks-queue-note > svg { flex-shrink: 0; margin-top: 2px; }
 .tasks-loading { display: flex; align-items: center; justify-content: center; gap: var(--sp-3); min-height: 150px; padding: var(--sp-5); color: var(--text-2); }
 .tasks-form { display: flex; flex-direction: column; gap: var(--sp-4); }
-.tasks-form > label, .tasks-review-feedback { display: flex; flex-direction: column; gap: var(--sp-2); }
+.tasks-form > label, .tasks-description-field > label, .tasks-review-feedback { display: flex; flex-direction: column; gap: var(--sp-2); }
+.tasks-description-field { display: flex; flex-direction: column; gap: var(--sp-2); }
+.tasks-image-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2); }
+.tasks-image-toolbar small, .tasks-image-unavailable { color: var(--danger-text); font-size: var(--fs-sm); }
+.tasks-image-previews { display: flex; flex-wrap: wrap; gap: var(--sp-2); list-style: none; padding: 0; margin: 0; }
+.tasks-image-previews li { position: relative; width: 80px; height: 64px; display: grid; place-items: center; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-chip); }
+.tasks-image-previews img { width: 100%; height: 100%; min-height: 0; object-fit: contain; border-radius: inherit; }
+.tasks-image-previews .icon-btn { position: absolute; top: 2px; right: 2px; background: var(--surface); }
+.tasks-image-unavailable { padding: var(--sp-2); text-align: center; overflow-wrap: anywhere; }
+.tasks-image-gallery { display: grid; gap: var(--sp-4); }
+.tasks-image-gallery figure { display: grid; justify-items: center; gap: var(--sp-2); margin: 0; min-width: 0; }
+.tasks-image-gallery img { max-width: 100%; max-height: 65vh; object-fit: contain; }
+.tasks-image-gallery figcaption { color: var(--text-2); font-size: var(--fs-sm); overflow-wrap: anywhere; }
 .tasks-form-pair { display: grid; grid-template-columns: minmax(0, 3fr) minmax(100px, 2fr); gap: var(--sp-3); }
 .tasks-form-pair > div { display: flex; flex-direction: column; gap: var(--sp-2); min-width: 0; }
 .tasks-form .field, .tasks-form .select, .tasks-review-feedback textarea { width: 100%; }

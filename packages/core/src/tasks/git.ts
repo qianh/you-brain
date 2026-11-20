@@ -31,6 +31,9 @@ export class TaskNoCommitError extends Error {
 
 export class TaskMergeBlockedError extends Error {}
 
+/** 任务分支不含最新 develop，不能快进；可先把 develop 合入任务分支再重新核对。 */
+export class TaskBehindDevelopError extends TaskMergeBlockedError {}
+
 export class TaskDirtyWorktreeError extends Error {
   constructor(readonly counts: TaskWorktreeBlock) {
     super("任务工作树有未提交或未跟踪的内容，请在 T3 中确认后重新检查");
@@ -140,7 +143,7 @@ export class TaskGit implements TaskGitPort {
       if (develop === approvedSha) return;
       if (!(await this.#isAncestor(repo, develop, approvedSha))) {
         if (approvedSha !== run.baseSha && await this.#isAncestor(repo, approvedSha, develop)) return;
-        throw new TaskMergeBlockedError("任务分支尚未包含最新的 develop。请在 T3 中将本地 develop 同步到任务分支，再重新核对。");
+        throw new TaskBehindDevelopError("任务分支尚未包含最新的 develop。请在 T3 中将本地 develop 同步到任务分支，再重新核对。");
       }
       if (!(await this.#isAncestor(repo, run.baseSha, develop))) {
         throw new TaskMergeBlockedError("本地 develop 已退回到任务起点之前，合并会带入未核对的提交。请在 T3 中检查分支历史。");
@@ -161,6 +164,43 @@ export class TaskGit implements TaskGitPort {
         await this.#git(repo, ["update-ref", "refs/heads/develop", approvedSha, develop]);
       }
       if (await this.#develop(repo) !== approvedSha) throw new Error("develop 合并结果发生变化，请人工检查");
+    });
+  }
+
+  /**
+   * 把本地 develop 合入已核对的任务分支（普通合并，不 rebase）。
+   * 冲突时撤销合并、恢复到核对版本，交给 T3 解决；只在任务工作树内操作，不改 develop。
+   */
+  async syncDevelop(project: TaskProject, run: TaskWorktreeRun, approvedSha: string): Promise<"merged" | "conflict" | "current"> {
+    this.#assertProject(project, run);
+    if (!SHA.test(approvedSha)) throw new Error("核对提交编号不正确");
+    const repo = await this.#repo(project);
+    return this.#serialize(repo, async () => {
+      const headSha = await this.#verifyRun(repo, run);
+      if (headSha !== approvedSha) throw new Error("任务提交已变化，请重新核对后再合并");
+      const develop = await this.#develop(repo);
+      if (await this.#isAncestor(repo, develop, headSha)) return "current";
+      if (!(await this.#isAncestor(repo, run.baseSha, develop))) {
+        throw new TaskMergeBlockedError("本地 develop 已退回到任务起点之前，合并会带入未核对的提交。请在 T3 中检查分支历史。");
+      }
+      const merged = await this.#git(run.worktreePath, [
+        "merge", "--no-ff", "--no-edit", "--no-autostash", "--no-overwrite-ignore",
+        "-m", `同步 develop 到 ${run.branch}`, develop,
+      ], { allowFailure: true });
+      if (merged.code === 0) {
+        await this.#clean(run.worktreePath, "合入 develop 后任务工作树不干净，已保留现场");
+        const next = await this.#sha(run.worktreePath, "HEAD");
+        if (next === headSha) return "current";
+        if (!(await this.#isAncestor(repo, headSha, next)) || !(await this.#isAncestor(repo, develop, next))) {
+          throw new Error("合入 develop 的结果不符合预期，已保留现场");
+        }
+        return "merged";
+      }
+      // 冲突或其他失败：撤销到核对版本，由 T3 在原会话中合并并解决冲突。
+      await this.#git(run.worktreePath, ["merge", "--abort"], { allowFailure: true });
+      await this.#clean(run.worktreePath, "自动合入 develop 失败且未能还原工作树，已保留现场，请在 T3 中处理");
+      if (await this.#sha(run.worktreePath, "HEAD") !== headSha) throw new Error("自动合入 develop 失败且任务分支已变化，已保留现场");
+      return "conflict";
     });
   }
 

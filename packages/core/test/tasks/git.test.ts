@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 
-import { TaskGit } from "../../src/tasks/git.js";
+import { TaskBehindDevelopError, TaskGit } from "../../src/tasks/git.js";
 import type { TaskProject, TaskWorktreeRun } from "../../src/tasks/types.js";
 
 let dir: string;
@@ -154,6 +154,38 @@ describe("TaskGit", () => {
     await expect(git.merge(project, { ...run, reviewSha: head }, head)).rejects.toThrow("任务提交已变化");
     await git.merge(project, { ...run, reviewSha: synced.headSha }, synced.headSha);
     expect(command(repo, ["rev-parse", "develop"])).toBe(synced.headSha);
+  });
+
+  test("合并被 develop 分叉阻止时，自动把 develop 合入任务分支，之后可快进", async () => {
+    const run = await task();
+    const head = commit(run.worktreePath);
+    const develop = commit(repo, "other.txt", "other work\n");
+    await expect(git.merge(project, { ...run, reviewSha: head }, head)).rejects.toBeInstanceOf(TaskBehindDevelopError);
+    await expect(git.syncDevelop(project, { ...run, reviewSha: head }, develop)).rejects.toThrow("任务提交已变化");
+    expect(await git.syncDevelop(project, { ...run, reviewSha: head }, head)).toBe("merged");
+    const synced = command(run.worktreePath, ["rev-parse", "HEAD"]);
+    expect(command(run.worktreePath, ["rev-parse", "HEAD^1"])).toBe(head);
+    expect(command(run.worktreePath, ["rev-parse", "HEAD^2"])).toBe(develop);
+    expect(command(run.worktreePath, ["status", "--porcelain"])).toBe("");
+    expect(command(repo, ["rev-parse", "develop"])).toBe(develop);
+    const review = await git.review(project, run);
+    expect(review.headSha).toBe(synced);
+    expect(review.diff).toContain("task.txt");
+    expect(review.diff).not.toContain("other.txt");
+    expect(await git.syncDevelop(project, { ...run, reviewSha: synced }, synced)).toBe("current");
+    await git.merge(project, { ...run, reviewSha: synced }, synced);
+    expect(command(repo, ["rev-parse", "develop"])).toBe(synced);
+  });
+
+  test("自动合入 develop 有冲突时撤销，任务分支和工作树保持核对版本", async () => {
+    const run = await task();
+    const head = commit(run.worktreePath, "initial.txt", "task side\n");
+    const develop = commit(repo, "initial.txt", "develop side\n");
+    expect(await git.syncDevelop(project, { ...run, reviewSha: head }, head)).toBe("conflict");
+    expect(command(run.worktreePath, ["rev-parse", "HEAD"])).toBe(head);
+    expect(command(run.worktreePath, ["status", "--porcelain"])).toBe("");
+    expect(readFileSync(join(run.worktreePath, "initial.txt"), "utf8")).toBe("task side\n");
+    expect(command(repo, ["rev-parse", "develop"])).toBe(develop);
   });
 
   test("develop 前进但任务没有提交，仍然等待任务提交", async () => {

@@ -20,7 +20,8 @@ import { UiPrefsLimitError, type UiPrefsPatch } from "../ui-prefs/store.js";
 import { MuseError } from "../deck/muse/sdk/errors.js";
 import { TelegramApiError } from "../deck/telegram/api.js";
 import { TaskError } from "../tasks/service.js";
-import { TaskActionSchema, TaskCreateSchema, TaskUpdateSchema } from "../tasks/schema.js";
+import { TaskActionSchema, TaskCreateSchema, TaskImageIdSchema, TaskUpdateSchema } from "../tasks/schema.js";
+import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT } from "../tasks/types.js";
 import { probeT3Web } from "../deck/t3/probe.js";
 import type { QuotaView } from "../quota/types.js";
 import { acceptActivityAt } from "../reminders/activity.js";
@@ -209,9 +210,25 @@ export async function handleApi(
     if (!context.deps.tasks) notSupported();
     const tasks = context.deps.tasks;
     if (request.method === "GET") return json(await tasks.board());
-    if (request.method === "POST") return json(await tasks.create(TaskCreateSchema.parse(await readJson(request))));
-    if (request.method === "PUT") return json(await tasks.update(TaskUpdateSchema.parse(await readJson(request))));
+    if (request.method === "POST" || request.method === "PUT") {
+      const { task, images } = await readTaskMutation(request);
+      return request.method === "POST"
+        ? json(await tasks.create(TaskCreateSchema.parse(task), images))
+        : json(await tasks.update(TaskUpdateSchema.parse(task), images));
+    }
     return methodNotAllowed("GET, POST, PUT");
+  }
+  if (path === "/api/tasks/image") {
+    return method(request, "GET", async () => {
+      if (!context.deps.tasks) notSupported();
+      const taskId = url.searchParams.get("task");
+      if (!taskId || taskId.length > 200) throw new HttpError(400, "INVALID_INPUT", "缺少有效的 TODO 编号");
+      const image = await context.deps.tasks.image(taskId, TaskImageIdSchema.parse(url.searchParams.get("id")));
+      return new Response(image.bytes, { headers: {
+        "content-type": image.mimeType, "cache-control": "private, no-store",
+        "x-content-type-options": "nosniff", "content-security-policy": "sandbox",
+      } });
+    });
   }
   if (path === "/api/tasks/action") {
     return method(request, "POST", async () => {
@@ -1620,7 +1637,38 @@ function publish(hub: ChangeHub, kinds: readonly DaemonChangeKind[]): void {
 }
 
 async function readJson(request: Request): Promise<unknown> {
-  const text = await request.text();
+  return parseJsonBody(await request.text());
+}
+
+async function readTaskMutation(request: Request): Promise<{ task: unknown; images?: File[] }> {
+  const contentType = request.headers.get("content-type") ?? "";
+  if (!/^multipart\/form-data\s*;/iu.test(contentType)) return { task: await readJson(request) };
+  const maxBytes = TASK_IMAGE_MAX_BYTES * TASK_IMAGE_MAX_COUNT + 128 * 1024;
+  const tooLarge = new HttpError(413, "INVALID_INPUT", "TODO 图片附件超过大小限制");
+  if (Number(request.headers.get("content-length")) > maxBytes) throw tooLarge;
+  let bytes = 0;
+  const body = request.body?.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      bytes += chunk.byteLength;
+      if (bytes > maxBytes) throw tooLarge;
+      controller.enqueue(chunk);
+    },
+  }));
+  let form: Awaited<ReturnType<Response["formData"]>>;
+  try { form = await new Response(body, { headers: { "content-type": contentType } }).formData(); }
+  catch (error) {
+    if (error === tooLarge || bytes > maxBytes) throw tooLarge;
+    throw new HttpError(400, "INVALID_INPUT", "TODO 附件表单不合法");
+  }
+  const task = form.get("task");
+  const images = form.getAll("images");
+  if (typeof task !== "string" || form.getAll("task").length !== 1 || images.length > TASK_IMAGE_MAX_COUNT || !images.every((item) => item instanceof File)) {
+    throw new HttpError(400, "INVALID_INPUT", "TODO 附件表单不合法");
+  }
+  return { task: parseJsonBody(task), images };
+}
+
+function parseJsonBody(text: string): unknown {
   if (text.trim() === "") return {};
   try {
     return JSON.parse(text) as unknown;

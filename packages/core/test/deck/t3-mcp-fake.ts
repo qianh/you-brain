@@ -37,7 +37,8 @@ export function fakeT3(input: { projects: FakeProject[]; threads?: FakeThread[];
   /** 新的在前，与 t3_thread_list 一致。 */
   const threads: FakeThread[] = [...(input.threads ?? [])];
   const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
-  const state = { initializes: 0, expireSession: false, toolFailure: null as null | { code: string; message: string }, invalid: false };
+  const uploads: Array<{ contentType: string | null; bytes: Uint8Array }> = [];
+  const state = { initializes: 0, expireSession: false, toolFailure: null as null | { code: string; message: string }, invalid: false, uploadUrl: "/signed-upload?ticket=fixture", uploadStatus: 200 };
   let session = 0;
   let runs = 100;
 
@@ -54,6 +55,7 @@ export function fakeT3(input: { projects: FakeProject[]; threads?: FakeThread[];
     if (state.toolFailure) return failure(state.toolFailure.code, state.toolFailure.message);
     if (state.invalid) return result({ unexpected: true });
     if (name === "t3_project_list") return result({ projects: input.projects, nextCursor: null });
+    if (name === "t3_attachment_prepare_upload") return result({ attachmentId: "uploaded-image", relativeUrl: state.uploadUrl });
     if (name === "t3_project_create") {
       const root = typeof args.workspaceRoot === "string" ? args.workspaceRoot : `/t3-projects/${String(args.title)}`;
       if (input.projects.some((project) => project.workspaceRoot === root)) return failure("project_exists", "This folder is already a project.");
@@ -117,6 +119,10 @@ export function fakeT3(input: { projects: FakeProject[]; threads?: FakeThread[];
 
   async function handle(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname === "/signed-upload" && request.method === "POST") {
+      uploads.push({ contentType: request.headers.get("content-type"), bytes: new Uint8Array(await request.arrayBuffer()) });
+      return new Response(null, { status: state.uploadStatus });
+    }
     if (url.pathname === "/.well-known/t3/environment") return Response.json({ environmentId: input.environmentId ?? "local-env" });
     if (url.pathname !== "/mcp" || request.method !== "POST") return new Response(null, { status: 404 });
     if (request.headers.get("authorization") !== `Bearer ${token}`) return Response.json({ error: "invalid_mcp_credential" }, { status: 401 });
@@ -144,5 +150,5 @@ export function fakeT3(input: { projects: FakeProject[]; threads?: FakeThread[];
   }
 
   const fetchImpl = (async (value: string | URL | Request, init?: RequestInit) => handle(new Request(value instanceof URL ? value.toString() : value as string, init))) as typeof fetch;
-  return { threads, calls, state, handle, complete, fetch: fetchImpl, token };
+  return { threads, calls, uploads, state, handle, complete, fetch: fetchImpl, token };
 }

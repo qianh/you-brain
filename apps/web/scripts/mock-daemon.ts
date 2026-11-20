@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { DevelopmentTask, TaskBoard, TaskCreateInput, TaskActionInput, TaskUpdateInput } from "@you-brain/core/tasks/types.js";
+import { TASK_IMAGE_MAX_COUNT, type DevelopmentTask, type TaskBoard, type TaskCreateInput, type TaskActionInput, type TaskUpdateInput } from "@you-brain/core/tasks/types.js";
+import { parseTaskImage } from "../../../packages/core/src/tasks/images.js";
 
 const token = process.env.MOCK_TOKEN || "you-brain-mock-token";
 const port = Number(process.env.MOCK_PORT || 4731);
@@ -58,6 +59,23 @@ const mockTaskBoard: TaskBoard = {
     { id: "demo-unassigned", title: "[演示] 整理下周的改进想法", description: "梳理改进项并列出建议优先级。", projectId: null, priority: 3, status: "queued", createdAt: ago(20 * MINUTE), updatedAt: ago(20 * MINUTE), run: null },
   ],
 };
+const mockTaskImages = new Map<string, Blob>();
+
+async function mockTaskMutation<T extends TaskCreateInput | TaskUpdateInput>(request: Request): Promise<{ input: T; images: File[] }> {
+  if (!request.headers.get("content-type")?.startsWith("multipart/form-data;")) return { input: await request.json() as T, images: [] };
+  const form = await request.formData();
+  return { input: JSON.parse(String(form.get("task"))) as T, images: form.getAll("images").filter((item): item is File => item instanceof File) };
+}
+
+async function mockSaveTaskImages(files: File[], retained = 0) {
+  if (files.length + retained > TASK_IMAGE_MAX_COUNT) return null;
+  const data = await Promise.all(files.map(parseTaskImage));
+  if (!data.every((image) => image !== null)) return null;
+  return data.map(({ bytes, ...image }) => {
+    mockTaskImages.set(image.id, new Blob([bytes], { type: image.mimeType }));
+    return image;
+  });
+}
 
 /** 演示「新建项目」：只加到内存看板，不连接 T3。 */
 function mockNewProject(input: { name: string; cwd?: string | undefined }): string {
@@ -1214,23 +1232,35 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
   if (path === "/api/tasks") {
     if (request.method === "GET") return json(mockTaskBoard);
     if (request.method === "POST") {
-      const input = await request.json() as TaskCreateInput;
+      const { input, images: files } = await mockTaskMutation<TaskCreateInput>(request);
+      const images = await mockSaveTaskImages(files);
+      if (!images) return fail(400, "INVALID_INPUT", "TODO 附件不合法");
       const projectId = input.newProject ? mockNewProject(input.newProject) : input.projectId ?? null;
-      const task: DevelopmentTask = { id: `demo-${crypto.randomUUID()}`, title: input.title, description: input.description ?? "", projectId, priority: input.priority ?? 2, status: "queued", run: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+      const task: DevelopmentTask = { id: `demo-${crypto.randomUUID()}`, title: input.title, description: input.description ?? "", images, projectId, priority: input.priority ?? 2, status: "queued", run: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
       mockTaskBoard.tasks.push(task);
       if (task.projectId) simulateNextTask(task.projectId);
       return json(mockTaskBoard);
     }
     if (request.method === "PUT") {
-      const input = await request.json() as TaskUpdateInput;
+      const { input, images: files } = await mockTaskMutation<TaskUpdateInput>(request);
       const task = mockTaskBoard.tasks.find((task) => task.id === input.id);
       if (!task) return fail(404, "NOT_FOUND", "演示任务不存在");
       if (task.status !== "queued") return fail(409, "INVALID_STATE", "只能编辑待处理任务");
-      const { newProject, ...patch } = input;
-      Object.assign(task, patch, newProject ? { projectId: mockNewProject(newProject) } : {}, { updatedAt: new Date().toISOString() });
+      const { newProject, retainImageIds, ...patch } = input;
+      const retained = (task.images ?? []).filter((image) => !retainImageIds || retainImageIds.includes(image.id));
+      const images = await mockSaveTaskImages(files, retained.length);
+      if (!images) return fail(400, "INVALID_INPUT", "TODO 附件不合法");
+      for (const image of task.images ?? []) if (!retained.includes(image)) mockTaskImages.delete(image.id);
+      Object.assign(task, patch, newProject ? { projectId: mockNewProject(newProject) } : {}, { updatedAt: new Date().toISOString(), images: [...retained, ...images] });
       return json(mockTaskBoard);
     }
     return fail(405, "METHOD_NOT_ALLOWED", "请求方法不支持");
+  }
+  if (path === "/api/tasks/image" && request.method === "GET") {
+    const task = mockTaskBoard.tasks.find((item) => item.id === url.searchParams.get("task"));
+    const image = task?.images?.find((item) => item.id === url.searchParams.get("id"));
+    const blob = image && mockTaskImages.get(image.id);
+    return blob ? new Response(blob) : fail(404, "NOT_FOUND", "演示图片不存在");
   }
   if (path === "/api/tasks/review" && request.method === "GET") {
     const task = mockTaskBoard.tasks.find((task) => task.id === url.searchParams.get("id"));

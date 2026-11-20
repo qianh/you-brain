@@ -11,6 +11,7 @@ import { useShortcuts } from "./components/shortcuts.js";
 import { StatusCapsule } from "./components/status-capsule.js";
 import { useToast } from "./components/toast.js";
 import { QuotaStrip } from "./components/quota-strip.js";
+import { DeckRail } from "./components/deck-rail.js";
 import { Tooltip } from "./components/tooltip.js";
 import { useQuota } from "./pages/panel/use-quota.js";
 import { useDaemon } from "./daemon-context.js";
@@ -261,6 +262,7 @@ export function Shell({ children }: { children: ReactNode }) {
         {streamError && !offlineHome ? <Banner tone="warn">{t("streamDown")}</Banner> : null}
         <RouteFade pathname={location.pathname}>{children}</RouteFade>
       </main>
+      {deck ? null : <DeckRail label={t("navDeck")} moveLabel={t("navDeckRailMove")} onOpen={(target) => navigate(target)} />}
       <CommandPalette open={palette} onClose={() => setPalette(false)} initialQuery={preset} />
     </div>
   );

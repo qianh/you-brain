@@ -1,10 +1,18 @@
 import { z } from "zod";
+import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT, TASK_IMAGE_TYPES } from "./types.js";
 
 const title = z.string().trim().min(1).max(200);
 const description = z.string().max(20_000);
 const projectId = z.string().min(1).max(200).nullable();
 const priority = z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]);
 const id = z.string().min(1).max(200);
+export const TaskImageIdSchema = z.uuid();
+const taskImage = z.object({
+  id: TaskImageIdSchema,
+  name: z.string().trim().min(1).max(255),
+  mimeType: z.enum(TASK_IMAGE_TYPES),
+  sizeBytes: z.number().int().positive().max(TASK_IMAGE_MAX_BYTES),
+});
 const newProject = z.object({
   name: z.string().trim().min(1).max(100),
   cwd: z.string().trim().min(1).max(4096).refine((value) => value.startsWith("/"), "项目文件夹必须是绝对路径").optional(),
@@ -25,6 +33,7 @@ export const TaskUpdateSchema = z.object({
   id,
   title: title.optional(),
   description: description.optional(),
+  retainImageIds: z.array(TaskImageIdSchema).max(TASK_IMAGE_MAX_COUNT).optional(),
   projectId: projectId.optional(),
   newProject: newProject.optional(),
   priority: priority.optional(),
@@ -48,6 +57,7 @@ const runDetails = z.object({
 
 export const TaskRecordSchema = z.object({
   id, title, description, projectId, priority,
+  images: z.array(taskImage).max(TASK_IMAGE_MAX_COUNT).optional(),
   status: z.enum(["queued", "preparing", "planning", "running", "review", "merging", "done", "failed"]),
   createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
   error: z.string().nullable().optional(),

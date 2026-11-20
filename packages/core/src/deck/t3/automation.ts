@@ -5,7 +5,7 @@ import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join, resolve } from "node:path";
 
-import type { TaskAutomationPort } from "../../tasks/types.js";
+import type { TaskAutomationPort, TaskImageData } from "../../tasks/types.js";
 import { normalizeT3Url } from "./index.js";
 
 /**
@@ -180,14 +180,31 @@ export class T3Automation implements TaskAutomationPort {
     if (!selection && !input.plan) throw new T3AutomationError("INVALID_INPUT", "请先在 T3 中为这个项目选择模型或创建一次会话，再启动 TODO。");
     const mode = runtimeMode(history.find((thread) => runtimeMode(thread.runtimeMode))?.runtimeMode) ?? (input.branch === null ? "approval-required" : "auto");
 
+    const attachments = [];
+    for (const image of input.images ?? []) attachments.push(await this.#uploadImage(url, image));
     const launched = await this.#call("t3_thread_launch", {
       projectId: project.id, title: input.title, message: `${launchReference ?? ""}${input.prompt}`,
+      ...(attachments.length ? { attachments } : {}),
       ...(selection ? { modelSelection: selection } : {}), runtimeMode: mode, interactionMode: input.plan ? "plan" : "default",
       workspaceStrategy: input.branch === null ? { type: "root" } : { type: "existing_worktree", worktreePath: input.cwd, branch: input.branch },
       clientRequestId: `u-brain-todo-start-${input.requestId}`,
     }, 60_000);
     if (!object(launched) || !text(launched.threadId)) invalidResponse();
     return { threadId: launched.threadId, threadUrl: await this.#threadUrl(url, launched.threadId) };
+  }
+
+  async #uploadImage(url: string, image: TaskImageData): Promise<{ id: string; type: "image"; name: string; mimeType: string; sizeBytes: number }> {
+    const { name, mimeType, sizeBytes, bytes } = image;
+    const upload = { type: "image" as const, name, mimeType, sizeBytes };
+    const prepared = await this.#call("t3_attachment_prepare_upload", { upload });
+    if (!object(prepared) || !text(prepared.attachmentId) || !text(prepared.relativeUrl) || !prepared.relativeUrl.startsWith("/")) invalidResponse();
+    let uploadUrl: URL;
+    try { uploadUrl = new URL(prepared.relativeUrl, url); } catch { invalidResponse(); }
+    if (uploadUrl.origin !== new URL(url).origin || uploadUrl.username || uploadUrl.password || uploadUrl.hash) invalidResponse();
+    const response = await this.#fetch(uploadUrl, { method: "POST", headers: { "content-type": mimeType }, body: bytes }, 60_000);
+    await response.body?.cancel();
+    if (!response.ok) throw new T3AutomationError("UNAVAILABLE", `TODO 图片未能上传到 T3（HTTP ${response.status}）。`);
+    return { id: prepared.attachmentId, ...upload };
   }
 
   async followup(threadId: string, prompt: string, commandId: string): Promise<void> {

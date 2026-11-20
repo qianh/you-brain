@@ -45,6 +45,7 @@ const PREF_KEYS: ReadonlySet<string> = new Set([
   "you-brain-theme",
   "you-brain-today-mode",
   "you-brain.deck.view",
+  "you-brain.deck.rail-top",
   "you-brain.deck.tty7-open",
   "you-brain.deck.t3-url",
   "you-brain.deck.tty7-harness",

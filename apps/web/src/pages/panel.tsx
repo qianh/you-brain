@@ -12,7 +12,7 @@ import { useToast } from "../components/toast.js";
 import { Toggle } from "../components/toggle.js";
 import { useDelayed } from "../components/use-delayed.js";
 import { capsuleFromStatus, capsuleWarningCount, type CapsuleKind, type CapsuleStatus } from "../lib/health.js";
-import { formatDateTime, type Language } from "../lib/format.js";
+import { type Language } from "../lib/format.js";
 import { settingsHref, topicHref } from "../lib/route.js";
 import { isTextEntry, modLabel, shortcutMod } from "../lib/shortcuts.js";
 import { browserWindowBridge, quitShell } from "../lib/window.js";
@@ -20,8 +20,9 @@ import type { MessageKey } from "../i18n/messages.js";
 import { StartGuide } from "./today/guide.js";
 import { emptyCaptureView, guideSteps } from "./today/model.js";
 import { panelShortcut } from "./panel/model.js";
-import { minutesAgo, resetIn, tokenCount, type QuotaCardView } from "./panel/quota.js";
-import type { DeckTelegramStatusResponse, QuotaTokenUsage } from "@you-brain/core/http/types.js";
+import { type QuotaCardView } from "./panel/quota.js";
+import { QuotaGroups } from "./panel/quota-groups.js";
+import type { DeckTelegramStatusResponse } from "@you-brain/core/http/types.js";
 import { useQuota } from "./panel/use-quota.js";
 import { openAppPath } from "./panel/open.js";
 import { ReminderList } from "./reminders/list.js";
@@ -349,68 +350,9 @@ function QuotaCard({
         <p className="panel-card-name">{t("panelQuotaTitle")}</p>
         {stale ? <span className="quota-stale">{t("panelQuotaStale", { minutes: ageMinutes })}</span> : null}
       </div>
-      {cards.map((card) => (
-        <div key={card.agent} className="quota-group">
-          <div className="quota-head">
-            <span className="quota-name">{card.label}</span>
-            {card.plan ? <span className="quota-plan">{card.plan}</span> : null}
-            {card.stale && !stale ? (
-              <span className="quota-plan quota-card-stale">{t("panelQuotaStale", { minutes: minutesAgo(card.readAt, nowMs) })}</span>
-            ) : null}
-          </div>
-          {card.windows.map((window) => {
-            const reset = resetIn(window.resetsAt, nowMs, language);
-            return (
-              <div
-                key={window.name}
-                className="quota-row"
-                title={window.resetsAt ? formatDateTime(window.resetsAt, language, timeZone) : undefined}
-              >
-                <span className="quota-window">{window.label}</span>
-                <span
-                  className="quota-bar"
-                  role="progressbar"
-                  aria-label={`${card.label} ${window.label}`}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={Math.round(window.used)}
-                >
-                  <i data-tone={window.tone} style={{ width: `${window.used}%` }} />
-                </span>
-                <span className="quota-pct">{Math.round(window.used)}%</span>
-                <span className="quota-reset">{reset ?? ""}</span>
-              </div>
-            );
-          })}
-          {card.tokens !== undefined ? tokenRows(card.tokens, t) : null}
-        </div>
-      ))}
+      <QuotaGroups cards={cards} nowMs={nowMs} language={language} timeZone={timeZone} t={t} hideCardStale={stale} />
     </Card>
   );
-}
-
-/** 卡片上 Token 消耗的三行，按今天 → 近 3 天 → 近 7 天排列。 */
-const TOKEN_SPANS: ReadonlyArray<{ span: keyof QuotaTokenUsage; labelKey: MessageKey }> = [
-  { span: "today", labelKey: "panelQuotaTokensToday" },
-  { span: "threeDays", labelKey: "panelQuotaTokens3d" },
-  { span: "sevenDays", labelKey: "panelQuotaTokens7d" },
-];
-
-function tokenRows(
-  usage: QuotaTokenUsage,
-  t: (key: MessageKey, vars?: Record<string, string | number>) => string,
-): ReactNode {
-  return TOKEN_SPANS.map(({ span, labelKey }) => {
-    const tokens = usage[span];
-    return (
-      <div key={span} className="quota-row">
-        <span className="quota-window">{t(labelKey)}</span>
-        <span className="quota-balance" title={`${tokens.input} → ${tokens.output} · cache ${tokens.cacheRead}`}>
-          {tokenCount(tokens.total)}
-        </span>
-      </div>
-    );
-  });
 }
 
 function PanelScroll({ children }: { children: ReactNode }) {

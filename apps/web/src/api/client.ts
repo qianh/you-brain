@@ -250,8 +250,9 @@ export interface BrowserDaemon
   deckTty7PasteImage(data: Blob): Promise<DeckTty7PasteImageResponse>;
   deckTty7Terminal(pane: number, size: DeckTerminalSize): WebSocket;
   taskBoard(): Promise<TaskBoard>;
-  createTask(body: TaskCreateInput): Promise<TaskBoard>;
-  updateTask(body: TaskUpdateInput): Promise<TaskBoard>;
+  createTask(body: TaskCreateInput, images?: readonly File[]): Promise<TaskBoard>;
+  updateTask(body: TaskUpdateInput, images?: readonly File[]): Promise<TaskBoard>;
+  taskImage(taskId: string, imageId: string): Promise<Blob>;
   taskAction(body: TaskActionInput): Promise<TaskBoard>;
   taskReview(id: string): Promise<TaskReview>;
 }
@@ -261,6 +262,14 @@ export function readDaemonToken(): string {
   if (typeof injected === "string" && injected.length > 0) return injected;
   const fromEnv = import.meta.env.VITE_DAEMON_TOKEN;
   return typeof fromEnv === "string" ? fromEnv : "";
+}
+
+function taskMutationBody(task: TaskCreateInput | TaskUpdateInput, images?: readonly File[]): typeof task | FormData {
+  if (!images?.length) return task;
+  const form = new FormData();
+  form.set("task", JSON.stringify(task));
+  for (const image of images) form.append("images", image);
+  return form;
 }
 
 export function createBrowserDaemon(options?: {
@@ -275,12 +284,15 @@ export function createBrowserDaemon(options?: {
     method: "GET" | "POST" | "PUT" | "DELETE",
     path: string,
     body?: unknown,
+    decode?: (response: Response) => Promise<T>,
   ): Promise<T> {
     const headers = new Headers({ authorization: `Bearer ${token}` });
     // Bearer auth is sufficient; dsh's cookies share this host across ports.
     const init: RequestInit = { method, headers, credentials: "omit" };
     if (body !== undefined) {
-      if (body instanceof Blob) {
+      if (body instanceof FormData) {
+        init.body = body;
+      } else if (body instanceof Blob) {
         // 二进制（如粘贴的图片）原样发，类型随 Blob。
         headers.set("content-type", body.type || "application/octet-stream");
         init.body = body;
@@ -296,6 +308,7 @@ export function createBrowserDaemon(options?: {
       const message = error instanceof Error ? error.message : "无法连接 daemon";
       throw new BrowserDaemonError(0, "DAEMON_UNREACHABLE", message);
     }
+    if (response.ok && decode) return decode(response);
     const text = await response.text();
     const parsed: unknown = text === "" ? null : parseJson(text);
     if (!response.ok) {
@@ -312,8 +325,9 @@ export function createBrowserDaemon(options?: {
   return {
     baseUrl,
     taskBoard: () => request<TaskBoard>("GET", "/api/tasks"),
-    createTask: (body) => request<TaskBoard>("POST", "/api/tasks", body),
-    updateTask: (body) => request<TaskBoard>("PUT", "/api/tasks", body),
+    createTask: (body, images) => request<TaskBoard>("POST", "/api/tasks", taskMutationBody(body, images)),
+    updateTask: (body, images) => request<TaskBoard>("PUT", "/api/tasks", taskMutationBody(body, images)),
+    taskImage: (taskId, imageId) => request("GET", `/api/tasks/image?${new URLSearchParams({ task: taskId, id: imageId })}`, undefined, (response) => response.blob()),
     taskAction: (body) => request<TaskBoard>("POST", "/api/tasks/action", body),
     taskReview: (id) => request<TaskReview>("GET", `/api/tasks/review?id=${encodeURIComponent(id)}`),
     today: () => request<TodayResponse>("GET", "/api/today"),

@@ -17,7 +17,7 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   return stdout.trim();
 }
 
-test("HTTP manual start → T3 plan → task worktree review → develop → next TODO", async () => {
+test("HTTP manual start → T3 plan → parallel TODO → review → develop → behind task synced and merged", async () => {
   const dir = await realpath(await mkdtemp(join(tmpdir(), "yb-todo-flow-")));
   const repo = join(dir, "repo");
   const homeDir = join(dir, "home");
@@ -60,7 +60,10 @@ test("HTTP manual start → T3 plan → task worktree review → develop → nex
     fake.complete(run.threadId, "请确认需求和计划");
     await call("/api/tasks/action", "POST", { action: "project", projectId: "project", enabled: true });
     await service.tick();
-    expect(dispatched()).toEqual(["high"]);
+    // 每个任务有独立工作树：高优先级仍在确认需求时，低优先级也被并行领取。
+    expect(dispatched()).toEqual(["high", "low"]);
+    const low = (await call<TaskBoard>("/api/tasks")).tasks.find((task) => task.title === "low")!;
+    expect(low).toMatchObject({ status: "running", run: { baseSha: original } });
     const planning = (await call<TaskBoard>("/api/tasks")).tasks.find((task) => task.id === active.id)!;
     expect(planning).toMatchObject({ status: "planning", run: { reviewSha: null } });
     projectThread.interactionMode = "default";
@@ -74,7 +77,7 @@ test("HTTP manual start → T3 plan → task worktree review → develop → nex
     await service.tick();
     expect((await call<TaskBoard>("/api/tasks")).tasks.find((task) => task.id === active.id)?.status).toBe("review");
     expect(await git(repo, "rev-parse", "develop")).toBe(original);
-    expect(dispatched()).toHaveLength(1);
+    expect(dispatched()).toHaveLength(2);
     const review = await call<TaskReview>(`/api/tasks/review?id=${encodeURIComponent(active.id)}`);
     expect(review.diff).toContain("+task change");
     expect(review.task.run?.summary).toBe("变更及检查已完成");
@@ -84,7 +87,38 @@ test("HTTP manual start → T3 plan → task worktree review → develop → nex
     expect(dispatched()).toEqual(["high", "low"]);
     const board = await call<TaskBoard>("/api/tasks");
     expect(board.tasks.find((task) => task.id === active.id)?.status).toBe("done");
-    expect(board.tasks.find((task) => task.title === "low")?.run?.baseSha).toBe(review.headSha);
+
+    // 低优先级任务从旧 develop 出发，确认时自动合入新 develop，交回 T3 检查后重新核对。
+    const lowRun = low.run!;
+    if (!lowRun.worktreePath || !lowRun.threadId) throw new Error("Expected the parallel task worktree");
+    await writeFile(join(lowRun.worktreePath, "low.txt"), "low change\n");
+    await git(lowRun.worktreePath, "add", "low.txt");
+    await git(lowRun.worktreePath, "commit", "-m", "fixture low result");
+    const lowHead = await git(lowRun.worktreePath, "rev-parse", "HEAD");
+    fake.complete(lowRun.threadId, "低优先级完成");
+    await service.tick();
+    const lowReview = await call<TaskReview>(`/api/tasks/review?id=${encodeURIComponent(low.id)}`);
+    expect(lowReview.headSha).toBe(lowHead);
+    expect(lowReview.diff).toContain("+low change");
+    expect(lowReview.diff).not.toContain("task change");
+    const handedBack = await call<TaskBoard>("/api/tasks/action", "POST", { action: "approve", id: low.id, reviewSha: lowHead });
+    expect(handedBack.tasks.find((task) => task.id === low.id)).toMatchObject({ status: "running", run: { reviewSha: null } });
+    expect(await git(repo, "rev-parse", "develop")).toBe(review.headSha);
+    expect(await git(lowRun.worktreePath, "rev-parse", "HEAD^1")).toBe(lowHead);
+    expect(await git(lowRun.worktreePath, "rev-parse", "HEAD^2")).toBe(review.headSha);
+    const lowThread = fake.threads.find((thread) => thread.threadId === lowRun.threadId)!;
+    const handBack = lowThread.items.at(-1);
+    expect(handBack?.type).toBe("user_message");
+    expect(handBack?.text).toContain("合入当前任务分支");
+    fake.complete(lowRun.threadId, "合入 develop 后检查通过");
+    await service.tick();
+    const resynced = await call<TaskReview>(`/api/tasks/review?id=${encodeURIComponent(low.id)}`);
+    expect(resynced.headSha).not.toBe(lowHead);
+    expect(resynced.diff).toContain("+low change");
+    expect(resynced.diff).not.toContain("task change");
+    await call("/api/tasks/action", "POST", { action: "approve", id: low.id, reviewSha: resynced.headSha });
+    expect(await git(repo, "rev-parse", "develop")).toBe(resynced.headSha);
+    expect((await call<TaskBoard>("/api/tasks")).tasks.find((task) => task.id === low.id)?.status).toBe("done");
 
     const created = await call<TaskBoard>("/api/tasks", "POST", { title: "standalone" });
     const id = created.tasks.find((task) => task.title === "standalone")!.id;
@@ -101,7 +135,7 @@ test("HTTP manual start → T3 plan → task worktree review → develop → nex
     fake.complete(thread.threadId, "按计划完成");
     await service.tick();
     expect((await call<TaskBoard>("/api/tasks")).tasks.find((task) => task.id === id)).toMatchObject({ status: "done", run: { reviewSha: null } });
-    expect(await git(repo, "rev-parse", "develop")).toBe(review.headSha);
+    expect(await git(repo, "rev-parse", "develop")).toBe(resynced.headSha);
   } finally {
     await service.stop(); await http.stop(); await automation.close(); await t3.stop(true);
     await rm(dir, { recursive: true, force: true });

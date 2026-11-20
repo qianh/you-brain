@@ -14,6 +14,11 @@ import type { TerminalAppearance } from "./deck-terminal-font.js";
 
 type Status = "connecting" | "ready" | "disconnected" | "exited";
 
+/** 回放期间这么久没有新数据，就当历史已放完。 */
+const REPLAY_QUIET_MS = 150;
+/** 历史再长也最多藏这么久，之后边放边显示。 */
+const REPLAY_MAX_MS = 2000;
+
 /** 仅开发模式：地址带 ?webgl=off 时不加载 GPU 渲染，用来和开启时对比延迟。正式包里恒为 false。 */
 function webglDisabledForDebug(): boolean {
   return import.meta.env.DEV && new URLSearchParams(window.location.search).get("webgl") === "off";
@@ -72,6 +77,8 @@ export function DeckTty7Terminal({
   /** tty7 把终端尺寸收回去了；后来 U-Brain 又拿到尺寸时清除。 */
   const [leaseLost, setLeaseLost] = useState(false);
   const [pasting, setPasting] = useState(false);
+  /** 历史回放期间终端先藏起来，放完直接停在最新内容，不让用户看到从头滚到尾。 */
+  const [revealed, setRevealed] = useState(false);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -84,6 +91,11 @@ export function DeckTty7Terminal({
     let resizeFrame = 0;
     let layoutFrame = 0;
     let webglFrame = 0;
+    let quietTimer: ReturnType<typeof setTimeout> | undefined;
+    let maxTimer: ReturnType<typeof setTimeout> | undefined;
+    let shown = false;
+    let replayStart = 0;
+    let replayBytes = 0;
     // 收到 daemon 的 live 之前写入的都是历史回放，其中的终端查询不作答。
     let replaying = true;
     setStatus("connecting");
@@ -91,6 +103,7 @@ export function DeckTty7Terminal({
     setWarning(null);
     setLeaseLost(false);
     setPasting(false);
+    setRevealed(false);
     // 背景色只有一个来源：和屏幕、状态条同用 --term-bg，内边距处才不会出现色差。
     const background = getComputedStyle(host).getPropertyValue("--term-bg").trim();
     const { fontFamily, fontSize, lineHeight } = appearanceRef.current;
@@ -201,10 +214,40 @@ export function DeckTty7Terminal({
       },
       () => disposed,
     );
+    // 回放写完后再显示：先一次写完攒下的历史，滚到底，再显示并加载 GPU 渲染。
+    const reveal = (reason: string): void => {
+      if (shown || disposed) return;
+      shown = true;
+      clearTimeout(quietTimer);
+      clearTimeout(maxTimer);
+      output.setHolding(false);
+      void output.whenIdle().then(() => {
+        if (disposed) return;
+        terminal.scrollToBottom();
+        setRevealed(true);
+        if (import.meta.env.DEV && replayStart !== 0) {
+          console.info(`[终端回放] pane=${pane} ${Math.round(performance.now() - replayStart)}ms ${replayBytes} 字节 触发=${reason}`);
+        }
+        webglFrame = requestAnimationFrame(() => {
+          loadWebgl();
+          if (activeRef.current) terminal.focus();
+        });
+      });
+    };
+    const armQuiet = (): void => {
+      clearTimeout(quietTimer);
+      quietTimer = setTimeout(() => reveal("静默"), REPLAY_QUIET_MS);
+    };
+    output.setHolding(true);
     socket.onmessage = (event: MessageEvent<string | ArrayBuffer>) => {
       if (disposed) return;
       if (event.data instanceof ArrayBuffer) {
-        output.pushBinary(new Uint8Array(event.data));
+        const bytes = new Uint8Array(event.data);
+        if (!shown) {
+          replayBytes += bytes.length;
+          armQuiet();
+        }
+        output.pushBinary(bytes);
         return;
       }
       let message: { type: string; size?: { cols: number; rows: number }; message?: string; by?: string | null };
@@ -223,9 +266,13 @@ export function DeckTty7Terminal({
           terminal.options.disableStdin = false;
           setStatus("ready");
           control({ type: "resize", size: measure() });
-          webglFrame = requestAnimationFrame(() => loadWebgl());
-          if (activeRef.current) terminal.focus();
-        } else if (message.type === "live") replaying = false;
+          replayStart = performance.now();
+          armQuiet();
+          maxTimer = setTimeout(() => reveal("上限"), REPLAY_MAX_MS);
+        } else if (message.type === "live") {
+          replaying = false;
+          reveal("live");
+        }
         else if (message.type === "size" && message.size) terminal.resize(message.size.cols, message.size.rows);
         else if (message.type === "warning" && typeof message.message === "string") setWarning(message.message);
         else if (message.type === "lease") setLeaseLost(message.by !== "U-Brain");
@@ -234,6 +281,7 @@ export function DeckTty7Terminal({
           connected = false;
           terminal.options.disableStdin = true;
           setStatus("exited");
+          reveal("exit");
         } else if (message.type === "error" && typeof message.message === "string") {
           failed = true;
           setError(message.message);
@@ -244,6 +292,7 @@ export function DeckTty7Terminal({
       connected = false;
       if (disposed) return;
       terminal.options.disableStdin = true;
+      reveal("close");
       // 等排队的 exit/error 事件处理完，避免误把会话结束当成网络断线。
       void output.whenIdle().finally(() => {
         if (disposed || exited) return;
@@ -301,6 +350,8 @@ export function DeckTty7Terminal({
       disposed = true;
       connected = false;
       clearTimeout(retry);
+      clearTimeout(quietTimer);
+      clearTimeout(maxTimer);
       if (focusFrame !== 0) cancelAnimationFrame(focusFrame);
       cancelAnimationFrame(resizeFrame);
       cancelAnimationFrame(layoutFrame);
@@ -364,7 +415,7 @@ export function DeckTty7Terminal({
     return () => cancelAnimationFrame(frame);
   }, [active, pendingPaste, status, onPasteHandled]);
 
-  const connectionText = status === "ready" ? null
+  const connectionText = status === "ready" ? (revealed ? null : t("deckTty7Connecting"))
     : t(status === "connecting" ? "deckTty7Connecting" : status === "exited" ? "deckTty7Exited" : "deckTty7Disconnected");
   const hasFloat = connectionText !== null || pasting || error !== null || warning !== null || leaseLost;
   return (
@@ -373,7 +424,7 @@ export function DeckTty7Terminal({
       focused && active ? "is-focused" : "",
       active ? "is-active" : "is-inactive",
     ].filter(Boolean).join(" ")}>
-      <div ref={hostRef} className="deck-tty7-xterm" aria-label={t("deckTty7ScreenLabel")}
+      <div ref={hostRef} className={revealed ? "deck-tty7-xterm" : "deck-tty7-xterm is-replaying"} aria-label={t("deckTty7ScreenLabel")}
         // xterm 已编码这些按键；不要让应用快捷键再处理。
         onKeyDown={(event) => event.stopPropagation()}
         onDragOver={(event) => {

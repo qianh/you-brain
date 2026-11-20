@@ -9,6 +9,7 @@ import { Spinner } from "../components/spinner.js";
 import { useToast } from "../components/toast.js";
 import { useDaemon } from "../daemon-context.js";
 import { parseDeckPane, readQuery } from "../lib/route.js";
+import { DECK_VIEW_KEY, DECK_VIEWS, isDeckView } from "../lib/deck-view.js";
 import { isTextEntry, modLabel, shortcutMod } from "../lib/shortcuts.js";
 import { usePageActive } from "../page-active.js";
 import { useRoute } from "../router.js";
@@ -34,12 +35,6 @@ type DshWebView =
 
 const POLL_MS = 1_000;
 const TTY7_OPEN_KEY = "you-brain.deck.tty7-open";
-const DECK_VIEW_KEY = "you-brain.deck.view";
-const DECK_VIEWS = [
-  { value: "t3", label: "T3" },
-  { value: "dsh", label: "DSH" },
-  { value: "muse", label: "Muse" },
-];
 
 /**
  * 指挥台：左边切换 T3 / DSH / Muse，右边共用可收起的 tty7 会话面板（ADR-0004）。
@@ -81,6 +76,18 @@ export function DshDeckPage() {
     setActivePage("t3");
     navigate("/deck", "replace");
   }, [requestedT3Thread, pageActive, navigate]);
+  // 其他页面左侧快捷栏点进来时带着 ?view=，切到对应页面后把地址换回 /deck。
+  const requestedView = readQuery(href, "view");
+  useEffect(() => {
+    if (requestedView === null || !pageActive) return;
+    if (isDeckView(requestedView)) {
+      setActivePage(requestedView);
+      if (requestedView === "t3") setT3Visited(true);
+      if (requestedView === "muse") setMuseVisited(true);
+      try { prefs.setItem(DECK_VIEW_KEY, requestedView); } catch { /* 本次切换仍可用。 */ }
+    }
+    navigate("/deck", "replace");
+  }, [requestedView, pageActive, navigate]);
   const [t3SettingsOpen, setT3SettingsOpen] = useState(false);
   const [t3ReloadVersion, setT3ReloadVersion] = useState(0);
   const [t3RefPickerOpen, setT3RefPickerOpen] = useState(false);
@@ -314,7 +321,7 @@ export function DshDeckPage() {
       <div className="dsh-deck">
         <div className="dsh-deck-main">
           <div className="dsh-deck-toolbar">
-            <Segmented label={t("dshDeckPageSwitch")} value={activePage} options={DECK_VIEWS} onChange={switchPage} labelledBy="radiogroup" />
+            <Segmented label={t("dshDeckPageSwitch")} value={activePage} options={[...DECK_VIEWS]} onChange={switchPage} labelledBy="radiogroup" />
             <div className="dsh-deck-actions">
               {activePage === "t3" ? (
                 <>

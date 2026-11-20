@@ -9,6 +9,19 @@ export interface TaskProject {
 export type TaskStatus = "queued" | "preparing" | "planning" | "running" | "review" | "merging" | "done" | "failed";
 export type TaskPriority = 0 | 1 | 2 | 3;
 
+export const TASK_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
+export const TASK_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+export const TASK_IMAGE_MAX_COUNT = 4;
+
+export interface TaskImage {
+  id: string;
+  name: string;
+  mimeType: typeof TASK_IMAGE_TYPES[number];
+  sizeBytes: number;
+}
+
+export type TaskImageData = TaskImage & { bytes: Uint8Array<ArrayBuffer> };
+
 export interface TaskWorktreeBlock {
   uncommitted: number;
   untracked: number;
@@ -44,6 +57,7 @@ export interface DevelopmentTask {
   id: string;
   title: string;
   description: string;
+  images?: TaskImage[] | undefined;
   projectId: string | null;
   /** P0 最高，同优先级按创建时间及入队顺序排序。 */
   priority: TaskPriority;
@@ -82,6 +96,7 @@ export interface TaskUpdateInput {
   id: string;
   title?: string | undefined;
   description?: string | undefined;
+  retainImageIds?: string[] | undefined;
   projectId?: string | null | undefined;
   /** 与 projectId 互斥。 */
   newProject?: TaskNewProject | undefined;
@@ -107,8 +122,9 @@ export interface TaskReview {
 
 export interface TaskHttpPort {
   board(): Promise<TaskBoard>;
-  create(input: TaskCreateInput): Promise<TaskBoard>;
-  update(input: TaskUpdateInput): Promise<TaskBoard>;
+  create(input: TaskCreateInput, images?: readonly File[]): Promise<TaskBoard>;
+  update(input: TaskUpdateInput, images?: readonly File[]): Promise<TaskBoard>;
+  image(taskId: string, imageId: string): Promise<TaskImageData>;
   action(input: TaskActionInput): Promise<TaskBoard>;
   review(id: string): Promise<TaskReview>;
 }
@@ -118,9 +134,11 @@ export interface TaskGitPort {
   isMerged(project: TaskProject, run: TaskWorktreeRun): Promise<boolean>;
   review(project: TaskProject, run: TaskWorktreeRun): Promise<Omit<TaskReview, "task">>;
   merge(project: TaskProject, run: TaskWorktreeRun, approvedSha: string): Promise<void>;
+  /** 合并被分叉阻止时，把本地 develop 合入任务分支；冲突时还原并返回 conflict。 */
+  syncDevelop(project: TaskProject, run: TaskWorktreeRun, approvedSha: string): Promise<"merged" | "conflict" | "current">;
 }
 
-type TaskLaunchInput = { title: string; prompt: string; cwd: string; requestId: string } & (
+type TaskLaunchInput = { title: string; prompt: string; cwd: string; requestId: string; images?: TaskImageData[] } & (
   | { projectId: string; branch: string; plan?: true | undefined }
   | { projectId: null; branch: null; plan: true }
 );

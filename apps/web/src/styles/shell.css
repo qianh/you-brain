@@ -178,3 +178,92 @@
 html.shell-overlay { --h-topbar: 56px; }
 /* 红绿灯组(x=16 起,宽 ~52)与品牌行之间留足间距,不再贴着灯。 */
 .shell-overlay .topbar { padding-left: 100px; }
+.quota-strip-pop {
+  width: 360px;
+  max-height: calc(100dvh - 80px);
+  overflow-y: auto;
+  transform-origin: top left;
+}
+
+/* 离开指挥台时悬浮在窗口左侧的 T3 / DSH / Muse 快捷栏：平时只露出 10px，悬停展开；按住顶部把手可上下拖动。 */
+.deck-rail {
+  position: fixed;
+  left: 0;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 4px 4px 3px;
+  border: 1px solid var(--border-strong);
+  border-left: none;
+  border-radius: 0 var(--r-pop) var(--r-pop) 0;
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
+  transform: translate(calc(-100% + 10px), -50%);
+  transition: transform 160ms ease-out;
+  user-select: none;
+}
+.deck-rail > * { opacity: 0; transition: opacity 120ms ease-out; }
+/* 收起时的竖条提示 */
+.deck-rail::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: 3px;
+  width: 2px;
+  height: 24px;
+  border-radius: 1px;
+  background: var(--text-3);
+  transform: translateY(-50%);
+  transition: opacity 120ms ease-out;
+}
+.deck-rail:hover,
+.deck-rail:has(:focus-visible),
+.deck-rail.is-dragging { transform: translate(0, -50%); }
+.deck-rail:hover > *,
+.deck-rail:has(:focus-visible) > *,
+.deck-rail.is-dragging > * { opacity: 1; }
+.deck-rail:hover::after,
+.deck-rail:has(:focus-visible)::after,
+.deck-rail.is-dragging::after { opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .deck-rail, .deck-rail > *, .deck-rail::after { transition: none; }
+}
+.deck-rail-grip {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 3px;
+  height: 12px;
+  padding: 0;
+  border: none;
+  border-radius: var(--r-ctl);
+  background: none;
+  cursor: grab;
+  touch-action: none;
+}
+.deck-rail-grip span {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+.deck-rail-grip:hover { background: var(--surface-2); }
+.deck-rail.is-dragging,
+.deck-rail.is-dragging .deck-rail-grip { cursor: grabbing; }
+.deck-rail-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  height: var(--h-ctl-sm);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-ctl);
+  color: var(--text-2);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  text-decoration: none;
+}
+.deck-rail-item:hover,
+.deck-rail-item:focus-visible { background: var(--surface-2); color: var(--text); }
+.deck-rail-item.is-current { color: var(--accent); background: var(--accent-soft); }

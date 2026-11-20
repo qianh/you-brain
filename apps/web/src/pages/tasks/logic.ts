@@ -1,4 +1,5 @@
 import type { DevelopmentTask, TaskProject, TaskStatus, TaskWorktreeBlock } from "@you-brain/core/tasks/types.js";
+import { deckT3ThreadHref } from "../../lib/route.js";
 import { translate, type MessageKey } from "../../i18n/messages.js";
 import type { Language } from "../../lib/format.js";
 
@@ -64,8 +65,20 @@ export function taskThreadUrl(value: string | null | undefined): string | null {
   }
 }
 
+export function taskThreadHref(value: string | null | undefined): string | null {
+  const url = taskThreadUrl(value);
+  return url ? deckT3ThreadHref(url) : null;
+}
+
+/** 项目内未结束的任务：执行中优先，其次待核对，最后受阻。同一项目可并行多项。 */
+export function projectTasks(tasks: DevelopmentTask[], projectId: string): DevelopmentTask[] {
+  const rank = (task: DevelopmentTask): number => task.status === "review" ? 1 : task.status === "failed" ? 2 : 0;
+  return tasks.filter((task) => task.projectId === projectId && task.status !== "queued" && task.status !== "done")
+    .sort((a, b) => rank(a) - rank(b));
+}
+
 export function projectTask(tasks: DevelopmentTask[], projectId: string): DevelopmentTask | undefined {
-  return tasks.find((task) => task.projectId === projectId && task.status !== "queued" && task.status !== "done");
+  return projectTasks(tasks, projectId)[0];
 }
 
 export type ProjectPickerRow =

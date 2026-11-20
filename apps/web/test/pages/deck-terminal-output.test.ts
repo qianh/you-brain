@@ -48,4 +48,38 @@ describe("createBatchedTerminalOutput", () => {
     expect(writes).toEqual([2]);
     expect(order).toEqual(["write", "ack", "control"]);
   });
+
+  test("暂存期间收到即 ACK、不写入，关闭后一次写完且不重复 ACK", async () => {
+    const frames: FrameRequestCallback[] = [];
+    globalThis.requestAnimationFrame = (cb) => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = () => undefined;
+    const writes: number[][] = [];
+    const acks: number[] = [];
+    const batch = createBatchedTerminalOutput(
+      {
+        writeBinary(bytes, done) {
+          writes.push([...bytes]);
+          done();
+        },
+        ack(bytes) {
+          acks.push(bytes);
+        },
+      },
+      () => false,
+    );
+    batch.setHolding(true);
+    batch.pushBinary(new Uint8Array([1, 2]));
+    batch.pushBinary(new Uint8Array([3]));
+    expect(frames).toHaveLength(0);
+    expect(writes).toEqual([]);
+    expect(acks).toEqual([2, 1]);
+    batch.setHolding(false);
+    batch.pushBinary(new Uint8Array([4]));
+    await batch.whenIdle();
+    expect(writes).toEqual([[1, 2, 3, 4]]);
+    expect(acks).toEqual([2, 1, 1]);
+  });
 });

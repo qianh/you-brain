@@ -2,11 +2,13 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { TaskActionSchema, TaskCreateSchema, TaskUpdateSchema, type TaskState } from "./schema.js";
-import { TaskAlreadyMergedError, TaskDirtyWorktreeError, TaskMergeBlockedError, TaskNoCommitError } from "./git.js";
+import { TaskAlreadyMergedError, TaskBehindDevelopError, TaskDirtyWorktreeError, TaskMergeBlockedError, TaskNoCommitError } from "./git.js";
+import { parseTaskImage, TaskImages } from "./images.js";
 import { TaskStore } from "./store.js";
+import { TASK_IMAGE_MAX_COUNT } from "./types.js";
 import type {
   DevelopmentTask, TaskActionInput, TaskAutomationPort, TaskBoard, TaskCreateInput,
-  TaskGitPort, TaskHttpPort, TaskNewProject, TaskProject, TaskReview, TaskRun, TaskStatus, TaskUpdateInput,
+  TaskGitPort, TaskHttpPort, TaskImageData, TaskNewProject, TaskProject, TaskReview, TaskRun, TaskStatus, TaskUpdateInput, TaskWorktreeRun,
 } from "./types.js";
 
 export class TaskError extends Error {
@@ -30,13 +32,22 @@ export interface TaskServiceOptions {
   store?: Pick<TaskStore, "read" | "write">;
 }
 
+/** 尚未结束、需要轮询推进的任务。 */
 const ACTIVE = new Set<TaskStatus>(["preparing", "planning", "running", "review", "merging", "failed"]);
+const EXECUTING = new Set<TaskStatus>(["preparing", "planning", "running", "merging"]);
+/** 同一仓库同时执行的 TODO 上限；待核对、执行后受阻的任务不占名额。 */
+export const PROJECT_PARALLEL_LIMIT = 3;
 const LEGACY_DIRTY_WORKTREE = "任务工作树有未提交或未跟踪的内容，请在 T3 中提交后重新检查";
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const samePath = (a: string, b: string): boolean => a.replace(/\/+$/u, "") === b.replace(/\/+$/u, "");
 
+/** 占用执行名额：执行中，或还没派发成功就失败（多为 T3/模型/Git 配置问题，避免把整个队列连续派发失败）。 */
+function occupiesSlot(task: DevelopmentTask): boolean {
+  return EXECUTING.has(task.status) || (task.status === "failed" && !task.run?.threadId);
+}
+
 export function nextProjectTask(tasks: DevelopmentTask[], projectId: string): DevelopmentTask | null {
-  if (tasks.some((task) => task.projectId === projectId && ACTIVE.has(task.status))) return null;
+  if (tasks.filter((task) => task.projectId === projectId && occupiesSlot(task)).length >= PROJECT_PARALLEL_LIMIT) return null;
   return tasks.filter((task) => task.projectId === projectId && task.status === "queued")
     .sort((a, b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt))[0] ?? null;
 }
@@ -44,6 +55,7 @@ export function nextProjectTask(tasks: DevelopmentTask[], projectId: string): De
 /** 每次状态与外部操作按顺序持久化。人工确认是唯一能进入 merging 的入口。 */
 export class TaskService implements TaskHttpPort {
   readonly #store: Pick<TaskStore, "read" | "write">;
+  readonly #images: TaskImages;
   #state: TaskState | null = null;
   #queue: Promise<unknown> = Promise.resolve();
   #timer: ReturnType<typeof setInterval> | null = null;
@@ -54,6 +66,7 @@ export class TaskService implements TaskHttpPort {
 
   constructor(private readonly options: TaskServiceOptions) {
     this.#store = options.store ?? new TaskStore(join(options.dataDir, "tasks", "board.json"));
+    this.#images = new TaskImages(join(options.dataDir, "tasks", "images"));
   }
 
   start(): void {
@@ -92,23 +105,24 @@ export class TaskService implements TaskHttpPort {
       }
       for (const project of state.projects) {
         if (this.#stopped || !this.#liveProjects.has(project.id)) continue;
-        const active = state.tasks.find((task) => task.projectId === project.id && ACTIVE.has(task.status));
-        try {
-          if (active) {
-            this.#checkProject(project, active);
-            await this.#advance(project, active);
-          } else if (project.enabled && !this.#projectBusy(project)) {
-            const next = nextProjectTask(state.tasks, project.id);
-            if (next) {
-              next.status = "preparing";
-              await this.#save(next);
-              await this.#dispatch(project, next);
-            }
+        for (const task of state.tasks.filter((item) => item.projectId === project.id && ACTIVE.has(item.status))) {
+          if (this.#stopped) return;
+          try {
+            this.#checkProject(project, task);
+            await this.#advance(project, task);
+          } catch (error) { await this.#fail(task, error); }
+        }
+        // 每个任务有独立的分支和工作树，可并行执行；合并仍逐个快进 develop。
+        while (project.enabled && !this.#stopped && !this.#projectBusy(project)) {
+          const next = nextProjectTask(state.tasks, project.id);
+          if (!next) break;
+          next.status = "preparing";
+          await this.#save(next);
+          try { await this.#dispatch(project, next); }
+          catch (error) {
+            await this.#fail(next, error);
+            break;
           }
-        } catch (error) {
-          if (error instanceof TaskPersistenceError) throw error;
-          const task = state.tasks.find((item) => item.projectId === project.id && ACTIVE.has(item.status));
-          if (task) await this.#fail(task, error);
         }
       }
     });
@@ -122,37 +136,86 @@ export class TaskService implements TaskHttpPort {
     });
   }
 
-  create(input: TaskCreateInput): Promise<TaskBoard> {
+  create(input: TaskCreateInput, files: readonly File[] = []): Promise<TaskBoard> {
     return this.#serial(async () => {
       const body = TaskCreateSchema.parse(input);
       const state = await this.#load();
+      const images = await this.#parseImages(files, 0);
       const projectId = await this.#taskProject(body);
       const now = this.#now();
-      state.tasks.push({
+      const task: DevelopmentTask = {
         id: this.options.id?.() ?? randomUUID(), title: body.title,
         description: body.description ?? "", projectId: projectId ?? null,
         priority: body.priority ?? 2, status: "queued", createdAt: now, updatedAt: now, run: null,
+      };
+      await this.#saveImages(images, async () => {
+        if (images.length) task.images = images.map(({ bytes: _bytes, ...metadata }) => metadata);
+        state.tasks.push(task);
+        await this.#save();
       });
-      await this.#save();
       this.poke();
       return this.#board();
     });
   }
 
-  update(input: TaskUpdateInput): Promise<TaskBoard> {
+  update(input: TaskUpdateInput, files: readonly File[] = []): Promise<TaskBoard> {
     return this.#serial(async () => {
       const body = TaskUpdateSchema.parse(input);
       const task = await this.#task(body.id);
       if (task.status !== "queued") throw new TaskError(409, "只有待处理的 TODO 可以修改；已开工任务请在 T3 中核对。");
+      const previous = task.images ?? [];
+      const keep = body.retainImageIds;
+      const retained = keep === undefined ? previous : previous.filter((image) => keep.includes(image.id));
+      if (keep !== undefined && retained.length !== keep.length) throw new TaskError(400, "只能保留本任务的图片。");
+      const images = await this.#parseImages(files, retained.length);
       const projectId = await this.#taskProject(body);
-      if (body.title !== undefined) task.title = body.title;
-      if (body.description !== undefined) task.description = body.description;
-      if (projectId !== undefined) task.projectId = projectId;
-      if (body.priority !== undefined) task.priority = body.priority;
-      await this.#save(task);
+      await this.#saveImages(images, async () => {
+        if (body.title !== undefined) task.title = body.title;
+        if (body.description !== undefined) task.description = body.description;
+        if (projectId !== undefined) task.projectId = projectId;
+        if (body.priority !== undefined) task.priority = body.priority;
+        if (keep !== undefined || images.length) task.images = [...retained, ...images.map(({ bytes: _bytes, ...metadata }) => metadata)];
+        await this.#save(task);
+      });
+      await this.#images.remove(previous.filter((image) => !retained.includes(image)));
       this.poke();
       return this.#board();
     });
+  }
+
+  image(taskId: string, imageId: string): Promise<TaskImageData> {
+    return this.#serial(async () => {
+      const task = await this.#task(taskId);
+      const image = task.images?.find((item) => item.id === imageId);
+      if (!image) throw new TaskError(404, "TODO 图片不存在。");
+      return this.#readImage(image);
+    });
+  }
+
+  async #readImage(image: Omit<TaskImageData, "bytes">): Promise<TaskImageData> {
+    try { return await this.#images.read(image); }
+    catch { throw new TaskError(404, "TODO 图片不存在或无法读取。"); }
+  }
+
+  async #parseImages(files: readonly File[], retained: number): Promise<TaskImageData[]> {
+    if (files.length + retained > TASK_IMAGE_MAX_COUNT) throw new TaskError(400, "每个 TODO 最多可添加 4 张图片。");
+    const images: TaskImageData[] = [];
+    for (const file of files) {
+      const image = await parseTaskImage(file);
+      if (!image) throw new TaskError(400, "仅支持不超过 10 MB 的 PNG、JPEG、GIF 或 WebP 图片。");
+      images.push(image);
+    }
+    return images;
+  }
+
+  async #saveImages(images: TaskImageData[], save: () => Promise<void>): Promise<void> {
+    try {
+      for (const image of images) await this.#images.write(image);
+      await save();
+    } catch (error) {
+      await this.#images.remove(images);
+      throw error;
+    }
   }
 
   action(input: TaskActionInput): Promise<TaskBoard> {
@@ -188,7 +251,7 @@ export class TaskService implements TaskHttpPort {
         if (project) this.#checkProject(project, task);
         else if (!(await this.#refreshProjects())) throw new TaskError(503, this.#connectionError ?? "T3 连接失败。");
         if (body.action === "start") {
-          if (project && this.#projectBusy(project)) throw new TaskError(409, "项目已有待完成的 TODO，请先处理该任务。");
+          if (project && this.#projectBusy(project)) throw new TaskError(409, `项目已有 ${PROJECT_PARALLEL_LIMIT} 个 TODO 在执行，请等其中一个完成或进入核对。`);
           task.manual = true;
           task.status = "preparing";
           await this.#save(task);
@@ -283,7 +346,8 @@ export class TaskService implements TaskHttpPort {
     const rawContext = project && this.options.projectContext
       ? await Promise.resolve(this.options.projectContext(project.cwd)).catch(() => null)
       : null;
-    const launch = { title: task.title, prompt: this.#taskPrompt(task, rawContext), requestId };
+    const images = await Promise.all((task.images ?? []).map((image) => this.#readImage(image)));
+    const launch = { title: task.title, prompt: this.#taskPrompt(task, rawContext), requestId, ...(images.length ? { images } : {}) };
     const started = project && task.run.branch !== null
       ? await this.options.automation.start({ ...launch, projectId: project.id, cwd: task.run.worktreePath, branch: task.run.branch, plan: task.manual })
       : await this.options.automation.start({ ...launch, projectId: null, cwd: task.run.projectCwd, branch: null, plan: true });
@@ -381,8 +445,35 @@ export class TaskService implements TaskHttpPort {
     if (!task.run?.reviewSha || !task.run.threadId || task.run.branch === null) throw new Error("缺少人工核对版本，不能合并。");
     const live = await this.options.automation.inspect(task.run.threadId, task.manual);
     if (live.state !== "ready") throw new Error("T3 会话在核对后发生变化，请完成处理并重新核对。");
-    await this.options.git.merge(project, task.run, task.run.reviewSha);
+    try { await this.options.git.merge(project, task.run, task.run.reviewSha); }
+    catch (error) {
+      if (!(error instanceof TaskBehindDevelopError)) throw error;
+      await this.#syncDevelop(project, task, task.run);
+      return;
+    }
     await this.#complete(task);
+  }
+
+  /**
+   * 并行任务先合并后，后面的任务分支与 develop 分叉、不能快进：把 develop 合入任务分支，
+   * 交回原 T3 会话检查（有冲突时由 T3 解决），完成后重新进入人工核对。
+   */
+  async #syncDevelop(project: TaskProject, task: DevelopmentTask, run: TaskWorktreeRun): Promise<void> {
+    const result = await this.options.git.syncDevelop(project, run, run.reviewSha!);
+    if (result === "current") throw new TaskMergeBlockedError("本地 develop 刚刚发生变化，请重新核对后再确认合并。");
+    const prompt = result === "merged"
+      ? "确认合并时，本地 develop 已有其他任务合入的新提交。U-Brain 已按用户授权把最新本地 develop 合入当前任务分支（已生成合并提交）。请在当前工作树运行适用检查，确认本任务与 develop 的新改动一起工作正常；如有问题修复并提交到任务分支。"
+      : "确认合并时，本地 develop 已有其他任务合入的新提交，自动合入有冲突，已撤销。用户授权你在当前工作树执行 git merge develop（不要 rebase），解决冲突并提交合并结果，然后运行适用检查，如有问题修复并提交到任务分支。";
+    run.pendingFeedback = {
+      commandId: randomUUID(),
+      prompt: `${prompt}完成后说明处理内容和验证结果，等待人工重新核对。禁止修改 develop、push 或部署。`,
+    };
+    run.reviewSha = null;
+    run.error = null;
+    task.error = null;
+    task.status = "running";
+    await this.#save(task);
+    await this.#feedback(task);
   }
 
   async #complete(task: DevelopmentTask): Promise<void> {
@@ -481,7 +572,7 @@ export class TaskService implements TaskHttpPort {
   #projectBusy(project: TaskProject): boolean {
     const { tasks, projects } = this.#state!;
     const ids = new Set(projects.filter((item) => samePath(item.cwd, project.cwd)).map((item) => item.id));
-    return tasks.some((task) => task.projectId !== null && ids.has(task.projectId) && ACTIVE.has(task.status));
+    return tasks.filter((task) => task.projectId !== null && ids.has(task.projectId) && occupiesSlot(task)).length >= PROJECT_PARALLEL_LIMIT;
   }
 
   async #task(id: string): Promise<DevelopmentTask> {

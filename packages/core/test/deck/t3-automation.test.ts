@@ -61,6 +61,30 @@ describe("T3 TODO automation MCP adapter", () => {
     expect(launches()).toHaveLength(0);
   });
 
+  test("uploads exact image bytes and launches with a native T3 attachment only once", async () => {
+    const { client, t3, launches } = harness({ projects: [{ ...project, defaultModelSelection: selection }] });
+    const bytes = new Uint8Array([137, 80, 78, 71]);
+    const metadata = { name: "Screenshot.png", mimeType: "image/png" as const, sizeBytes: bytes.length };
+    const input = { ...startInput, images: [{ id: "local-image", ...metadata, bytes }] };
+    expect(await client.start(input)).toEqual(await client.start(input));
+    expect(t3.calls.find((call) => call.name === "t3_attachment_prepare_upload")?.args).toEqual({ upload: { type: "image", ...metadata } });
+    expect(t3.uploads).toEqual([{ contentType: "image/png", bytes }]);
+    expect(launches()).toHaveLength(1);
+    expect(launches()[0]?.args.attachments).toEqual([{ id: "uploaded-image", type: "image", ...metadata }]);
+  });
+
+  test("does not launch without the image if upload fails or offers a different origin", async () => {
+    const { client, t3, launches } = harness({ projects: [{ ...project, defaultModelSelection: selection }] });
+    const input = { ...startInput, images: [{ id: "local-image", name: "Screenshot.png", mimeType: "image/png" as const, sizeBytes: 1, bytes: new Uint8Array([1]) }] };
+    t3.state.uploadUrl = "//elsewhere.invalid/signed-upload";
+    await expect(client.start(input)).rejects.toThrow("T3 接口返回格式不兼容");
+    expect(t3.uploads).toHaveLength(0);
+    t3.state.uploadUrl = "/signed-upload";
+    t3.state.uploadStatus = 500;
+    await expect(client.start(input)).rejects.toThrow("TODO 图片未能上传到 T3");
+    expect(launches()).toHaveLength(0);
+  });
+
   test("starts a manual project TODO in plan mode in the owned worktree", async () => {
     const { client, launches } = harness();
     await client.start({ ...startInput, plan: true });

@@ -2,8 +2,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { TaskAlreadyMergedError, TaskDirtyWorktreeError, TaskMergeBlockedError, TaskNoCommitError } from "../../src/tasks/git.js";
-import { TaskService } from "../../src/tasks/service.js";
+import { TaskAlreadyMergedError, TaskBehindDevelopError, TaskDirtyWorktreeError, TaskMergeBlockedError, TaskNoCommitError } from "../../src/tasks/git.js";
+import { PROJECT_PARALLEL_LIMIT, TaskService } from "../../src/tasks/service.js";
 import { TaskStore } from "../../src/tasks/store.js";
 import type { TaskAutomationPort, TaskGitPort } from "../../src/tasks/types.js";
 
@@ -22,6 +22,7 @@ async function setup() {
   const starts: Array<Parameters<TaskAutomationPort["start"]>[0]> = [];
   const followups: Array<{ threadId: string; prompt: string; commandId: string }> = [];
   const merges: string[] = [];
+  const syncs: string[] = [];
   const states = new Map<string, "planning" | "running" | "ready" | "failed">();
   let startFailure = false;
   let followupFailure = false;
@@ -62,6 +63,7 @@ async function setup() {
       expect(taskRun.reviewSha).toBe(approvedSha);
       merges.push(approvedSha);
     },
+    async syncDevelop() { syncs.push("merged"); return "merged"; },
   };
   const options = {
     dataDir: dir, automation, git, homeDir: "/Users/hong",
@@ -87,7 +89,7 @@ async function setup() {
     return (await board()).tasks.find((task) => task.id === current.id)!;
   };
   return {
-    dir, service, starts, merges, states, followups, board, ready, options, created,
+    dir, service, starts, merges, syncs, states, followups, board, ready, options, created,
     setStartFailure(value: boolean) { startFailure = value; },
     setFollowupFailure(value: boolean) { followupFailure = value; },
     setOnline(value: boolean) { online = value; },
@@ -101,21 +103,23 @@ async function enable(service: TaskService, projectId = "one") {
   await service.tick();
 }
 
-describe("T3 TODO serial queue", () => {
+describe("T3 TODO parallel queue", () => {
   test("P0 first, FIFO tie, unassigned TODO never starts", () => fixture(async (f) => {
     await f.service.create({ title: "unassigned", priority: 0 });
     await f.service.create({ title: "low", projectId: "one", priority: 3 });
     await f.service.create({ title: "first high", projectId: "one", priority: 0 });
     await f.service.create({ title: "second high", projectId: "one", priority: 0 });
+    await f.service.create({ title: "middle", projectId: "one", priority: 2 });
     expect(f.starts).toHaveLength(0);
+    expect(PROJECT_PARALLEL_LIMIT).toBe(3);
     await enable(f.service);
-    expect(f.starts.map((item) => item.title)).toEqual(["first high"]);
+    expect(f.starts.map((item) => item.title)).toEqual(["first high", "second high", "middle"]);
     await f.service.tick();
-    expect(f.starts).toHaveLength(1);
-    expect((await f.board()).tasks[0]?.status).toBe("queued");
+    expect(f.starts).toHaveLength(3);
+    expect((await f.board()).tasks.map((task) => task.status)).toEqual(["queued", "queued", "running", "running", "running"]);
   }));
 
-  test("manual start picks the clicked TODO in a paused project and blocks the rest while confirming requirements", () => fixture(async (f) => {
+  test("manual start picks the clicked TODO in a paused project; planning occupies a parallel slot", () => fixture(async (f) => {
     const first = (await f.service.create({ title: "automatic priority", projectId: "one", priority: 0 })).tasks[0]!;
     const selected = (await f.service.create({ title: "user selected", description: "验收说明", projectId: "one", priority: 3 })).tasks[1]!;
     const started = await f.service.action({ action: "start", id: selected.id });
@@ -125,10 +129,9 @@ describe("T3 TODO serial queue", () => {
     expect(f.starts[0]?.prompt).toContain("验收说明");
     expect(f.starts[0]?.prompt).toContain("明确确认需求和计划");
     await expect(f.service.action({ action: "start", id: selected.id })).rejects.toThrow("只有待处理");
-    await expect(f.service.action({ action: "start", id: first.id })).rejects.toThrow("项目已有");
     await enable(f.service);
-    expect(f.starts).toHaveLength(1);
-    expect((await f.board()).tasks.map((task) => task.status)).toEqual(["queued", "planning"]);
+    expect(f.starts.map((item) => item.title)).toEqual(["user selected", "automatic priority"]);
+    expect((await f.board()).tasks.map((task) => task.status)).toEqual(["running", "planning"]);
   }));
 
   test("unassigned manual start persists its home directory and never uses Git", () => fixture(async (f) => {
@@ -209,7 +212,7 @@ describe("T3 TODO serial queue", () => {
     expect(review.status).toBe("review");
     await f.service.tick();
     expect(f.merges).toHaveLength(0);
-    expect(f.starts).toHaveLength(1);
+    expect(f.starts).toHaveLength(2);
     await expect(f.service.action({ action: "approve", id: review.id, reviewSha: BASE })).rejects.toThrow("核对版本已变化");
     expect(f.merges).toHaveLength(0);
     const detail = await f.service.review(review.id);
@@ -234,7 +237,7 @@ describe("T3 TODO serial queue", () => {
     f.options.git.review = async () => { throw new TaskDirtyWorktreeError(counts); };
     await f.service.tick();
     expect((await f.options.store.read()).tasks[0]).toMatchObject({ status: "failed", worktreeBlock: counts });
-    expect(f.starts).toHaveLength(1);
+    expect(f.starts).toHaveLength(2);
 
     f.states.set(task.run!.threadId!, "running");
     await f.service.tick();
@@ -243,21 +246,22 @@ describe("T3 TODO serial queue", () => {
     expect(running.worktreeBlock).toBeUndefined();
   }));
 
-  test("develop blocking merge leaves the task reviewable until it is synced and reapproved", () => fixture(async (f) => {
+  test("a merge blocked by develop history leaves the task reviewable until it is fixed and reapproved", () => fixture(async (f) => {
     await f.service.create({ title: "first", projectId: "one" });
     await f.service.create({ title: "second", projectId: "one" });
     await enable(f.service);
     const task = await f.ready();
     const merge = f.options.git.merge;
-    const mergeError = "任务分支尚未包含最新的 develop";
+    const mergeError = "本地 develop 已退回到任务起点之前";
     f.options.git.merge = async () => { throw new TaskMergeBlockedError(mergeError); };
     const detail = await f.service.review(task.id);
     await expect(f.service.action({ action: "approve", id: task.id, reviewSha: detail.headSha })).rejects.toThrow(mergeError);
     await f.service.tick();
     expect((await f.board()).tasks[0]).toMatchObject({ status: "review", error: mergeError });
     expect((await f.service.review(task.id)).diff).toBe(detail.diff);
-    expect(f.starts).toHaveLength(1);
+    expect(f.starts).toHaveLength(2);
     expect(f.merges).toHaveLength(0);
+    expect(f.syncs).toHaveLength(0);
 
     const synced = "c".repeat(40);
     f.options.git.review = async () => ({ headSha: synced, baseSha: BASE, stat: "1 file", diff: "+change", truncated: false });
@@ -323,9 +327,9 @@ describe("T3 TODO serial queue", () => {
 
   test("pause lets current task finish but prevents next claim", () => fixture(async (f) => {
     await f.service.create({ title: "first", projectId: "one" });
-    await f.service.create({ title: "second", projectId: "one" });
     await enable(f.service);
     await f.service.action({ action: "project", projectId: "one", enabled: false });
+    await f.service.create({ title: "second", projectId: "one" });
     const task = await f.ready();
     await f.service.action({ action: "approve", id: task.id, reviewSha: SHA });
     await f.service.tick();
@@ -333,11 +337,12 @@ describe("T3 TODO serial queue", () => {
     expect(f.starts).toHaveLength(1);
   }));
 
-  test("concurrent ticks never claim a second task in the same project", () => fixture(async (f) => {
-    await f.service.create({ title: "one", projectId: "one" });
-    await f.service.create({ title: "two", projectId: "one" });
+  test("concurrent ticks never claim a task twice or exceed the parallel limit", () => fixture(async (f) => {
+    for (const title of ["one", "two", "three", "four"]) await f.service.create({ title, projectId: "one" });
     await Promise.all([enable(f.service), f.service.tick(), f.service.tick()]);
-    expect(f.starts).toHaveLength(1);
+    expect(f.starts.map((item) => item.title)).toEqual(["one", "two", "three"]);
+    expect(new Set(f.starts.map((item) => item.requestId)).size).toBe(3);
+    expect((await f.board()).tasks[3]?.status).toBe("queued");
     await expect(f.service.update({ id: f.starts[0]!.requestId, title: "changed" })).rejects.toThrow();
     const task = (await f.board()).tasks.find((item) => item.status === "running")!;
     await expect(f.service.update({ id: task.id, title: "changed" })).rejects.toThrow("只有待处理");
@@ -369,21 +374,98 @@ describe("T3 TODO serial queue", () => {
     expect((await f.board()).tasks[0]?.status).toBe("running");
   }));
 
-  test("failed turn blocks project and explicit retry continues same T3 thread", () => fixture(async (f) => {
-    await f.service.create({ title: "first", projectId: "one" });
-    await f.service.create({ title: "second", projectId: "one" });
+  test("a failed turn frees its slot and explicit retry continues the same T3 thread", () => fixture(async (f) => {
+    for (const title of ["first", "second", "third", "fourth"]) await f.service.create({ title, projectId: "one" });
     await enable(f.service);
+    expect(f.starts).toHaveLength(3);
     const first = (await f.board()).tasks[0]!;
     f.states.set(first.run!.threadId!, "failed");
     await f.service.tick();
     expect((await f.board()).tasks[0]?.status).toBe("failed");
-    await f.service.tick();
-    expect(f.starts).toHaveLength(1);
+    expect(f.starts.map((item) => item.title)).toEqual(["first", "second", "third", "fourth"]);
     await f.service.action({ action: "retry", id: first.id });
     await f.service.tick();
     expect(f.followups).toHaveLength(1);
     expect(f.followups[0]?.threadId).toBe(first.run!.threadId!);
-    expect(f.starts).toHaveLength(1);
+    expect(f.starts).toHaveLength(4);
+    await expect(f.service.create({ title: "fifth", projectId: "one" })).resolves.toBeDefined();
+    await f.service.tick();
+    expect(f.starts).toHaveLength(4);
+  }));
+
+  test("a dispatch that fails before T3 accepts it keeps its slot instead of failing the whole queue", () => fixture(async (f) => {
+    for (const title of ["first", "second", "third", "fourth", "fifth"]) await f.service.create({ title, projectId: "one" });
+    f.setStartFailure(true);
+    await enable(f.service);
+    await f.service.tick();
+    await f.service.tick();
+    await f.service.tick();
+    expect(f.starts.map((item) => item.title)).toEqual(["first", "second", "third"]);
+    expect((await f.board()).tasks.map((task) => task.status)).toEqual(["failed", "failed", "failed", "queued", "queued"]);
+    await expect(f.service.action({ action: "start", id: (await f.board()).tasks[3]!.id })).rejects.toThrow("项目已有 3 个");
+  }));
+
+  test("approving a task whose branch is behind develop merges develop in and hands it back to T3 for checks", () => fixture(async (f) => {
+    await f.service.create({ title: "first", projectId: "one" });
+    await f.service.create({ title: "second", projectId: "one" });
+    await enable(f.service);
+    const merge = f.options.git.merge;
+    let behind = true;
+    f.options.git.merge = async (...args) => {
+      if (behind) throw new TaskBehindDevelopError("任务分支尚未包含最新的 develop");
+      return merge(...args);
+    };
+    const task = await f.ready();
+    const board = await f.service.action({ action: "approve", id: task.id, reviewSha: SHA });
+    expect(board.tasks[0]).toMatchObject({ status: "running", error: null, run: { reviewSha: null } });
+    expect(board.tasks[0]?.run?.pendingFeedback).toBeUndefined();
+    expect(f.syncs).toEqual(["merged"]);
+    expect(f.merges).toHaveLength(0);
+    expect(f.followups).toHaveLength(1);
+    expect(f.followups[0]).toMatchObject({ threadId: task.run!.threadId });
+    expect(f.followups[0]?.prompt).toContain("已按用户授权把最新本地 develop 合入当前任务分支");
+    expect(f.followups[0]?.prompt).toContain("禁止修改 develop");
+
+    const synced = "c".repeat(40);
+    behind = false;
+    f.options.git.review = async () => ({ headSha: synced, baseSha: SHA, stat: "1 file", diff: "+change", truncated: false });
+    f.states.set(task.run!.threadId!, "ready");
+    await f.service.tick();
+    expect((await f.board()).tasks[0]).toMatchObject({ status: "review", run: { reviewSha: synced } });
+    await f.service.action({ action: "approve", id: task.id, reviewSha: synced });
+    expect(f.merges).toEqual([synced]);
+    expect((await f.board()).tasks[0]?.status).toBe("done");
+  }));
+
+  test("a conflicting develop sync is undone and T3 is asked to merge and resolve it", () => fixture(async (f) => {
+    await f.service.create({ title: "task", projectId: "one" });
+    await enable(f.service);
+    f.options.git.merge = async () => { throw new TaskBehindDevelopError("任务分支尚未包含最新的 develop"); };
+    f.options.git.syncDevelop = async () => "conflict";
+    const task = await f.ready();
+    f.setFollowupFailure(true);
+    await expect(f.service.action({ action: "approve", id: task.id, reviewSha: SHA })).rejects.toThrow("feedback uncertain");
+    expect((await f.board()).tasks[0]).toMatchObject({ status: "failed", run: { reviewSha: null } });
+    f.setFollowupFailure(false);
+    await f.service.action({ action: "retry", id: task.id });
+    await f.service.tick();
+    expect(f.followups).toHaveLength(2);
+    expect(f.followups[0]?.commandId).toBe(f.followups[1]?.commandId);
+    expect(f.followups[1]?.prompt).toContain("git merge develop");
+    expect(f.followups[1]?.prompt).toContain("不要 rebase");
+    expect((await f.board()).tasks[0]?.status).toBe("running");
+    expect(f.merges).toHaveLength(0);
+  }));
+
+  test("develop moving again during sync keeps the task reviewable", () => fixture(async (f) => {
+    await f.service.create({ title: "task", projectId: "one" });
+    await enable(f.service);
+    f.options.git.merge = async () => { throw new TaskBehindDevelopError("任务分支尚未包含最新的 develop"); };
+    f.options.git.syncDevelop = async () => "current";
+    const task = await f.ready();
+    await expect(f.service.action({ action: "approve", id: task.id, reviewSha: SHA })).rejects.toThrow("刚刚发生变化");
+    expect((await f.board()).tasks[0]).toMatchObject({ status: "review" });
+    expect(f.followups).toHaveLength(0);
   }));
 
   test("turn ends without a commit: waits as requirement confirmation instead of failing", () => fixture(async (f) => {
@@ -414,7 +496,7 @@ describe("T3 TODO serial queue", () => {
     f.states.set(first.run!.threadId!, "running");
     await f.service.tick();
     expect((await f.board()).tasks[0]).toMatchObject({ status: "running", error: null });
-    expect(f.starts).toHaveLength(1);
+    expect(f.starts).toHaveLength(2);
     expect(f.followups).toHaveLength(0);
   }));
 
@@ -429,7 +511,7 @@ describe("T3 TODO serial queue", () => {
     f.states.set(reviewed.run!.threadId!, "running");
     await f.service.tick();
     expect((await f.board()).tasks[0]).toMatchObject({ status: "running", run: { reviewSha: null } });
-    expect(f.starts).toHaveLength(1);
+    expect(f.starts).toHaveLength(2);
     await expect(f.service.action({ action: "approve", id: reviewed.id, reviewSha: SHA })).rejects.toThrow();
     f.states.set(reviewed.run!.threadId!, "ready");
     await f.service.tick();

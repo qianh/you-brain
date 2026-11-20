@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { DevelopmentTask } from "../../../../packages/core/src/tasks/types.js";
-import { folderName, projectPickerRows, projectTask, taskCounts, taskStatusKey, taskThreadUrl, taskWorktreeHint, visibleTasks } from "../../src/pages/tasks/logic.js";
+import { folderName, projectPickerRows, projectTask, projectTasks, taskCounts, taskStatusKey, taskThreadHref, taskThreadUrl, taskWorktreeHint, visibleTasks } from "../../src/pages/tasks/logic.js";
+import { t3FrameSrc } from "../../src/lib/t3-frame.js";
+import { clipboardTaskImages } from "../../src/pages/tasks/images.js";
 
 function task(id: string, patch: Partial<DevelopmentTask> = {}): DevelopmentTask {
   return { id, title: id, description: "", priority: 2, projectId: "one", status: "queued", createdAt: "2026-11-16T00:00:00Z", updatedAt: "2026-11-16T00:00:00Z", run: null, ...patch };
@@ -19,6 +21,11 @@ describe("TODO queue presentation", () => {
     expect(projectTask(tasks, "one")?.id).toBe("waiting");
     expect(visibleTasks(tasks, "all", "active").map((item) => item.id)).toEqual(["running", "preparing", "planning"]);
     expect(visibleTasks(tasks, "one", "review").map((item) => item.id)).toEqual(["waiting"]);
+  });
+
+  test("project card lists unfinished tasks with running ones first", () => {
+    const tasks = [task("failed", { status: "failed" }), task("waiting", { status: "review" }), task("queued"), task("planning", { status: "planning" }), task("running", { status: "running" }), task("done", { status: "done" })];
+    expect(projectTasks(tasks, "one").map((item) => item.id)).toEqual(["planning", "running", "waiting", "failed"]);
   });
 
   test("all counts every status within the selected project", () => {
@@ -49,6 +56,25 @@ describe("TODO queue presentation", () => {
     expect(taskThreadUrl("http://127.0.0.1:3773/thread/task-id")).toBe("http://127.0.0.1:3773/thread/task-id");
     expect(taskThreadUrl("https://[::1]:3773/thread/task-id")).toBe("https://[::1]:3773/thread/task-id");
     for (const url of ["javascript:alert(1)", "file:///tmp/task", "https://example.com/thread", "http://user:pass@localhost:3773/thread", "not-a-url", null]) expect(taskThreadUrl(url)).toBeNull();
+  });
+
+  test("routes a saved TODO conversation to the matching thread in the deck iframe", () => {
+    const url = "http://127.0.0.1:3773/desk/thread-123";
+    const route = new URL(taskThreadHref(url)!, "http://localhost:3921");
+    expect(route.pathname).toBe("/deck");
+    expect(t3FrameSrc({ url: "http://127.0.0.1:3773", frameUrl: "http://127.0.0.1:3922" }, route.searchParams.get("t3Thread")))
+      .toBe("http://127.0.0.1:3922/desk/thread-123");
+    expect(taskThreadHref("https://example.com/thread")).toBeNull();
+  });
+
+  test("accepts pasted screenshots from both clipboard layouts and leaves text alone", () => {
+    const screenshot = new File(["png"], "clipboard.png", { type: "image/png" });
+    const image = { kind: "file", type: "image/png", getAsFile: () => screenshot };
+    const text = { kind: "string", type: "text/plain", getAsFile: () => null };
+    const clipboard = (files: File[], items: Array<typeof image | typeof text>) => ({ files, items }) as unknown as DataTransfer;
+    expect(clipboardTaskImages(clipboard([screenshot], [image, text]))).toEqual([screenshot]);
+    expect(clipboardTaskImages(clipboard([], [image, text]))).toEqual([screenshot]);
+    expect(clipboardTaskImages(clipboard([], [text]))).toEqual([]);
   });
 
   test("project picker searches by name, offers a new project for unknown names and hides paths unless names clash", () => {

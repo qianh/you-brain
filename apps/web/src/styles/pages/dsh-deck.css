@@ -220,6 +220,8 @@
 }
 .deck-tty7-xterm .xterm { height: 100%; padding: 4px 6px; }
 .deck-tty7-xterm .xterm-viewport { overscroll-behavior: contain; }
+/* 历史回放期间先不显示，放完直接停在最新内容。 */
+.deck-tty7-xterm.is-replaying { visibility: hidden; }
 
 .deck-tty7-float {
   position: absolute;

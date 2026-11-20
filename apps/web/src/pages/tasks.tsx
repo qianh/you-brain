@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import type { DevelopmentTask, TaskActionInput, TaskBoard, TaskCreateInput, TaskPriority, TaskProject, TaskReview } from "@you-brain/core/tasks/types.js";
+import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT, TASK_IMAGE_TYPES, type DevelopmentTask, type TaskActionInput, type TaskBoard, type TaskCreateInput, type TaskImage, type TaskPriority, type TaskProject, type TaskReview } from "@you-brain/core/tasks/types.js";
 
 import { Banner } from "../components/banner.js";
-import { Button } from "../components/button.js";
+import { Button, IconButton } from "../components/button.js";
 import { ConfirmDialog, Dialog } from "../components/dialog.js";
 import { EmptyState } from "../components/empty.js";
 import { Icon } from "../components/icons.js";
@@ -16,21 +16,27 @@ import { useToast } from "../components/toast.js";
 import { useDaemon } from "../daemon-context.js";
 import { usePageActive } from "../page-active.js";
 import { formatRelative } from "../lib/format.js";
-import { deckT3ThreadHref } from "../lib/route.js";
 import { useRoute } from "../router.js";
-import { projectTask, TASK_PRIORITY_KEYS, TASK_STATUS_KEYS, taskCounts, taskStatusKey, taskThreadUrl, taskWorktreeHint, visibleTasks } from "./tasks/logic.js";
+import { projectTasks, TASK_PRIORITY_KEYS, TASK_STATUS_KEYS, taskCounts, taskStatusKey, taskThreadHref, taskWorktreeHint, visibleTasks } from "./tasks/logic.js";
 import { ProjectPicker, type ProjectChoice } from "./tasks/project-picker.js";
+import { clipboardTaskImages, TaskImagePreview } from "./tasks/images.js";
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const TASK_METRICS = [
   ["all", "tasksAll"], ["queued", "tasksQueued"], ["active", "tasksActive"], ["review", "tasksReview"], ["done", "tasksDone"],
 ] as const;
 
-function ThreadLink({ task }: { task: DevelopmentTask }) {
+function ThreadLink({ task, onOpen }: { task: DevelopmentTask; onOpen?: () => void }) {
   const { t } = useDaemon();
-  const href = taskThreadUrl(task.run?.threadUrl);
-  return href ? <a className="tasks-thread-link" href={href} target="_blank" rel="noopener noreferrer">
-    {t("tasksOpenT3")} <Icon name="external-link" size={12} />
+  const { navigate } = useRoute();
+  const href = taskThreadHref(task.run?.threadUrl);
+  return href ? <a className="tasks-thread-link" href={href} onClick={(event) => {
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    onOpen?.();
+    navigate(href);
+  }}>
+    {t("tasksOpenT3")} <Icon name="chevron-right" size={12} />
   </a> : null;
 }
 
@@ -48,6 +54,7 @@ export function TasksPage() {
   const [tab, setTab] = useState<"tasks" | "projects">("tasks");
   const [editor, setEditor] = useState<{ task: DevelopmentTask | null } | null>(null);
   const [reviewing, setReviewing] = useState<DevelopmentTask | null>(null);
+  const [viewingImages, setViewingImages] = useState<DevelopmentTask | null>(null);
   const [completing, setCompleting] = useState<DevelopmentTask | null>(null);
   const [starting, setStarting] = useState<TaskProject | null>(null);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
@@ -131,8 +138,8 @@ export function TasksPage() {
     setLaunchingId(id);
     try {
       await mutate(() => client.taskAction({ action: "start", id }), undefined, (next) => {
-        const href = taskThreadUrl(next.tasks.find((task) => task.id === id)?.run?.threadUrl);
-        if (href && document.visibilityState !== "hidden" && window.location.pathname.replace(/\/$/u, "") === "/todos") navigate(deckT3ThreadHref(href));
+        const href = taskThreadHref(next.tasks.find((task) => task.id === id)?.run?.threadUrl);
+        if (href && document.visibilityState !== "hidden" && window.location.pathname.replace(/\/$/u, "") === "/todos") navigate(href);
       });
     } finally {
       if (mounted.current) setLaunchingId(null);
@@ -157,7 +164,8 @@ export function TasksPage() {
       {board?.connectionError && <Banner tone="warn">{t("tasksConnection", { detail: board.connectionError })}</Banner>}
       {tab === "projects" ? <div className="tasks-projects-grid" aria-label={t("tasksProjects")}>
         {projects.map((item) => {
-          const current = projectTask(tasks, item.id);
+          const unfinished = projectTasks(tasks, item.id);
+          const current = unfinished[0];
           const queued = tasks.filter((task) => task.projectId === item.id && task.status === "queued").length;
           // 卡片固定三段:头部(名称+路径+排队数)、正文(当前任务/待领取/空闲,固定两行高)、底栏(状态+按钮),高度一致。
           return <section className={`tasks-project${project === item.id ? " is-selected" : ""}${item.enabled ? " is-enabled" : ""}`} key={item.id}>
@@ -171,7 +179,7 @@ export function TasksPage() {
             </button>
             <div className="tasks-project-body">
               {current
-                ? <p className={`tasks-project-current is-${current.status}`}><span className="tasks-project-current-label">{t(current.status === "review" ? "tasksProjectReview" : current.status === "failed" ? "tasksProjectFailed" : TASK_STATUS_KEYS[current.status])}</span><span className="tasks-project-current-title" title={current.title}>{current.title}</span></p>
+                ? <p className={`tasks-project-current is-${current.status}`}><span className="tasks-project-current-label">{t(current.status === "review" ? "tasksProjectReview" : current.status === "failed" ? "tasksProjectFailed" : TASK_STATUS_KEYS[current.status])}</span><span className="tasks-project-current-title" title={current.title}>{current.title}{unfinished.length > 1 ? ` +${unfinished.length - 1}` : ""}</span></p>
                 : queued > 0
                   ? <p className="tasks-project-waiting">{t("tasksProjectQueued", { count: queued })}</p>
                   : <p className="tasks-project-idle">{t("tasksProjectIdle")}</p>}
@@ -223,6 +231,7 @@ export function TasksPage() {
                   <div className="tasks-item-title"><h3>{task.title}</h3><span className={`tasks-status is-${worktreeBlock ? "worktree-blocked" : task.status}`}>{t(taskStatusKey(task))}</span></div>
                   {task.description && <p className="tasks-description">{task.description}</p>}
                   <div className="tasks-item-meta"><span><Icon name="folder" size={12} />{linked?.name ?? t(task.projectId ? "tasksUnknownProject" : "tasksUnassigned")}</span>{task.run?.branch && <code>{task.run.branch}</code>}<span>{t("tasksUpdated", { when: formatRelative(task.updatedAt, language, timeZone) })}</span></div>
+                  {!!task.images?.length && <Button size="sm" variant="ghost" onClick={() => setViewingImages(task)}>{t("tasksImages", { count: task.images.length })}</Button>}
                   {worktreeBlock ? <p className="tasks-item-error is-worktree-blocked" role="status">{taskWorktreeHint(worktreeBlock, language)}</p>
                     : taskError && <p className="tasks-item-error" role="alert">{taskError}</p>}
                 </div>
@@ -241,10 +250,13 @@ export function TasksPage() {
         </section>
       </>}
     </div>
-    {editor && <TaskEditor key={editor.task?.id ?? "new"} task={editor.task} projects={projects} initialProject={project} busy={busy} onClose={() => { if (!busy) setEditor(null); }} onSave={async (input) => {
-      const ok = await mutate(() => editor.task ? client.updateTask({ id: editor.task.id, ...input }) : client.createTask(input), t(editor.task ? "tasksSaved" : "tasksCreated"));
+    {editor && <TaskEditor key={editor.task?.id ?? "new"} task={editor.task} projects={projects} initialProject={project} busy={busy} onClose={() => { if (!busy) setEditor(null); }} onSave={async (input, files, retainImageIds) => {
+      const ok = await mutate(() => editor.task ? client.updateTask({ id: editor.task.id, ...input, retainImageIds }, files) : client.createTask(input, files), t(editor.task ? "tasksSaved" : "tasksCreated"));
       if (ok) setEditor(null);
     }} />}
+    {viewingImages && <Dialog open size="lg" title={viewingImages.title} onClose={() => setViewingImages(null)}>
+      <div className="tasks-image-gallery">{viewingImages.images?.map((image) => <figure key={image.id}><TaskImagePreview image={image} taskId={viewingImages.id} /><figcaption>{image.name}</figcaption></figure>)}</div>
+    </Dialog>}
     {reviewing && <TaskReviewDialog key={reviewing.id} task={reviewing} onClose={() => setReviewing(null)} onChanged={acceptBoard} />}
     <ConfirmDialog open={completing !== null} title={completing ? `${t("tasksComplete")} · ${completing.title}` : t("tasksComplete")} description={t("tasksCompleteHint")} confirmLabel={t("tasksComplete")} cancelLabel={t("cancel")} loading={busy} onClose={() => { if (!busy) setCompleting(null); }} onConfirm={() => {
       if (completing) void mutate(() => client.taskAction({ action: "complete", id: completing.id }), t("tasksCompleted")).then((ok) => { if (ok) setCompleting(null); });
@@ -261,23 +273,54 @@ function TaskEditor({ task, projects, initialProject, busy, onClose, onSave }: {
   initialProject: string;
   busy: boolean;
   onClose: () => void;
-  onSave: (input: TaskCreateInput) => Promise<void>;
+  onSave: (input: TaskCreateInput, images: File[], retainImageIds: string[]) => Promise<void>;
 }) {
   const { t } = useDaemon();
   const [title, setTitle] = useState(task?.title ?? "");
   const [description, setDescription] = useState(task?.description ?? "");
   const [project, setProject] = useState<ProjectChoice>({ projectId: task?.projectId ?? (projects.some((item) => item.id === initialProject) ? initialProject : "") });
   const [priority, setPriority] = useState<TaskPriority>(task?.priority ?? 2);
+  const [savedImages, setSavedImages] = useState<TaskImage[]>(task?.images ?? []);
+  const [newImages, setNewImages] = useState<Array<{ id: number; file: File }>>([]);
+  const [imageError, setImageError] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const imageSequence = useRef(0);
+  const imageCount = savedImages.length + newImages.length;
+  const addImages = (files: File[]): void => {
+    if (busy || !files.length) return;
+    if (imageCount + files.length > TASK_IMAGE_MAX_COUNT) { setImageError(t("tasksImageCountLimit")); return; }
+    if (files.some((file) => !TASK_IMAGE_TYPES.some((type) => type === file.type) || file.size === 0 || file.size > TASK_IMAGE_MAX_BYTES)) {
+      setImageError(t("tasksImageTypeLimit"));
+      return;
+    }
+    setImageError(null);
+    const added = files.map((file) => ({ id: ++imageSequence.current, file }));
+    setNewImages((previous) => [...previous, ...added]);
+  };
   const submit = (event: FormEvent): void => {
     event.preventDefault();
     if (busy || !title.trim()) return;
     const linked = "newProject" in project ? { newProject: project.newProject } : { projectId: project.projectId || null };
-    void onSave({ title: title.trim(), description: description.trim(), ...linked, priority });
+    void onSave({ title: title.trim(), description: description.trim(), ...linked, priority }, newImages.map(({ file }) => file), savedImages.map(({ id }) => id));
   };
   return <Dialog open className="tasks-editor-dialog" onClose={onClose} title={t(task ? "tasksEdit" : "tasksNew")} footer={<><Button variant="ghost" disabled={busy} onClick={onClose}>{t("cancel")}</Button><Button variant="primary" type="submit" form="task-editor" loading={busy} disabled={!title.trim()}>{t(task ? "tasksSave" : "tasksCreate")}</Button></>}>
     <form id="task-editor" className="tasks-form" onSubmit={submit}>
       <label><span>{t("tasksTitle")}</span><Input label={t("tasksTitle")} value={title} maxLength={200} required onChange={(event) => setTitle(event.target.value)} placeholder={t("tasksTitlePlaceholder")} disabled={busy} /></label>
-      <label><span>{t("tasksDescription")}</span><Textarea label={t("tasksDescription")} value={description} maxLength={20_000} rows={5} onChange={(event) => setDescription(event.target.value)} placeholder={t("tasksDescriptionPlaceholder")} disabled={busy} /></label>
+      <div className="tasks-description-field">
+        <label><span>{t("tasksDescription")}</span><Textarea label={t("tasksDescription")} value={description} maxLength={20_000} rows={5} onChange={(event) => setDescription(event.target.value)} placeholder={t("tasksDescriptionPlaceholder")} disabled={busy} onPaste={(event) => {
+          const images = clipboardTaskImages(event.clipboardData);
+          if (images.length) { event.preventDefault(); addImages(images); }
+        }} /></label>
+        {!!imageCount && <ul className="tasks-image-previews">
+          {savedImages.map((image) => <li key={image.id}><TaskImagePreview image={image} {...(task ? { taskId: task.id } : {})} /><IconButton label={t("tasksRemoveImage", { name: image.name })} disabled={busy} onClick={() => { setSavedImages((items) => items.filter(({ id }) => id !== image.id)); setImageError(null); }}><Icon name="x" size={13} /></IconButton></li>)}
+          {newImages.map(({ id, file }) => <li key={id}><TaskImagePreview image={file} /><IconButton label={t("tasksRemoveImage", { name: file.name })} disabled={busy} onClick={() => { setNewImages((items) => items.filter((item) => item.id !== id)); setImageError(null); }}><Icon name="x" size={13} /></IconButton></li>)}
+        </ul>}
+        <div className="tasks-image-toolbar">
+          <input ref={fileInput} type="file" hidden multiple accept={TASK_IMAGE_TYPES.join(",")} onChange={(event) => { addImages([...event.currentTarget.files ?? []]); event.currentTarget.value = ""; }} />
+          <Button size="sm" variant="ghost" disabled={busy || imageCount >= TASK_IMAGE_MAX_COUNT} icon={<Icon name="plus" size={13} />} onClick={() => fileInput.current?.click()}>{t("tasksAddImage")}</Button>
+          {imageError && <small role="alert">{imageError}</small>}
+        </div>
+      </div>
       <div className="tasks-form-pair"><div><label>{t("tasksProject")}</label><ProjectPicker projects={projects} value={project} onChange={setProject} disabled={busy} /></div><div><label>{t("tasksPriority")}</label><Select label={t("tasksPriority")} value={String(priority)} onChange={(value) => setPriority(Number(value) as TaskPriority)} disabled={busy} options={TASK_PRIORITY_KEYS.map((key, index) => ({ value: String(index), label: t(key) }))} /></div></div>
       {"newProject" in project && <p className="tasks-form-hint" role="status"><Icon name="info" size={13} />{t(project.newProject.cwd ? "tasksProjectWillAdd" : "tasksProjectWillCreate", { name: project.newProject.name })}</p>}
     </form>
@@ -311,7 +354,9 @@ function TaskReviewDialog({ task, onClose, onChanged }: { task: DevelopmentTask;
         ? { action, id: task.id, reviewSha: review.headSha }
         : { action, id: task.id, feedback: feedback.trim() });
       onChanged(next);
-      push({ message: t(action === "approve" ? "tasksApproved" : "tasksRejected"), tone: "success" });
+      // 确认合并时若 develop 已前进，任务被合入 develop 后交回 T3，而不是直接完成。
+      const synced = action === "approve" && next.tasks.find((item) => item.id === task.id)?.status !== "done";
+      push({ message: t(action === "approve" ? (synced ? "tasksApproveSynced" : "tasksApproved") : "tasksRejected"), tone: synced ? "info" : "success" });
       onClose();
     } catch (error) {
       setError(errorMessage(error));
@@ -329,7 +374,7 @@ function TaskReviewDialog({ task, onClose, onChanged }: { task: DevelopmentTask;
     {error && <Banner tone="danger" action={<Button size="sm" disabled={busy} onClick={() => setRevision((value) => value + 1)}>{t(review ? "reload" : "retry")}</Button>}>{error}</Banner>}
     {!review && !error && <div className="tasks-loading" role="status"><Spinner />{t("tasksLoadingReview")}</div>}
     {review && <div className="tasks-review-content">
-      <header className="tasks-review-task"><h3>{review.task.title}</h3><ThreadLink task={review.task} /></header>
+      <header className="tasks-review-task"><h3>{review.task.title}</h3><ThreadLink task={review.task} onOpen={onClose} /></header>
       <dl className="tasks-review-meta"><div><dt>{t("tasksBranch")}</dt><dd><code>{review.task.run?.branch}</code></dd></div><div><dt>{t("tasksCommit")}</dt><dd><code>{review.headSha}</code></dd></div><div><dt>{t("tasksBaseCommit")}</dt><dd><code>{review.baseSha}</code></dd></div><div><dt>{t("tasksWorktree")}</dt><dd><code>{review.task.run?.worktreePath}</code></dd></div></dl>
       <section><h4>{t("tasksSummary")}</h4><p className="tasks-review-summary">{review.task.run?.summary || t("tasksNoSummary")}</p></section>
       <section><h4>{t("tasksChanges")}</h4><pre className="tasks-review-stat">{review.stat}</pre></section>
