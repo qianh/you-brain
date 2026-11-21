@@ -85,6 +85,23 @@ test("reports an explicit embedding restriction", async () => {
   }, () => new Response(SHELL, { headers: { "content-type": "text/html", "x-frame-options": "SAMEORIGIN" } }));
 });
 
+test("T3 禁止嵌入但转发可用时，仍返回 ready 与转发地址", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "yb-t3-frame-blocked-"));
+  const t3 = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response(SHELL, { headers: { "content-type": "text/html", "x-frame-options": "DENY", "content-security-policy": "frame-ancestors 'none'" } }) });
+  const server = await startDaemonHttp({
+    dataDir: dir,
+    deps: { deck: { t3Frame: () => "http://127.0.0.1:13773/" } } as unknown as HttpDeps,
+  });
+  try {
+    const url = `http://127.0.0.1:${t3.port}/`;
+    expect(await (await probe(server, url)).json()).toEqual({ state: "ready", url, frameUrl: "http://127.0.0.1:13773/" });
+  } finally {
+    await server.stop();
+    await t3.stop(true);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("allows a T3 shell that permits this daemon origin", async () => {
   await withServers(async (server, url) => {
     expect(await (await probe(server, url)).json()).toEqual({ state: "ready", url });

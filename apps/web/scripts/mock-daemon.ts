@@ -1490,6 +1490,7 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
     return json({
       readAt: new Date().toISOString(),
       stale: false,
+      local: ["claude", "codex", "cursor", "gemini", "kimi"],
       accounts: [
         {
           id: "mock-claude",

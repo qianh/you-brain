@@ -534,10 +534,12 @@ export async function handleApi(
   }
   if (path === "/api/deck/t3") {
     return method(request, "GET", async () => {
-      const state = await probeT3Web(url.searchParams.get("url") ?? "");
-      if (state.state !== "ready") return json(state);
-      const frameUrl = context.deps.deck?.t3Frame?.(state.url) ?? null;
-      return json(frameUrl === null ? state : { ...state, frameUrl });
+      const probed = await probeT3Web(url.searchParams.get("url") ?? "");
+      // T3 自己禁止被嵌入时，转发会去掉这些头，所以只要转发起得来就仍可用。
+      if (probed.state !== "ready" && !(probed.state === "error" && probed.reason === "frame-blocked")) return json(probed);
+      const frameUrl = context.deps.deck?.t3Frame?.(probed.url) ?? null;
+      if (frameUrl === null) return json(probed);
+      return json({ state: "ready", url: probed.url, frameUrl });
     });
   }
   if (path === "/api/deck/muse") {

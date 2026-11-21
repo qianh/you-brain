@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import type { Server } from "bun";
 
 import { T3_INJECT_PATH } from "../../src/deck/t3/inject.js";
-import { forwardHeaders, injectT3Html, preferredProxyPort, responseHeaders, startT3Proxy, type T3Proxy } from "../../src/deck/t3/proxy.js";
+import { forwardHeaders, injectT3Html, preferredProxyPort, responseHeaders, startT3Proxy, stripFrameAncestors, type T3Proxy } from "../../src/deck/t3/proxy.js";
 
 describe("T3 转发的纯函数", () => {
   it("优先端口 = T3 端口 + 10000，超出范围时随机", () => {
@@ -44,6 +44,24 @@ describe("T3 转发的纯函数", () => {
     expect(out.get("location")).toBe("http://127.0.0.1:13773/login");
     expect(out.get("content-encoding")).toBeNull();
     expect(out.getSetCookie()).toEqual(["a=1; Path=/", "b=2; Path=/"]);
+  });
+});
+
+describe("防嵌入头", () => {
+  it("响应头：去掉 X-Frame-Options 和 CSP 里的 frame-ancestors，其他指令保留", () => {
+    const source = new Headers({
+      "x-frame-options": "DENY",
+      "content-security-policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+    });
+    const out = responseHeaders(source, "http://127.0.0.1:13773", "http://127.0.0.1:3773");
+    expect(out.get("x-frame-options")).toBeNull();
+    expect(out.get("content-security-policy")).toBe("default-src 'none'; base-uri 'none'");
+  });
+
+  it("CSP 只剩 frame-ancestors 时整条去掉", () => {
+    expect(stripFrameAncestors("frame-ancestors 'none'")).toBeNull();
+    const out = responseHeaders(new Headers({ "content-security-policy": "frame-ancestors 'none'" }), "http://a", "http://b");
+    expect(out.get("content-security-policy")).toBeNull();
   });
 });
 

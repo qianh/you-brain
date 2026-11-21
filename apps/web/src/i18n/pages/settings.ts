@@ -1,6 +1,7 @@
 export const zh = {
   settingsLead: "外观、语言和额度展示即时生效，其他改动需保存。",
   settingsQuotaDisplay: "额度展示",
+  settingsQuotaEmpty: "未检测到本机 AI Agent",
   navCapture: "来源与采集",
   navRefine: "提炼与话题",
   navConsolidation: "沉淀与提醒",
@@ -128,6 +129,7 @@ export const zh = {
 export const en = {
   settingsLead: "Appearance, language, and usage display apply immediately. Other changes need to be saved.",
   settingsQuotaDisplay: "Usage display",
+  settingsQuotaEmpty: "No AI agents found on this machine",
   navCapture: "Sources and capture",
   navRefine: "Refine and topics",
   navConsolidation: "Consolidation and reminders",

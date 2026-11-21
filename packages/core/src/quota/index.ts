@@ -4,3 +4,5 @@ export { TOKEN_AGENTS, QUOTA_KEEP_MS, QUOTA_STALE_MS, QuotaService, type QuotaPo
 export type { QuotaAccount, QuotaTokens, QuotaTokenUsage, QuotaView, QuotaWindow } from "./types.js";
 export { MAGPIE_BIN_ENV, locateMagpie, readMagpieAccounts } from "./magpie.js";
 export { USAGE_LOG_ENV, parseUsageLog, readMagpieUsageLog, tokenWindowCutoffs, type TokenWindowCutoffs } from "./usage-log.js";
+export { LOCAL_AGENT_DIRS, detectLocalAgents } from "./local-agents.js";
+export { ANTIGRAVITY_TIMEOUT_MS, locateAntigravity, parseAntigravityQuota, readAntigravityQuota } from "./antigravity.js";

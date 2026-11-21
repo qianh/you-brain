@@ -1,7 +1,7 @@
 import { useMemo, useSyncExternalStore } from "react";
 
 import { prefs } from "../../lib/prefs.js";
-import { QUOTA_AGENTS, quotaSelection, type QuotaAgent, type QuotaCaptures } from "./quota.js";
+import { quotaSelection, type QuotaAgent, type QuotaCaptures } from "./quota.js";
 
 const KEY = "you-brain.quota-display";
 const listeners = new Set<() => void>();
@@ -42,7 +42,7 @@ export function useQuotaSelection(captures: QuotaCaptures, nowMs = Date.now()) {
     const next = quotaSelection(getStored(), captures, nowMs);
     if (checked) next.add(agent);
     else next.delete(agent);
-    const value = JSON.stringify(QUOTA_AGENTS.map((item) => item.agent).filter((id) => next.has(id)));
+    const value = JSON.stringify([...next].sort());
     prefs.setItem(KEY, value);
     received = null;
     publish();

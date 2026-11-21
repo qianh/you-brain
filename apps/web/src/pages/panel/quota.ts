@@ -3,18 +3,53 @@ import type { QuotaTokenUsage, QuotaView } from "@you-brain/core/http/types.js";
 import type { Language } from "../../lib/format.js";
 
 /**
- * magpie's agent id → label and capture sources used for the default selection.
+ * Labels and default capture sources for the agents we know by name. The checkable
+ * list itself comes from what magpie returns and what the machine has (see `quotaOptions`).
  */
-export const QUOTA_AGENTS = [
+export const QUOTA_AGENTS: ReadonlyArray<{ agent: string; sources: readonly string[]; label: string }> = [
   { agent: "claude", sources: ["claude-code"], label: "Claude Code" },
   { agent: "codex", sources: ["codex", "t3-code"], label: "Codex" },
   { agent: "cursor", sources: ["cursor"], label: "Cursor" },
   { agent: "grok", sources: ["grok-build"], label: "Grok" },
   { agent: "zcode", sources: ["zcode"], label: "ZCode" },
-] as const;
+  { agent: "gemini", sources: ["gemini-cli"], label: "Gemini CLI" },
+  { agent: "antigravity", sources: [], label: "Antigravity" },
+  { agent: "kimi", sources: [], label: "Kimi CLI" },
+  { agent: "opencode", sources: [], label: "OpenCode" },
+  { agent: "qwen", sources: [], label: "Qwen Code" },
+  { agent: "windsurf", sources: [], label: "Windsurf" },
+  { agent: "trae", sources: [], label: "Trae" },
+  { agent: "pi", sources: [], label: "Pi" },
+];
 
-export type QuotaAgent = (typeof QUOTA_AGENTS)[number]["agent"];
+/** Agents the user asked never to see in the usage display, even when magpie reports them. */
+const QUOTA_HIDDEN: ReadonlySet<string> = new Set(["copilot", "qoder", "kiro", "workbuddy-ai"]);
+
+export type QuotaAgent = string;
 export type QuotaCaptures = ReadonlyArray<{ source: string; lastCaptureAt: string | null }> | undefined;
+
+export interface QuotaOption {
+  agent: QuotaAgent;
+  label: string;
+}
+
+/**
+ * Every agent that can be ticked: the ones found on this machine plus any magpie has
+ * numbers for (an active subscription with windows, or gateway token usage). Known ones
+ * come first in a fixed order, then the rest by id.
+ */
+export function quotaOptions(quota: Pick<QuotaView, "accounts" | "tokens" | "local"> | null): QuotaOption[] {
+  const ids = new Set<string>(quota?.local ?? []);
+  for (const account of quota?.accounts ?? []) {
+    if (account.active && account.windows.length > 0) ids.add(account.agent);
+  }
+  for (const agent of Object.keys(quota?.tokens ?? {})) ids.add(agent);
+  const known = QUOTA_AGENTS.filter(({ agent }) => ids.has(agent));
+  const knownIds = new Set(known.map(({ agent }) => agent));
+  const rest = [...ids].filter((agent) => !knownIds.has(agent)).sort();
+  return [...known.map(({ agent, label }) => ({ agent, label })), ...rest.map((agent) => ({ agent, label: agent }))]
+    .filter(({ agent }) => !QUOTA_HIDDEN.has(agent));
+}
 
 /** A source counts as in use when it captured a session this recently. */
 export const QUOTA_RECENT_MS = 7 * 24 * 60 * 60_000;
@@ -23,7 +58,7 @@ export function quotaSelection(stored: string | null, captures: QuotaCaptures, n
   if (stored !== null) {
     try {
       const value: unknown = JSON.parse(stored);
-      if (Array.isArray(value)) return new Set(QUOTA_AGENTS.filter(({ agent }) => value.includes(agent)).map(({ agent }) => agent));
+      if (Array.isArray(value)) return new Set(value.filter((item): item is string => typeof item === "string"));
     } catch {
       return quotaSelection(null, captures, nowMs);
     }
@@ -50,7 +85,7 @@ export interface QuotaCardView {
   windows: QuotaWindowView[];
   /** magpie could not read this one last time; the numbers are from `readAt`. */
   stale: boolean;
-  readAt: string;
+  readAt: string | null;
   /** Token consumption over 今天 / 近 3 天 / 近 7 天, for agents riding a gateway rather than a subscription. */
   tokens?: QuotaTokenUsage;
 }
@@ -110,7 +145,7 @@ export function resetIn(resetsAt: string | null, nowMs: number, language: Langua
  * An agent without a subscription can still show measured gateway token usage.
  */
 export function quotaCards(
-  quota: Pick<QuotaView, "accounts" | "tokens"> | null,
+  quota: Pick<QuotaView, "accounts" | "tokens" | "local"> | null,
   selected: ReadonlySet<QuotaAgent>,
   nowMs: number,
   language: Language,
@@ -118,11 +153,15 @@ export function quotaCards(
   const accounts = quota?.accounts ?? [];
   const tokens = quota?.tokens ?? {};
   const cards: QuotaCardView[] = [];
-  for (const { agent, label } of QUOTA_AGENTS) {
+  for (const { agent, label } of quotaOptions(quota)) {
     if (!selected.has(agent)) continue;
     const account = accounts.find((item) => item.agent === agent && item.active && item.windows.length > 0);
     const agentTokens = tokens[agent];
-    if (account === undefined && agentTokens === undefined) continue;
+    if (account === undefined && agentTokens === undefined) {
+      // Ticked but magpie has nothing for it: still show it, so the tick is visibly honoured.
+      cards.push({ agent, label, plan: null, stale: false, readAt: null, windows: [] });
+      continue;
+    }
     const windows = (account?.windows ?? []).map((window) => ({
       name: window.name,
       label: windowLabel(window.name, language),

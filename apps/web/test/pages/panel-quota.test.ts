@@ -4,6 +4,7 @@ import type { QuotaAccount, QuotaTokenUsage, QuotaView } from "@you-brain/core/h
 import {
   minutesAgo,
   quotaCards as buildQuotaCards,
+  quotaOptions,
   quotaSelection,
   quotaTone,
   resetIn,
@@ -54,7 +55,7 @@ describe("quota selection", () => {
   });
 
   test("an explicit selection overrides activity including when all items are unchecked", () => {
-    expect([...quotaSelection('["cursor","cursor","retired",1]', captured("claude-code"), NOW)]).toEqual(["cursor"]);
+    expect([...quotaSelection('["cursor","cursor","retired",1]', captured("claude-code"), NOW)]).toEqual(["cursor", "retired"]);
     expect([...quotaSelection("[]", captured("claude-code"), NOW)]).toEqual([]);
     expect(buildQuotaCards(view([claude]), quotaSelection("[]", captured("claude-code"), NOW), NOW, "zh")).toEqual([]);
   });
@@ -235,5 +236,43 @@ describe("nextQuotaIndex", () => {
     expect([0, 1, 2].map((index) => nextQuotaIndex(index, 3))).toEqual([1, 2, 0]);
     expect(nextQuotaIndex(0, 1)).toBe(0);
     expect(nextQuotaIndex(4, 0)).toBe(0);
+  });
+});
+
+describe("quotaOptions", () => {
+  test("lists what magpie returns: known agents first, unknown by id, hidden ones dropped", () => {
+    const mk = (agent: string, windows = [{ name: "7 days", used: 1, resetsAt: null }], active = true): QuotaAccount =>
+      ({ id: agent, readAt: READ, stale: false, agent, plan: null, active, windows });
+    const options = quotaOptions(view(
+      [mk("zcode"), mk("newtool"), mk("copilot"), mk("grok"), mk("gemini", []), mk("cursor", undefined, false)],
+      { codex: codexTokens },
+    ));
+    expect(options).toEqual([
+      { agent: "codex", label: "Codex" },
+      { agent: "grok", label: "Grok" },
+      { agent: "zcode", label: "ZCode" },
+      { agent: "newtool", label: "newtool" },
+    ]);
+    expect(quotaOptions(null)).toEqual([]);
+  });
+
+  test("an unknown agent that is checked shows a card straight away", () => {
+    const tool: QuotaAccount = { id: "n1", readAt: READ, stale: false, agent: "newtool", plan: null, active: true, windows: [{ name: "7 days", used: 5, resetsAt: null }] };
+    const cards = buildQuotaCards(view([tool]), new Set(["newtool"]), NOW, "zh");
+    expect(cards.map((card) => [card.agent, card.label])).toEqual([["newtool", "newtool"]]);
+  });
+
+  test("agents found on this machine are listed even when magpie has nothing for them", () => {
+    const options = quotaOptions({ ...view([]), local: ["claude", "kimi", "copilot", "cursor"] });
+    expect(options).toEqual([
+      { agent: "claude", label: "Claude Code" },
+      { agent: "cursor", label: "Cursor" },
+      { agent: "kimi", label: "Kimi CLI" },
+    ]);
+  });
+
+  test("a ticked agent with no numbers still gets an empty card straight away", () => {
+    const cards = buildQuotaCards({ ...view([]), local: ["cursor"] }, new Set(["cursor"]), NOW, "zh");
+    expect(cards).toEqual([{ agent: "cursor", label: "Cursor", plan: null, stale: false, readAt: null, windows: [] }]);
   });
 });

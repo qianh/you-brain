@@ -1,3 +1,4 @@
+import { antigravityAccount, parseAntigravityQuota } from "./antigravity.js";
 import { ClaudeUsageError, readClaudeAccessToken, readClaudeUsage, type ClaudeUsageWindows } from "./claude-usage.js";
 import { parseMagpieAccounts } from "./parse.js";
 import type { QuotaAccount, QuotaTokens, QuotaTokenUsage, QuotaView } from "./types.js";
@@ -36,6 +37,9 @@ export const TOKEN_AGENTS: ReadonlyArray<{ name: string; agent: string }> = [
   { name: "t3code", agent: "codex" },
 ];
 
+/** `agy /quota` is a process start plus a network call, so it runs at most this often; failures wait the same. */
+export const ANTIGRAVITY_MIN_INTERVAL_MS = 5 * 60_000;
+
 export interface QuotaPorts {
   /** Runs `magpie accounts --json` and returns its stdout. Rejects on any failure. */
   read(): Promise<string>;
@@ -43,6 +47,8 @@ export interface QuotaPorts {
   readTokens(): Promise<string>;
   /** Probes Anthropic's live usage endpoint for the Claude subscription; may reject. */
   readClaudeLive(): Promise<ClaudeUsageWindows>;
+  /** Runs Antigravity's `/quota` and returns its stdout; rejects when `agy` is missing or fails. Optional. */
+  readAntigravity?(): Promise<string>;
   nowMs(): number;
 }
 
@@ -61,6 +67,9 @@ export class QuotaService {
   /** Earliest clock time the next probe may run; null while none has failed. */
   #claudeRetryAtMs: number | null = null;
   #claudeFailures = 0;
+  /** Last Antigravity windows and when the last attempt (good or bad) ran. */
+  #antigravity: { windows: ReturnType<typeof parseAntigravityQuota>; atMs: number } | null = null;
+  #antigravityAttemptMs: number | null = null;
 
   constructor(ports: QuotaPorts) {
     this.#ports = ports;
@@ -91,8 +100,15 @@ export class QuotaService {
   async #read(): Promise<void> {
     this.#attemptAtMs = this.#ports.nowMs();
     try {
-      const parsed = parseMagpieAccounts(await this.#ports.read());
-      if (parsed === null) throw new Error("magpie 输出无法解析");
+      // magpie covers the subscriptions it knows; agents read straight from this machine
+      // (Claude, Antigravity) must not depend on it, so a failing magpie only drops its share.
+      const magpie = await (async () => {
+        try {
+          return parseMagpieAccounts(await this.#ports.read());
+        } catch {
+          return null;
+        }
+      })();
       // The live probe replaces Claude's numbers outright: it is what Claude Code's own
       // /usage panel shows, and magpie's copy can be days behind when no request runs
       // through Anthropic. Anything failing here only skips that account, never the read.
@@ -103,6 +119,9 @@ export class QuotaService {
         .then(() => this.#ports.readTokens())
         .then((text) => parseUsageLog(text, TOKEN_AGENTS.map(({ name }) => name), tokenWindowCutoffs(this.#ports.nowMs())))
         .catch(() => null);
+      const antigravity = await this.#probeAntigravity();
+      if (magpie === null && antigravity === null) throw new Error("magpie 与本机 agent 都没有可用的额度");
+      const parsed = magpie ?? [];
       const now = this.#ports.nowMs();
       const readAt = new Date(now).toISOString();
       let fresh: QuotaAccount[] = parsed
@@ -121,6 +140,9 @@ export class QuotaService {
       if (claudeProbe !== null) {
         fresh = fresh.map((account) => (account.agent === "claude" ? claudeAccount(account, claudeProbe.windows, claudeProbe.atMs, now) : account));
       }
+      if (antigravity !== null && antigravity.windows !== null && !fresh.some((account) => account.agent === "antigravity")) {
+        fresh.push(antigravityAccount(antigravity.windows, antigravity.atMs, now));
+      }
       // One subscription failing to answer must not wipe its numbers: keep the last good ones a while.
       const kept = this.#view.accounts
         .filter((old) => !fresh.some((account) => account.id === old.id))
@@ -136,6 +158,27 @@ export class QuotaService {
     } catch {
       this.#view = { ...this.#view, stale: this.#readAtMs !== null };
     }
+  }
+
+  /**
+   * Antigravity's own `/quota`, asked at most every few minutes. A failure keeps the
+   * previous windows (honestly aging) and only delays the next ask.
+   */
+  async #probeAntigravity(): Promise<{ windows: ReturnType<typeof parseAntigravityQuota>; atMs: number } | null> {
+    const read = this.#ports.readAntigravity;
+    if (read === undefined) return null;
+    const now = this.#ports.nowMs();
+    if (this.#antigravityAttemptMs !== null && now - this.#antigravityAttemptMs < ANTIGRAVITY_MIN_INTERVAL_MS) return this.#antigravity;
+    this.#antigravityAttemptMs = now;
+    try {
+      const windows = parseAntigravityQuota(await read());
+      if (windows !== null) this.#antigravity = { windows, atMs: this.#ports.nowMs() };
+    } catch {
+      // Not installed or not signed in: no card numbers, never an error for the rest.
+    }
+    // Numbers older than the keep window are dropped rather than shown as current.
+    if (this.#antigravity !== null && this.#ports.nowMs() - this.#antigravity.atMs >= QUOTA_KEEP_MS) this.#antigravity = null;
+    return this.#antigravity;
   }
 
   /**

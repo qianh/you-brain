@@ -34,7 +34,7 @@ export function QuotaGroups({
           <div className="quota-head">
             <span className="quota-name">{card.label}</span>
             {card.plan ? <span className="quota-plan">{card.plan}</span> : null}
-            {card.stale && !hideCardStale ? (
+            {card.stale && !hideCardStale && card.readAt !== null ? (
               <span className="quota-plan quota-card-stale">{t("panelQuotaStale", { minutes: minutesAgo(card.readAt, nowMs) })}</span>
             ) : null}
           </div>
@@ -63,6 +63,11 @@ export function QuotaGroups({
             );
           })}
           {card.tokens !== undefined ? tokenRows(card.tokens, t) : null}
+          {card.windows.length === 0 && card.tokens === undefined ? (
+            <div className="quota-row">
+              <span className="quota-window">{t("panelQuotaNone")}</span>
+            </div>
+          ) : null}
         </div>
       ))}
     </>

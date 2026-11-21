@@ -58,4 +58,6 @@ export interface QuotaView {
   readAt: string | null;
   /** The last refresh failed, so `accounts` are from an earlier read. */
   stale: boolean;
+  /** Common AI agents found on this machine, whether or not magpie has numbers for them. Absent on older daemons. */
+  local?: string[];
 }

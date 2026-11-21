@@ -72,12 +72,26 @@ export function forwardHeaders(source: Headers, proxyOrigin: string, upstreamOri
   return out;
 }
 
-/** 响应头：去掉逐跳头和编码相关头（正文已解压、可能被改写）；跳转到 T3 本身的地址换回转发地址。 */
+/** 去掉 CSP 里的 frame-ancestors 指令（T3 0.1.11 起写死 'none'），其余指令保留；剩不下指令时返回 null。 */
+export function stripFrameAncestors(csp: string): string | null {
+  const rest = csp.split(";").map((part) => part.trim()).filter((part) => part !== "" && !/^frame-ancestors(?:\s|$)/iu.test(part));
+  return rest.length === 0 ? null : rest.join("; ");
+}
+
+/**
+ * 响应头：去掉逐跳头和编码相关头（正文已解压、可能被改写）；跳转到 T3 本身的地址换回转发地址。
+ * T3 0.1.11 起带 X-Frame-Options: DENY 与 frame-ancestors 'none'，转发要去掉，指挥台的 iframe 才能加载。
+ */
 export function responseHeaders(source: Headers, proxyOrigin: string, upstreamOrigin: string): Headers {
   const out = new Headers();
   source.forEach((value, key) => {
     const lower = key.toLowerCase();
-    if (HOP_HEADERS.has(lower) || lower === "content-encoding" || lower === "set-cookie") return;
+    if (HOP_HEADERS.has(lower) || lower === "content-encoding" || lower === "set-cookie" || lower === "x-frame-options") return;
+    if (lower === "content-security-policy") {
+      const stripped = stripFrameAncestors(value);
+      if (stripped !== null) out.append(key, stripped);
+      return;
+    }
     if (lower === "location" && value.startsWith(upstreamOrigin)) {
       out.set(key, proxyOrigin + value.slice(upstreamOrigin.length));
       return;

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { appendFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -533,12 +534,32 @@ export class MuseDeckRuntime {
         const streamingText = new Map<string, string>();
         for await (const event of sub) {
           if (controller.signal.aborted || this.#stopped) break;
+          void this.#captureDebugEvent(event);
           await this.#handleMainBackgroundEvent(event, streamingText);
         }
       } catch {
         // Reconnection happens automatically on next activity or overview warm.
       }
     })();
+  }
+
+  /**
+   * 调试抓包：数据目录 `deck/muse/` 下存在 `debug-events` 文件时，把主订阅收到的全部原始事件
+   * 追加到 `debug-events.jsonl`（含当前被白名单丢弃的卡片、工具调用等），用于逆向事件结构。
+   * 原始 payload 可能含账号等敏感内容，仅落本机、不进 store、超过 8 MB 自动停止；删掉开关文件即关闭。
+   */
+  async #captureDebugEvent(event: ChatEvent): Promise<void> {
+    try {
+      await stat(join(this.#museDir, "debug-events"));
+      const file = join(this.#museDir, "debug-events.jsonl");
+      const size = await stat(file).then((s) => s.size, () => 0);
+      if (size > 8 * 1024 * 1024) return;
+      await appendFile(file, `${JSON.stringify({ at: this.#now().toISOString(), event: event.event, raw: event.raw })}\n`, {
+        mode: 0o600,
+      });
+    } catch {
+      // 开关文件不存在或写入失败：静默忽略，不影响正常对话。
+    }
   }
 
   #rememberLocalUserId(id: string): void {

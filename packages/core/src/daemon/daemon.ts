@@ -154,6 +154,8 @@ import {
 } from "../reminders/run.js";
 import {
   QuotaService,
+  detectLocalAgents,
+  readAntigravityQuota,
   readClaudeAccessToken,
   readClaudeUsage,
   readMagpieAccounts,
@@ -967,6 +969,7 @@ export class YouBrainDaemon {
   readonly #quota: QuotaService = new QuotaService({
     read: () => readMagpieAccounts({ env: this.#env, homeDir: this.#homeDir, signal: this.#abort.signal }),
     readTokens: () => readMagpieUsageLog({ env: this.#env, homeDir: this.#homeDir }),
+    readAntigravity: () => readAntigravityQuota({ env: this.#env, homeDir: this.#homeDir, signal: this.#abort.signal }),
     readClaudeLive: () => readClaudeAccessToken(this.#env).then((token) => readClaudeUsage(token, this.#abort.signal)),
     nowMs: () => this.#clock.nowMs(),
   });
@@ -3972,7 +3975,7 @@ export class YouBrainDaemon {
         }),
       quota: () => {
         if (!this.#stopped) this.#quota.refreshIfOlder(QUOTA_REFRESH_MS);
-        return this.#quota.snapshot();
+        return { ...this.#quota.snapshot(), local: detectLocalAgents(this.#homeDir) };
       },
       reminders: async (all) => {
         const body = await readers.reminders(all);

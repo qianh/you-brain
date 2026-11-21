@@ -44,7 +44,7 @@ async function writeUsageLog(homeDir: string): Promise<void> {
   );
 }
 
-async function boot(magpie: string | null): Promise<YouBrainDaemon> {
+async function boot(magpie: string | null, homeDirs: readonly string[] = []): Promise<YouBrainDaemon> {
   const dirs = await makeDaemonDirs("you-brain-quota-");
   roots.push(dirs.root);
   let bin = "/nonexistent/magpie";
@@ -54,10 +54,11 @@ async function boot(magpie: string | null): Promise<YouBrainDaemon> {
     await chmod(bin, 0o755);
   }
   await writeUsageLog(dirs.homeDir);
+  for (const name of homeDirs) await mkdir(join(dirs.homeDir, name), { recursive: true });
   const daemon = await startDaemon({
     homeDir: dirs.homeDir,
     platform: "darwin",
-    env: { ...dirs.env, YOU_BRAIN_MAGPIE_BIN: bin },
+    env: { ...dirs.env, YOU_BRAIN_MAGPIE_BIN: bin, YOU_BRAIN_AGY_BIN: "/nonexistent/agy" },
     hostname: "test-host",
     clock: testClock(),
     sourceRoots: {},
@@ -91,7 +92,7 @@ describe("GET /api/quota", () => {
   it("answers at once with nothing, then serves what magpie printed, without the email", async () => {
     const daemon = await boot(`sleep 0.2; echo '2026/11/16 plugin: host starts'; echo '${OUTPUT}'`);
     const first = await quota(daemon);
-    expect(first).toEqual({ accounts: [], tokens: {}, readAt: null, stale: false });
+    expect(first).toEqual({ accounts: [], tokens: {}, readAt: null, stale: false, local: [] });
     const view = await untilRead(daemon);
     expect(view.accounts.map(({ id: _id, readAt: _readAt, ...rest }) => rest)).toEqual([
       {
@@ -108,17 +109,22 @@ describe("GET /api/quota", () => {
     expect(JSON.stringify(view)).not.toContain("example.com");
   });
 
+  it("lists agents found in the home directory even when magpie is not installed", async () => {
+    const daemon = await boot(null, [".cursor"]);
+    expect((await quota(daemon)).local).toEqual(["cursor"]);
+  });
+
   it("is an empty list, not an error, when magpie is not installed", async () => {
     const daemon = await boot(null);
     await quota(daemon);
     await new Promise((resolve) => setTimeout(resolve, 100));
-    expect(await quota(daemon)).toEqual({ accounts: [], tokens: {}, readAt: null, stale: false });
+    expect(await quota(daemon)).toEqual({ accounts: [], tokens: {}, readAt: null, stale: false, local: [] });
   });
 
   it("is an empty list when magpie exits with an error", async () => {
     const daemon = await boot("echo boom >&2; exit 3");
     await quota(daemon);
     await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(await quota(daemon)).toEqual({ accounts: [], tokens: {}, readAt: null, stale: false });
+    expect(await quota(daemon)).toEqual({ accounts: [], tokens: {}, readAt: null, stale: false, local: [] });
   });
 });
