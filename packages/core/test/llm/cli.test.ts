@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, test } from "bun:test";
 
+import { cliDriver, splitGrokModel } from "../../src/llm/cli/drivers.js";
 import { createLlmBackend } from "../../src/llm/factory.js";
 import { LlmRequestError } from "../../src/llm/errors.js";
 import { isCliNoOutputTimeout } from "../../src/llm/cli/exec.js";
@@ -425,6 +426,29 @@ async function waitForFile(path: string): Promise<void> {
   }
   throw new Error(`timed out waiting for ${path}`);
 }
+
+describe("grok 思考强度", () => {
+  test("模型名后缀指定强度，缺省为 low", () => {
+    expect(splitGrokModel("grok-4.7-build-fast:xhigh")).toEqual({ model: "grok-4.7-build-fast", effort: "xhigh" });
+    expect(splitGrokModel("grok-4.7-build-fast")).toEqual({ model: "grok-4.7-build-fast", effort: "low" });
+    expect(splitGrokModel("")).toEqual({ model: "", effort: "low" });
+    expect(splitGrokModel("grok-4.7@500k:high")).toEqual({ model: "grok-4.7@500k", effort: "high" });
+  });
+
+  test("传给 grok 的参数里 -m 不带后缀，--effort 取后缀", () => {
+    const built = cliDriver("grok-cli").build({
+      cwd: "/tmp",
+      model: "grok-4.7-build-fast:xhigh",
+      system: "s",
+      user: "u",
+      promptFile: "/tmp/p",
+      secrets: [],
+    });
+    const at = (flag: string) => built.args[built.args.indexOf(flag) + 1];
+    expect(at("--effort")).toBe("xhigh");
+    expect(at("-m")).toBe("grok-4.7-build-fast");
+  });
+});
 
 describe("subscription cli backends", () => {
   test("extracts the first JSON object, including a fenced one", () => {

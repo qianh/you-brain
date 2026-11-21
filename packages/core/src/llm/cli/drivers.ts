@@ -110,6 +110,18 @@ function modelArgs(model: string, flag: string): string[] {
   return model.trim() === "" ? [] : [flag, model];
 }
 
+const GROK_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
+
+/**
+ * grok 的模型名可带思考强度后缀：`grok-4.7-build-fast:xhigh`（界面上的 4.7 Fast Extra High）。
+ * 没写后缀时用 low：grok 的全局默认可能是 xhigh，会慢约 3 倍。
+ */
+export function splitGrokModel(model: string): { model: string; effort: (typeof GROK_EFFORTS)[number] } {
+  const match = /^(.*):(low|medium|high|xhigh)$/u.exec(model.trim());
+  if (!match) return { model: model.trim(), effort: "low" };
+  return { model: match[1] ?? "", effort: match[2] as (typeof GROK_EFFORTS)[number] };
+}
+
 function parseRecord(text: string): Record<string, unknown> | null {
   const extracted = extractFirstJsonObject(text);
   if (!extracted) return null;
@@ -197,6 +209,7 @@ function structuredOrText(
 }
 
 function grokArgs(ctx: CliBuildContext, outputFormat: "json" | "streaming-json"): CliBuilt {
+  const grok = splitGrokModel(ctx.model);
   return {
     args: [
       "--prompt-file",
@@ -221,12 +234,12 @@ function grokArgs(ctx: CliBuildContext, outputFormat: "json" | "streaming-json")
       "--no-memory",
       "--no-auto-update",
       "--verbatim",
-      // Without this grok uses the user's global default, which can be xhigh and runs ~3x slower.
+      // 不显式指定时 grok 用用户的全局默认，可能是 xhigh，慢约 3 倍；所以默认 low，要高强度在模型名后加 :xhigh。
       "--effort",
-      "low",
+      grok.effort,
       "--cwd",
       ctx.cwd,
-      ...modelArgs(ctx.model, "-m"),
+      ...modelArgs(grok.model, "-m"),
       ...(ctx.jsonSchema ? ["--json-schema", JSON.stringify(ctx.jsonSchema)] : []),
     ],
   };
