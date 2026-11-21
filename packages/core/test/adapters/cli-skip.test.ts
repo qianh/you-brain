@@ -56,6 +56,21 @@ describe("subscription CLI sessions are not captured", () => {
     expect(dropped.skippedSubagent).toBe(false);
   });
 
+  test("claude records the working-directory name from the first cwd", async () => {
+    const { root, workDir } = await layout();
+    const file = join(root, "claude-cwd.jsonl");
+    await writeFile(
+      file,
+      [
+        '{"type":"user","sessionId":"c1","cwd":"/home/user/real-project","timestamp":"2026-07-18T11:00:00.000Z","message":{"role":"user","content":"Find the release issue"}}',
+        '{"type":"assistant","sessionId":"c1","cwd":"/home/user/other","timestamp":"2026-07-18T11:01:00.000Z","message":{"role":"assistant","content":"Pin the release version."}}',
+        "",
+      ].join("\n"),
+    );
+    const parsed = await parseClaudeSession(file, options(workDir));
+    expect(parsed.session?.repo).toBe("real-project");
+  });
+
   test("codex keeps a normal cwd and drops the dedicated cwd", async () => {
     const { root, workDir } = await layout();
     const physical = physicalPath(workDir);
@@ -73,6 +88,7 @@ describe("subscription CLI sessions are not captured", () => {
     const kept = await parseCodexSession(normal, options(workDir));
     const dropped = await parseCodexSession(skipped, options(workDir));
     expect(kept.session?.source).toBe("codex");
+    expect(kept.session?.repo).toBe("real-project");
     expect(dropped.session).toBeNull();
     expect(dropped.skippedSubagent).toBe(false);
   });

@@ -3687,6 +3687,13 @@ export class YouBrainDaemon {
               : { action: "approve" };
           },
         });
+        if (reviewed.blocked.includes(body.id)) {
+          throw new HttpError(
+            409,
+            "CODING_FULL",
+            "编码分身这一节已满，不能新增规则；请把提案改成替换已有规则（修改后合入），或先忽略它",
+          );
+        }
         const remaining = await runtime.portrait.codingProposals();
         return { ok: true, proposals: remaining, version: reviewed.version };
       },
@@ -4715,6 +4722,7 @@ export class YouBrainDaemon {
             day,
             seenTurns,
             ...(options?.budgetUnits === undefined ? {} : { budgetUnits: options.budgetUnits }),
+            ...(options?.until === undefined ? {} : { until: options.until }),
           });
         },
       }),

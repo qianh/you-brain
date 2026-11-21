@@ -4,7 +4,8 @@ import {
   renderSessionMarkdown,
   sessionFilename,
 } from "../../src/capture/normalize.js";
-import type { NormalizedSession } from "../../src/domain/session.js";
+import { repoOfCwd, type NormalizedSession } from "../../src/domain/session.js";
+import { parseWebSession } from "../../src/web-sessions/parse.js";
 
 const session: NormalizedSession = {
   source: "codex",
@@ -37,6 +38,18 @@ describe("normalization", () => {
     expect(rendered.markdown).toContain("## User\nQuestion");
     expect(rendered.markdown).toContain("## Assistant\nAnswer");
     expect(rendered.contentSha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("records the working-directory name only when known, and parses it back", () => {
+    const options = { redactionVersion: 1, redactionCount: 0, imageReferences: new Map() };
+    const without = renderSessionMarkdown(session, options).markdown;
+    expect(without).not.toContain("repo:");
+    const withRepo = renderSessionMarkdown({ ...session, repo: "you-brain" }, options).markdown;
+    expect(withRepo).toContain("device: macbook\nrepo: you-brain\n");
+    expect(parseWebSession(withRepo)?.repo).toBe("you-brain");
+    expect(parseWebSession(without)?.repo).toBeUndefined();
+    expect(repoOfCwd("/Users/x/work/you-brain/")).toBe("you-brain");
+    expect(repoOfCwd("/")).toBeUndefined();
   });
 
   it("uses the manual filename contract", () => {

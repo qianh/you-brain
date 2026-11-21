@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import type { PortraitSnapshot } from "@you-brain/core/http/types.js";
 
 import { useDaemon } from "../../daemon-context.js";
@@ -11,6 +12,31 @@ import { PortraitCorrections } from "./corrections.js";
 import { scrollBehavior, snapshotVersion } from "./logic.js";
 import { PortraitProbes } from "./probes.js";
 import { PortraitProposals } from "./proposals.js";
+
+/** Items waiting for the user's review on this layer: coding proposals plus unreviewed probes. */
+function usePendingReviewCount(variant: string): number {
+  const { client } = useDaemon();
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    const wantsProposals = variant === "coding";
+    const wantsProbes = variant === "full" || variant === "coding";
+    void Promise.all([
+      wantsProposals ? client.portraitProposals().then((body) => body.proposals.length) : Promise.resolve(0),
+      wantsProbes ? client.portraitProbes().then((body) => body.probes.length) : Promise.resolve(0),
+    ])
+      .then(([proposals, probes]) => {
+        if (alive) setCount(proposals + probes);
+      })
+      .catch(() => {
+        if (alive) setCount(0);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [client, variant]);
+  return count;
+}
 
 export function PortraitSide({
   variant,
@@ -39,11 +65,22 @@ export function PortraitSide({
 }) {
   const { t, language, timeZone } = useDaemon();
   const showToc = shouldShowToc(toc);
+  const pending = usePendingReviewCount(variant);
+  const [open, setOpen] = useState(false);
+  // Pending review items used to hide behind a closed fold; open it once when some arrive.
+  useEffect(() => {
+    if (pending > 0) setOpen(true);
+  }, [pending]);
   return (
     <aside className="portrait-side" tabIndex={0} aria-label={t("portraitSideSummary")}>
-      <details className="portrait-side-fold">
+      <details
+        className="portrait-side-fold"
+        open={open}
+        onToggle={(event) => setOpen(event.currentTarget.open)}
+      >
         <summary>
           <span>{t("portraitSideSummary")}</span>
+          {pending > 0 ? <Chip>{t("portraitSidePending", { count: String(pending) })}</Chip> : null}
           <Icon name="chevron-down" />
         </summary>
         <div className="portrait-side-body">

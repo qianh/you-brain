@@ -56,11 +56,20 @@ export const NormalizedSessionSchema = z
     updatedAt: IsoTimestampSchema,
     turns: z.array(TurnSchema).min(1),
     sourcePath: z.string().min(1),
+    /** Directory name of the working directory the session ran in (not the full path). */
+    repo: z.string().min(1).optional(),
     warnings: z.array(z.string()),
   })
   .refine((session) => session.updatedAt >= session.startedAt, {
     message: "updatedAt must not precede startedAt",
     path: ["updatedAt"],
   });
+
+/** Last path segment of a working directory, or undefined when it is empty or the filesystem root. */
+export function repoOfCwd(cwd: string | null | undefined): string | undefined {
+  if (!cwd) return undefined;
+  const name = cwd.replaceAll("\\", "/").split("/").filter((part) => part !== "").pop()?.trim();
+  return name && !/[\r\n]/u.test(name) ? name : undefined;
+}
 
 export type NormalizedSession = z.infer<typeof NormalizedSessionSchema>;

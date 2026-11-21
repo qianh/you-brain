@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
 import { applyCaptureRedaction } from "../capture/redact.js";
-import { NormalizedSessionSchema, type Turn } from "../domain/session.js";
+import { NormalizedSessionSchema, repoOfCwd, type Turn } from "../domain/session.js";
 import { isDedicatedCwd, llmCliWorkDir } from "../llm/cli/workdir.js";
 import { rememberContinuation, resolveContinuation } from "./continuation.js";
 import {
@@ -94,6 +94,7 @@ export async function parseCodexSession(
     ...bounds,
     turns,
     sourcePath: path,
+    ...(repoOfCwd(asString(metaPayload?.cwd)) === undefined ? {} : { repo: repoOfCwd(asString(metaPayload?.cwd)) }),
     warnings:
       malformedLines > 0
         ? [`Ignored ${malformedLines} malformed JSONL line(s)`]

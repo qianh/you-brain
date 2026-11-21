@@ -197,3 +197,24 @@ export const MERGE_SUGGESTIONS_JSON_SCHEMA: Record<string, unknown> = {
     },
   },
 };
+
+export const TWIN_PROJECT_MERGE_PLAN_JSON_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["merges"],
+  properties: {
+    merges: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["into", "from", "aliases"],
+        properties: {
+          into: { type: "string", minLength: 1 },
+          from: { type: "array", minItems: 1, items: { type: "string", minLength: 1 } },
+          aliases: { type: "array", items: { type: "string", minLength: 1 } },
+        },
+      },
+    },
+  },
+};

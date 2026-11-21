@@ -24,6 +24,7 @@ import {
   parseTurnCursor,
   readTwinSessions,
   rebuildTwin,
+  tidyProjects,
   reviewCodingProposals,
   reviewProbes,
   seedCodingTwin,
@@ -305,6 +306,32 @@ export async function rebuildPortrait(options: { timeoutSeconds: number }): Prom
   for (const warning of result.warnings) console.log(`提示：${warning}`);
 }
 
+/** Fold same-system projects together and compact them. Previews the plan unless `apply` is set. */
+export async function tidyPortraitProjects(options: { timeoutSeconds: number; apply: boolean }): Promise<void> {
+  const { llm, portrait, day } = await openDrivePortrait(options.timeoutSeconds);
+  const result = await tidyProjects({
+    llm,
+    portrait,
+    day,
+    apply: options.apply,
+    log: (line) => console.log(line),
+  });
+  if (!options.apply) {
+    console.log(
+      result.merges.length === 0
+        ? "没有可归并的项目"
+        : `预览：${result.merges.length} 组归并，项目数 ${result.groups.before} → ${result.groups.after}。确认无误后加 --apply 执行`,
+    );
+    return;
+  }
+  console.log(
+    result.version === null
+      ? "项目决定没有变化"
+      : `已写回 v${result.version}：项目 ${result.groups.before} → ${result.groups.after}，整理了 ${result.tidied.length} 个项目`,
+  );
+  for (const warning of result.warnings) console.log(`提示：${warning}`);
+}
+
 /** Review pending coding-rule proposals interactively and merge approved ones into Drive `coding.md`. */
 export async function reviewPortraitProposals(): Promise<void> {
   const { portrait, day } = await openDrivePortrait(60);
@@ -351,6 +378,11 @@ export async function reviewPortraitProposals(): Promise<void> {
     console.log(
       `\n已合入 ${result.approved} 条${result.version ? `（新版本 v${result.version}）` : ""}，忽略 ${result.rejected} 条，剩余 ${result.left} 条待审`,
     );
+    if (result.blocked.length > 0) {
+      console.log(
+        `${result.blocked.join("、")} 是新增规则，但编码分身（或对应小节）已满，已跳过；请用 replace 提案合并同类规则，或先忽略低价值提案`,
+      );
+    }
   } finally {
     rl.close();
   }

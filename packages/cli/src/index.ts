@@ -47,6 +47,7 @@ import {
   listIntegrations,
   publishLocalPortrait,
   rebuildPortrait,
+  tidyPortraitProjects,
   restoreBrainHub,
   reviewPortraitProbes,
   reviewPortraitProposals,
@@ -298,6 +299,21 @@ program
       const seconds = Number(opts.timeout);
       if (!Number.isFinite(seconds) || seconds <= 0) throw new CliError("--timeout 必须是正数");
       await rebuildPortrait({ timeoutSeconds: seconds });
+    } catch (error) {
+      fail(error);
+    }
+  });
+
+program
+  .command("portrait-projects-tidy")
+  .description("整理项目决定：把同一系统的多个项目归并成一个（旧名记为别名），并淘汰旧口径与一次性细节。默认只预览归并方案")
+  .option("--apply", "确认后执行归并与整理并写回 Drive")
+  .option("--timeout <seconds>", "单次模型调用的超时秒数", "900")
+  .action(async (opts: { apply?: boolean; timeout: string }) => {
+    try {
+      const seconds = Number(opts.timeout);
+      if (!Number.isFinite(seconds) || seconds <= 0) throw new CliError("--timeout 必须是正数");
+      await tidyPortraitProjects({ timeoutSeconds: seconds, apply: opts.apply === true });
     } catch (error) {
       fail(error);
     }

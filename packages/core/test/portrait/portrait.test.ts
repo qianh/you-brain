@@ -48,6 +48,12 @@ function countingStore(store: SqliteStore): PortraitStore & { writes: number } {
       writes += 1;
       store.upsertPortrait(record);
     },
+    listPortraits() {
+      return store.listPortraits();
+    },
+    deletePortrait(variant: string) {
+      store.deletePortrait(variant);
+    },
   };
 }
 
@@ -89,6 +95,18 @@ async function cleanup(home: string, store: SqliteStore): Promise<void> {
   store.close();
   await rm(home, { recursive: true, force: true });
 }
+
+describe("project aliases", () => {
+  const projects = "# 项目\n版本 v1.0.0 · 2026-11-20 · 变更见 changelog\n\n## you-brain · 架构\n> aliases: U-Brain, 指挥台\n> repos: you-brain\n口径 A。\n\n## 其他\n口径 B。\n";
+
+  it("keeps aliases and repos on the first section after a round trip and finds a project by alias", () => {
+    const hit = lookupProjectPortrait(projects, "指挥台");
+    expect(hit.matched).toBe(true);
+    expect(hit.project).toBe("you-brain");
+    expect(hit.portrait).toContain("> repos: you-brain\n> aliases: U-Brain, 指挥台");
+    expect(lookupProjectPortrait(projects, "u-brain").project).toBe("you-brain");
+  });
+});
 
 describe("portrait pull", () => {
   it("pulls absolute and root-relative variants, then skips unchanged bytes", async () => {
@@ -155,6 +173,27 @@ describe("portrait pull", () => {
       const restored = await service.pull();
       expect(restored.variants[0]?.status).toBe("written");
       expect(await readFile(fullPath, "utf8")).toBe("# 全量 v2\n");
+    } finally {
+      await cleanup(home, store);
+    }
+  });
+
+  it("drops the retired brief variant's local row and file once it is no longer configured", async () => {
+    const { home, drive, store, service } = await fixture();
+    try {
+      await drive.put({ path: FULL, bytes: Buffer.from("# 全量\n"), mimeType: "text/markdown" });
+      await drive.put({ path: BRIEF, bytes: Buffer.from("# 精简\n"), mimeType: "text/markdown" });
+      await drive.put({ path: CODING, bytes: Buffer.from("# 编码\n"), mimeType: "text/markdown" });
+      const first = await service.pull();
+      const briefPath = first.variants[1]?.localPath ?? "";
+      expect(await readFile(briefPath, "utf8")).toBe("# 精简\n");
+
+      const next = config();
+      service.setConfig({ ...next, variants: next.variants.filter((variant) => variant.id !== "brief") });
+      await service.pull();
+      expect(store.getPortrait("brief")).toBeNull();
+      expect(store.getPortrait("full")).not.toBeNull();
+      await expect(readFile(briefPath, "utf8")).rejects.toThrow();
     } finally {
       await cleanup(home, store);
     }

@@ -42,6 +42,24 @@ const EditsSchema = z.object({
   ),
 });
 
+const ProjectMergePlanSchema = z.object({
+  merges: z.array(z.object({ into: z.string(), from: z.array(z.string()), aliases: z.array(z.string()) })),
+});
+
+export interface ProjectMergePlanItem {
+  into: string;
+  from: string[];
+  aliases: string[];
+}
+
+export function parseProjectMergePlan(input: unknown): ProjectMergePlanItem[] {
+  return ProjectMergePlanSchema.parse(input).merges.map((item) => ({
+    into: item.into.trim(),
+    from: item.from.map((name) => name.trim()).filter((name) => name !== ""),
+    aliases: item.aliases.map((name) => name.trim()).filter((name) => name !== ""),
+  }));
+}
+
 const CodingProposalsSchema = z.object({
   proposals: z.array(
     z.object({

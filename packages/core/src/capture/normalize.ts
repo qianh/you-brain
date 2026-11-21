@@ -43,6 +43,7 @@ export function renderSessionMarkdown(
     `source: ${session.source}`,
     `conversation_id: ${session.conversationId}`,
     `device: ${session.device}`,
+    ...(session.repo === undefined ? [] : [`repo: ${session.repo}`]),
     `started_at: ${session.startedAt}`,
     `updated_at: ${session.updatedAt}`,
     `turn_count: ${session.turns.length}`,

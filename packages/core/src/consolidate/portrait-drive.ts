@@ -38,8 +38,8 @@ export interface DrivePortraitSource {
   /** The user's own turns for sessions updated on or after `day`. Absent means none. */
   sessions?: (
     day: string,
-    options?: { budgetUnits?: number },
-  ) => Promise<Array<{ sessionKey: string; title: string; turns: string[] }>>;
+    options?: { budgetUnits?: number; until?: string },
+  ) => Promise<Array<{ sessionKey: string; title: string; turns: string[]; contexts?: string[] }>>;
 }
 
 export function createDrivePortrait(source: DrivePortraitSource): ConsolidationPortrait {
@@ -213,6 +213,35 @@ export interface TwinSessionRow {
 }
 
 const TWIN_CATCHUP_DAYS = 7;
+/** A user turn this short usually points back at the assistant's last message ("按方案 A"). */
+const CONTEXT_MAX_TURN_CHARS = 80;
+/** Tail of the assistant message kept as the anchor of a short user turn. */
+const CONTEXT_CLIP_CHARS = 240;
+
+/**
+ * The user's own turns, plus (index-aligned) the tail of the assistant message right before each
+ * short turn. The context only helps read references; the extractor must not draw claims from it.
+ * `contexts` is omitted when no turn needs one.
+ */
+function userTurnsWithContext(
+  turns: ReadonlyArray<{ role: "user" | "assistant"; text: string }>,
+): { turns: string[]; contexts?: string[] } {
+  const users: string[] = [];
+  const contexts: string[] = [];
+  let anchored = false;
+  turns.forEach((turn, index) => {
+    if (turn.role !== "user") return;
+    users.push(turn.text);
+    const previous = index > 0 ? turns[index - 1] : undefined;
+    const context =
+      previous?.role === "assistant" && Array.from(turn.text.trim()).length <= CONTEXT_MAX_TURN_CHARS
+        ? Array.from(previous.text.replace(/\s+/gu, " ").trim()).slice(-CONTEXT_CLIP_CHARS).join("")
+        : "";
+    if (context !== "") anchored = true;
+    contexts.push(context);
+  });
+  return anchored ? { turns: users, contexts } : { turns: users };
+}
 
 /** True when refine already examined the whole session and classified it as `action = "none"` noise. */
 function isRefinedNoiseSession(session: TwinSessionRow): boolean {
@@ -243,7 +272,9 @@ export async function readTwinSessions(input: {
   day: string;
   seenTurns?: Readonly<Record<string, number>>;
   budgetUnits?: number;
-}): Promise<Array<{ sessionKey: string; title: string; turns: string[] }>> {
+  /** Local day upper bound (inclusive). Back-filling an earlier day must not read later sessions. */
+  until?: string;
+}): Promise<Array<{ sessionKey: string; title: string; turns: string[]; contexts?: string[]; repo?: string }>> {
   // A 03:00 run would miss yesterday's evening without the extra day; the turn cursor skips repeats.
   // When `seenTurns` is provided, unread turns from the past week also catch up instead of starving.
   const sinceRecent = shiftDateKey(input.day, -1);
@@ -253,6 +284,7 @@ export async function readTwinSessions(input: {
       if (session.fileId === null || session.updatedAt === null) return false;
       if (isRefinedNoiseSession(session)) return false;
       const sessionDay = localDayKey(new Date(session.updatedAt), input.timeZone);
+      if (input.until !== undefined && sessionDay > input.until) return false;
       if (sessionDay >= sinceRecent) return true;
       return (
         input.seenTurns !== undefined &&
@@ -265,7 +297,7 @@ export async function readTwinSessions(input: {
     input.budgetUnits === undefined
       ? null
       : createTurnAccumulator(input.seenTurns ?? {}, input.budgetUnits);
-  const sessions: Array<{ sessionKey: string; title: string; turns: string[] }> = [];
+  const sessions: Array<{ sessionKey: string; title: string; turns: string[]; contexts?: string[]; repo?: string }> = [];
   for (let start = 0; start < rows.length; start += SESSION_READ_CONCURRENCY) {
     const batch = rows.slice(start, start + SESSION_READ_CONCURRENCY);
     const objects = await Promise.all(
@@ -280,7 +312,8 @@ export async function readTwinSessions(input: {
       const item = {
         sessionKey: session.sessionKey,
         title: session.title,
-        turns: parsed.turns.filter((turn) => turn.role === "user").map((turn) => turn.text),
+        ...(parsed.repo === undefined ? {} : { repo: parsed.repo }),
+        ...userTurnsWithContext(parsed.turns),
       };
       sessions.push(item);
       accumulator?.add(item);

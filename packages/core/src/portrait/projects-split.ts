@@ -9,6 +9,7 @@ export interface SplitProjectFile {
   fileName: string;
   name: string;
   repos: string[];
+  aliases: string[];
   headings: string[];
   content: string;
 }
@@ -76,6 +77,7 @@ export function renderProjectsSplit(projectsMarkdown: string): RenderedProjectsS
       fileName,
       name: group.name,
       repos: [...group.repos],
+      aliases: [...group.aliases],
       headings,
       content,
     });
@@ -90,7 +92,8 @@ export function renderProjectsSplit(projectsMarkdown: string): RenderedProjectsS
       ? ["（暂无已沉淀的项目决定）"]
       : files.map((file) => {
           const reposNote =
-            file.repos.length > 0 ? ` · repos: \`${file.repos.join("`, `")}\`` : "";
+            (file.repos.length > 0 ? ` · repos: \`${file.repos.join("`, `")}\`` : "") +
+            (file.aliases.length > 0 ? ` · aliases: ${file.aliases.join(", ")}` : "");
           const subtopics = file.headings
             .map((heading) => {
               const suffix = heading.startsWith(`${file.name} · `)
@@ -192,9 +195,11 @@ export function lookupProjectPortrait(
   const base = basename(normalized.replaceAll("\\", "/")).toLowerCase();
   const tokens = [...new Set([normalized, base].filter((token) => token !== ""))];
 
-  // 1. Exact repository directory match
-  const repoMatches = files.filter((file) =>
-    file.repos.some((repo) => tokens.includes(repo.toLowerCase())),
+  // 1. Exact repository directory or alias match
+  const repoMatches = files.filter(
+    (file) =>
+      file.repos.some((repo) => tokens.includes(repo.toLowerCase())) ||
+      file.aliases.some((alias) => tokens.includes(alias.toLowerCase())),
   );
   if (repoMatches.length > 0) {
     return buildHitResult(repoMatches, availableProjects);

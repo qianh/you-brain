@@ -941,6 +941,10 @@ export class SqliteStore {
     return row ? mapPortrait(row) : null;
   }
 
+  deletePortrait(variant: string): void {
+    this.#db.query("DELETE FROM portrait WHERE variant = ?").run(variant);
+  }
+
   listPortraits(): PortraitRecord[] {
     return this.#db
       .query<PortraitRow, []>("SELECT * FROM portrait ORDER BY variant")

@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { applyCaptureRedaction } from "../capture/redact.js";
-import { NormalizedSessionSchema, type Turn } from "../domain/session.js";
+import { NormalizedSessionSchema, repoOfCwd, type Turn } from "../domain/session.js";
 import { claudeProjectKey, isDedicatedCapturePath, llmCliWorkDir } from "../llm/cli/workdir.js";
 import {
   mergeToolText,
@@ -36,6 +36,7 @@ export async function parseClaudeSession(
   const turns: Turn[] = [];
   const timestamps: Array<string | null> = [];
   let conversationId: string | null = null;
+  let cwd: string | null = null;
   let sidechain = false;
   const keepTools = options.keepToolCalls === true;
   const maxChars = toolCallLimit(options);
@@ -47,6 +48,7 @@ export async function parseClaudeSession(
         if (!record) return;
         if (record.isSidechain === true) sidechain = true;
         conversationId ??= asString(record.sessionId);
+        cwd ??= asString(record.cwd);
         timestamps.push(asString(record.timestamp));
         if (sidechain && !options.includeSubagents) {
           turns.length = 0;
@@ -85,6 +87,7 @@ export async function parseClaudeSession(
     ...bounds,
     turns,
     sourcePath: path,
+    ...(repoOfCwd(cwd) === undefined ? {} : { repo: repoOfCwd(cwd) }),
     warnings:
       malformedLines > 0
         ? [`Ignored ${malformedLines} malformed JSONL line(s)`]

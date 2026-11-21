@@ -62,8 +62,8 @@ export interface ConsolidationPortrait {
   /** The user's own turns, in order, for sessions updated on or after `day`. */
   sessions(
     day: string,
-    options?: { budgetUnits?: number },
-  ): Promise<Array<{ sessionKey: string; title: string; turns: string[] }>>;
+    options?: { budgetUnits?: number; until?: string },
+  ): Promise<Array<{ sessionKey: string; title: string; turns: string[]; contexts?: string[]; repo?: string }>>;
   /** Pending corrections for any layer, oldest first. */
   corrections(): Array<{ correctionId: string; variant: string; section: string; text: string }>;
   /** Low-confidence claims kept from earlier days. */

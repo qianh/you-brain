@@ -28,11 +28,14 @@ import {
   fillSnapshotPattern,
   normalizeProjectsTwin,
   pendingCorrections,
+  evaluateTwin,
   portraitEvalStep,
   portraitMonthlyStep,
   portraitStep,
   readTwinSessions,
+  applyProjectMerges,
   rebuildTwin,
+  tidyProjects,
   reviewCodingProposals,
   reviewProbes,
   runConsolidation,
@@ -44,6 +47,9 @@ import {
   type ConsolidationPortrait,
 } from "../../src/consolidate/index.js";
 import {
+  TWIN_PROJECT_MERGE_PLAN_SYSTEM_PROMPT,
+  TWIN_PROJECT_TIDY_SYSTEM_PROMPT,
+  buildTwinFixPrompt,
   TWIN_EVAL_ANSWER_SYSTEM_PROMPT,
   TWIN_EVAL_BLANK_SYSTEM_PROMPT,
   TWIN_EVAL_GENERIC_PERSONA,
@@ -55,7 +61,7 @@ import {
 import { TWIN_SKELETON } from "../../src/consolidate/twin.js";
 import { twinCrossLayerProblems, twinStandardProblems } from "../../src/consolidate/twin-standard.js";
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
-import { LlmRequestError } from "../../src/llm/errors.js";
+import { LlmAbortError, LlmRequestError } from "../../src/llm/errors.js";
 import type { LlmCompleteRequest } from "../../src/llm/types.js";
 import {
   PortraitService,
@@ -223,13 +229,18 @@ const codingEdit = {
 async function run(
   box: World,
   complete: (request: LlmCompleteRequest) => string | Promise<string>,
-  options?: { attach?: boolean; steps?: typeof portraitStep[]; day?: string },
+  options?: {
+    attach?: boolean;
+    steps?: typeof portraitStep[];
+    day?: string;
+    load?: () => { book: ReturnType<typeof fold>; sessionUpdatedAt: Record<string, string> };
+  },
 ) {
   return runConsolidation({
     day: options?.day ?? LOCAL_DAY,
     timeZone: SHANGHAI,
     now: () => new Date(LATER),
-    load: () => ({ book: fold([]), sessionUpdatedAt: {} }),
+    load: options?.load ?? (() => ({ book: fold([]), sessionUpdatedAt: {} })),
     zone: ZONE,
     llm: fakeBackend(async (request) => {
       box.requests.push(request);
@@ -533,7 +544,7 @@ describe("portrait consolidation", () => {
       day: LOCAL_DAY,
       decide: async () => ({ action: "approve" }),
     });
-    expect(reviewed).toEqual({ approved: 1, rejected: 0, left: 0, version: "2.2.0" });
+    expect(reviewed).toEqual({ approved: 1, rejected: 0, left: 0, version: "2.2.0", blocked: [] });
     const codingAfter = await textAt(box.drive, CODING);
     expect(codingAfter).toContain("- **变更验证**：修改后先跑适用测试再交付。");
     expect(codingAfter).toContain(POINTER);
@@ -574,11 +585,31 @@ describe("portrait consolidation", () => {
     ]);
     expect(box.requests[1]?.user).toContain("## 甲 · 架构");
     expect(box.requests[1]?.user).toContain("repo:legal-ai");
-    expect(box.requests[1]?.user).not.toContain("无关大项目");
+    // The index names every project, but the unrelated project's content is not sent.
+    expect(box.requests[1]?.user).toContain("## 现有项目索引");
+    expect(box.requests[1]?.user).not.toContain("无关口径");
     const updatedProjects = await textAt(box.drive, PROJECTS);
     expect(updatedProjects).toContain("## 甲 · 架构\n> repos: legal-ai\n数据源改为 B。");
     expect(updatedProjects).not.toContain("旧数据源用 A");
     expect(updatedProjects).toContain("## 无关大项目");
+  });
+
+  it("sends an existing project's sections when the claim uses one of its aliases", async () => {
+    const box = await world();
+    const projects = `# 数字分身 · 项目决定\n${VERSION_LINE}\n\n## you-brain · 架构\n> repos: you-brain\n> aliases: U-Brain, 指挥台\n旧口径 A。\n\n## 无关项目\n无关口径。\n`;
+    await seedTwin(box, { full: FULL_TEXT, coding: CODING_TEXT, projects });
+    box.sessions = [{ sessionKey: "s1", title: "指挥台", turns: ["指挥台以后一律走置顶弹框"] }];
+    const result = await run(
+      box,
+      model({
+        claims: { claims: [{ layer: "project", project: "指挥台", confidence: "high", text: "提醒一律走置顶弹框。" }] },
+        projectMerge: { bump: "patch", changelog: [], edits: [] },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    expect(box.requests[0]?.user).toContain("别名：U-Brain、指挥台");
+    expect(box.requests[1]?.user).toContain("旧口径 A。");
+    expect(box.requests[1]?.user).not.toContain("无关口径");
   });
 
   it("writes a full snapshot and stays quiet when only projects change", async () => {
@@ -651,7 +682,8 @@ describe("portrait consolidation", () => {
       TWIN_MERGE_SYSTEM_PROMPT,
     ]);
     expect(box.requests[1]?.user).toContain("[persona low 2026-10-23] 喜欢短回复。");
-    expect(jsonl(await textAt(box.drive, PENDING))).toHaveLength(2);
+    // The earlier claim was shown to the merge, so it retires; only today's low claim stays pending.
+    expect(jsonl(await textAt(box.drive, PENDING))).toEqual([{ ...lowPersona, day: "2026-10-24" }]);
   });
 
   it("runs one fix pass for bookkeeping words and writes the fixed text", async () => {
@@ -947,6 +979,26 @@ describe("portrait eval", () => {
       return JSON.stringify({ answers: ids.map((id, index) => ({ id, answer: pick[index] ?? "✗" })) });
     };
   }
+
+  it("stops scoring when the step signal aborts, without finishing the remaining rounds", async () => {
+    const box = await world();
+    await seedTwin(box);
+    await seed(box.drive, PROBES, `${JSON.stringify(probe)}\n`);
+    const controller = new AbortController();
+    const result = await evaluateTwin({
+      llm: fakeBackend(async (request) => {
+        box.requests.push(request);
+        controller.abort(new Error("daemon 停机"));
+        return JSON.stringify({ answers: [], verdicts: [] });
+      }),
+      portrait: box.portrait,
+      day: LOCAL_DAY,
+      newProbes: 0,
+      signal: controller.signal,
+    }).catch((error: unknown) => error);
+    expect(result).toBeInstanceOf(LlmAbortError);
+    expect(box.requests).toHaveLength(1);
+  });
 
   it("puts new probes up for review and scores the reviewed ones against the held-out twin and both baselines", async () => {
     const box = await world();
@@ -1312,6 +1364,92 @@ describe("portrait rebuild", () => {
     const dupFull = `# 数字分身 · 人格\n版本 v4.5.0 · ${LOCAL_DAY} · 变更见 changelog\n\n## 8. 合作说明\n仅在用户明确要求时执行 commit 或 push，不要自作主张提交代码。\n`;
     const dupCoding = `# 数字分身 · 编码\n版本 v4.5.0 · ${LOCAL_DAY} · 变更见 changelog\n\n## 安全与授权\n- **提交授权**：仅在用户明确要求时执行 commit 或 push，不要自作主张提交代码。\n`;
     expect(twinCrossLayerProblems(dupFull, dupCoding)[0]).toContain("full 与 coding 重复写了同一条通用规范");
+  });
+
+  it("lists projects section sizes in the fix prompt even when full and coding are also present", () => {
+    const prompt = buildTwinFixPrompt({
+      docs: { full: FULL_TEXT, coding: CODING_TEXT, projects: "# 项目\n\n## 甲\n只写这一条。\n" },
+      problems: ["projects 这些项目总长超过 8192 字节：甲"],
+    });
+    expect(prompt.user).toMatch(/- projects ## 甲：\d+ 字节/u);
+  });
+
+  it("anchors short user turns with the assistant's preceding message and keeps the cursor on user turns", async () => {
+    const drive = new MemoryDrive({ now: () => new Date(LATER) });
+    await seed(
+      drive,
+      "inbox/dev/anchor.md",
+      `---\nsource: codex\nconversation_id: c-anchor\nstarted_at: ${LOCAL_DAY}T08:00:00.000Z\nupdated_at: ${LOCAL_DAY}T08:05:00.000Z\n---\n\n## User\n\n列表怎么加执行人\n\n## Assistant\n\n方案 A：新增列。方案 B：放详情页。\n\n## User\n\n按方案 A\n`,
+    );
+    const entry = await drive.findByPath("inbox/dev/anchor.md");
+    const sessions = await readTwinSessions({
+      drive,
+      timeZone: SHANGHAI,
+      day: LOCAL_DAY,
+      seenTurns: {},
+      sessions: [
+        { sessionKey: "anchor", title: "指代", fileId: entry?.id ?? null, updatedAt: `${LOCAL_DAY}T08:05:00.000Z` },
+      ],
+    });
+    expect(sessions[0]?.turns).toEqual(["列表怎么加执行人", "按方案 A"]);
+    expect(sessions[0]?.contexts).toEqual(["", "方案 A：新增列。方案 B：放详情页。"]);
+    const { chunks, cursor } = collectTurns(sessions, {});
+    expect(cursor).toEqual({ anchor: 2 });
+    expect(chunks.join("\n")).toContain("> 助手上文（仅供理解指代，不抽主张）：方案 A：新增列。");
+    expect(chunks.join("\n")).toContain("- 按方案 A");
+  });
+
+  it("shows the session working directory in the chunk heading", () => {
+    const { chunks } = collectTurns(
+      [{ sessionKey: "w", title: "加列", turns: ["列表加执行人"], repo: "you-brain" }],
+      {},
+    );
+    expect(chunks.join("\n")).toContain("### 加列（工作目录：you-brain）");
+  });
+
+  it("does not read sessions updated after `until` when back-filling an earlier day", async () => {
+    const drive = new MemoryDrive({ now: () => new Date(LATER) });
+    await seed(
+      drive,
+      "inbox/dev/future.md",
+      "---\nsource: codex\nconversation_id: c-future\nstarted_at: 2026-10-25T08:00:00.000Z\nupdated_at: 2026-10-25T08:05:00.000Z\n---\n\n## User\n\n以后都先写测试\n",
+    );
+    await seed(
+      drive,
+      "inbox/dev/past.md",
+      "---\nsource: codex\nconversation_id: c-past\nstarted_at: 2026-10-23T08:00:00.000Z\nupdated_at: 2026-10-23T08:05:00.000Z\n---\n\n## User\n\n一律先查证\n",
+    );
+    const future = await drive.findByPath("inbox/dev/future.md");
+    const past = await drive.findByPath("inbox/dev/past.md");
+    const sessions = await readTwinSessions({
+      drive,
+      timeZone: SHANGHAI,
+      day: "2026-10-23",
+      until: "2026-10-23",
+      seenTurns: {},
+      sessions: [
+        { sessionKey: "future", title: "未来", fileId: future?.id ?? null, updatedAt: "2026-10-25T08:05:00.000Z" },
+        { sessionKey: "past", title: "当天", fileId: past?.id ?? null, updatedAt: "2026-10-23T08:05:00.000Z" },
+      ],
+    });
+    expect(sessions.map((session) => session.sessionKey)).toEqual(["past"]);
+  });
+
+  it("drops turn cursor entries of long-idle sessions but keeps recent and unknown ones", async () => {
+    const box = await world();
+    await seedTwin(box);
+    box.sessions = [{ sessionKey: "s1", title: "闲聊", turns: ["我喜欢短回复"] }];
+    box.cursors.set(PORTRAIT_TURNS_CURSOR, JSON.stringify({ old: 3, recent: 2, unknown: 1 }));
+    const load = () => ({
+      book: fold([]),
+      sessionUpdatedAt: {
+        old: "2026-09-01T00:00:00.000Z",
+        recent: `${LOCAL_DAY}T01:00:00.000Z`,
+      },
+    });
+    const result = await run(box, model({ claims: { claims: [lowPersona] } }), { load });
+    expect(result.ok).toBe(true);
+    expect(JSON.parse(box.cursors.get(PORTRAIT_TURNS_CURSOR) ?? "{}")).toEqual({ recent: 2, unknown: 1, s1: 1 });
   });
 
   it("retains unmerged high-confidence claims when finishTwin skips, and skips action=none noise in readTwinSessions", async () => {
@@ -1801,5 +1939,124 @@ describe("portrait budget early-stop and stage cache", () => {
     const text = await textAt(box.drive, PROJECTS);
     expect(text).toContain("改用 V2 口径。");
     expect(text).not.toContain("样本数");
+  });
+});
+
+describe("coding proposals when a section is full", () => {
+  it("skips new-rule proposals for a full section without asking, and still takes replacements", async () => {
+    const box = await world();
+    const rules = Array.from({ length: 7 }, (_, i) => `- **验证${i}**：第${i}类改动先跑对应的检查再交付。`).join("\n");
+    const coding = `# 数字分身 · 编码\n${VERSION_LINE}\n\n## 行为与范围\n${POINTER}\n\n## 安全与授权\n- **授权**：删除数据前先确认。\n\n## 验证与交付\n${rules}\n\n## 并行与指令优先级\n- **优先级**：用户明确要求优先。\n`;
+    await seedTwin(box, { full: FULL_TEXT, coding, projects: PROJECTS_TEXT });
+    const add = { id: "cp01", day: LOCAL_DAY, section: "## 验证与交付", action: "add", proposedLine: "- **新增**：交付前贴出验证结果。", reason: "新维度" };
+    const replace = {
+      id: "cp02",
+      day: LOCAL_DAY,
+      section: "## 验证与交付",
+      action: "replace",
+      targetLine: "- **验证0**：第0类改动先跑对应的检查再交付。",
+      proposedLine: "- **验证0**：每类改动先跑对应的检查再交付。",
+      reason: "措辞合并",
+    };
+    await seed(box.drive, "digital-twin/proposals/coding-pending.jsonl", `${JSON.stringify(add)}\n${JSON.stringify(replace)}\n`);
+    const asked: string[] = [];
+    const reviewed = await reviewCodingProposals({
+      portrait: box.portrait,
+      day: LOCAL_DAY,
+      decide: async (proposal) => {
+        asked.push(proposal.id);
+        return { action: "approve" };
+      },
+    });
+    expect(asked).toEqual(["cp02"]);
+    expect(reviewed).toMatchObject({ approved: 1, left: 1, blocked: ["cp01"] });
+    expect(await textAt(box.drive, CODING)).toContain("每类改动先跑对应的检查再交付");
+    expect(jsonl(await textAt(box.drive, "digital-twin/proposals/coding-pending.jsonl"))).toEqual([add]);
+  });
+});
+
+describe("projects governance", () => {
+  const PROJECTS_SPLIT = `# 数字分身 · 项目决定\n${VERSION_LINE}\n\n## you-brain · 架构\n> repos: you-brain\n旧口径 A。\n\n## 指挥台\n提醒走置顶弹框。\n\n## 指挥台 · 终端\n终端整屏跳转。\n\n## 其他\n无关口径。\n`;
+
+  it("folds projects into one with prefixed sections, merged repos and the old names as aliases", () => {
+    const merged = applyProjectMerges(PROJECTS_SPLIT, [{ into: "you-brain", from: ["指挥台"], aliases: ["U-Brain"] }]);
+    expect(merged).toContain("## you-brain · 架构\n> repos: you-brain\n> aliases: 指挥台, U-Brain\n旧口径 A。");
+    expect(merged).toContain("## you-brain\n提醒走置顶弹框。");
+    expect(merged).toContain("## you-brain · 终端\n终端整屏跳转。");
+    expect(merged).not.toContain("## 指挥台");
+    expect(merged).toContain("## 其他\n无关口径。");
+  });
+
+  it("previews the merge plan without writing, ignores invented names, and applies the plan when asked", async () => {
+    const box = await world();
+    await seedTwin(box, { full: FULL_TEXT, coding: CODING_TEXT, projects: PROJECTS_SPLIT });
+    const reply = (request: LlmCompleteRequest): string => {
+      box.requests.push(request);
+      if (request.system === TWIN_PROJECT_MERGE_PLAN_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          merges: [
+            { into: "you-brain", from: ["指挥台", "不存在的项目"], aliases: ["U-Brain"] },
+            { into: "编造", from: ["其他"], aliases: [] },
+          ],
+        });
+      }
+      if (request.system === TWIN_PROJECT_TIDY_SYSTEM_PROMPT) {
+        return JSON.stringify({
+          bump: "minor",
+          changelog: [],
+          edits: [{ layer: "projects", heading: "## you-brain · 架构", text: "## you-brain · 架构\n> repos: you-brain\n> aliases: 指挥台, U-Brain\n现行口径。" }],
+        });
+      }
+      return JSON.stringify(noEdits);
+    };
+    const llm = fakeBackend(async (request) => reply(request));
+
+    const preview = await tidyProjects({ llm, portrait: box.portrait, day: LOCAL_DAY, apply: false });
+    expect(preview.merges).toEqual([{ into: "you-brain", from: ["指挥台"], aliases: ["U-Brain"] }]);
+    expect(await textAt(box.drive, PROJECTS)).toContain("## 指挥台");
+    expect(box.requests.map((request) => request.system)).toEqual([TWIN_PROJECT_MERGE_PLAN_SYSTEM_PROMPT]);
+
+    const applied = await tidyProjects({ llm, portrait: box.portrait, day: LOCAL_DAY, apply: true });
+    expect(applied.tidied).toEqual(["you-brain"]);
+    expect(applied.groups).toEqual({ before: 3, after: 2 });
+    const text = await textAt(box.drive, PROJECTS);
+    expect(text).toContain("现行口径。");
+    expect(text).toContain("## you-brain · 终端");
+    expect(text).not.toContain("## 指挥台");
+    expect(text).toContain("## 其他");
+  });
+
+  it("tidies an over-budget project one section at a time and keeps the rest when one section fails", async () => {
+    const box = await world();
+    const filler = "冗长的旧口径。".repeat(220);
+    const projects = `# 数字分身 · 项目决定\n${VERSION_LINE}\n\n## 大项目 · 甲\n> repos: big\n${filler}\n\n## 大项目 · 乙\n${filler}\n\n## 大项目 · 丙\n${filler}\n\n## 其他\n无关口径。\n`;
+    await seedTwin(box, { full: FULL_TEXT, coding: CODING_TEXT, projects });
+    const tidyRequests: string[] = [];
+    const reply = (request: LlmCompleteRequest): string => {
+      box.requests.push(request);
+      if (request.system === TWIN_PROJECT_MERGE_PLAN_SYSTEM_PROMPT) return JSON.stringify({ merges: [] });
+      if (request.system === TWIN_PROJECT_TIDY_SYSTEM_PROMPT) {
+        const heading = /只整理小节：(## [^（\n]+)/u.exec(request.user)?.[1] ?? "";
+        tidyRequests.push(heading);
+        if (heading === "## 大项目 · 乙") throw new Error("请求超时");
+        const first = heading === "## 大项目 · 甲";
+        return JSON.stringify({
+          bump: "minor",
+          changelog: [],
+          edits: [{ layer: "projects", heading, text: `${heading}\n${first ? "> repos: big\n" : ""}精简口径。` }],
+        });
+      }
+      return JSON.stringify(noEdits);
+    };
+    const llm = fakeBackend(async (request) => reply(request));
+    const applied = await tidyProjects({ llm, portrait: box.portrait, day: LOCAL_DAY, apply: true });
+    expect([...new Set(tidyRequests)]).toEqual(["## 大项目 · 甲", "## 大项目 · 乙", "## 大项目 · 丙"]);
+    expect(applied.tidied).toEqual(["大项目"]);
+    expect(applied.warnings.some((warning) => warning.includes("大项目 · 乙") && warning.includes("保留原文"))).toBe(true);
+    const text = (await textAt(box.drive, PROJECTS)) ?? "";
+    expect(text).toContain("## 大项目 · 甲\n> repos: big\n精简口径。");
+    expect(text).toContain("## 大项目 · 丙\n精简口径。");
+    expect(text).toContain("## 大项目 · 乙");
+    expect(text).toContain("冗长的旧口径。");
   });
 });

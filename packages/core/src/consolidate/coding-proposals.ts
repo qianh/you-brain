@@ -13,7 +13,7 @@ import {
   withHeader,
   withProjectsPointer,
 } from "./twin.js";
-import { twinStandardProblems } from "./twin-standard.js";
+import { codingCapacity, twinStandardProblems } from "./twin-standard.js";
 
 export interface CodingRuleProposal {
   id: string;
@@ -166,13 +166,13 @@ export async function reviewCodingProposals(input: {
   portrait: ConsolidationPortrait;
   day: string;
   decide: (proposal: CodingRuleProposal) => Promise<ProposalDecision>;
-}): Promise<{ approved: number; rejected: number; left: number; version: string | null }> {
+}): Promise<{ approved: number; rejected: number; left: number; version: string | null; blocked: string[] }> {
   if (!input.portrait.codingProposals || !input.portrait.saveCodingProposals) {
-    return { approved: 0, rejected: 0, left: 0, version: null };
+    return { approved: 0, rejected: 0, left: 0, version: null, blocked: [] };
   }
   const pending = await input.portrait.codingProposals();
   if (pending.length === 0) {
-    return { approved: 0, rejected: 0, left: 0, version: null };
+    return { approved: 0, rejected: 0, left: 0, version: null, blocked: [] };
   }
   const files = await input.portrait.read();
   if (!files.coding) {
@@ -182,10 +182,20 @@ export async function reviewCodingProposals(input: {
   let coding = files.coding.text;
   const changelog: string[] = [];
   const left: CodingRuleProposal[] = [];
+  const blocked: string[] = [];
   let approved = 0;
   let rejected = 0;
 
   for (const proposal of pending) {
+    if (proposal.action === "add") {
+      // A new rule has no room once the layer or its section is full; asking would only fail at the check.
+      const room = codingCapacity(coding, proposal.section.trim());
+      if (room.total >= room.totalLimit || (room.sectionLimit !== null && room.inSection >= room.sectionLimit)) {
+        blocked.push(proposal.id);
+        left.push(proposal);
+        continue;
+      }
+    }
     const verdict = await input.decide(proposal);
     if (verdict.action === "approve") {
       coding = applyCodingProposal(coding, proposal, verdict.editedLine);
@@ -240,7 +250,7 @@ export async function reviewCodingProposals(input: {
   if (approved + rejected > 0) {
     await input.portrait.saveCodingProposals(left);
   }
-  return { approved, rejected, left: left.length, version: savedVersion };
+  return { approved, rejected, left: left.length, version: savedVersion, blocked };
 }
 
 /**

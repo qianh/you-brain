@@ -53,6 +53,22 @@ const REDLINES_HEADING = "## 9. 红线";
 const CODING_THEME = /^- \*\*[^*]{2,12}\*\*：/u;
 
 /** Problems that keep this layer below the standard. Empty when it meets it. */
+/** Rules in coding and how many the whole layer or one section may hold. */
+export function codingCapacity(
+  text: string,
+  section: string,
+): { total: number; totalLimit: number; inSection: number; sectionLimit: number | null } {
+  const sections = splitTwin(text).sections;
+  const total = sections.reduce((sum, item) => sum + bodyLines(item.text).length, 0);
+  const target = sections.find((item) => item.heading === section);
+  return {
+    total,
+    totalLimit: CODING_TOTAL_LIMIT,
+    inSection: target ? bodyLines(target.text).length : 0,
+    sectionLimit: CODING_LIMITS[section] ?? null,
+  };
+}
+
 export function twinStandardProblems(layer: TwinLayer, text: string): string[] {
   if (layer === "projects") return [];
   const doc = splitTwin(text);

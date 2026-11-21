@@ -10,6 +10,7 @@ import {
   type CodingRuleProposal,
 } from "./coding-proposals.js";
 import {
+  parseProjectMergePlan,
   parseTwinAnswers,
   parseTwinClaims,
   parseTwinCodingProposals,
@@ -17,10 +18,13 @@ import {
   parseTwinJudge,
   parseTwinMonthly,
   parseTwinProbes,
+  type ProjectMergePlanItem,
   type TwinClaim,
   type TwinEditsUpdate,
 } from "./normalize.js";
 import {
+  buildProjectMergePlanPrompt,
+  buildProjectTidyPrompt,
   buildTwinClaimsPrompt,
   buildTwinCodingProposalsPrompt,
   buildTwinEvalAnswerPrompt,
@@ -31,11 +35,13 @@ import {
   buildTwinProbesPrompt,
   buildTwinProjectMergePrompt,
   TWIN_EVAL_GENERIC_PERSONA,
+  type TwinProjectDirectoryEntry,
   type TwinPromptCorrection,
 } from "./prompt.js";
-import { shiftDateKey } from "./schedule.js";
+import { localDayKey, shiftDateKey } from "./schedule.js";
 import {
   TWIN_CLAIMS_JSON_SCHEMA,
+  TWIN_PROJECT_MERGE_PLAN_JSON_SCHEMA,
   TWIN_CODING_PROPOSALS_JSON_SCHEMA,
   TWIN_EDITS_JSON_SCHEMA,
   TWIN_EVAL_ANSWERS_JSON_SCHEMA,
@@ -52,12 +58,15 @@ import type {
 } from "./steps.js";
 import { clipUnits, textUnits } from "./text.js";
 import {
+  TWIN_BUDGET,
   TWIN_LAYERS,
   TWIN_SCAN,
   applyTwinEdits,
   bumpVersion,
   changedLayers,
   checkTwin,
+  joinTwin,
+  normalizeProjectsTwin,
   parseProjectGroups,
   projectPrefixOfHeading,
   skeletonTwin,
@@ -187,7 +196,10 @@ export const portraitStep: ConsolidationStep = {
     }
     const before = textsOf(files);
     const seen = parseTurnCursor(ctx.cursors.get(PORTRAIT_TURNS_CURSOR));
-    const input = collectTurns(await portrait.sessions(ctx.day, { budgetUnits: DAY_UNITS }), seen);
+    const input = collectTurns(
+      await portrait.sessions(ctx.day, { budgetUnits: DAY_UNITS, until: ctx.day }),
+      seen,
+    );
     const corrections = portrait.corrections();
     const keepFrom = shiftDateKey(ctx.day, -PENDING_KEEP_DAYS);
     const earlier = (await portrait.pendingClaims()).filter((claim) => claim.day !== ctx.day);
@@ -209,7 +221,7 @@ export const portraitStep: ConsolidationStep = {
               ctx.llm,
               input.chunks,
               "sessions",
-              projectNames(before.projects),
+              projectDirectory(before.projects),
               undefined,
               ctx.signal,
               stageCache.complete,
@@ -227,6 +239,9 @@ export const portraitStep: ConsolidationStep = {
     const shouldProposeCoding =
       codingClaims.some((claim) => claim.confidence === "high") ||
       (codingClaims.some((claim) => claim.confidence === "low") && codingEarlier.length > 0);
+    // Earlier low-confidence claims that were shown to a finished merge or proposal step are
+    // retired from pending; otherwise they keep being replayed until they expire.
+    const consumedLow = new Set<StoredTwinClaim>();
     if (shouldProposeCoding && portrait.codingProposals && portrait.saveCodingProposals) {
       const addedProposals = await proposeCodingRules(ctx.llm, {
         day: ctx.day,
@@ -237,6 +252,7 @@ export const portraitStep: ConsolidationStep = {
         ...(ctx.signal ? { signal: ctx.signal } : {}),
         complete: stageCache.complete,
       });
+      for (const claim of codingEarlier) consumedLow.add(claim);
       if (addedProposals > 0) {
         await ctx.emit("reminder.issued", {
           reminderId: `portrait-coding-proposals-${ctx.day}`,
@@ -277,10 +293,10 @@ export const portraitStep: ConsolidationStep = {
         await portrait.saveClaims({
           name: ctx.day,
           claims,
-          pending: [...earlierLow, ...low],
+          pending: [...earlierLow.filter((claim) => !consumedLow.has(claim)), ...low],
         });
       }
-      ctx.cursors.set(PORTRAIT_TURNS_CURSOR, JSON.stringify(input.cursor));
+      ctx.cursors.set(PORTRAIT_TURNS_CURSOR, JSON.stringify(pruneTurnCursor(input.cursor, ctx)));
       stageCache.clear();
       return;
     }
@@ -325,6 +341,7 @@ export const portraitStep: ConsolidationStep = {
       const projectPrompt = buildTwinProjectMergePrompt({
         day: ctx.day,
         targetProjectsText,
+        directory: projectDirectory(workingTexts.projects),
         claims: projectClaims,
         pending: projectEarlier,
         corrections: projectCorrections,
@@ -363,11 +380,15 @@ export const portraitStep: ConsolidationStep = {
         await portrait.saveClaims({
           name: ctx.day,
           claims,
-          pending: dedupeStoredClaims([...earlierLow, ...low, ...unmergedHigh]),
+          pending: dedupeStoredClaims([
+            ...earlierLow.filter((claim) => !consumedLow.has(claim)),
+            ...low,
+            ...unmergedHigh,
+          ]),
         });
       }
       ctx.warnings.push(outcome.skip);
-      ctx.cursors.set(PORTRAIT_TURNS_CURSOR, JSON.stringify(input.cursor));
+      ctx.cursors.set(PORTRAIT_TURNS_CURSOR, JSON.stringify(pruneTurnCursor(input.cursor, ctx)));
       stageCache.clear();
       return;
     }
@@ -393,14 +414,16 @@ export const portraitStep: ConsolidationStep = {
       }
       for (const warning of outcome.warnings) ctx.warnings.push(warning);
     }
+    if (shouldMergeResident) for (const claim of personaEarlier) consumedLow.add(claim);
+    if (shouldMergeProjects) for (const claim of projectEarlier) consumedLow.add(claim);
     if (input.chunks.length > 0 || earlierHigh.length > 0) {
       await portrait.saveClaims({
         name: ctx.day,
         claims,
-        pending: [...earlierLow, ...low],
+        pending: [...earlierLow.filter((claim) => !consumedLow.has(claim)), ...low],
       });
     }
-    ctx.cursors.set(PORTRAIT_TURNS_CURSOR, JSON.stringify(input.cursor));
+    ctx.cursors.set(PORTRAIT_TURNS_CURSOR, JSON.stringify(pruneTurnCursor(input.cursor, ctx)));
     stageCache.clear();
     const applied = new Set(merged.includedCorrectionIds);
     for (const correction of corrections) {
@@ -545,9 +568,9 @@ export async function evaluateTwin(input: {
   }
 
   const current: TwinEvalScores = {
-    twin: await scoreProbes(llm, twinProfile(files.full.text, files.coding.text), probes),
-    blank: await scoreProbes(llm, [], probes),
-    generic: await scoreProbes(llm, [{ title: "人设", text: TWIN_EVAL_GENERIC_PERSONA }], probes),
+    twin: await scoreProbes(llm, twinProfile(files.full.text, files.coding.text), probes, signal),
+    blank: await scoreProbes(llm, [], probes, signal),
+    generic: await scoreProbes(llm, [{ title: "人设", text: TWIN_EVAL_GENERIC_PERSONA }], probes, signal),
   };
   const flat = flatProbes(probes, current);
   const marked = probes.map(({ flat: _, ...probe }): TwinProbe =>
@@ -571,7 +594,7 @@ export async function evaluateTwin(input: {
     for (const [before, group] of groups) {
       const old = await portrait.twinBefore(before);
       if (!old) continue;
-      scores.push(await scoreProbes(llm, twinProfile(old.full, old.coding), group));
+      scores.push(await scoreProbes(llm, twinProfile(old.full, old.coding), group, signal));
       for (const probe of group) scored.add(probe.id);
     }
     if (scored.size > 0) {
@@ -682,13 +705,15 @@ async function scoreProbes(
   llm: LlmBackend,
   profile: readonly { title: string; text: string }[],
   probes: readonly TwinProbe[],
+  signal?: AbortSignal,
 ): Promise<TwinEvalScore> {
   const majority = Math.floor(EVAL_ROUNDS / 2) + 1;
   const passes = new Map<string, number>();
   const fails = new Map<string, number>();
   let open = [...probes];
   for (let round = 0; round < EVAL_ROUNDS && open.length > 0; round += 1) {
-    const passed = await scoreRound(llm, profile, open);
+    signal?.throwIfAborted();
+    const passed = await scoreRound(llm, profile, open, signal);
     for (const probe of open) {
       const tally = passed.has(probe.id) ? passes : fails;
       tally.set(probe.id, (tally.get(probe.id) ?? 0) + 1);
@@ -706,12 +731,14 @@ async function scoreRound(
   llm: LlmBackend,
   profile: readonly { title: string; text: string }[],
   probes: readonly TwinProbe[],
+  signal?: AbortSignal,
 ): Promise<Set<string>> {
   const answers = await completeJson(
     llm,
     buildTwinEvalAnswerPrompt({ profile, probes }),
     TWIN_EVAL_ANSWERS_JSON_SCHEMA,
     parseTwinAnswers,
+    signal,
   );
   const verdicts = await completeJson(
     llm,
@@ -725,6 +752,7 @@ async function scoreRound(
     }),
     TWIN_EVAL_JUDGE_JSON_SCHEMA,
     parseTwinJudge,
+    signal,
   );
   return new Set(probes.filter((probe) => verdicts.get(probe.id) === true).map((probe) => probe.id));
 }
@@ -862,7 +890,7 @@ export async function rebuildTwin(input: RebuildTwinInput): Promise<RebuildTwinR
     const chunks = TWIN_LAYERS.flatMap((layer) => chunkDocument(before[layer]));
     log(`旧分身切成 ${chunks.length} 段，开始抽取主张`);
     claims = (
-      await extractClaims(input.llm, chunks, "legacy", projectNames(before.projects), (done) =>
+      await extractClaims(input.llm, chunks, "legacy", projectDirectory(before.projects), (done) =>
         log(`主张抽取 ${done}/${chunks.length}`),
       )
     ).map((claim) => ({ ...claim, day: input.day }));
@@ -918,6 +946,199 @@ export async function rebuildTwin(input: RebuildTwinInput): Promise<RebuildTwinR
     sizes: outcome.sizes,
   });
   return { version: written.version, sizes: outcome.sizes, claims: claims.length, warnings: outcome.warnings };
+}
+
+export interface TidyProjectsInput {
+  llm: LlmBackend;
+  portrait: ConsolidationPortrait;
+  day: string;
+  /** False only previews the merge plan: nothing is compacted or written. */
+  apply: boolean;
+  signal?: AbortSignal;
+  log?: (line: string) => void;
+}
+
+export interface TidyProjectsResult {
+  merges: ProjectMergePlanItem[];
+  tidied: string[];
+  version: string | null;
+  groups: { before: number; after: number };
+  warnings: string[];
+}
+
+/** Keeps only plan items whose names exist and never reuses a project, so one bad item can't cascade. */
+function validMergePlan(projectsText: string, plan: readonly ProjectMergePlanItem[]): ProjectMergePlanItem[] {
+  const names = new Map(parseProjectGroups(projectsText).groups.map((group) => [group.name.toLowerCase(), group.name]));
+  const used = new Set<string>();
+  const out: ProjectMergePlanItem[] = [];
+  for (const item of plan) {
+    const into = names.get(item.into.toLowerCase());
+    if (!into || used.has(into.toLowerCase())) continue;
+    const from = [
+      ...new Set(
+        item.from
+          .map((name) => names.get(name.toLowerCase()))
+          .filter((name): name is string => name !== undefined && name.toLowerCase() !== into.toLowerCase()),
+      ),
+    ].filter((name) => !used.has(name.toLowerCase()));
+    if (from.length === 0) continue;
+    used.add(into.toLowerCase());
+    for (const name of from) used.add(name.toLowerCase());
+    out.push({ into, from, aliases: item.aliases });
+  }
+  return out;
+}
+
+/**
+ * Folds the `from` projects into `into`: sections are re-prefixed, repos carry over, and the old
+ * names become aliases. Content is not rewritten here; {@link tidyProjects} compacts it afterwards.
+ */
+export function applyProjectMerges(projectsText: string, plan: readonly ProjectMergePlanItem[]): string {
+  const { head, groups } = parseProjectGroups(projectsText);
+  const byName = new Map(groups.map((group) => [group.name.toLowerCase(), group]));
+  const absorbed = new Set<string>();
+  for (const item of plan) {
+    const target = byName.get(item.into.toLowerCase());
+    if (!target) continue;
+    for (const name of item.from) {
+      const source = byName.get(name.toLowerCase());
+      if (!source || source === target) continue;
+      absorbed.add(source.name.toLowerCase());
+      for (const repo of source.repos) {
+        if (!target.repos.some((existing) => existing.toLowerCase() === repo.toLowerCase())) target.repos.push(repo);
+      }
+      for (const alias of [source.name, ...source.aliases]) {
+        if (!target.aliases.some((existing) => existing.toLowerCase() === alias.toLowerCase())) {
+          target.aliases.push(alias);
+        }
+      }
+      const taken = new Set(target.sections.map((section) => section.heading));
+      for (const section of source.sections) {
+        const rest = section.heading.replace(/^##\s+/u, "").split(/\s*·\s*/u).slice(1).join(" · ");
+        let heading = `## ${target.name}${rest ? ` · ${rest}` : ""}`;
+        if (taken.has(heading)) heading = `## ${target.name} · ${source.name}${rest ? ` · ${rest}` : ""}`;
+        taken.add(heading);
+        const [, ...body] = section.text.split("\n");
+        target.sections.push({ heading, text: [heading, ...body].join("\n") });
+      }
+    }
+    for (const alias of item.aliases) {
+      if (
+        alias.toLowerCase() !== target.name.toLowerCase() &&
+        !target.aliases.some((existing) => existing.toLowerCase() === alias.toLowerCase())
+      ) {
+        target.aliases.push(alias);
+      }
+    }
+  }
+  const sections = groups
+    .filter((group) => !absorbed.has(group.name.toLowerCase()))
+    .flatMap((group) => {
+      const first = group.sections[0];
+      if (!first) return group.sections;
+      // The metadata lines are rebuilt from the group on the next normalize pass.
+      const meta = [
+        ...(group.repos.length > 0 ? [`> repos: ${group.repos.join(", ")}`] : []),
+        ...(group.aliases.length > 0 ? [`> aliases: ${group.aliases.join(", ")}`] : []),
+      ];
+      const [headingLine = first.heading, ...rest] = first.text.split("\n").filter((line) => !/^>\s*(repos|aliases)\s*[:：]/iu.test(line.trim()));
+      return [{ heading: first.heading, text: [headingLine, ...meta, ...rest].join("\n") }, ...group.sections.slice(1)];
+    });
+  return normalizeProjectsTwin(joinTwin({ head, sections }));
+}
+
+/**
+ * One-off governance of `projects.md`: fold same-system projects together (aliases keep the old
+ * names findable), then compact every merged or over-budget project group.
+ */
+export async function tidyProjects(input: TidyProjectsInput): Promise<TidyProjectsResult> {
+  const log = input.log ?? (() => undefined);
+  const files = await input.portrait.read();
+  if (!files.projects) throw new Error("Drive 上没有项目决定，无法整理");
+  const before = textsOf(files);
+  const beforeGroups = parseProjectGroups(before.projects).groups;
+  const entries = projectDirectory(before.projects);
+  const directory = beforeGroups.map((group, index) => ({
+    ...entries[index]!,
+    bytes: group.sections.reduce((sum, section) => sum + byteSize(section.text), 0),
+  }));
+  log(`现有 ${beforeGroups.length} 个项目，开始找同义项目`);
+  const raw = await completeJson(
+    input.llm,
+    buildProjectMergePlanPrompt({ directory }),
+    TWIN_PROJECT_MERGE_PLAN_JSON_SCHEMA,
+    parseProjectMergePlan,
+    input.signal,
+  );
+  const merges = validMergePlan(before.projects, raw);
+  for (const item of merges) log(`归并：${item.from.join("、")} → ${item.into}`);
+  if (!input.apply) {
+    return { merges, tidied: [], version: null, groups: { before: beforeGroups.length, after: beforeGroups.length - merges.reduce((n, m) => n + m.from.length, 0) }, warnings: [] };
+  }
+
+  let projects = merges.length > 0 ? applyProjectMerges(before.projects, merges) : before.projects;
+  const mergedInto = new Set(merges.map((item) => item.into.toLowerCase()));
+  const tidied: string[] = [];
+  const tidyWarnings: string[] = [];
+  for (const group of parseProjectGroups(projects).groups) {
+    const bytes = group.sections.reduce((sum, section) => sum + byteSize(section.text), 0);
+    if (!mergedInto.has(group.name.toLowerCase()) && bytes < TWIN_BUDGET.projectGroup) continue;
+    log(`整理 ${group.name}（${bytes} 字节）`);
+    const sectionsText = group.sections.map((section) => section.text).join("\n\n");
+    // A whole group over budget is too much for one request: go section by section, each with its share.
+    const requests =
+      bytes >= TWIN_BUDGET.projectGroup && group.sections.length > 1
+        ? group.sections.map((section) => ({
+            label: section.heading,
+            prompt: buildProjectTidyPrompt({
+              name: group.name,
+              sectionsText,
+              bytes,
+              focus: {
+                heading: section.heading,
+                text: section.text,
+                targetBytes: Math.max(600, Math.floor(TWIN_BUDGET.projectGroup / group.sections.length)),
+                otherHeadings: group.sections.filter((other) => other !== section).map((other) => other.heading),
+              },
+            }),
+          }))
+        : [{ label: group.name, prompt: buildProjectTidyPrompt({ name: group.name, sectionsText, bytes }) }];
+    let touched = false;
+    for (const request of requests) {
+      try {
+        const update = await completeJson(input.llm, request.prompt, TWIN_EDITS_JSON_SCHEMA, parseTwinEdits, input.signal);
+        const edits = update.edits.filter((edit) => edit.layer === "projects");
+        if (edits.length === 0) continue;
+        projects = applyEditsWithIndex({ ...before, projects }, edits).projects;
+        touched = true;
+      } catch (error) {
+        if (input.signal?.aborted || requests.length === 1) throw error;
+        // One slow or malformed section must not discard the sections already tidied.
+        tidyWarnings.push(`整理「${request.label}」失败，保留原文：${error instanceof Error ? error.message.split("\n")[0] : String(error)}`);
+      }
+    }
+    if (touched) tidied.push(group.name);
+  }
+
+  const outcome = await finishTwin(input.llm, before, { ...before, projects }, { guardShrink: false, ...(input.signal ? { signal: input.signal } : {}) });
+  if ("skip" in outcome) throw new Error(outcome.skip);
+  const afterGroups = parseProjectGroups(outcome.texts.projects).groups;
+  if (outcome.changed.size === 0) {
+    return { merges, tidied, version: null, groups: { before: beforeGroups.length, after: afterGroups.length }, warnings: [...tidyWarnings, ...outcome.warnings] };
+  }
+  const written = await writeTwin(input.portrait, {
+    day: input.day,
+    files,
+    after: outcome.texts,
+    changed: new Set<TwinLayer>(["projects"]),
+    bump: "minor",
+    changelog: [
+      `projects · 整理项目决定：${beforeGroups.length} 个项目归并为 ${afterGroups.length} 个，${tidied.length} 个项目淘汰旧口径与一次性细节`,
+      ...merges.slice(0, 6).map((item) => `projects · ${item.from.join("、")} 并入 ${item.into}`),
+    ],
+    sizes: outcome.sizes,
+  });
+  return { merges, tidied, version: written.version, groups: { before: beforeGroups.length, after: afterGroups.length }, warnings: [...tidyWarnings, ...outcome.warnings] };
 }
 
 interface MergeInput {
@@ -1092,6 +1313,7 @@ function selectTargetProjectSections(
   const matched = groups.filter((group) => {
     const nameLower = group.name.toLowerCase();
     if (targetNames.has(nameLower)) return true;
+    if (group.aliases.some((alias) => targetNames.has(alias.toLowerCase()))) return true;
     if (group.repos.some((repo) => targetRepos.has(repo.toLowerCase()) || targetNames.has(repo.toLowerCase()))) {
       return true;
     }
@@ -1326,20 +1548,23 @@ function twinVersionText(texts: TwinTexts): string {
   return twinVersion(texts).join(".");
 }
 
-function projectNames(projects: string): string[] {
-  const names = new Set<string>();
-  for (const section of splitTwin(projects).sections) {
-    const name = section.heading.replace(/^##\s+/u, "").split(" · ")[0]?.trim();
-    if (name) names.add(name);
-  }
-  return [...names];
+/** Every existing project with its aliases, repos and sub-topic names. */
+function projectDirectory(projects: string): TwinProjectDirectoryEntry[] {
+  return parseProjectGroups(projects).groups.map((group) => ({
+    name: group.name,
+    aliases: group.aliases,
+    repos: group.repos,
+    subtopics: group.sections
+      .map((section) => section.heading.replace(/^##\s+/u, "").split(" · ").slice(1).join(" · ").trim())
+      .filter((topic) => topic !== ""),
+  }));
 }
 
 async function extractClaims(
   llm: LlmBackend,
   chunks: readonly string[],
   source: "sessions" | "legacy",
-  projects: readonly string[],
+  projects: readonly TwinProjectDirectoryEntry[],
   progress?: (done: number) => void,
   signal?: AbortSignal,
   complete?: StageCompleter,
@@ -1443,6 +1668,25 @@ function packPieces(pieces: readonly string[]): string[] {
 
 export type TurnCursor = Record<string, number>;
 
+/** Sessions idle longer than this are never read again, so their cursor entries can go. */
+const TURN_CURSOR_KEEP_DAYS = 14;
+
+/** Drops cursor entries of sessions last updated before the keep window; unknown sessions stay. */
+function pruneTurnCursor(
+  cursor: TurnCursor,
+  ctx: { day: string; timeZone: string; load: () => { sessionUpdatedAt: Readonly<Record<string, string>> } },
+): TurnCursor {
+  const updatedAt = ctx.load().sessionUpdatedAt;
+  const keepFrom = shiftDateKey(ctx.day, -TURN_CURSOR_KEEP_DAYS);
+  const kept: TurnCursor = {};
+  for (const [key, value] of Object.entries(cursor)) {
+    const at = updatedAt[key];
+    if (at !== undefined && localDayKey(new Date(at), ctx.timeZone) < keepFrom) continue;
+    kept[key] = value;
+  }
+  return kept;
+}
+
 export function parseTurnCursor(raw: string | null): TurnCursor {
   if (!raw) return {};
   try {
@@ -1478,6 +1722,10 @@ export interface TurnSessionInput {
   sessionKey: string;
   title: string;
   turns: readonly string[];
+  /** Index-aligned assistant message tails that give short user turns their referent. */
+  contexts?: readonly string[];
+  /** Working-directory name the session ran in, when captured. */
+  repo?: string;
 }
 
 export interface TurnAccumulator {
@@ -1492,6 +1740,7 @@ export interface TurnAccumulator {
  * later sessions can still fill remaining space; only `used >= budgetUnits` marks full.
  */
 const MIN_TURN_UNITS = 3;
+const CONTEXT_CLIP = 240;
 
 export function createTurnAccumulator(
   seen: Readonly<Record<string, number>>,
@@ -1509,9 +1758,12 @@ export function createTurnAccumulator(
       let taken = start;
       for (let index = start; index < session.turns.length; index += 1) {
         const text = cleanUserTurn(session.turns[index] ?? "");
-        const size = textUnits(text) + 2;
+        const context = text === "" ? "" : clipUnits(session.contexts?.[index] ?? "", CONTEXT_CLIP);
+        const contextLine = context === "" ? "" : `  > 助手上文（仅供理解指代，不抽主张）：${context}`;
+        const size = textUnits(text) + textUnits(contextLine) + 2;
         if (text !== "" && used + size > budgetUnits) break;
         if (text !== "") {
+          if (contextLine !== "") lines.push(contextLine);
           lines.push(`- ${text}`);
           used += size;
         }
@@ -1519,7 +1771,8 @@ export function createTurnAccumulator(
       }
       cursor[session.sessionKey] = taken;
       if (lines.length > 0) {
-        pieces.push([`### ${session.title.trim() || "（无标题）"}`, ...lines].join("\n"));
+        const heading = `### ${session.title.trim() || "（无标题）"}${session.repo ? `（工作目录：${session.repo}）` : ""}`;
+        pieces.push([heading, ...lines].join("\n"));
       }
     },
     full() {

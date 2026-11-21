@@ -9,6 +9,8 @@ export interface WebSessionDocument {
   source: string;
   conversationId: string;
   device: string;
+  /** Working-directory name recorded at capture time, when known. */
+  repo?: string;
   startedAt: string;
   updatedAt: string;
   /** Parsed turns. Frontmatter `turn_count` is not used here. */
@@ -75,6 +77,7 @@ export function parseWebSession(markdown: string): WebSessionDocument | null {
     source,
     conversationId,
     device: fields.get("device") ?? "",
+    ...((fields.get("repo") ?? "") === "" ? {} : { repo: fields.get("repo") ?? "" }),
     startedAt,
     updatedAt,
     turnCount: turns.length,

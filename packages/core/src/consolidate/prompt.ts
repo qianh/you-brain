@@ -8,8 +8,10 @@ import {
   TWIN_EVAL_JUDGE_JSON_SCHEMA,
   TWIN_MONTHLY_JSON_SCHEMA,
   TWIN_PROBES_JSON_SCHEMA,
+  TWIN_PROJECT_MERGE_PLAN_JSON_SCHEMA,
 } from "./schema.js";
 import { clipUnits, textUnits } from "./text.js";
+import { codingCapacity } from "./twin-standard.js";
 
 export const TOPIC_SUMMARY_SYSTEM_PROMPT = `你是 you-brain 的话题沉淀器。根据这个话题当天的变化，重写话题概要和下一步。只输出一个 JSON 对象，不要 Markdown，不要解释。
 
@@ -173,7 +175,8 @@ export const TWIN_CLAIMS_SYSTEM_PROMPT = `你是 you-brain 的数字分身主张
 1. layer：
    - persona：换项目、换话题也成立的工作重心、价值取舍、遇到什么情境会怎样、擅长和不熟的领域、情绪和信任、说话方式、对助手的跨场景期待、红线、世界观、品味、生活。说话方式的真实原话可以原样作为一条 persona 主张，加引号。
    - coding：所有代码仓库都适用、与具体语言/公司基建无关、会改变编码助手行为的工程纪律；具体工具、技能内置流程（如特定提交脚本）、公司基建（如 Apollo、XXL-JOB）、模型 ID 和设备细节一律不算 coding。
-   - project：只对某个系统、仓库、业务成立的口径与决定；project 填项目名，优先沿用输入里给出的已有项目名；若对话明确提到对应的代码仓库目录名（仅填裸仓库名如 legal-ai、dzg-ai-tools、you-brain，不带路径斜杠），填入 repo。
+   - project：只对某个系统、仓库、业务成立、且跨会话仍需遵守的架构边界、领域口径、数据不变量、外部集成契约与明确禁令；project 必须优先沿用「已有项目」里的名称：话题提到某个已有项目的别名、子主题或仓库时，project 填该项目的规范名称，不要另起新名；确实不属于任何已有项目时才填新项目名。若对话明确提到对应的代码仓库目录名（仅填裸仓库名如 legal-ai、dzg-ai-tools、you-brain，不带路径斜杠），填入 repo；会话标题后若带「（工作目录：xxx）」，那是该会话实际所在的目录名，主张属于某个项目时可直接填入 repo，并据此对照「已有项目」的 repos 选用规范名称（工作目录名不等于项目名，不要把它当项目名）。
+   - 单次页面加字段、单次文案或样式微调、单次 bug 排查或功能开发指令，哪怕用户说得很肯定，也不是 project 主张，不要输出。
    - 一次性操作、单轮调试中间态、临时状态、设备和网络的琐碎细节、试用信号、定时脚本固定模板、他人或群聊的观点：不要输出。
 2. 每条主张一句完整中文，写成带适用条件的指令或陈述，不写来历；专有名词和标识符保留英文。他在纠正助手或在几种做法里选一种时，把触发情境和他的选择都写清楚。
 3. 不要把用户举的例子写成通用规则；不要输出否定式身份事实；不要输出任何密钥、token、密码、手机号、邮箱、主机名、IP、完整本机路径。
@@ -181,16 +184,39 @@ export const TWIN_CLAIMS_SYSTEM_PROMPT = `你是 you-brain 的数字分身主张
 5. JSON 键名保持英文。`;
 
 const CLAIMS_FROM_SESSIONS = `输入是用户本人在 AI 会话里的发言。只看他自己说的话；粘贴进来的文档、日志、定时任务模板、别人的观点都不算。
+以「> 助手上文（仅供理解指代，不抽主张）」开头的行是助手上一条消息的末尾，只用来理解紧随其后那条用户发言里的指代（例如「按方案 A」「第二个留着」），绝不能从中抽取主张。
 confidence 严格按下面判定：
 - persona 与 coding：只有用户明确说出跨会话永久生效词（「以后都 / 一律 / 必须 / 永远不要 / 记进全局规范」）才标 high；单次会话里对助手某步做法的普通纠偏一律标 low（靠后续跨天复现再升格，不得因为是纠偏就标 high）。
-- project：用户明确拍板锁定该项目口径或纠正该项目做法标 high；试探、讨论未定案标 low。`;
+- project：用户明确拍板「以后都 / 一律 / 必须 / 不要再」这类长期生效的架构边界、领域口径、数据不变量、接口契约或禁令，或纠正助手违背了这类既有口径，才标 high；一次性的功能需求或界面调整不要输出；试探、讨论未定案标 low。`;
 
 const CLAIMS_FROM_LEGACY = `输入是旧版数字分身的一段原文，里面的规则都已经由用户确认过。
 confidence：一律 high；只有标了待确认、试用、暂定的内容才是 low。版本说明、来源、证据 ID、样本数这类记账内容不要抽。尽量保留所有仍然成立的规则，不要因为看起来琐碎就丢掉项目口径。`;
 
+/** One existing project as the extractor and the project merge see it. */
+export interface TwinProjectDirectoryEntry {
+  name: string;
+  aliases: readonly string[];
+  repos: readonly string[];
+  subtopics: readonly string[];
+}
+
+export function renderProjectDirectory(entries: readonly TwinProjectDirectoryEntry[]): string {
+  if (entries.length === 0) return "（无）";
+  return entries
+    .map((entry) => {
+      const notes = [
+        entry.aliases.length > 0 ? `别名：${entry.aliases.join("、")}` : "",
+        entry.repos.length > 0 ? `repos：${entry.repos.join("、")}` : "",
+        entry.subtopics.length > 0 ? `子主题：${entry.subtopics.join("、")}` : "",
+      ].filter((note) => note !== "");
+      return `- ${entry.name}${notes.length > 0 ? `（${notes.join("；")}）` : ""}`;
+    })
+    .join("\n");
+}
+
 export interface TwinClaimPromptInput {
   source: "sessions" | "legacy";
-  projects: readonly string[];
+  projects: readonly TwinProjectDirectoryEntry[];
   text: string;
 }
 
@@ -198,8 +224,8 @@ export function buildTwinClaimsPrompt(input: TwinClaimPromptInput): { system: st
   const user = [
     input.source === "sessions" ? CLAIMS_FROM_SESSIONS : CLAIMS_FROM_LEGACY,
     "",
-    "## 已有项目名",
-    input.projects.length === 0 ? "（无）" : input.projects.join("、"),
+    "## 已有项目（名称、别名、仓库目录、子主题）",
+    renderProjectDirectory(input.projects),
     "",
     "## 输入",
     input.text.trim() === "" ? "（无）" : input.text,
@@ -246,13 +272,14 @@ export const TWIN_PROJECT_MERGE_SYSTEM_PROMPT = `你是 you-brain 的项目决�
 
 项目决定（projects）维护规则：
 1. 只输出 layer 为 "projects" 的 edits，只处理输入里给出的目标项目，不要编造其他项目。
-2. 淘汰过时与冲突口径（核心要求）：把新主张与该项目现有的全部子节逐条比对。凡是已被新决定推翻、替代、改方案的旧说法（例如旧数据源、已废弃的同步方式、已取消的开关或旧架构），必须原地删除或改写为最新口径，严禁同一项目下保留前后矛盾的两套说法！一次性排查过程和临时状态直接删掉。
-3. 小节组织：
+2. 项目归并：输入里的「现有项目索引」列出了全部已有项目的名称、别名和仓库。新主张的项目名若其实是某个已有项目的别名、子系统或同一仓库，必须并入该已有项目（用其规范名称做小节前缀，并在首个小节的「> aliases: ...」行里记下新叫法），不要新建孤岛小节。若并入的已有项目没有出现在「目标项目当前小节」里，只新增「## 规范名 · 子主题」小节，不要改写你没看到的小节。
+3. 淘汰过时与冲突口径（核心要求）：把新主张与该项目现有的全部子节逐条比对。凡是已被新决定推翻、替代、改方案的旧说法（例如旧数据源、已废弃的同步方式、已取消的开关或旧架构），必须原地删除或改写为最新口径，严禁同一项目下保留前后矛盾的两套说法！一次性排查过程和临时状态直接删掉。项目组总长接近或超过 8192 字节时，优先淘汰「已经落地完成的一次性功能点、界面细节、字段增补」和「已被新架构替代的旧口径」，只保留长期有效的架构边界与业务规则；此时允许删除仍然成立但只是单次需求的细则。
+4. 小节组织：
    - 标题格式为「## 项目名」或「## 项目名 · 子主题」，同一项目名保持一致前缀。
    - 单小节接近或超过 4096 字节时，按子主题拆成多个「## 项目名 · 子主题」，合并同义表述。
-   - 仓库目录映射：若现有小节首行带有「> repos: ...」或输入的新主张带有 repo 仓库目录名，在该项目第一个小节标题正下方保留并合并「> repos: 仓库1, 仓库2」（仅写裸仓库目录名，不写路径斜杠）。
-4. 写法：每条口径一行完整中文短句，直接写清定论或约束，不写日期流水账、不写记账词（待确认、样本数等）、不写任何密钥、IP、邮箱、手机号或完整本机路径。
-5. ${TWIN_EDIT_FORMAT}`;
+   - 仓库目录映射：若现有小节首行带有「> repos: ...」或输入的新主张带有 repo 仓库目录名，在该项目第一个小节标题正下方保留并合并「> repos: 仓库1, 仓库2」（仅写裸仓库目录名，不写路径斜杠）；别名同理保留并合并「> aliases: 别名1, 别名2」。
+5. 写法：每条口径一行完整中文短句，直接写清定论或约束，不写日期流水账、不写记账词（待确认、样本数等）、不写任何密钥、IP、邮箱、手机号或完整本机路径。
+6. ${TWIN_EDIT_FORMAT}`;
 
 export interface TwinPromptClaim {
   layer: string;
@@ -312,6 +339,19 @@ export function buildTwinMergePrompt(input: TwinMergePromptInput): {
   return { system: TWIN_MERGE_SYSTEM_PROMPT, user, includedCorrectionIds: corrections.ids };
 }
 
+/** Tells the proposer which sections are full: a full section only accepts action = replace. */
+function capacityLines(coding: string): string[] {
+  const headings = ["## 行为与范围", "## 安全与授权", "## 验证与交付", "## 并行与指令优先级"];
+  const first = codingCapacity(coding, headings[0] ?? "");
+  const lines = [`整份共 ${first.total}/${first.totalLimit} 条；满了只能 action=replace，不能 add。`];
+  for (const heading of headings) {
+    const room = codingCapacity(coding, heading);
+    const full = room.total >= room.totalLimit || (room.sectionLimit !== null && room.inSection >= room.sectionLimit);
+    lines.push(`- ${heading}：${room.inSection}/${room.sectionLimit ?? "?"} 条${full ? "（已满，只能 replace）" : ""}`);
+  }
+  return lines;
+}
+
 export function buildTwinCodingProposalsPrompt(input: {
   day: string;
   coding: string;
@@ -331,6 +371,9 @@ export function buildTwinCodingProposalsPrompt(input: {
     "## 当前编码分身 coding",
     input.coding.trim() === "" ? "（空）" : input.coding,
     "",
+    "## 容量",
+    capacityLines(input.coding).join("\n"),
+    "",
     "## 已有待审提案",
     existing,
     "",
@@ -349,6 +392,8 @@ export function buildTwinCodingProposalsPrompt(input: {
 export function buildTwinProjectMergePrompt(input: {
   day: string;
   targetProjectsText: string;
+  /** Every existing project, so a claim under a new name can be folded into an existing one. */
+  directory?: readonly TwinProjectDirectoryEntry[];
   claims: readonly TwinPromptClaim[];
   pending: readonly TwinPromptClaim[];
   corrections: readonly TwinPromptCorrection[];
@@ -361,6 +406,9 @@ export function buildTwinProjectMergePrompt(input: {
   const claimBudget = Math.max(0, TWIN_EVIDENCE_LIMIT - textUnits(corrections.text));
   const user = [
     `日期：${input.day}`,
+    "",
+    "## 现有项目索引（全部已有项目）",
+    renderProjectDirectory(input.directory ?? []),
     "",
     "## 目标项目当前小节（仅限本次涉及的项目）",
     input.targetProjectsText.trim() === "" ? "（新建项目小节）" : input.targetProjectsText,
@@ -388,7 +436,7 @@ ${TWIN_LAYOUT}
 1. 合并同义或重叠的规则，删掉被取代的旧说法。
 2. 删掉例子、解释和理由，把过长句子拆成独立的一条一事短规则。
 3. 只对某个项目、系统或公司基建成立的规则移到 projects 对应小节（同时输出 projects 的 edits）。
-4. 仍然超预算，删掉最少触发、影响最小的细则。
+4. 仍然超预算，删掉最少触发、影响最小的细则；projects 项目组超预算时，优先删「已落地的一次性功能点、界面细节、字段增补」与「已被后续决定推翻的旧口径」。
 需要修正的层，把改动小节按完整新内容输出；参考「各节字节数」先压最大的节，不要在思考中逐字精确计算 UTF-8 字节数，直接合并重复条目、删除过时口径并快速输出 JSON。没有问题的层不删仍然成立的规则。
 
 ${TWIN_WRITING}
@@ -404,9 +452,7 @@ export function buildTwinFixPrompt(input: {
   const sizes = [
     ...sectionSizes("full", input.docs.full),
     ...sectionSizes("coding", input.docs.coding),
-    ...(input.docs.full.trim() === "" && input.docs.coding.trim() === ""
-      ? sectionSizes("projects", input.docs.projects)
-      : []),
+    ...(input.docs.projects.trim() === "" ? [] : sectionSizes("projects", input.docs.projects)),
   ];
   const user = [
     ...docBlock(input.docs),
@@ -428,7 +474,7 @@ export const TWIN_PROBES_SYSTEM_PROMPT = `你是 you-brain 的数字分身评测
 1. situation 写一个助手会遇到的具体情境：助手准备怎么做，或者已经做了什么。不要复述用户原话，不要透露答案。
 2. expect 写用户在这个情境下的实际反应，一两句中文。
 3. 只出能看出他这个人的题。一个不了解他、但做事靠谱的助手本来就会做对的情境不要出；要出的是他的做法和常见做法不同，或者几种做法都说得通、他明确选了其中一种的情境。
-4. 只出换一个项目也会遇到的情境：去掉项目名、业务名词和只在该项目里成立的口径。只在某个项目里拍板过一次、离开那个项目就推不出来的具体决定不要出题。
+4. 只出换一个项目也会遇到的情境：去掉项目名、业务名词和只在该项目里成立的口径。只在某个项目里拍板过一次、离开那个项目就推不出来的具体决定不要出题。只是把系统名或工具名隐去的具体功能交互设计、字段取值规则、单点技术排障方案，一律不出题。出题前先自检：只凭通用的价值观和工程习惯，能不能合理推出他的选择？推不出来就不要出。
 5. layer：编码和工程上的做法是 coding，其余是 persona。
 6. 已有题目里标了「没有区分度」的，上次评测时各组作答结果都一样；不要再出和它们同类的题。
 7. 同一个意思只出一道，也不要和已有题目重复。不超过给定的题量，宁缺毋滥；没有合适的就输出空数组。
@@ -599,4 +645,67 @@ function packCorrections(
 
 function oneLine(value: string): string {
   return value.replace(/[\r\n]+/gu, " ").trim();
+}
+
+export const TWIN_PROJECT_MERGE_PLAN_SYSTEM_PROMPT = `你是 you-brain 的项目决定整理员。输入是 projects.md 里全部项目的名称、别名、仓库目录、子主题和字节数。找出其实是同一个产品、同一个代码仓库或同一个系统的不同叫法，给出归并方案。只输出一个 JSON 对象，不要 Markdown，不要解释。
+
+规则：
+1. 归并条件：同一个仓库目录（repos 相同或重叠）、一个是另一个的子系统/界面/模块、或明显是同一产品的不同叫法。拿不准、只是业务相近的不要合并。
+2. into 取最能代表整体的已有项目名（优先带 repos 的、范围最大的）；from 列出要并入它的其他项目名。名称必须原样取自输入，不得编造；一个项目只能出现一次，into 不能同时出现在别处的 from 里。
+3. aliases 填 from 之外还应记录的其他叫法（可为空数组）。
+4. 没有可归并的项目时 merges 输出空数组。JSON 键名保持英文。`;
+
+export function buildProjectMergePlanPrompt(input: {
+  directory: ReadonlyArray<TwinProjectDirectoryEntry & { bytes: number }>;
+}): { system: string; user: string } {
+  const lines = input.directory.map(
+    (entry) => `${renderProjectDirectory([entry])}［${entry.bytes} 字节］`,
+  );
+  const user = [
+    "## 全部项目",
+    lines.length === 0 ? "（无）" : lines.join("\n"),
+    "",
+    "## 输出 JSON schema",
+    JSON.stringify(TWIN_PROJECT_MERGE_PLAN_JSON_SCHEMA),
+  ].join("\n");
+  return { system: TWIN_PROJECT_MERGE_PLAN_SYSTEM_PROMPT, user };
+}
+
+export const TWIN_PROJECT_TIDY_SYSTEM_PROMPT = `你是 you-brain 的项目决定整理员。输入是一个项目的全部小节（可能由多个同义项目并入）。请整理成准确、无矛盾、短而稳定的项目口径。只输出一个 JSON 对象，不要 Markdown，不要解释。
+
+整理规则：
+1. 只输出 layer 为 "projects" 的 edits，只处理输入里给出的这个项目。
+2. 消除矛盾：同一件事出现两种相反说法时，保留较新、与「现行实现」更一致的一条，删掉另一条；已被后来的架构替代的旧口径直接删除。
+3. 淘汰一次性细节：已落地完成的单次功能点、界面微调、字段增补、排障过程、临时状态不是长期口径，直接删除。只保留跨会话仍需遵守的架构边界、领域口径、数据不变量、外部集成契约和明确禁令。
+4. 合并同义表述；整个项目总长压到 8192 字节以下，单小节 4096 字节以下，必要时按子主题拆成「## 项目名 · 子主题」。输入若指明「只整理小节」，则只改这一小节：压到指定字节以内，其余小节只作对照（避免重复与矛盾），不要输出它们的 edits。同一项目的小节标题统一用同一个项目名前缀（并入的旧项目名前缀改成该项目名）。
+5. 首个小节标题下保留「> repos: …」与「> aliases: …」两行元数据原样。
+6. ${TWIN_EDIT_FORMAT}`;
+
+export function buildProjectTidyPrompt(input: {
+  name: string;
+  sectionsText: string;
+  bytes: number;
+  /** Tidy one section only; the rest of the project is shown as headings for context. */
+  focus?: { heading: string; text: string; targetBytes: number; otherHeadings: readonly string[] };
+}): { system: string; user: string } {
+  const body = input.focus
+    ? [
+        `只整理小节：${input.focus.heading}（压到 ${input.focus.targetBytes} 字节以内）`,
+        "",
+        "## 该项目的其他小节（仅供对照，不要改）",
+        input.focus.otherHeadings.length === 0 ? "（无）" : input.focus.otherHeadings.map((heading) => `- ${heading}`).join("\n"),
+        "",
+        "## 要整理的小节",
+        input.focus.text,
+      ]
+    : ["## 当前全部小节", input.sectionsText];
+  const user = [
+    `项目：${input.name}（当前 ${input.bytes} 字节）`,
+    "",
+    ...body,
+    "",
+    "## 输出 JSON schema",
+    JSON.stringify(TWIN_EDITS_JSON_SCHEMA),
+  ].join("\n");
+  return { system: TWIN_PROJECT_TIDY_SYSTEM_PROMPT, user };
 }

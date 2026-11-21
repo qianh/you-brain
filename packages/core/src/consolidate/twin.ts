@@ -22,6 +22,7 @@ const LEGACY_CODING_PRINCIPLES_HEADING = "## 核心原则";
 const LEGACY_INDEX_PREFIX = "在下列项目里工作时";
 const ANY_VERSION = /v(\d+)\.(\d+)\.(\d+)/u;
 const REPOS_META_LINE = /^>\s*repos\s*[:：]\s*(.+)$/iu;
+const ALIASES_META_LINE = /^>\s*aliases\s*[:：]\s*(.+)$/iu;
 
 export const TWIN_TITLES: Record<TwinLayer, string> = {
   full: "# 数字分身 · 人格",
@@ -83,6 +84,8 @@ export interface ProjectTwinGroup {
   name: string;
   /** Repository directory / package names mapped via `> repos: a, b`. */
   repos: string[];
+  /** Other names the same project goes by, mapped via `> aliases: a, b`. */
+  aliases: string[];
   sections: TwinSection[];
 }
 
@@ -161,6 +164,23 @@ export function parseReposLine(line: string): string[] | null {
   return repos;
 }
 
+/** Parses `> aliases: 别名1, 别名2`; null when the line is not an aliases line. */
+export function parseAliasesLine(line: string): string[] | null {
+  const match = ALIASES_META_LINE.exec(line.trim());
+  if (!match) return null;
+  const seen = new Set<string>();
+  const aliases: string[] = [];
+  for (const part of (match[1] ?? "").split(/[,，、]+/gu)) {
+    const alias = cleanRepoToken(part);
+    if (!alias) continue;
+    const lower = alias.toLowerCase();
+    if (seen.has(lower)) continue;
+    seen.add(lower);
+    aliases.push(alias);
+  }
+  return aliases;
+}
+
 /**
  * Group `projects.md` sections by project prefix, merging any `> repos:` lines per group.
  * Preserves first-seen order of project groups and relative order of sub-sections within each group.
@@ -179,7 +199,7 @@ export function parseProjectGroups(projectsText: string): {
     const key = name.toLowerCase();
     let group = byKey.get(key);
     if (!group) {
-      group = { name, repos: [], sections: [] };
+      group = { name, repos: [], aliases: [], sections: [] };
       byKey.set(key, group);
       groups.push(group);
     }
@@ -195,22 +215,34 @@ export function parseProjectGroups(projectsText: string): {
         }
         continue;
       }
+      const aliases = parseAliasesLine(line);
+      if (aliases !== null) {
+        for (const alias of aliases) {
+          if (!group.aliases.some((existing) => existing.toLowerCase() === alias.toLowerCase())) {
+            group.aliases.push(alias);
+          }
+        }
+        continue;
+      }
       kept.push(line);
     }
     const cleaned = trimEndLines(kept.join("\n"));
     group.sections.push({ heading: section.heading, text: cleaned });
   }
 
-  // Re-attach canonical `> repos: ...` line onto the first section of each group that has repos.
+  // Re-attach canonical `> repos:` / `> aliases:` lines onto the first section of each group.
   for (const group of groups) {
-    if (group.repos.length === 0 || group.sections.length === 0) continue;
+    if ((group.repos.length === 0 && group.aliases.length === 0) || group.sections.length === 0) continue;
     const first = group.sections[0]!;
     const [headingLine = first.heading, ...rest] = first.text.split("\n");
     while (rest[0]?.trim() === "") rest.shift();
-    const meta = `> repos: ${group.repos.join(", ")}`;
+    const meta = [
+      ...(group.repos.length > 0 ? [`> repos: ${group.repos.join(", ")}`] : []),
+      ...(group.aliases.length > 0 ? [`> aliases: ${group.aliases.join(", ")}`] : []),
+    ];
     group.sections[0] = {
       heading: first.heading,
-      text: trimEndLines([headingLine, meta, ...rest].join("\n")),
+      text: trimEndLines([headingLine, ...meta, ...rest].join("\n")),
     };
   }
 
@@ -432,7 +464,7 @@ export function checkTwin(
   }
   if (changed.has("projects") && oversized.length > 0) {
     warnings.push(
-      `projects 这些小节超过 ${TWIN_BUDGET.section} 字节：${oversized.join("、")}。只合并同义表述、按子主题拆成新的 ## 小节，不删仍成立的规则`,
+      `projects 这些小节超过 ${TWIN_BUDGET.section} 字节：${oversized.join("、")}。合并同义表述、按子主题拆成新的 ## 小节，并删除已被推翻的旧口径与已落地的一次性细节`,
     );
   }
   if (changed.has("projects") && texts.projects.trim() !== "") {

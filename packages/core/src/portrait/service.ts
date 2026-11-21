@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { basename } from "node:path";
 
 import type { CaptureSourceId } from "@you-brain/protocol";
@@ -29,7 +29,13 @@ export interface PortraitConfig {
 export interface PortraitStore {
   getPortrait(variant: string): PortraitRecord | null;
   upsertPortrait(record: PortraitRecord): void;
+  /** Optional: needed only to reconcile retired variants. */
+  listPortraits?(): PortraitRecord[];
+  deletePortrait?(variant: string): void;
 }
+
+/** Variants that earlier versions pulled and that are no longer part of the twin. */
+const RETIRED_VARIANTS: readonly string[] = ["brief"];
 
 export interface PortraitSnapshot {
   fileId: string;
@@ -125,8 +131,20 @@ export class PortraitService {
     for (const variant of this.#config.variants) {
       variants.push(await this.#pullVariant(variant));
     }
+    await this.#dropRetiredVariants();
     const injection = this.#injection ? await this.#injection.reconcile() : idleInjection();
     return { variants, injection };
+  }
+
+  /** Removes the local row and file of retired variants (e.g. `brief`) that are no longer configured. */
+  async #dropRetiredVariants(): Promise<void> {
+    if (!this.#store.listPortraits || !this.#store.deletePortrait) return;
+    const configured = new Set(this.#config.variants.map((variant) => variant.id));
+    for (const row of this.#store.listPortraits()) {
+      if (configured.has(row.variant) || !RETIRED_VARIANTS.includes(row.variant)) continue;
+      await rm(portraitFile(this.#paths, row.variant), { force: true });
+      this.#store.deletePortrait(row.variant);
+    }
   }
 
   async getPortrait(variant = "full"): Promise<PortraitDocument> {
