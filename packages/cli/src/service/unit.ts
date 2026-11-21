@@ -105,7 +105,8 @@ export function renderSystemdUnit(input: {
     lines.push(`Environment=${systemdQuote(`${key}=${value}`)}`);
   }
   lines.push(
-    `WorkingDirectory=${systemdQuote(input.workingDirectory)}`,
+    // WorkingDirectory= 不解析引号（带引号会被判为非绝对路径），只展开 % 说明符。
+    `WorkingDirectory=${input.workingDirectory.replaceAll("%", "%%")}`,
     `KillSignal=SIGTERM`,
     `TimeoutStopSec=15`,
     ``,

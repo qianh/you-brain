@@ -97,7 +97,7 @@ Restart=on-failure
 RestartSec=5
 Environment="PATH=/usr/bin:/bin"
 Environment="HOME=/home/tester"
-WorkingDirectory="/home/tester"
+WorkingDirectory=/home/tester
 KillSignal=SIGTERM
 TimeoutStopSec=15
 
@@ -116,7 +116,7 @@ ExecStart="/opt/my app/bin" "a\\"b$$c%%d\\\\e"
 Restart=on-failure
 RestartSec=5
 Environment="PATH=/opt/$$bin & %%s"
-WorkingDirectory="/home/user/my dir"
+WorkingDirectory=/home/user/my dir
 KillSignal=SIGTERM
 TimeoutStopSec=15
 
