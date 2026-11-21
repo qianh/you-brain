@@ -34,32 +34,16 @@ export function readRolesFile(path: string, fallback: Roles): Promise<Roles> {
   return readJsonFile(path, (value) => parseRoles(value), fallback);
 }
 
-function sameLlm(left: SharedConfig["llm"], right: SharedConfig["llm"]): boolean {
-  return left.provider === right.provider && left.model === right.model && left.baseUrl === right.baseUrl;
+/**
+ * 模型（`llm`、`consolidateLlm`）由各设备自己维护，不跟随 Drive：
+ * 同步下来的 shared.json 只取其余字段，模型始终保留本机的。
+ */
+export function keepLocalLlm(remote: SharedConfig, local: SharedConfig): SharedConfig {
+  return { ...remote, llm: { ...local.llm }, consolidateLlm: { ...local.consolidateLlm } };
 }
 
-/**
- * Drive may still hold the factory default while this machine already chose a
- * provider. CLI providers leave the model blank on purpose, so an empty model
- * string is not "unconfigured". Keep the local provider until the remote file
- * actually names one. A remote file that names no model still yields to a
- * local model string.
- */
-export function preferLocalLlm(remote: SharedConfig, local: SharedConfig): SharedConfig {
-  const defaults = createDefaultSharedConfig();
-  const fallback = defaults.llm;
-  let next = remote;
-  if (sameLlm(remote.llm, fallback) && !sameLlm(local.llm, fallback)) {
-    next = { ...next, llm: { ...local.llm } };
-  } else if (remote.llm.model.trim() === "" && local.llm.model.trim() !== "") {
-    next = { ...next, llm: { ...local.llm } };
-  }
-  const sameConsolidateDefault =
-    !remote.consolidateLlm.enabled && sameLlm(remote.consolidateLlm, defaults.consolidateLlm);
-  const localConsolidateCustomized =
-    local.consolidateLlm.enabled || !sameLlm(local.consolidateLlm, defaults.consolidateLlm);
-  if (sameConsolidateDefault && localConsolidateCustomized) {
-    next = { ...next, consolidateLlm: { ...local.consolidateLlm } };
-  }
-  return next;
+/** 推到 Drive 的补丁不带模型字段：本机改模型不能改动其他设备（含尚未升级的旧版本）。 */
+export function sharedWithoutLlm(config: SharedConfig): Omit<SharedConfig, "llm" | "consolidateLlm"> {
+  const { llm: _llm, consolidateLlm: _consolidateLlm, ...rest } = config;
+  return rest;
 }

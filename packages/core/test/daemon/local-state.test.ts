@@ -1,26 +1,35 @@
 import { createDefaultSharedConfig, parseSharedConfig } from "@you-brain/protocol";
 import { describe, expect, it } from "bun:test";
 
-import { preferLocalLlm } from "../../src/daemon/local-state.js";
+import { keepLocalLlm, sharedWithoutLlm } from "../../src/daemon/local-state.js";
 
-describe("preferLocalLlm", () => {
-  it("keeps a blank-model CLI provider when Drive still has the factory default", () => {
-    const local = parseSharedConfig({ llm: { provider: "codex-cli", model: "", baseUrl: "" } });
-    const merged = preferLocalLlm(createDefaultSharedConfig(), local);
-    expect(merged.llm).toEqual(local.llm);
-  });
-
-  it("keeps a local model string when the remote names none", () => {
+describe("各设备自己维护模型", () => {
+  it("同步下来的 shared.json 不改本机模型，其余字段照取", () => {
     const local = parseSharedConfig({
-      llm: { provider: "deepseek", model: "deepseek-chat", baseUrl: "" },
+      llm: { provider: "grok-cli", model: "grok-4.7-build-fast:xhigh", baseUrl: "" },
+      consolidateLlm: { enabled: true, provider: "grok-cli", model: "grok-4.7-build-fast:xhigh", baseUrl: "" },
     });
-    const remote = parseSharedConfig({ llm: { provider: "openai", model: "", baseUrl: "" } });
-    expect(preferLocalLlm(remote, local).llm).toEqual(local.llm);
+    const remote = parseSharedConfig({
+      llm: { provider: "magpie", model: "grok/grok-4.7-build-fast", baseUrl: "" },
+      consolidateLlm: { enabled: false, provider: "magpie", model: "x", baseUrl: "" },
+      refine: { ...createDefaultSharedConfig().refine, idleMinutes: 9 },
+    });
+    const merged = keepLocalLlm(remote, local);
+    expect(merged.llm).toEqual(local.llm);
+    expect(merged.consolidateLlm).toEqual(local.consolidateLlm);
+    expect(merged.refine.idleMinutes).toBe(9);
   });
 
-  it("accepts a remote provider that was actually set, even with a blank model", () => {
-    const local = parseSharedConfig({ llm: { provider: "codex-cli", model: "", baseUrl: "" } });
-    const remote = parseSharedConfig({ llm: { provider: "grok-cli", model: "", baseUrl: "" } });
-    expect(preferLocalLlm(remote, local).llm.provider).toBe("grok-cli");
+  it("本机还是默认模型时，也不接受 Drive 上别的设备选的模型", () => {
+    const local = createDefaultSharedConfig();
+    const remote = parseSharedConfig({ llm: { provider: "magpie", model: "grok/grok-4.7-build-fast", baseUrl: "" } });
+    expect(keepLocalLlm(remote, local).llm).toEqual(local.llm);
+  });
+
+  it("推到 Drive 的补丁不带模型字段", () => {
+    const patch = sharedWithoutLlm(createDefaultSharedConfig());
+    expect("llm" in patch).toBe(false);
+    expect("consolidateLlm" in patch).toBe(false);
+    expect("refine" in patch).toBe(true);
   });
 });

@@ -277,9 +277,10 @@ import { acquireDaemonLock } from "./lock.js";
 import { startMemoryTrace, traceStage } from "./memory-trace.js";
 import { createStartupLog, type StartupLog } from "./startup-log.js";
 import {
-  preferLocalLlm,
+  keepLocalLlm,
   readRolesFile,
   readSharedFile,
+  sharedWithoutLlm,
   writeJsonFile,
 } from "./local-state.js";
 import {
@@ -922,7 +923,7 @@ export class YouBrainDaemon {
   };
   #sharedPush = new ConfigPush<SharedConfig>(
     async (config) => {
-      await this.#sync?.updateShared(config);
+      await this.#sync?.updateShared(sharedWithoutLlm(config));
     },
     (failure) => this.#onConfigPush("shared", failure),
   );
@@ -2965,7 +2966,7 @@ export class YouBrainDaemon {
       const prevLlm = this.#shared.llm;
       const prevConsolidateLlm = this.#shared.consolidateLlm;
       const prevPortraitClients = this.#shared.integrations.codingPortraitClients;
-      this.#shared = preferLocalLlm(update.shared, this.#shared);
+      this.#shared = keepLocalLlm(update.shared, this.#shared);
       this.#clearCliStall();
       await writeJsonFile(join(this.#paths.dataDir, "shared.json"), this.#shared);
       this.#applyZone();
