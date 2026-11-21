@@ -24,6 +24,11 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
+      # build:daemon 会打包 DSH 运行时，要求 Node ≥ 24.9（scripts/build-dsh.ts）。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
       - name: Install JavaScript dependencies
         run: bun install --frozen-lockfile
 
