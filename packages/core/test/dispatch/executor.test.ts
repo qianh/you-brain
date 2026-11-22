@@ -410,6 +410,26 @@ describe("目标端执行器", () => {
     }]);
   });
 
+  test("短任务在第一次轮询前就做完，也会发出状态变化（以 running 为起点）", async () => {
+    const h = track(await make());
+    const started = await h.executor.handle(h.frame({ cmd: startCmd("d-fast") }));
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    const threadId = (started.result as { threadId: string }).threadId;
+    const row = h.t3.threads.get(threadId);
+    if (!row) throw new Error("missing thread");
+    row.status = "completed";
+    await h.executor.tick();
+    expect(h.events).toHaveLength(1);
+    expect(h.events[0]?.frame).toMatchObject({
+      dispatchId: "d-fast",
+      kind: "thread.status",
+      data: { threadId, status: "completed", previous: "running" },
+    });
+    await h.executor.tick();
+    expect(h.events).toHaveLength(1);
+  });
+
   test("hello 只返回白名单里且 T3 存在的项目，T3 出错时 ready 为 false", async () => {
     const h = track(await make());
     expect(await h.executor.hello()).toEqual({

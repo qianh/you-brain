@@ -106,6 +106,8 @@ export class DispatchExecutor {
   readonly #audit: AuditLog;
   readonly #nonces = new Map<string, number>();
   #seen: Map<string, string> | null = null;
+  /** 刚派出、还没被轮询看到过的会话：以 running 为起点，短任务在一个周期内做完也能发出状态变化。 */
+  #launched = new Map<string, string>();
   #timer: ReturnType<typeof setTimeout> | null = null;
   #started = false;
   #failures = 0;
@@ -218,9 +220,9 @@ export class DispatchExecutor {
       }
       const threads = await this.#relevantThreads();
       this.#failures = 0;
-      if (this.#seen !== null) {
+      {
         for (const thread of threads) {
-          const previous = this.#seen.get(thread.threadId);
+          const previous = this.#seen?.get(thread.threadId) ?? this.#launched.get(thread.threadId);
           if (previous === undefined || previous === thread.status) continue;
           const hit = await this.#ledger.findByThread(thread.threadId);
           if (!hit) continue;
@@ -242,6 +244,7 @@ export class DispatchExecutor {
         }
       }
       this.#seen = new Map(threads.map((thread) => [thread.threadId, thread.status]));
+      for (const thread of threads) this.#launched.delete(thread.threadId);
     } catch {
       next = RETRY_MS[Math.min(this.#failures, RETRY_MS.length - 1)] ?? POLL_MS;
       this.#failures += 1;
@@ -300,6 +303,7 @@ export class DispatchExecutor {
       capped,
     };
     await this.#ledger.putDispatch(args.dispatchId, record);
+    this.#launched.set(launched.threadId, "running");
     await this.#notifyStart(policy, sender.name, args.projectId, args.title);
     return this.#startResult(record);
   }
