@@ -7,6 +7,8 @@ import { T3_INJECT_PATH, T3_INJECT_SCRIPT } from "./inject.js";
  * 只在首页 HTML 里插入一段 U-Brain 脚本（多巴胺底色、输入框里的 @ 引用）。
  *
  * - 只监听 127.0.0.1；不读写 T3 的数据库，不保存、不打印 T3 的 Cookie 或令牌。
+ * - 自动配对（可选）：浏览器导航到首页而 T3 还没登录时，转发向 `pairCredential` 要一次性凭据，
+ *   立刻去 T3 换登录 Cookie 并直接写回浏览器（带前缀）；凭据与 Cookie 只在这一次请求里经手。
  * - 浏览器不按端口区分 Cookie，同一 127.0.0.1 上多个 T3 会互相覆盖同名登录 Cookie；
  *   每个转发用 `ub<上游端口>_` 前缀隔离各自 Cookie：响应 Set-Cookie 加前缀并去 Domain，
  *   请求 Cookie 只转发带本转发前缀的项并去前缀，其余丢弃。
@@ -187,12 +189,60 @@ export function responseHeaders(
   return out;
 }
 
-export function startT3Proxy(upstreamUrl: string): T3Proxy {
+export interface T3ProxyOptions {
+  /** 返回一次性配对凭据；该上游不能自动配对（不是本机 T3、CLI 不可用）时返回 null。 */
+  pairCredential?: () => Promise<string | null>;
+}
+
+/** 请求是不是浏览器打开页面（而不是接口、脚本、WebSocket）。 */
+function isNavigation(request: Request): boolean {
+  if (request.method !== "GET") return false;
+  const dest = request.headers.get("sec-fetch-dest");
+  if (dest !== null) return dest === "document" || dest === "iframe";
+  return request.headers.get("accept")?.includes("text/html") === true;
+}
+
+/** 自动配对失败后多久内不再试，避免 T3 没起来或 CLI 不可用时每次导航都起子进程。 */
+const PAIR_RETRY_MS = 30_000;
+
+export function startT3Proxy(upstreamUrl: string, options: T3ProxyOptions = {}): T3Proxy {
   const upstream = new URL(upstreamUrl);
   const upstreamOrigin = upstream.origin;
   const wsOrigin = upstreamOrigin.replace(/^http/u, "ws");
   const cookiePrefix = t3CookiePrefix(upstreamUrl);
   let proxyOrigin = "";
+  let pairFailedAt = 0;
+
+  /** 没登录时用一次性凭据换 T3 的登录 Cookie；返回要写回浏览器的 Set-Cookie（已加前缀），不需要或失败返回空数组。 */
+  async function autoPair(request: Request): Promise<string[]> {
+    const pairCredential = options.pairCredential;
+    if (!pairCredential || Date.now() - pairFailedAt < PAIR_RETRY_MS) return [];
+    const headers = forwardHeaders(request.headers, proxyOrigin, upstreamOrigin, HOP_HEADERS, cookiePrefix);
+    try {
+      const session = await fetch(`${upstreamOrigin}/api/auth/session`, { headers, redirect: "manual", signal: AbortSignal.timeout(5_000) });
+      if (!session.ok) return [];
+      if ((await session.json() as { authenticated?: unknown }).authenticated === true) return [];
+      const credential = await pairCredential();
+      if (credential === null) return [];
+      const paired = await fetch(`${upstreamOrigin}/api/auth/browser-session`, {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: upstreamOrigin },
+        body: JSON.stringify({ credential }),
+        redirect: "manual",
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!paired.ok) throw new Error("pair rejected");
+      const cookies: string[] = [];
+      for (const cookie of paired.headers.getSetCookie()) {
+        const rewritten = prefixSetCookie(cookie, cookiePrefix);
+        if (rewritten !== null) cookies.push(rewritten);
+      }
+      return cookies;
+    } catch {
+      pairFailedAt = Date.now();
+      return [];
+    }
+  }
 
   const handler = {
     hostname: "127.0.0.1",
@@ -225,6 +275,9 @@ export function startT3Proxy(upstreamUrl: string): T3Proxy {
         return new Response("T3 服务没有响应", { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });
       }
       const headers = responseHeaders(response.headers, proxyOrigin, upstreamOrigin, cookiePrefix);
+      if (options.pairCredential && isNavigation(request) && response.headers.get("content-type")?.toLowerCase().includes("text/html")) {
+        for (const cookie of await autoPair(request)) headers.append("set-cookie", cookie);
+      }
       if (response.headers.get("content-type")?.toLowerCase().includes("text/html") && request.method === "GET") {
         const html = injectT3Html(await response.text());
         return new Response(html, { status: response.status, statusText: response.statusText, headers });

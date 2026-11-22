@@ -4361,6 +4361,11 @@ export class YouBrainDaemon {
       getLlmConfig: () => ({ provider: this.#shared.llm.provider, baseUrl: this.#shared.llm.baseUrl }),
       getSearchKey: (provider) =>
         getSearchKey(provider, { platform: this.#platform, backend: this.#secretBackend }),
+      t3PairCredential: async (upstream) => {
+        const local = normalizeT3Url((await this.#uiPrefsStore().read())["you-brain.deck.t3-url"] ?? "") ?? DEFAULT_T3_URL;
+        if (normalizeT3Url(upstream) !== local) return null;
+        return (await this.#taskAutomation?.pairingCredential()) ?? null;
+      },
       noticesEnabled: async () => (await this.#uiPrefsStore().read())[TERMINAL_NOTIFY_PREF_KEY] !== "0",
       onNotices: () => this.changes.publish("deck", this.#clock.now().toISOString()),
       noticeLlm: async () => this.#llm,

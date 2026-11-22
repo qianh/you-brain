@@ -153,4 +153,57 @@ describe("startT3Proxy（假的 T3 上游）", () => {
     });
     expect(code).not.toBe(-1);
   });
+
+  it("自动配对：没登录的页面导航换到登录 Cookie 写回浏览器；已登录、接口请求、失败后限频都不再配", async () => {
+    const credentials: string[] = [];
+    let sessions = 0;
+    upstream = Bun.serve<{ cookie: string }, never>({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        const cookie = request.headers.get("cookie") ?? "";
+        if (url.pathname === "/api/auth/session") {
+          sessions += 1;
+          return Response.json({ authenticated: cookie.includes("t3_session=ok") });
+        }
+        if (url.pathname === "/api/auth/browser-session") {
+          const body = (await request.json()) as { credential?: string };
+          credentials.push(body.credential ?? "");
+          if (body.credential !== "once") return new Response("no", { status: 401 });
+          return new Response("{}", { headers: { "set-cookie": "t3_session=ok; Path=/; HttpOnly; SameSite=Lax" } });
+        }
+        return new Response("<!doctype html><html><head></head><body></body></html>", { headers: { "content-type": "text/html" } });
+      },
+    });
+    let next: string | null = "once";
+    let minted = 0;
+    proxy = startT3Proxy(`http://127.0.0.1:${upstream.port}/`, {
+      pairCredential: async () => {
+        minted += 1;
+        return next;
+      },
+    });
+    const navigate = (cookie?: string) =>
+      fetch(proxy!.url, { headers: { "sec-fetch-dest": "iframe", ...(cookie ? { cookie } : {}) } });
+
+    const first = await navigate();
+    expect(first.headers.getSetCookie()).toEqual([`ub${upstream.port}_t3_session=ok; Path=/; HttpOnly; SameSite=Lax`]);
+    expect(credentials).toEqual(["once"]);
+
+    const logged = await navigate(`ub${upstream.port}_t3_session=ok`);
+    expect(logged.headers.getSetCookie()).toEqual([]);
+    expect(minted).toBe(1);
+
+    await fetch(new URL("/api/echo", proxy.url), { headers: { "sec-fetch-dest": "empty" } });
+    expect(minted).toBe(1);
+
+    next = "bad";
+    expect((await navigate()).headers.getSetCookie()).toEqual([]);
+    expect(minted).toBe(2);
+    next = "once";
+    expect((await navigate()).headers.getSetCookie()).toEqual([]);
+    expect(minted).toBe(2);
+    expect(sessions).toBeGreaterThanOrEqual(3);
+  });
 });

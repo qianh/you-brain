@@ -493,6 +493,17 @@ export class T3Automation implements TaskAutomationPort {
     try { return await this.#issuing; } finally { this.#issuing = null; }
   }
 
+  /**
+   * 给指挥台 iframe 的浏览器会话签发一次性配对凭据（5 分钟、一次性）：只交给转发立刻去换登录 Cookie，
+   * 不保存、不打印。标签与 TODO 的 MCP 授权分开，避免被它的清理误撤销。
+   */
+  async pairingCredential(): Promise<string> {
+    const raw = await this.#runCli(["auth", "pairing", "create", "--ttl", "5m", "--label", "U-Brain 指挥台", "--json"]);
+    const credential = (JSON.parse(raw) as Record<string, unknown>).credential;
+    if (!text(credential)) invalidResponse();
+    return credential;
+  }
+
   /** 配对码 → 注册 MCP 客户端 → 用配对码批准 → 换取访问令牌（PKCE）。 */
   async #issueToken(url: string): Promise<string> {
     if (!this.#staleCleaned) {

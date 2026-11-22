@@ -39,6 +39,8 @@ export interface DeckServiceOptions {
   homeDir: string;
   /** dsh 与 CLI 子进程的查找与运行环境（daemon 传它的 #env；缺省用 process.env）。 */
   env?: NodeJS.ProcessEnv;
+  /** T3 转发自动登录用：返回某个上游的一次性配对凭据；不是本机 T3 或拿不到时返回 null。 */
+  t3PairCredential?: (upstream: string) => Promise<string | null>;
   /** 设置里的各供应商 Key 经这里交给 dsh 做环境层凭据（daemon 传钥匙串读取）。 */
   getApiKey?: (provider: LlmProvider) => string | null | undefined | Promise<string | null | undefined>;
   /** 设置里的 LLM 选择（provider + 地址）；选了 magpie 时指挥台照它挂网关路由。 */
@@ -201,7 +203,8 @@ export class DeckService {
     }
     let proxy: T3Proxy;
     try {
-      proxy = startT3Proxy(upstream);
+      const pair = this.#options.t3PairCredential;
+      proxy = startT3Proxy(upstream, pair ? { pairCredential: () => pair(upstream) } : {});
     } catch {
       return null;
     }
