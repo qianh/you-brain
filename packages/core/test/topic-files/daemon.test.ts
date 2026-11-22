@@ -129,7 +129,7 @@ describe("topic files daemon", () => {
       (
         await putRoles(daemon, {
           mainDevice: deviceId,
-          consolidation: { enabled: true, time: "23:00" },
+          consolidation: { enabled: false, time: "23:00" },
         })
       ).status,
     ).toBe(200);
@@ -139,6 +139,12 @@ describe("topic files daemon", () => {
     ).toBeGreaterThan(0);
     // The upload no longer refines, so give the refine pass a turn before consolidating.
     await refineNow(clock, daemon);
+    // Consolidation reviews the finished day, so move to the next morning before turning it on.
+    await clock.advance(15 * 60 * 60 * 1000);
+    await daemon.settled();
+    expect(
+      (await putRoles(daemon, { mainDevice: deviceId, consolidation: { enabled: true, time: "23:00" } })).status,
+    ).toBe(200);
     expect(await drive.findByPath(DRIVE_PATHS.topicsLatest)).toBeNull();
 
     const response = await send(daemon, "/api/actions/consolidate", {
