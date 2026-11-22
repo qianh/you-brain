@@ -17,6 +17,8 @@ export interface AutoJoinPorts {
   canJoin(): Promise<boolean>;
   join(url: string, code: string): Promise<void>;
   now(): number;
+  /** 排查用：失败原因、兑换结果。缺省不记。 */
+  log?(message: string): void;
 }
 
 export type AutoJoinResult = "published" | "fresh" | "joined" | "waiting" | "skipped" | "failed";
@@ -53,15 +55,30 @@ export class RelayAutoJoin {
       const now = this.#ports.now();
       const url = await this.#ports.enrolledUrl();
       if (url === null) {
-        if (!(await this.#ports.canJoin())) return "skipped";
-        if (!invite || Date.parse(invite.expiresAt) <= now || invite.code === this.#failedCode) return "waiting";
+        if (!(await this.#ports.canJoin())) {
+          this.#ports.log?.("自动入网跳过：本机不满足入网条件（缺少设备身份/令牌存储，或在用自己的 Bot Token 直连）");
+          return "skipped";
+        }
+        if (!invite) {
+          this.#ports.log?.("自动入网等待：云盘里没有邀请码文件");
+          return "waiting";
+        }
+        if (Date.parse(invite.expiresAt) <= now || invite.code === this.#failedCode) {
+          this.#ports.log?.("自动入网等待：云盘里的邀请码已过期或已试过");
+          return "waiting";
+        }
         // 旧版 VPS 会把回环地址写进云盘，本机去连只会连到自己。
-        if (isLoopbackRelayUrl(invite.url)) return "waiting";
+        if (isLoopbackRelayUrl(invite.url)) {
+          this.#ports.log?.("自动入网等待：云盘里的邀请码指向回环地址，等发布端更新");
+          return "waiting";
+        }
         try {
           await this.#ports.join(invite.url, invite.code);
+          this.#ports.log?.(`自动入网成功（邀请码来自设备 ${invite.issuedBy}）`);
           return "joined";
-        } catch {
+        } catch (error) {
           this.#failedCode = invite.code;
+          this.#ports.log?.(`自动入网兑换失败：${error instanceof Error ? error.message : String(error)}`);
           return "failed";
         }
       }
@@ -72,7 +89,8 @@ export class RelayAutoJoin {
       this.#publishedUrl = fresh.url;
       await this.#ports.writeInvite({ url: fresh.url, code: fresh.code, expiresAt: fresh.expiresAt, issuedBy: this.#ports.deviceId() });
       return "published";
-    } catch {
+    } catch (error) {
+      this.#ports.log?.(`自动入网出错：${error instanceof Error ? error.message : String(error)}`);
       return "failed";
     }
   }
