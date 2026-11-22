@@ -26,6 +26,12 @@ export interface RelaySocket {
   send(frame: string): void;
 }
 
+export interface RelayDeviceMeta {
+  enrolled: boolean;
+  publicKey?: string;
+  dispatch?: unknown;
+}
+
 export interface RelayPorts {
   storage: RelayStorage;
   /** 当前在线的设备连接。 */
@@ -35,6 +41,8 @@ export interface RelayPorts {
   now(): number;
   /** 取 [0, max) 的随机整数，生成绑定码用。 */
   randomInt(max: number): number;
+  /** 可选：为 state.devices 补充入网状态、公钥与最近一次 hello 的 dispatch 信息。 */
+  deviceMeta?: (deviceId: string) => Promise<RelayDeviceMeta | undefined> | RelayDeviceMeta | undefined;
 }
 
 export interface TgMessage {
@@ -73,19 +81,36 @@ type Devices = Record<string, { name: string; seenAt: number }>;
 /** [Telegram 消息 id, 设备 id]，新的在后。 */
 type Routes = Array<[number, string]>;
 
+export interface RelayStateDevice {
+  id: string;
+  name: string;
+  online: boolean;
+  enrolled?: boolean;
+  publicKey?: string;
+  dispatch?: unknown;
+}
+
 export interface RelayState {
   bot: { username: string; name: string } | null;
   bound: { name: string } | null;
-  devices: Array<{ id: string; name: string; online: boolean }>;
+  devices: RelayStateDevice[];
 }
 
 const ROUTES_KEPT = 1_000;
 const DEVICES_KEPT = 200;
 const PAIR_TTL_MS = 10 * 60_000;
 const PAIR_MAX_FAILURES = 5;
-const PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+export const PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 /** 直接发消息时，最近设备超过这么久就不再默认发给它（与设备端的会话时效一致）。 */
 export const RECENT_DEVICE_TTL_MS = 2 * 60 * 60_000;
+/** 同一 url 比对成功后，这段时间内不再请求 Telegram。只放进程内存，不写 storage。 */
+const WEBHOOK_RECHECK_MS = 60_000;
+
+function webhookUrlOf(info: unknown): string | undefined {
+  if (!info || typeof info !== "object") return undefined;
+  const url = (info as { url?: unknown }).url;
+  return typeof url === "string" ? url : undefined;
+}
 const TEXT_MAX = 4_000;
 
 function displayName(message: TgMessage): string {
@@ -96,6 +121,8 @@ function displayName(message: TgMessage): string {
 
 export class RelayCore {
   readonly #ports: RelayPorts;
+  /** 最近一次确认过的 webhook url → 到期时间。换进程即失效，所以回滚后会重新比对。 */
+  #webhookOk = new Map<string, number>();
 
   constructor(ports: RelayPorts) {
     this.#ports = ports;
@@ -121,12 +148,22 @@ export class RelayCore {
       this.#get<Devices>("devices"),
     ]);
     const online = new Set(this.#ports.sockets().map((socket) => socket.deviceId));
+    const sorted = Object.entries(devices ?? {}).sort((a, b) => b[1].seenAt - a[1].seenAt);
+    const list: RelayStateDevice[] = [];
+    for (const [id, device] of sorted) {
+      const item: RelayStateDevice = { id, name: device.name, online: online.has(id) };
+      const meta = this.#ports.deviceMeta ? await this.#ports.deviceMeta(id) : undefined;
+      if (meta) {
+        item.enrolled = meta.enrolled;
+        if (meta.publicKey !== undefined) item.publicKey = meta.publicKey;
+        if (meta.dispatch !== undefined) item.dispatch = meta.dispatch;
+      }
+      list.push(item);
+    }
     return {
       bot: bot ? { username: bot.username, name: bot.name } : null,
       bound: chat ? { name: chat.name } : null,
-      devices: Object.entries(devices ?? {})
-        .sort((a, b) => b[1].seenAt - a[1].seenAt)
-        .map(([id, device]) => ({ id, name: device.name, online: online.has(id) })),
+      devices: list,
     };
   }
 
@@ -153,13 +190,22 @@ export class RelayCore {
     await this.broadcast();
   }
 
-  /** webhook 地址变了才调 setWebhook（第一次部署、换域名、换 Bot）。 */
+  /**
+   * 先向 Telegram 要当前 webhook。url 已经是目标就不再 setWebhook。
+   * 不能只信 storage 里的「已设置」：回滚到另一套中转时，那边记得设过，但 Telegram 实际还指向这边。
+   * 同一个 url 在 60 秒内比对成功则跳过请求；这个标记只在内存里。
+   */
   async ensureWebhook(url: string, secret: string): Promise<void> {
-    const bot = await this.#bot();
-    const mark = `${bot.id}|${url}`;
-    if ((await this.#get<string>("webhook")) === mark) return;
-    await this.#ports.telegram("setWebhook", { url, secret_token: secret, allowed_updates: ["message"] });
-    await this.#ports.storage.put("webhook", mark);
+    const now = this.#ports.now();
+    const until = this.#webhookOk.get(url);
+    if (until !== undefined && now < until) return;
+    await this.#bot();
+    const info = await this.#ports.telegram<unknown>("getWebhookInfo", {});
+    if (webhookUrlOf(info) !== url) {
+      await this.#ports.telegram("setWebhook", { url, secret_token: secret, allowed_updates: ["message"] });
+    }
+    this.#webhookOk.clear();
+    this.#webhookOk.set(url, now + WEBHOOK_RECHECK_MS);
   }
 
   async frame(socket: RelaySocket, raw: string): Promise<void> {

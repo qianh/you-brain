@@ -25,6 +25,12 @@ import {
 import type { SqliteStore } from "../store/index.js";
 import type {
   ActionResponse,
+  DispatchDevicesResponse,
+  DispatchFollowupBody,
+  DispatchFollowupResponse,
+  DispatchOutboxItemResponse,
+  DispatchStartThreadBody,
+  DispatchStartThreadResponse,
   PortraitCorrectionResult,
   ReferenceCandidatesResponse,
   ReferenceContentView,
@@ -273,6 +279,22 @@ export function createLocalMcpServices(options: LocalMcpOptions): McpServices {
         }
         throw error;
       }
+    },
+    dispatch: {
+      devices: () => call<DispatchDevicesResponse>("GET", "/api/dispatch/devices"),
+      startThread: (body: DispatchStartThreadBody) =>
+        call<DispatchStartThreadResponse>("POST", "/api/dispatch/threads", body),
+      getOutbox: (dispatchId: string, opts?: { refresh?: boolean }) =>
+        call<DispatchOutboxItemResponse>(
+          "GET",
+          `/api/dispatch/outbox/${encodeURIComponent(dispatchId)}${opts?.refresh ? "?refresh=1" : ""}`,
+        ),
+      followup: (dispatchId: string, body: DispatchFollowupBody) =>
+        call<DispatchFollowupResponse>(
+          "POST",
+          `/api/dispatch/outbox/${encodeURIComponent(dispatchId)}/followup`,
+          body,
+        ),
     },
   };
 }

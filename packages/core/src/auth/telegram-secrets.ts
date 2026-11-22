@@ -36,3 +36,29 @@ export function telegramRelayKeyStore(options: TelegramSecretOptions): SecretSto
     ...(options.backend ? { backend: options.backend } : {}),
   });
 }
+
+/** Telegram 中转入网后的设备专属令牌。 */
+export function telegramRelayTokenStore(options: TelegramSecretOptions): SecretStore {
+  return createNamedSecretStore({
+    platform: options.platform,
+    service: TELEGRAM_KEYCHAIN_SERVICE,
+    account: "relay-token",
+    label: "you-brain Telegram relay token",
+    ...(options.runner ? { runner: options.runner } : {}),
+    ...(options.memory ? { memory: options.memory } : {}),
+    ...(options.backend ? { backend: options.backend } : {}),
+  });
+}
+
+/** 跨设备派活的 Ed25519 私钥。 */
+export function dispatchIdentityStore(options: TelegramSecretOptions): SecretStore {
+  return createNamedSecretStore({
+    platform: options.platform,
+    service: TELEGRAM_KEYCHAIN_SERVICE,
+    account: "dispatch-identity",
+    label: "you-brain dispatch identity",
+    ...(options.runner ? { runner: options.runner } : {}),
+    ...(options.memory ? { memory: options.memory } : {}),
+    ...(options.backend ? { backend: options.backend } : {}),
+  });
+}

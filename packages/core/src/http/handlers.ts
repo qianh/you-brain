@@ -10,7 +10,14 @@ import {
 } from "@you-brain/protocol";
 import { z } from "zod";
 
-import type { DeckHttpPort, HttpDeps } from "./deps.js";
+import type { DeckHttpPort, DispatchHttpPort, HttpDeps } from "./deps.js";
+import {
+  defaultDispatchPolicy,
+  type DispatchExecutor,
+  type DispatchHub,
+  type DispatchPolicy,
+  type DispatchSender,
+} from "../dispatch/index.js";
 import {
   ConsolidationRejected,
   consolidationRejectMessage,
@@ -23,6 +30,7 @@ import { TaskError } from "../tasks/service.js";
 import { TaskActionSchema, TaskCreateSchema, TaskImageIdSchema, TaskUpdateSchema } from "../tasks/schema.js";
 import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT } from "../tasks/types.js";
 import { probeT3Web } from "../deck/t3/probe.js";
+import { DEFAULT_T3_URL, normalizeT3Url } from "../deck/t3/index.js";
 import type { QuotaView } from "../quota/types.js";
 import { acceptActivityAt } from "../reminders/activity.js";
 import { planReminderAction } from "../reminders/action.js";
@@ -94,11 +102,16 @@ import {
   DeckTelegramActionBodySchema,
   DeckTty7SendBodySchema,
   DeckTty7StartBodySchema,
+  DispatchFollowupBodySchema,
+  DispatchPolicyPutBodySchema,
+  DispatchSendBodySchema,
+  DispatchStartThreadBodySchema,
   ReferenceKindSchema,
   ReferenceMaterializeBodySchema,
   type ActionResponse,
   type ApiErrorBody,
   type DaemonChangeKind,
+  type DispatchPolicyResponse,
   type GoogleLoginResult,
   type GoogleLogoutResult,
   type LlmTestResult,
@@ -113,6 +126,26 @@ import {
   type UploadActionInput,
   type UserEvent,
 } from "./types.js";
+
+const T3_PREF_KEYS = ["you-brain.deck.t3-url", "you-brain.deck.t3-endpoints"];
+
+/** 指挥台当前仍在用的 T3 上游：本机地址 + 额外端点；其余转发可以回收。 */
+function t3KeepUpstreams(prefs: Record<string, string>): string[] {
+  const keep = [normalizeT3Url(prefs["you-brain.deck.t3-url"] ?? "") ?? DEFAULT_T3_URL];
+  try {
+    const list: unknown = JSON.parse(prefs["you-brain.deck.t3-endpoints"] ?? "[]");
+    if (Array.isArray(list)) {
+      for (const item of list) {
+        const url = typeof item === "object" && item !== null ? normalizeT3Url(String((item as { url?: unknown }).url ?? "")) : null;
+        if (url !== null) keep.push(url);
+      }
+    }
+  } catch {
+    // 端点列表损坏：只保留本机。
+  }
+  return keep;
+}
+
 
 const EMPTY_QUOTA: QuotaView = { accounts: [], tokens: {}, readAt: null, stale: false };
 const SECTION_LIMIT = 80;
@@ -256,7 +289,11 @@ export async function handleApi(
           ...(body.set === undefined ? {} : { set: body.set }),
           ...(body.remove === undefined ? {} : { remove: body.remove }),
         };
-        return json({ prefs: await context.deps.uiPrefs.patch(patch) });
+        const prefs = await context.deps.uiPrefs.patch(patch);
+        if (T3_PREF_KEYS.some((key) => key in (body.set ?? {}) || (body.remove ?? []).includes(key))) {
+          context.deps.deck?.t3Retain?.(t3KeepUpstreams(prefs));
+        }
+        return json({ prefs });
       } catch (error) {
         if (error instanceof UiPrefsLimitError) throw new HttpError(413, "PAYLOAD_TOO_LARGE", error.message);
         throw error;
@@ -596,6 +633,66 @@ export async function handleApi(
       const body = DeckTelegramActionBodySchema.parse(await readJson(request));
       return json(await port.telegramAction(body));
     });
+  }
+  if (path === "/api/dispatch/devices") {
+    return method(request, "GET", async () => {
+      const port = dispatchPort(context);
+      return json(await port.devices());
+    });
+  }
+  if (path === "/api/dispatch/threads") {
+    return method(request, "POST", async () => {
+      const port = dispatchPort(context);
+      const body = DispatchStartThreadBodySchema.parse(await readJson(request));
+      return json(await port.startThread(body));
+    });
+  }
+  if (path === "/api/dispatch/outbox") {
+    return method(request, "GET", async () => {
+      const port = dispatchPort(context);
+      return json(await port.outbox());
+    });
+  }
+  const dispatchFollowupMatch = /^\/api\/dispatch\/outbox\/([^/]+)\/followup$/u.exec(path);
+  if (dispatchFollowupMatch) {
+    const dispatchId = decodeURIComponent(dispatchFollowupMatch[1] ?? "");
+    if (dispatchId.length === 0) return apiError(404, "NOT_FOUND", "找不到这个派活记录");
+    return method(request, "POST", async () => {
+      const port = dispatchPort(context);
+      const body = DispatchFollowupBodySchema.parse(await readJson(request));
+      return json(await port.followup(dispatchId, body));
+    });
+  }
+  const dispatchOutboxMatch = /^\/api\/dispatch\/outbox\/([^/]+)$/u.exec(path);
+  if (dispatchOutboxMatch) {
+    const dispatchId = decodeURIComponent(dispatchOutboxMatch[1] ?? "");
+    if (dispatchId.length === 0) return apiError(404, "NOT_FOUND", "找不到这个派活记录");
+    return method(request, "GET", async () => {
+      const port = dispatchPort(context);
+      const refresh = url.searchParams.get("refresh") === "1";
+      const item = await port.getOutbox(dispatchId, { refresh });
+      if (!item) return apiError(404, "NOT_FOUND", "找不到这个派活记录");
+      return json(item);
+    });
+  }
+  if (path === "/api/dispatch/send") {
+    return method(request, "POST", async () => {
+      const port = dispatchPort(context);
+      const body = DispatchSendBodySchema.parse(await readJson(request));
+      return json(await port.send(body));
+    });
+  }
+  if (path === "/api/dispatch/policy") {
+    if (request.method === "GET") {
+      const port = dispatchPort(context);
+      return json(await port.policy());
+    }
+    if (request.method === "PUT") {
+      const port = dispatchPort(context);
+      const body = DispatchPolicyPutBodySchema.parse(await readJson(request));
+      return json(await port.updatePolicy(body));
+    }
+    return methodNotAllowed("GET, PUT");
   }
   if (path === "/api/deck/muse/stream") {
     return method(request, "GET", async () => {
@@ -1685,4 +1782,150 @@ async function readObject(request: Request): Promise<Record<string, unknown>> {
     throw new HttpError(400, "INVALID_INPUT", "请求体必须是 JSON 对象");
   }
   return value as Record<string, unknown>;
+}
+
+function dispatchPort(context: ApiContext): DispatchHttpPort {
+  if (!context.deps.dispatch) notSupported();
+  return context.deps.dispatch;
+}
+
+export interface DispatchHttpPortOptions {
+  hub: Pick<
+    DispatchHub,
+    "devices" | "startThread" | "followup" | "outbox" | "getOutbox" | "read" | "dispatch" | "refreshHello"
+  >;
+  executor: Pick<DispatchExecutor, "policy" | "updatePolicy"> | null;
+  deviceId: string;
+  selfName(): string;
+  isConnected(): boolean;
+  isEnrolled(): boolean | Promise<boolean>;
+  projects(): Promise<Array<{ id: string; name: string }>>;
+  onFollowup?(dispatchId: string): void;
+  onPolicyChanged?(): void;
+}
+
+/** 把 DispatchHub 与可选的 DispatchExecutor 装配成 DispatchHttpPort（daemon 与测试共用）。 */
+export function createDispatchHttpPort(options: DispatchHttpPortOptions): DispatchHttpPort {
+  async function readPolicyView(): Promise<DispatchPolicyResponse> {
+    const policy = options.executor ? await options.executor.policy() : defaultDispatchPolicy();
+    const projects = await options.projects().catch(() => []);
+    const knownSenders = options.hub
+      .devices()
+      .filter((device) => !device.self)
+      .map((device) => ({
+        deviceId: device.id,
+        name: device.name,
+        enrolled: device.enrolled,
+        ...(device.publicKey ? { publicKey: device.publicKey } : {}),
+      }));
+    return { policy, projects, knownSenders };
+  }
+
+  return {
+    async devices() {
+      const all = options.hub.devices();
+      const enrolled = await options.isEnrolled();
+      return {
+        self: { deviceId: options.deviceId, name: options.selfName() },
+        connected: options.isConnected(),
+        enrolled,
+        devices: all.map((device) => ({
+          id: device.id,
+          name: device.name,
+          online: device.online,
+          self: device.self,
+          enrolled: device.enrolled,
+          ...(device.dispatch ? { dispatch: device.dispatch } : {}),
+        })),
+      };
+    },
+    startThread(body) {
+      return options.hub.startThread(body.to, {
+        projectId: body.projectId,
+        title: body.title,
+        prompt: body.prompt,
+        ...(body.mode !== undefined ? { mode: body.mode } : {}),
+      });
+    },
+    async followup(dispatchId, body) {
+      const result = await options.hub.followup(dispatchId, body.prompt);
+      if (result.ok) options.onFollowup?.(dispatchId);
+      return result;
+    },
+    async outbox() {
+      return { entries: await options.hub.outbox() };
+    },
+    async getOutbox(dispatchId, opts) {
+      const existing = await options.hub.getOutbox(dispatchId);
+      if (!existing) return null;
+      if (opts?.refresh !== true) return { entry: existing, refreshed: false };
+      const read = await options.hub.read(dispatchId);
+      if (!read.ok) {
+        return {
+          entry: (await options.hub.getOutbox(dispatchId)) ?? existing,
+          refreshed: false,
+          refreshError: read.error,
+        };
+      }
+      return {
+        entry: read.entry,
+        refreshed: true,
+        read: {
+          state: read.state,
+          summary: read.summary,
+          ...(read.error !== undefined ? { error: read.error } : {}),
+          link: read.link,
+        },
+      };
+    },
+    send(body) {
+      return options.hub.dispatch(body.to, body.kind, body.args ?? {}, { timeoutMs: 45_000 });
+    },
+    policy: readPolicyView,
+    async updatePolicy(body) {
+      if (!options.executor) {
+        throw new HttpError(409, "DISPATCH_UNSUPPORTED", "本机不支持接收派活");
+      }
+      const patch: Partial<DispatchPolicy> = {};
+      if (body.enabled !== undefined) patch.enabled = body.enabled;
+      if (body.notify !== undefined) patch.notify = body.notify;
+      if (body.maxMode !== undefined) patch.maxMode = body.maxMode;
+      if (body.allowedProjects !== undefined) patch.allowedProjects = body.allowedProjects;
+      if (body.allowedSenders !== undefined) {
+        const current = await options.executor.policy();
+        const existingById = new Map(current.allowedSenders.map((sender) => [sender.deviceId, sender]));
+        const stateById = new Map(
+          options.hub
+            .devices()
+            .filter((device) => !device.self)
+            .map((device) => [device.id, device]),
+        );
+        const resolved: DispatchSender[] = [];
+        const seen = new Set<string>();
+        for (const deviceId of body.allowedSenders) {
+          if (seen.has(deviceId)) continue;
+          seen.add(deviceId);
+          const known = stateById.get(deviceId);
+          if (known) {
+            if (!known.enrolled || typeof known.publicKey !== "string" || known.publicKey === "") {
+              throw new HttpError(400, "INVALID_INPUT", "该设备尚未入网，无法允许");
+            }
+            resolved.push({ deviceId: known.id, name: known.name, publicKey: known.publicKey });
+            continue;
+          }
+          const preserved = existingById.get(deviceId);
+          if (preserved) {
+            resolved.push(preserved);
+            continue;
+          }
+          throw new HttpError(400, "INVALID_INPUT", "该设备尚未入网，无法允许");
+        }
+        patch.allowedSenders = resolved;
+      }
+      await options.executor.updatePolicy(patch);
+      await options.hub.refreshHello();
+      options.onPolicyChanged?.();
+      return readPolicyView();
+    },
+  };
 }

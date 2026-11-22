@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -458,6 +458,78 @@ describe("TelegramBridge", () => {
     expect(sent).toHaveLength(2);
     expect(ctx.sends).toEqual([]);
     ctx.bridge.stop();
+  });
+
+  it("pushDispatch pushes with 🛰 device prefix, respects notificationsEnabled, and does not register reply routing", async () => {
+    const ctx = await paired();
+    ctx.bridge.pushDispatch({
+      deviceName: "Mac Studio",
+      title: "排查日志",
+      kind: "done",
+      body: "已修复并验证通过",
+      link: "https://t3.example/t-9",
+    });
+    ctx.bridge.pushDispatch({
+      deviceName: "Mac Studio",
+      title: "部署确认",
+      kind: "waiting",
+    });
+    ctx.bridge.pushDispatch({
+      deviceName: "Mac Studio",
+      title: "跑单测",
+      kind: "failed",
+      body: "编译失败",
+    });
+    await ctx.bridge.flush();
+
+    expect(ctx.telegram.sent).toHaveLength(3);
+    expect(ctx.telegram.sent[0]!.text).toContain("✅ 🛰 Mac Studio「排查日志」做完了");
+    expect(ctx.telegram.sent[0]!.text).toContain("已修复并验证通过");
+    expect(ctx.telegram.sent[0]!.text).toContain("🔗 https://t3.example/t-9");
+    expect(ctx.telegram.sent[1]!.text).toContain("⏳ 🛰 Mac Studio「部署确认」在等你处理授权或提问");
+    expect(ctx.telegram.sent[2]!.text).toContain("❌ 🛰 Mac Studio「跑单测」执行失败");
+
+    // 未登记 #sent 与 #recent：回复它或直接发消息都不会路由到本机会话
+    const pushedId = 500 + ctx.telegram.nextId - 1;
+    ctx.telegram.say(OWNER, "继续", pushedId);
+    await until(() => ctx.telegram.sent.some((item) => item.text.includes("不是可回复的提醒")), "dispatch reply rejected");
+    ctx.telegram.say(OWNER, "随便说一句");
+    await until(() => ctx.telegram.sent.some((item) => item.text.includes("直接发消息")), "dispatch not set as recent");
+    expect(ctx.sends).toEqual([]);
+
+    // 关闭通知开关后不再推送
+    await ctx.bridge.action({ action: "set-notifications", enabled: false });
+    const countBefore = ctx.telegram.sent.length;
+    ctx.bridge.pushDispatch({ deviceName: "Mac Studio", title: "静默", kind: "done", body: "不应推送" });
+    await ctx.bridge.flush();
+    expect(ctx.telegram.sent.length).toBe(countBefore);
+    ctx.bridge.stop();
+  });
+
+  it("set-relay uses options.deviceId when no relay.deviceId is stored yet", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "yb-tg-devid-"));
+    const relayKey = new MemorySecretStore(null);
+    const bridge = new TelegramBridge({
+      configPath: join(dir, "deck", "telegram.json"),
+      token: new MemorySecretStore(null),
+      relayKey,
+      deviceId: "stable-dev-id-1234",
+      notices: () => ({ epoch: "e1", latest: 0, notices: [] }),
+      sessions: async () => ({ available: true, detail: "", workspaces: [], sessions: [], harnesses: [], appearance: null }),
+      send: async () => undefined,
+      dismiss: () => undefined,
+      relayFetch: async () => new Response(JSON.stringify({ ok: true, botConfigured: true }), { status: 200 }),
+    });
+    try {
+      await bridge.action({ action: "set-relay", url: "https://relay.example.com", key: "0123456789abcdef" });
+      const saved = JSON.parse(await readFile(join(dir, "deck", "telegram.json"), "utf8")) as {
+        relay: { deviceId: string };
+      };
+      expect(saved.relay.deviceId).toBe("stable-dev-id-1234");
+    } finally {
+      bridge.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("clear-token forgets the token and the binding", async () => {

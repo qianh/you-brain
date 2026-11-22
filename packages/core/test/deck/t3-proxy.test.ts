@@ -109,7 +109,7 @@ describe("startT3Proxy（假的 T3 上游）", () => {
     });
   }
 
-  it("首页插入脚本、脚本可取到、接口带 Cookie 原样转发", async () => {
+  it("首页插入脚本、脚本可取到、接口带前缀 Cookie 去前缀后转发", async () => {
     upstream = startUpstream();
     proxy = startT3Proxy(`http://127.0.0.1:${upstream.port}/`);
     const html = await (await fetch(proxy.url)).text();
@@ -123,7 +123,7 @@ describe("startT3Proxy（假的 T3 上游）", () => {
       await fetch(new URL("/api/echo", proxy.url), {
         method: "POST",
         body: "{}",
-        headers: { cookie: "t3_session=ok", origin: proxyOrigin },
+        headers: { cookie: `ub${upstream.port}_t3_session=ok`, origin: proxyOrigin },
       })
     ).json()) as { method: string; cookie: string; origin: string };
     expect(echo).toEqual({ method: "POST", cookie: "t3_session=ok", origin: `http://127.0.0.1:${upstream.port}` });
@@ -132,7 +132,7 @@ describe("startT3Proxy（假的 T3 上游）", () => {
   it("WebSocket：带上 Cookie 升级，消息双向转发", async () => {
     upstream = startUpstream();
     proxy = startT3Proxy(`http://127.0.0.1:${upstream.port}/`);
-    const socket = new WebSocket(`${proxy.url.replace("http", "ws")}ws`, { headers: { cookie: "t3_session=ok" } } as unknown as string[]);
+    const socket = new WebSocket(`${proxy.url.replace("http", "ws")}ws`, { headers: { cookie: `ub${upstream.port}_t3_session=ok` } } as unknown as string[]);
     const reply = await new Promise<string>((resolve, reject) => {
       socket.onopen = () => socket.send("hi");
       socket.onmessage = (event) => resolve(String(event.data));

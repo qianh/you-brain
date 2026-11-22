@@ -261,3 +261,237 @@ describe("TelegramBridge 中转模式", () => {
     mac.bridge.stop();
   });
 });
+
+import {
+  TelegramRelayClient,
+  enrollRelay,
+  type DispatchRelayFrame,
+  type TelegramRelayState,
+} from "../../src/deck/telegram/relay.js";
+import { DeviceIdentity } from "../../src/dispatch/identity.js";
+
+describe("TelegramRelayClient 扩展与入网", () => {
+  it("token 优先于 key 作为 Bearer，支持 4001 不重连、state 扩展字段、onDispatchFrame 及异常吞掉", async () => {
+    const authHeaders: string[] = [];
+    const sockets: FakeSocket[] = [];
+    const states: TelegramRelayState[] = [];
+    const connections: Array<{ status: string; error: string | null }> = [];
+    const frames: DispatchRelayFrame[] = [];
+    let throwOnFrame = true;
+
+    const client = new TelegramRelayClient({
+      url: URL_,
+      key: KEY,
+      token: "ubd_device_token_123456",
+      deviceId: "device-001",
+      name: "MacBook",
+      retryMs: [5],
+      onState: (s) => states.push(s),
+      onMessage: () => undefined,
+      onConnection: (status, error) => connections.push({ status, error }),
+      onDispatchFrame: (frame) => {
+        frames.push(frame);
+        if (throwOnFrame) throw new Error("boom");
+      },
+      socket: (_url, headers) => {
+        authHeaders.push(headers.Authorization ?? "");
+        const s = new FakeSocket();
+        sockets.push(s);
+        queueMicrotask(() => {
+          s.readyState = 1;
+          s.emit("open", {});
+        });
+        return s;
+      },
+    });
+
+    client.start();
+    await until(() => connections.some((c) => c.status === "ok"), "connected with token");
+    expect(authHeaders).toEqual(["Bearer ubd_device_token_123456"]);
+
+    // state 带新字段与旧格式均不报错
+    const s1 = sockets[0]!;
+    s1.emit("message", {
+      data: JSON.stringify({
+        t: "state",
+        bot: { username: "ub_bot", name: "UB" },
+        bound: null,
+        devices: [
+          {
+            id: "device-001",
+            name: "MacBook",
+            online: true,
+            enrolled: true,
+            publicKey: "pk-1",
+            dispatch: { enabled: true, t3: { ready: true }, projects: [], maxMode: "auto" },
+          },
+          { id: "legacy-dev", name: "Old", online: false },
+        ],
+      }),
+    });
+    expect(states).toHaveLength(1);
+    expect(states[0]!.devices[0]).toEqual({
+      id: "device-001",
+      name: "MacBook",
+      online: true,
+      enrolled: true,
+      publicKey: "pk-1",
+      dispatch: { enabled: true, t3: { ready: true }, projects: [], maxMode: "auto" },
+    });
+    expect(states[0]!.devices[1]).toEqual({ id: "legacy-dev", name: "Old", online: false });
+
+    // cmd / cmdres / event 触发 onDispatchFrame，回调抛错不影响连接
+    s1.emit("message", { data: JSON.stringify({ t: "cmd", cmdId: "c-1" }) });
+    throwOnFrame = false;
+    s1.emit("message", { data: JSON.stringify({ t: "cmdres", cmdId: "c-1", ok: true }) });
+    s1.emit("message", { data: JSON.stringify({ t: "event", dispatchId: "d-1", kind: "thread.status" }) });
+    expect(frames.map((f) => f.t)).toEqual(["cmd", "cmdres", "event"]);
+    expect(s1.readyState).toBe(1);
+
+    // 关闭码 4001：报告吊销错误且不再自动重连
+    s1.close(4001);
+    expect(connections.at(-1)).toEqual({
+      status: "error",
+      error: "这台设备已被中转吊销，请重新入网",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    expect(sockets).toHaveLength(1);
+
+    // 外部再次 start() 可以重新连接
+    client.start();
+    await until(() => sockets.length === 2, "restarted after revoke");
+    client.stop();
+  });
+
+  it("enrollRelay 成功与各类错误文案，且错误信息不含邀请码与令牌", async () => {
+    const code = "ABCD2345";
+    const okFetch = async (url: string, init: RequestInit): Promise<Response> => {
+      expect(url).toBe(`${URL_}/enroll`);
+      expect(init.method).toBe("POST");
+      expect(init.redirect).toBe("error");
+      expect(JSON.parse(String(init.body))).toEqual({
+        code,
+        deviceId: "dev-12345678",
+        name: "Mac A",
+        publicKey: "pk-abc",
+      });
+      return Response.json({ token: "ubd_new_token_xyz" });
+    };
+    const res = await enrollRelay(URL_, { code, deviceId: "dev-12345678", name: "Mac A", publicKey: "pk-abc" }, okFetch);
+    expect(res).toEqual({ token: "ubd_new_token_xyz" });
+
+    const errorCases: Array<{ status: number; body: Record<string, unknown>; expected: string }> = [
+      { status: 400, body: { error: `bad publicKey for ${code}` }, expected: "公钥" },
+      { status: 401, body: { error: `invalid code ${code}` }, expected: "邀请码" },
+      { status: 403, body: { error: `forbidden ${code}` }, expected: "邀请码" },
+      { status: 409, body: { error: "already enrolled" }, expected: "已入网" },
+      { status: 429, body: { error: "too many attempts" }, expected: "次数过多" },
+    ];
+    for (const item of errorCases) {
+      let caught: Error | null = null;
+      try {
+        await enrollRelay(
+          URL_,
+          { code, deviceId: "dev-12345678", name: "Mac A", publicKey: "pk-abc" },
+          async () => Response.json(item.body, { status: item.status }),
+        );
+      } catch (error) {
+        caught = error instanceof Error ? error : new Error(String(error));
+      }
+      expect(caught).not.toBeNull();
+      expect(caught!.message).toContain(item.expected);
+      expect(caught!.message).not.toContain(code);
+      expect(caught!.message).not.toContain("ubd_");
+    }
+  });
+
+  it("TelegramBridge enroll-relay：入网保存令牌、删旧 relayKey、用令牌连接并接通 dispatch 钩子", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ub-telegram-enroll-"));
+    const list: SessionNoticeList = { epoch: "e1", latest: 0, notices: [] };
+    const relayKey = new MemorySecretStore(KEY);
+    const relayToken = new MemorySecretStore(null);
+    const identityStore = new MemorySecretStore(null);
+    const identity = new DeviceIdentity({ store: identityStore });
+
+    const attached: Array<unknown> = [];
+    const seenStates: TelegramRelayState[] = [];
+    const seenFrames: DispatchRelayFrame[] = [];
+    const authHeaders: string[] = [];
+    const enrolledPayloads: Array<Record<string, unknown>> = [];
+    const sockets: FakeSocket[] = [];
+
+    const bridgeWithoutEnroll = new TelegramBridge({
+      configPath: join(dir, "deck", "telegram-no-enroll.json"),
+      token: new MemorySecretStore(null),
+      notices: () => list,
+      sessions: async () => ({ available: true, detail: "", workspaces: [], sessions: [], harnesses: [], appearance: null }),
+      send: async () => undefined,
+      dismiss: () => undefined,
+    });
+    await expect(
+      bridgeWithoutEnroll.action({ action: "enroll-relay", url: URL_, code: "ABCD2345" }),
+    ).rejects.toThrow("不支持入网");
+
+    const bridge = new TelegramBridge({
+      configPath: join(dir, "deck", "telegram.json"),
+      token: new MemorySecretStore(null),
+      relayKey,
+      relayToken,
+      dispatchIdentity: identity,
+      dispatch: {
+        attach: (link) => attached.push(link),
+        onFrame: (frame) => seenFrames.push(frame),
+        setState: (state) => seenStates.push(state),
+      },
+      notices: () => list,
+      sessions: async () => ({ available: true, detail: "", workspaces: [], sessions: [], harnesses: [], appearance: null }),
+      send: async () => undefined,
+      dismiss: () => undefined,
+      relayFetch: async (url, init) => {
+        expect(url).toBe(`${URL_}/enroll`);
+        enrolledPayloads.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return Response.json({ token: "ubd_enrolled_token_999" });
+      },
+      relaySocket: (_url, headers) => {
+        authHeaders.push(headers.Authorization ?? "");
+        const s = new FakeSocket();
+        sockets.push(s);
+        queueMicrotask(() => {
+          s.readyState = 1;
+          s.emit("open", {});
+          s.emit("message", {
+            data: JSON.stringify({
+              t: "state",
+              bot: { username: "ub_bot", name: "UB" },
+              bound: null,
+              devices: [{ id: String(enrolledPayloads[0]?.deviceId), name: "MacBook", online: true, enrolled: true }],
+            }),
+          });
+        });
+        return s;
+      },
+      retryMs: [5],
+    });
+
+    await bridge.start();
+    await bridge.action({ action: "enroll-relay", url: `${URL_}/`, code: "WXYZ6789", name: "MacBook" });
+    await until(() => bridge.status().connection === "ok", "enrolled connected");
+
+    expect(await relayToken.get()).toBe("ubd_enrolled_token_999");
+    expect(await relayKey.get()).toBeNull();
+    expect(authHeaders).toEqual(["Bearer ubd_enrolled_token_999"]);
+    expect(enrolledPayloads[0]?.publicKey).toBe(await identity.publicKey());
+    expect(String(enrolledPayloads[0]?.deviceId)).toMatch(/^[A-Za-z0-9_-]{8,64}$/);
+    expect(attached.at(-1)).not.toBeNull();
+    expect(seenStates).toHaveLength(1);
+
+    sockets[0]!.emit("message", { data: JSON.stringify({ t: "event", dispatchId: "d-1", kind: "thread.status" }) });
+    expect(seenFrames).toHaveLength(1);
+
+    // clear-relay 同时删除 relayToken 并 attach(null)
+    await bridge.action({ action: "clear-relay" });
+    expect(await relayToken.get()).toBeNull();
+    expect(attached.at(-1)).toBeNull();
+    bridge.stop();
+  });
+});

@@ -7,7 +7,9 @@ import { T3_INJECT_PATH, T3_INJECT_SCRIPT } from "./inject.js";
  * 只在首页 HTML 里插入一段 U-Brain 脚本（多巴胺底色、输入框里的 @ 引用）。
  *
  * - 只监听 127.0.0.1；不读写 T3 的数据库，不保存、不打印 T3 的 Cookie 或令牌。
- * - T3 的登录 Cookie 绑在 127.0.0.1 主机上（浏览器不按端口区分 Cookie），转发后沿用同一登录状态。
+ * - 浏览器不按端口区分 Cookie，同一 127.0.0.1 上多个 T3 会互相覆盖同名登录 Cookie；
+ *   每个转发用 `ub<上游端口>_` 前缀隔离各自 Cookie：响应 Set-Cookie 加前缀并去 Domain，
+ *   请求 Cookie 只转发带本转发前缀的项并去前缀，其余丢弃。
  * - 端口优先用「T3 端口 + 10000」，让 T3 存在 localStorage 里的设置在 daemon 重启后还在；被占时随机。
  */
 export interface T3Proxy {
@@ -51,6 +53,62 @@ export function preferredProxyPort(upstream: string): number {
   return preferred <= 65_535 ? preferred : 0;
 }
 
+/** 每个上游转发对应的 Cookie 隔离前缀：`ub<上游端口>_`。 */
+export function t3CookiePrefix(upstream: string): string {
+  const parsed = new URL(upstream);
+  const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+  return `ub${port}_`;
+}
+
+/**
+ * 为上游返回的 Set-Cookie 名称加上端点前缀，并去掉 Domain 属性（Path 与其余属性原样保留）。
+ *
+ * 注意：`__Host-` 与 `__Secure-` 依赖 Cookie 名前缀本身的浏览器语义，加上端点前缀后会破坏这些约束，
+ * 因此对这类 Cookie 不加前缀也不转发，直接丢弃返回 null。
+ */
+export function prefixSetCookie(setCookie: string, prefix: string): string | null {
+  const parts = setCookie.split(";");
+  const first = parts[0];
+  if (first === undefined) return null;
+  const eq = first.indexOf("=");
+  if (eq <= 0) return null;
+  const name = first.slice(0, eq).trim();
+  if (name === "") return null;
+  if (/^__(?:host|secure)-/iu.test(name)) return null;
+  const value = first.slice(eq + 1);
+  const attrs: string[] = [];
+  for (let index = 1; index < parts.length; index += 1) {
+    const part = parts[index]?.trim() ?? "";
+    if (part === "") continue;
+    const attrEq = part.indexOf("=");
+    const attrName = (attrEq === -1 ? part : part.slice(0, attrEq)).trim().toLowerCase();
+    if (attrName === "domain") continue;
+    attrs.push(part);
+  }
+  const head = `${prefix}${name}=${value}`;
+  return attrs.length === 0 ? head : `${head}; ${attrs.join("; ")}`;
+}
+
+/**
+ * 过滤请求 Cookie 头：只保留带本转发前缀的项并去掉前缀，其余（其他端点写入或无前缀旧 Cookie）一律丢弃。
+ */
+export function stripCookiePrefix(cookieHeader: string, prefix: string): string {
+  const kept: string[] = [];
+  for (const part of cookieHeader.split(";")) {
+    const trimmed = part.trim();
+    if (trimmed === "") continue;
+    const eq = trimmed.indexOf("=");
+    if (eq <= 0) continue;
+    const name = trimmed.slice(0, eq).trim();
+    if (!name.startsWith(prefix)) continue;
+    const rawName = name.slice(prefix.length);
+    if (rawName === "") continue;
+    const value = trimmed.slice(eq + 1);
+    kept.push(`${rawName}=${value}`);
+  }
+  return kept.join("; ");
+}
+
 /** 在 HTML 的 </head> 前插入 U-Brain 脚本；没有 </head> 时插在最前。 */
 export function injectT3Html(html: string): string {
   const tag = `<script src="${T3_INJECT_PATH}"></script>`;
@@ -59,11 +117,26 @@ export function injectT3Html(html: string): string {
 }
 
 /** 请求头：去掉逐跳头；Origin / Referer 里的转发地址换回 T3 地址，避免上游的同源校验把请求拒掉。 */
-export function forwardHeaders(source: Headers, proxyOrigin: string, upstreamOrigin: string, skip = HOP_HEADERS): Headers {
+export function forwardHeaders(
+  source: Headers,
+  proxyOrigin: string,
+  upstreamOrigin: string,
+  skip = HOP_HEADERS,
+  cookiePrefix?: string,
+): Headers {
   const out = new Headers();
   source.forEach((value, key) => {
-    if (skip.has(key.toLowerCase())) return;
-    if ((key.toLowerCase() === "origin" || key.toLowerCase() === "referer") && value.startsWith(proxyOrigin)) {
+    const lower = key.toLowerCase();
+    if (skip.has(lower)) return;
+    if (lower === "cookie" && cookiePrefix !== undefined) {
+      const stripped = stripCookiePrefix(value, cookiePrefix);
+      if (stripped !== "") {
+        const existing = out.get(key);
+        out.set(key, existing ? `${existing}; ${stripped}` : stripped);
+      }
+      return;
+    }
+    if ((lower === "origin" || lower === "referer") && value.startsWith(proxyOrigin)) {
       out.set(key, upstreamOrigin + value.slice(proxyOrigin.length));
       return;
     }
@@ -82,7 +155,12 @@ export function stripFrameAncestors(csp: string): string | null {
  * 响应头：去掉逐跳头和编码相关头（正文已解压、可能被改写）；跳转到 T3 本身的地址换回转发地址。
  * T3 0.1.11 起带 X-Frame-Options: DENY 与 frame-ancestors 'none'，转发要去掉，指挥台的 iframe 才能加载。
  */
-export function responseHeaders(source: Headers, proxyOrigin: string, upstreamOrigin: string): Headers {
+export function responseHeaders(
+  source: Headers,
+  proxyOrigin: string,
+  upstreamOrigin: string,
+  cookiePrefix?: string,
+): Headers {
   const out = new Headers();
   source.forEach((value, key) => {
     const lower = key.toLowerCase();
@@ -98,7 +176,14 @@ export function responseHeaders(source: Headers, proxyOrigin: string, upstreamOr
     }
     out.append(key, value);
   });
-  for (const cookie of source.getSetCookie()) out.append("set-cookie", cookie);
+  for (const cookie of source.getSetCookie()) {
+    if (cookiePrefix === undefined) {
+      out.append("set-cookie", cookie);
+    } else {
+      const rewritten = prefixSetCookie(cookie, cookiePrefix);
+      if (rewritten !== null) out.append("set-cookie", rewritten);
+    }
+  }
   return out;
 }
 
@@ -106,6 +191,7 @@ export function startT3Proxy(upstreamUrl: string): T3Proxy {
   const upstream = new URL(upstreamUrl);
   const upstreamOrigin = upstream.origin;
   const wsOrigin = upstreamOrigin.replace(/^http/u, "ws");
+  const cookiePrefix = t3CookiePrefix(upstreamUrl);
   let proxyOrigin = "";
 
   const handler = {
@@ -120,7 +206,7 @@ export function startT3Proxy(upstreamUrl: string): T3Proxy {
       const target = `${upstreamOrigin}${url.pathname}${url.search}`;
       if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
         const headers: Record<string, string> = {};
-        forwardHeaders(request.headers, proxyOrigin, upstreamOrigin, WS_SKIP_HEADERS).forEach((value, key) => {
+        forwardHeaders(request.headers, proxyOrigin, upstreamOrigin, WS_SKIP_HEADERS, cookiePrefix).forEach((value, key) => {
           headers[key] = value;
         });
         const data: SocketData = { target: `${wsOrigin}${url.pathname}${url.search}`, headers, upstream: null, pending: [] };
@@ -131,14 +217,14 @@ export function startT3Proxy(upstreamUrl: string): T3Proxy {
       try {
         response = await fetch(target, {
           method: request.method,
-          headers: forwardHeaders(request.headers, proxyOrigin, upstreamOrigin),
+          headers: forwardHeaders(request.headers, proxyOrigin, upstreamOrigin, HOP_HEADERS, cookiePrefix),
           ...(request.method === "GET" || request.method === "HEAD" ? {} : { body: await request.arrayBuffer() }),
           redirect: "manual",
         });
       } catch {
         return new Response("T3 服务没有响应", { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });
       }
-      const headers = responseHeaders(response.headers, proxyOrigin, upstreamOrigin);
+      const headers = responseHeaders(response.headers, proxyOrigin, upstreamOrigin, cookiePrefix);
       if (response.headers.get("content-type")?.toLowerCase().includes("text/html") && request.method === "GET") {
         const html = injectT3Html(await response.text());
         return new Response(html, { status: response.status, statusText: response.statusText, headers });

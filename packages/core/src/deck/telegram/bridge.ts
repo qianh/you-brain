@@ -4,6 +4,7 @@ import { hostname } from "node:os";
 import { z } from "zod";
 
 import type { SecretStore } from "../../auth/secret-store.js";
+import type { DeviceIdentity } from "../../dispatch/identity.js";
 import { YouBrainError } from "../../domain/errors.js";
 import { readJsonFile, writeJsonFile } from "../../daemon/local-state.js";
 import type { SessionNotice, SessionNoticeDismissInput, SessionNoticeList } from "../session-notices.js";
@@ -18,7 +19,9 @@ import {
 import {
   TelegramRelayClient,
   checkRelay,
+  enrollRelay,
   normalizeRelayUrl,
+  type DispatchRelayFrame,
   type RelayFetch,
   type RelaySocketFactory,
   type TelegramRelayState,
@@ -54,7 +57,22 @@ export type TelegramAction =
   | { action: "test" }
   | { action: "set-notifications"; enabled: boolean }
   | { action: "set-relay"; url: string; key: string; name?: string | undefined }
+  | { action: "enroll-relay"; url: string; code: string; name?: string | undefined }
   | { action: "clear-relay" };
+
+export interface TelegramDispatchLink {
+  request<T>(op: string, params?: Record<string, unknown>): Promise<T>;
+}
+
+export interface TelegramDispatchPort {
+  attach(link: TelegramDispatchLink | null): void;
+  onFrame(frame: DispatchRelayFrame): void;
+  setState(state: TelegramRelayState): void;
+}
+
+export interface TelegramDispatchIdentity {
+  ensure(): Promise<{ publicKey: string; privateKey: string }>;
+}
 
 export interface TelegramBridgeOptions {
   /** `<dataDir>/deck/telegram.json`：绑定的私聊与收消息进度，不含 Token。 */
@@ -62,6 +80,12 @@ export interface TelegramBridgeOptions {
   token: SecretStore;
   /** 中转的设备连接密钥；不传就不能用中转。 */
   relayKey?: SecretStore;
+  /** 中转入网后的设备专属令牌；有则优先于 relayKey 使用。 */
+  relayToken?: SecretStore;
+  /** 跨设备派活中枢接口（结构类型，避免与 dispatch/hub 循环依赖）。 */
+  dispatch?: TelegramDispatchPort;
+  /** 跨设备派活本机身份（入网时提供公钥）。 */
+  dispatchIdentity?: DeviceIdentity;
   notices(): SessionNoticeList;
   sessions(): Promise<Tty7SessionsView>;
   send(input: Tty7SendInput): Promise<void>;
@@ -71,6 +95,8 @@ export interface TelegramBridgeOptions {
   fetch?: TelegramFetch;
   relayFetch?: RelayFetch;
   relaySocket?: RelaySocketFactory;
+  /** 本机在中转里的稳定设备 ID；未配置过中转时用它作为 relay.deviceId。 */
+  deviceId?: string;
   /** 本机在中转里的默认名字（默认主机名）。 */
   deviceName?: string;
   now?(): number;
@@ -135,6 +161,26 @@ export interface TelegramT3Notice {
   title: string;
   kind: "done" | "waiting" | "failed";
   link: string | null;
+}
+
+export interface TelegramDispatchNotice {
+  deviceName: string;
+  title: string;
+  kind: "done" | "waiting" | "failed";
+  body?: string;
+  link?: string | null;
+}
+
+export function dispatchNoticeText(notice: TelegramDispatchNotice): string {
+  const trimmed = (notice.body ?? "").trim();
+  const clipped = trimmed.length > BODY_MAX ? `${trimmed.slice(0, BODY_MAX)}…` : trimmed;
+  const head =
+    notice.kind === "done"
+      ? `✅ 🛰 ${notice.deviceName}「${notice.title}」做完了`
+      : notice.kind === "waiting"
+        ? `⏳ 🛰 ${notice.deviceName}「${notice.title}」在等你处理授权或提问`
+        : `❌ 🛰 ${notice.deviceName}「${notice.title}」执行失败`;
+  return [head, ...(clipped ? ["", clipped] : []), ...(notice.link ? ["", `🔗 ${notice.link}`] : [])].join("\n");
 }
 
 export function t3NoticeText(notice: TelegramT3Notice, body: string): string {
@@ -234,10 +280,13 @@ export class TelegramBridge {
     this.#cursor = { epoch: list.epoch, seq: list.latest };
     this.#stored = await readJsonFile(this.#options.configPath, (value) => StoredSchema.parse(value), { ...EMPTY });
     const relay = this.#stored.relay;
-    const relayKey = relay ? ((await this.#options.relayKey?.get().catch(() => null))?.trim() ?? "") : "";
-    if (relay && relayKey) {
-      if (this.#started) this.#runRelay(relay, relayKey);
-      return;
+    if (relay) {
+      const relayToken = (await this.#options.relayToken?.get().catch(() => null))?.trim() ?? "";
+      const relayKey = relayToken ? "" : ((await this.#options.relayKey?.get().catch(() => null))?.trim() ?? "");
+      if (relayToken || relayKey) {
+        if (this.#started) this.#runRelay(relay, relayToken ? { token: relayToken } : { key: relayKey });
+        return;
+      }
     }
     const token = (await this.#options.token.get().catch(() => null))?.trim() ?? "";
     if (token && this.#started) this.#run(token);
@@ -251,6 +300,7 @@ export class TelegramBridge {
     this.#api = null;
     this.#relay?.stop();
     this.#relay = null;
+    this.#options.dispatch?.attach(null);
     this.#connection = "off";
   }
 
@@ -308,6 +358,11 @@ export class TelegramBridge {
     }
     if (input.action === "set-relay") {
       await this.#setRelay(input);
+      this.#changed();
+      return this.status();
+    }
+    if (input.action === "enroll-relay") {
+      await this.#enrollRelay(input);
       this.#changed();
       return this.status();
     }
@@ -413,7 +468,15 @@ export class TelegramBridge {
     }
     await relayKey.set(key);
     const name = input.name?.trim().slice(0, 40) || this.#stored.relay?.name || this.#options.deviceName || defaultDeviceName();
-    const relay = { url, name, deviceId: this.#stored.relay?.deviceId ?? randomUUID() };
+    const existingId = this.#stored.relay?.deviceId;
+    const optionId = this.#options.deviceId;
+    const deviceId =
+      existingId && /^[A-Za-z0-9_-]{8,64}$/.test(existingId)
+        ? existingId
+        : optionId && /^[A-Za-z0-9_-]{8,64}$/.test(optionId)
+          ? optionId
+          : randomUUID();
+    const relay = { url, name, deviceId };
     // 换到中转：本机不再自己收 Telegram 消息，直连的绑定作废（中转里另行绑定）。
     this.#loop?.abort();
     this.#loop = null;
@@ -422,12 +485,60 @@ export class TelegramBridge {
     this.#sent.clear();
     this.#recent = null;
     await this.#save({ chatId: null, chatName: null, relay });
-    if (this.#started) this.#runRelay(relay, key);
+    if (this.#started) this.#runRelay(relay, { key });
+  }
+
+  async #enrollRelay(input: { url: string; code: string; name?: string | undefined }): Promise<void> {
+    const relayToken = this.#options.relayToken;
+    const identity = this.#options.dispatchIdentity;
+    if (!relayToken || !identity) throw new YouBrainError("INVALID_INPUT", "这个版本不支持入网");
+    let url: string;
+    try {
+      url = normalizeRelayUrl(input.url);
+    } catch (error) {
+      throw new YouBrainError("INVALID_INPUT", error instanceof Error ? error.message : String(error));
+    }
+    const code = input.code.trim();
+    if (!code) throw new YouBrainError("INVALID_INPUT", "请填写邀请码");
+    const name = input.name?.trim().slice(0, 40) || this.#stored.relay?.name || this.#options.deviceName || defaultDeviceName();
+    const existingId = this.#stored.relay?.deviceId;
+    const optionId = this.#options.deviceId;
+    const deviceId =
+      existingId && /^[A-Za-z0-9_-]{8,64}$/.test(existingId)
+        ? existingId
+        : optionId && /^[A-Za-z0-9_-]{8,64}$/.test(optionId)
+          ? optionId
+          : randomUUID();
+    let publicKey: string;
+    try {
+      publicKey = (await identity.ensure()).publicKey;
+    } catch (error) {
+      throw new YouBrainError("INVALID_INPUT", error instanceof Error ? error.message : String(error));
+    }
+    let token: string;
+    try {
+      token = (await enrollRelay(url, { code, deviceId, name, publicKey }, this.#options.relayFetch)).token;
+    } catch (error) {
+      throw new YouBrainError("INVALID_INPUT", error instanceof Error ? error.message : String(error));
+    }
+    await relayToken.set(token);
+    await this.#options.relayKey?.delete();
+    const relay = { url, name, deviceId };
+    // 换到中转：本机不再自己收 Telegram 消息，直连的绑定作废（中转里另行绑定）。
+    this.#loop?.abort();
+    this.#loop = null;
+    this.#api = null;
+    this.#pair = null;
+    this.#sent.clear();
+    this.#recent = null;
+    await this.#save({ chatId: null, chatName: null, relay });
+    if (this.#started) this.#runRelay(relay, { token });
   }
 
   async #clearRelay(): Promise<void> {
     this.#relay?.stop();
     this.#relay = null;
+    this.#options.dispatch?.attach(null);
     this.#relayState = null;
     this.#relayPair = null;
     this.#connection = "off";
@@ -435,19 +546,24 @@ export class TelegramBridge {
     this.#sent.clear();
     this.#recent = null;
     await this.#options.relayKey?.delete();
+    await this.#options.relayToken?.delete();
     await this.#save({ relay: null });
     // 还留着 Bot Token 就回到直连。
     const token = (await this.#options.token.get().catch(() => null))?.trim() ?? "";
     if (token && this.#started) this.#run(token);
   }
 
-  #runRelay(relay: NonNullable<Stored["relay"]>, key: string): void {
-    this.#relay?.stop();
+  #runRelay(relay: NonNullable<Stored["relay"]>, auth: { token?: string; key?: string }): void {
+    if (this.#relay) {
+      this.#relay.stop();
+      this.#options.dispatch?.attach(null);
+    }
     this.#connection = "connecting";
     this.#error = null;
     const client = new TelegramRelayClient({
       url: relay.url,
-      key,
+      ...(auth.token ? { token: auth.token } : {}),
+      ...(auth.key ? { key: auth.key } : {}),
       deviceId: relay.deviceId,
       name: relay.name,
       onState: (state) => {
@@ -458,6 +574,7 @@ export class TelegramBridge {
           this.#sent.clear();
           this.#recent = null;
         }
+        this.#options.dispatch?.setState(state);
         this.#changed();
       },
       onMessage: (message) => {
@@ -468,7 +585,13 @@ export class TelegramBridge {
         if (this.#relay !== client) return;
         this.#connection = connection;
         this.#error = error;
+        if (connection === "ok") this.#options.dispatch?.attach(client);
+        else this.#options.dispatch?.attach(null);
         this.#changed();
+      },
+      onDispatchFrame: (frame) => {
+        if (this.#relay !== client) return;
+        this.#options.dispatch?.onFrame(frame);
       },
       ...(this.#options.relaySocket ? { socket: this.#options.relaySocket } : {}),
       ...(this.#options.retryMs ? { retryMs: this.#options.retryMs } : {}),
@@ -752,6 +875,28 @@ export class TelegramBridge {
         this.#sent.set(sent, target);
         this.#recent = { target, at: this.#now() };
         if (this.#sent.size > SENT_KEPT) this.#sent.delete(this.#sent.keys().next().value!);
+      } catch {
+        // 推送失败只丢这一条。
+      }
+    });
+  }
+
+  /** 跨设备派活结果到达时推送到绑定的私聊；不登记回复路由，由中转帮助文案接手回复。 */
+  pushDispatch(notice: TelegramDispatchNotice): void {
+    const revision = this.#notificationRevision;
+    if (!this.#canNotify(revision)) return;
+    this.#pushChain = this.#pushChain.then(async () => {
+      if (!this.#canNotify(revision)) return;
+      try {
+        const text = dispatchNoticeText(notice);
+        if (this.#relay) {
+          await this.#relay.send(text);
+        } else {
+          const api = this.#api;
+          const chatId = this.#stored.chatId;
+          if (!api || chatId === null) return;
+          await api.sendMessage(chatId, text);
+        }
       } catch {
         // 推送失败只丢这一条。
       }

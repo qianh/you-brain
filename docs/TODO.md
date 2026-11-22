@@ -46,7 +46,7 @@
 - [x] **D1 M0 六项验证记录**：`scripts/m0/*`（`bun scripts/m0/<项>.ts`）；1/2/6 本机已跑（onnxruntime/sharp 在 vendor 与编译产物中可加载；.app 为 ad-hoc 签名且 `codesign --verify` 失败），3/5 需真实 Drive、4 需真实 CLI 额度，脚本已备未跑，结论写入 进度.md
 - [x] **D3 .app 整包 ad-hoc 签名**：`tauri.bundle.conf.json` 设 macOS `signingIdentity: "-"`，Tauri 先签 `.app` 再打 DMG，`codesign --verify --deep --strict` 通过，DMG 内的包 CDHash 与外面一致；`bundle.sh` 留有复查失败时整包重签并重建 DMG 的兜底。未公证，`spctl` 拒绝是预期；未启动应用验证 sidecar 加载 vendor
 - [x] **D2 进度文档更新**：`进度.md`、`产品说明.md`、`技术方案.md` 的状态按现状更新（2026-10-23）；此后每完成一项仍同步更新对应行
-- [ ] **D4 服务器端真机验收**：在真实 Linux 服务器上跑通 `install.sh` → `setup --server --oauth custom`（SSH 隧道完成一次真实 Google 授权）→ `service install` + `loginctl enable-linger` → 设为主设备 → 完成一次每日沉淀。同时在 GitHub Actions 手动触发 `server-linux.yml` 确认 tar.gz 可用
+- [x] **D4 服务器端真机验收**：在真实 Linux 服务器上跑通 `install.sh` → `setup --server --oauth custom`（SSH 隧道完成一次真实 Google 授权）→ `service install` + `loginctl enable-linger` → 设为主设备 → 完成一次每日沉淀。同时在 GitHub Actions 手动触发 `server-linux.yml` 确认 tar.gz 可用。2026-11-22 核对：VPS（Ubuntu 24.04 x86_64）上每日沉淀已在 03:00 自动执行（`you-brain status` 显示 03:00:26 完成），但辅助步骤 portrait_eval 因 grok 300 秒无响应未写完，需在 VPS 上 `grok login` 后观察下一次；aarch64 与非 root 用户放行 `bwrap` 仍未验证
 
 ## F. 真实数据下暴露的问题（2026-10-25 ~ 26）
 - [x] **F1 Codex 启动噪音**：Codex 每次启动写一份只含 `AGENTS.md` 注入的 JSONL，6735 个文件里只有 189 个真对话。统一 `isConversation` 判定并接入全部适配器；`scripts/cleanup-noise-sessions.ts` 清理历史（本机删 158 会话 / 34 空话题 / 327 事件）
@@ -128,8 +128,9 @@
 
 ## K. 跨设备派活（2026-11-21 调研，见 [跨设备派活.md](./跨设备派活.md)）
 
-- [!] **K0 前置**：先完成 D4，在 VPS 上真实跑通服务器端
-- [ ] **K1 写规格**：按 跨设备派活.md §3.2 的六项与 §4 待决定事项，用 `/spec` 出规格后再拆任务；实现前继续用 T3 environment link 过渡
+- [x] **K0 前置**：D4 已核对（2026-11-22），VPS 上服务器端已真实跑通
+- [x] **K1 写规格**：已出 [实施计划](./跨设备派活-实施计划.md)、[协议](./跨设备派活-协议.md) 和 [ADR-0007](./adr/0007-中转迁自有VPS并承载设备间派活.md)（2026-11-22）
+- [~] **K2 实现**：代码、自动化测试、VPS 中转部署（经 cloudflared 隧道以自有域名对外）、VPS 与 Mac 的 daemon 升级入网均已完成；2026-11-22 已验证 Mac 向 VPS 的 T3 派真任务并取回结果，M6.0 对 VPS 的 T3 真机验证通过（经转发层登录，Cookie 带端点前缀、无 Domain 属性，带前缀 Cookie 为已登录，不带或无前缀旧 Cookie 为未登录；T3 回环下的会话 Cookie 名是 `t3_session_<端口>_<哈希>`，没有 `__Host-` 前缀）；Telegram webhook 已切到 VPS 中转并重新绑定。待办：手机回复回到 Mac 的端到端确认、另一台 MacBook Air 升级入网、Cloudflare Worker 下线与目录改名（M7，切换后观察一周）、在 @BotFather 换新 Token
 
 ## 需要你决定或配合（不进自动队列）
 

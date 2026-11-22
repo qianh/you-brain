@@ -6,6 +6,8 @@ import { createMcpServer, createToolHandlers, type McpServices } from "../../src
 
 const TOOLS = [
   "add_portrait_correction",
+  "dispatch_to_device",
+  "get_dispatch_result",
   "get_notion_page",
   "get_portrait",
   "get_portrait_corrections",
@@ -16,9 +18,11 @@ const TOOLS = [
   "get_topic",
   "get_topics",
   "hub_status",
+  "list_devices",
   "search_notion",
   "search_references",
   "search_sessions",
+  "send_to_dispatch",
   "update_topic",
   "upload_sessions",
 ];

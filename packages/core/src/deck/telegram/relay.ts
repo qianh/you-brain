@@ -6,10 +6,31 @@ import type { TelegramMessage } from "./api.js";
  * 不需要公网地址。帧格式见 services/telegram-relay/src/core.ts。
  */
 
+export interface TelegramRelayDevice {
+  id: string;
+  name: string;
+  online: boolean;
+  enrolled?: boolean;
+  publicKey?: string;
+  dispatch?: unknown;
+}
+
 export interface TelegramRelayState {
   bot: { username: string; name: string } | null;
   bound: { name: string } | null;
-  devices: Array<{ id: string; name: string; online: boolean }>;
+  devices: TelegramRelayDevice[];
+}
+
+export interface DispatchRelayFrame {
+  t: "cmd" | "cmdres" | "event";
+  [k: string]: unknown;
+}
+
+export interface EnrollRelayInput {
+  code: string;
+  deviceId: string;
+  name: string;
+  publicKey: string;
 }
 
 export interface RelaySocketLike {
@@ -24,12 +45,16 @@ export type RelayFetch = (url: string, init: RequestInit) => Promise<Response>;
 
 export interface TelegramRelayClientOptions {
   url: string;
-  key: string;
+  /** 过渡期共享密钥；若同时提供 `token`，优先用 `token`。 */
+  key?: string;
+  /** 入网后的设备专属令牌；有则 `Authorization: Bearer <token>`。 */
+  token?: string;
   deviceId: string;
   name: string;
   onState(state: TelegramRelayState): void;
   onMessage(message: TelegramMessage): void;
   onConnection(connection: "connecting" | "ok" | "error", error: string | null): void;
+  onDispatchFrame?(frame: DispatchRelayFrame): void;
   socket?: RelaySocketFactory;
   retryMs?: readonly number[];
   pingMs?: number;
@@ -76,6 +101,78 @@ export async function checkRelay(url: string, key: string, fetchImpl: RelayFetch
   const body = (await response.json().catch(() => ({}))) as { ok?: boolean; botConfigured?: boolean };
   if (body.ok !== true) throw new Error("这个地址不像 U-Brain 中转");
   if (body.botConfigured !== true) throw new Error("中转还没设置 BOT_TOKEN（wrangler secret put BOT_TOKEN）");
+}
+
+function redactSecret(text: string, secret: string): string {
+  let out = text.replace(/ubd_[A-Za-z0-9_-]+/g, "[已隐藏]");
+  if (secret !== "") out = out.split(secret).join("[已隐藏]");
+  return out;
+}
+
+function enrollErrorMessage(status: number, serverError: string): string {
+  const lower = serverError.toLowerCase();
+  switch (status) {
+    case 400:
+      if (serverError.includes("公钥") || lower.includes("publickey") || lower.includes("public key")) {
+        return "公钥不合法，无法入网";
+      }
+      if (serverError.includes("邀请码") || lower.includes("code") || lower.includes("invite")) {
+        return "邀请码无效或已过期";
+      }
+      if (serverError.includes("设备") || lower.includes("device")) {
+        return "设备信息不合法，无法入网";
+      }
+      return "入网请求参数不合法（公钥或设备信息有误）";
+    case 401:
+      return "邀请码无效或已过期";
+    case 403:
+      if (serverError.includes("吊销") || lower.includes("revok")) {
+        return "这台设备已被中转吊销，无法入网";
+      }
+      return "邀请码无效、已过期或已作废";
+    case 409:
+      return "设备已入网，如需重新入网请先在中转吊销该设备";
+    case 429:
+      return "尝试次数过多，请稍后重试或重新生成邀请码";
+    default:
+      return `中转入网失败（HTTP ${status}）`;
+  }
+}
+
+/** 兑换一次性邀请码入网：上报设备公钥，换取专属设备令牌。错误信息不包含邀请码或令牌。 */
+export async function enrollRelay(
+  url: string,
+  input: EnrollRelayInput,
+  fetchImpl: RelayFetch = fetch,
+): Promise<{ token: string }> {
+  let response: Response;
+  try {
+    response = await fetchImpl(`${url}/enroll`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        code: input.code,
+        deviceId: input.deviceId,
+        name: input.name,
+        publicKey: input.publicKey,
+      }),
+      signal: AbortSignal.timeout(15_000),
+      redirect: "error",
+    });
+  } catch (error) {
+    const detail = redactSecret(error instanceof Error ? error.message : String(error), input.code);
+    throw new Error(`连不上中转：${detail}`);
+  }
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { error?: unknown };
+    const serverError = typeof body.error === "string" ? body.error.trim() : "";
+    throw new Error(enrollErrorMessage(response.status, serverError));
+  }
+  const body = (await response.json().catch(() => ({}))) as { token?: unknown };
+  if (typeof body.token !== "string" || body.token.trim() === "") {
+    throw new Error("中转没有返回有效的设备令牌");
+  }
+  return { token: body.token.trim() };
 }
 
 export class TelegramRelayClient {
@@ -134,7 +231,8 @@ export class TelegramRelayClient {
     const query = new URLSearchParams({ device: this.#options.deviceId, name: this.#options.name });
     let socket: RelaySocketLike;
     try {
-      socket = (this.#options.socket ?? defaultSocket)(`${base}/connect?${query}`, { Authorization: `Bearer ${this.#options.key}` });
+      const credential = this.#options.token ? this.#options.token : (this.#options.key ?? "");
+      socket = (this.#options.socket ?? defaultSocket)(`${base}/connect?${query}`, { Authorization: `Bearer ${credential}` });
     } catch (error) {
       this.#lost(error instanceof Error ? error.message : String(error));
       return;
@@ -169,6 +267,10 @@ export class TelegramRelayClient {
     });
     const closed = (event: { code?: number }) => {
       if (this.#socket !== socket) return;
+      if (event.code === 4001) {
+        this.#revoked("这台设备已被中转吊销，请重新入网");
+        return;
+      }
       if (event.code === 4000) {
         this.#lost("同一台设备在别处又连上了中转");
         return;
@@ -177,6 +279,16 @@ export class TelegramRelayClient {
     };
     socket.addEventListener("close", closed);
     socket.addEventListener("error", () => closed({}));
+  }
+
+  #revoked(reason: string): void {
+    const wasStopped = this.#stopped;
+    this.#stopped = true;
+    if (this.#retry !== null) clearTimeout(this.#retry);
+    this.#retry = null;
+    this.#teardown();
+    this.#rejectAll(reason);
+    if (!wasStopped) this.#options.onConnection("error", reason);
   }
 
   #lost(reason: string): void {
@@ -197,14 +309,32 @@ export class TelegramRelayClient {
 
   #frame(raw: string): void {
     if (raw === "pong") return;
-    let frame: { t?: unknown; id?: unknown; ok?: unknown; result?: unknown; error?: unknown; message?: unknown } & Partial<TelegramRelayState>;
+    let frame: Record<string, unknown>;
     try {
-      frame = JSON.parse(raw) as typeof frame;
+      const parsed: unknown = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return;
+      frame = parsed as Record<string, unknown>;
     } catch {
       return;
     }
     if (frame.t === "state") {
-      this.#options.onState({ bot: frame.bot ?? null, bound: frame.bound ?? null, devices: frame.devices ?? [] });
+      const devices: TelegramRelayDevice[] = Array.isArray(frame.devices)
+        ? frame.devices
+            .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null && !Array.isArray(item))
+            .map((item) => ({
+              id: typeof item.id === "string" ? item.id : "",
+              name: typeof item.name === "string" ? item.name : "",
+              online: item.online === true,
+              ...(typeof item.enrolled === "boolean" ? { enrolled: item.enrolled } : {}),
+              ...(typeof item.publicKey === "string" ? { publicKey: item.publicKey } : {}),
+              ...(item.dispatch !== undefined ? { dispatch: item.dispatch } : {}),
+            }))
+        : [];
+      this.#options.onState({
+        bot: (frame.bot as TelegramRelayState["bot"]) ?? null,
+        bound: (frame.bound as TelegramRelayState["bound"]) ?? null,
+        devices,
+      });
     } else if (frame.t === "message" && frame.message && typeof frame.message === "object") {
       this.#options.onMessage(frame.message as TelegramMessage);
     } else if (frame.t === "res" && typeof frame.id === "string") {
@@ -214,6 +344,15 @@ export class TelegramRelayClient {
       clearTimeout(pending.timer);
       if (frame.ok === true) pending.resolve(frame.result);
       else pending.reject(new Error(typeof frame.error === "string" ? frame.error : "中转处理失败"));
+    } else if (frame.t === "cmd" || frame.t === "cmdres" || frame.t === "event") {
+      try {
+        const res: unknown = this.#options.onDispatchFrame?.(frame as DispatchRelayFrame);
+        if (res && typeof (res as PromiseLike<unknown>).then === "function") {
+          void Promise.resolve(res).catch(() => undefined);
+        }
+      } catch {
+        // 派活帧处理异常不影响连接。
+      }
     }
   }
 

@@ -12,6 +12,7 @@ import {
 } from "../../src/clients/integrations.js";
 import { clientMutation } from "../../src/clients/registry.js";
 import {
+  YOU_BRAIN_DISPATCH_SKILL,
   YOU_BRAIN_PORTRAIT_SKILL,
   YOU_BRAIN_REF_SKILL,
   YOU_BRAIN_SKILL,
@@ -178,6 +179,7 @@ describe("client integrations", () => {
         "codex:skill:you-brain",
         "codex:skill:you-brain-portrait",
         "codex:skill:you-brain-ref",
+        "codex:skill:you-brain-dispatch",
       ],
       managedStatePath: join(root, "state.json"),
     });
@@ -190,6 +192,9 @@ describe("client integrations", () => {
     expect(
       await readFile(join(root, ".codex/skills/you-brain-ref/SKILL.md"), "utf8"),
     ).toBe(YOU_BRAIN_REF_SKILL);
+    expect(
+      await readFile(join(root, ".codex/skills/you-brain-dispatch/SKILL.md"), "utf8"),
+    ).toBe(YOU_BRAIN_DISPATCH_SKILL);
     const repoRoot = join(import.meta.dir, "..", "..", "..", "..");
     expect(await readFile(join(repoRoot, "skills/you-brain/SKILL.md"), "utf8")).toBe(
       YOU_BRAIN_SKILL,
@@ -200,6 +205,9 @@ describe("client integrations", () => {
     expect(
       await readFile(join(repoRoot, "skills/you-brain-ref/SKILL.md"), "utf8"),
     ).toBe(YOU_BRAIN_REF_SKILL);
+    expect(
+      await readFile(join(repoRoot, "skills/you-brain-dispatch/SKILL.md"), "utf8"),
+    ).toBe(YOU_BRAIN_DISPATCH_SKILL);
   });
 
   it("removes legacy BrainHub MCP entries when installing you-brain MCP in JSON and TOML", async () => {

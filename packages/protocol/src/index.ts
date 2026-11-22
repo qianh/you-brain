@@ -2,6 +2,7 @@ export * from "./app-properties.js";
 export * from "./config.js";
 export * from "./defaults.js";
 export * from "./device.js";
+export * from "./dispatch.js";
 export * from "./event-file.js";
 export * from "./events.js";
 export * from "./formats.js";

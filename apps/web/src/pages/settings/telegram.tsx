@@ -3,40 +3,112 @@ import { useCallback, useEffect, useState } from "react";
 import { decodeRelayInvite } from "@you-brain/core/deck/telegram/invite.js";
 import type { DeckTelegramActionBody, DeckTelegramStatusResponse } from "@you-brain/core/http/types.js";
 
+import type { BrowserDaemon } from "../../api/client.js";
 import { Banner } from "../../components/banner.js";
 import { Button } from "../../components/button.js";
 import { Card, Section } from "../../components/card.js";
+import { Chip } from "../../components/chip.js";
 import { useToast } from "../../components/toast.js";
 import { useDaemon } from "../../daemon-context.js";
 
 /** 等待绑定时轮询状态的间隔：用户在手机上点了「开始」后这里自动显示已绑定。 */
 const PAIR_POLL_MS = 3_000;
 
+export interface RelayEnrollInput {
+  url: string;
+  code: string;
+  name?: string;
+}
+
+export interface RelayEnrollResult {
+  submitted: boolean;
+  ok: boolean;
+  status?: DeckTelegramStatusResponse;
+  error?: string;
+}
+
+/**
+ * 提交邀请码入网：提交瞬间先清空邀请码输入框，绝不把邀请码回显到界面、提示或日志。
+ */
+export async function submitRelayEnroll(options: {
+  input: RelayEnrollInput;
+  clearCode: () => void;
+  action: (body: DeckTelegramActionBody) => Promise<DeckTelegramStatusResponse>;
+}): Promise<RelayEnrollResult> {
+  const url = options.input.url.trim();
+  const code = options.input.code.trim();
+  const name = options.input.name?.trim() ?? "";
+  if (url === "" || code === "") {
+    return { submitted: false, ok: false };
+  }
+  // 立即清空邀请码输入，不论后续成功还是失败都不再留在状态中。
+  options.clearCode();
+  try {
+    const body: DeckTelegramActionBody = {
+      action: "enroll-relay",
+      url,
+      code,
+      ...(name !== "" ? { name } : {}),
+    };
+    const status = await options.action(body);
+    return { submitted: true, ok: true, status };
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error);
+    // 防御性避免错误消息意外带出邀请码。
+    const sanitized = raw.includes(code) ? raw.replaceAll(code, "***") : raw;
+    return { submitted: true, ok: false, error: sanitized };
+  }
+}
+
+export interface TelegramSectionProps {
+  client?: BrowserDaemon;
+  initialStatus?: DeckTelegramStatusResponse | null;
+  initialEnrolled?: boolean;
+}
+
 /** Telegram 桥：Bot Token 或中转、绑定私聊、发送测试。推送「终端会话等你回复」，回复提醒即输入。 */
-export function TelegramSection() {
-  const { client, t } = useDaemon();
+export function TelegramSection(props: TelegramSectionProps = {}) {
+  const daemon = useDaemon();
+  const client = props.client ?? daemon.client;
+  const { t } = daemon;
   const { push } = useToast();
   const [token, setToken] = useState("");
+  const [enrollUrl, setEnrollUrl] = useState(props.initialStatus?.relay?.url ?? "");
+  const [enrollCode, setEnrollCode] = useState("");
+  const [enrollName, setEnrollName] = useState(props.initialStatus?.relay?.name ?? "");
   const [relayUrl, setRelayUrl] = useState("");
   const [relayKey, setRelayKey] = useState("");
   const [relayName, setRelayName] = useState("");
   const [invite, setInvite] = useState("");
-  const [status, setStatus] = useState<DeckTelegramStatusResponse | null>(null);
+  const [status, setStatus] = useState<DeckTelegramStatusResponse | null>(props.initialStatus ?? null);
+  const [enrolled, setEnrolled] = useState(props.initialEnrolled ?? false);
   const [unsupported, setUnsupported] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      setStatus(await client.deckTelegram());
+      const next = await client.deckTelegram();
+      setStatus(next);
       setUnsupported(false);
+      if (!next.relay) {
+        setEnrolled(false);
+      } else if (typeof client.dispatchDevices === "function") {
+        try {
+          const devices = await client.dispatchDevices();
+          setEnrolled(devices.enrolled);
+        } catch {
+          // 旧版 daemon 没有 dispatch 接口时忽略，不影响 Telegram 设置本身。
+        }
+      }
     } catch {
       setUnsupported(true);
     }
   }, [client]);
 
   useEffect(() => {
+    if (props.initialStatus !== undefined) return;
     void refresh();
-  }, [refresh]);
+  }, [props.initialStatus, refresh]);
 
   const pairing = status?.pairing ?? null;
   useEffect(() => {
@@ -51,6 +123,7 @@ export function TelegramSection() {
       try {
         const next = await client.deckTelegramAction(body);
         setStatus(next);
+        if (body.action === "clear-relay") setEnrolled(false);
         if (success) push({ message: success(next), tone: "success" });
         return true;
       } catch (error) {
@@ -62,6 +135,27 @@ export function TelegramSection() {
     },
     [client, push],
   );
+
+  const handleEnroll = useCallback(async () => {
+    setBusy(true);
+    try {
+      const result = await submitRelayEnroll({
+        input: { url: enrollUrl, code: enrollCode, name: enrollName },
+        clearCode: () => setEnrollCode(""),
+        action: (body) => client.deckTelegramAction(body),
+      });
+      if (!result.submitted) return;
+      if (result.ok && result.status) {
+        setStatus(result.status);
+        setEnrolled(true);
+        push({ message: t("telegramRelayEnrolledOk"), tone: "success" });
+      } else if (result.error) {
+        push({ message: result.error, tone: "danger" });
+      }
+    } finally {
+      setBusy(false);
+    }
+  }, [client, enrollCode, enrollName, enrollUrl, push, t]);
 
   if (unsupported) return null;
 
@@ -147,6 +241,11 @@ export function TelegramSection() {
                   <span>
                     {t("telegramRelayCurrent")}: {relay.url}
                   </span>
+                  {enrolled ? (
+                    <Chip tone="success" dot>
+                      {t("telegramRelayEnrolled")}
+                    </Chip>
+                  ) : null}
                   <span>
                     {t("telegramRelayDevices")}:{" "}
                     {relay.devices
@@ -203,8 +302,73 @@ export function TelegramSection() {
       <Card>
         <div className="notion-form">
           <span className="notion-label">{t("telegramRelayTitle")}</span>
-          {relay ? (
+          {enrolled ? (
+            <div className="notion-token-row">
+              <Chip tone="success" dot>
+                {t("telegramRelayEnrolled")}
+              </Chip>
+              {relay ? (
+                <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run({ action: "clear-relay" })}>
+                  {t("telegramRelayClear")}
+                </Button>
+              ) : null}
+            </div>
+          ) : (
             <>
+              <span className="settings-kicker">{t("telegramRelayEnrollTitle")}</span>
+              <label className="notion-label" htmlFor="telegram-enroll-url">
+                {t("telegramRelayUrl")}
+              </label>
+              <input
+                id="telegram-enroll-url"
+                className="notion-input"
+                type="url"
+                autoComplete="off"
+                placeholder="https://relay.example.com"
+                value={enrollUrl}
+                onChange={(event) => setEnrollUrl(event.target.value)}
+              />
+              <label className="notion-label" htmlFor="telegram-enroll-code">
+                {t("telegramRelayEnrollCode")}
+              </label>
+              <input
+                id="telegram-enroll-code"
+                className="notion-input"
+                type="password"
+                autoComplete="off"
+                maxLength={16}
+                placeholder={t("telegramRelayEnrollCodePlaceholder")}
+                value={enrollCode}
+                onChange={(event) => setEnrollCode(event.target.value)}
+              />
+              <label className="notion-label" htmlFor="telegram-enroll-name">
+                {t("telegramRelayName")}
+              </label>
+              <div className="notion-token-row">
+                <input
+                  id="telegram-enroll-name"
+                  className="notion-input"
+                  type="text"
+                  autoComplete="off"
+                  maxLength={40}
+                  value={enrollName}
+                  onChange={(event) => setEnrollName(event.target.value)}
+                />
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={busy || enrollUrl.trim() === "" || enrollCode.trim() === ""}
+                  onClick={() => void handleEnroll()}
+                >
+                  {t("telegramRelayEnrollSubmit")}
+                </Button>
+              </div>
+            </>
+          )}
+
+          {relay && !enrolled ? (
+            <div className="dispatch-divider">
+              <span className="notion-label">{t("telegramRelayLegacyHint")}</span>
               <div className="notion-token-row">
                 <Button size="sm" disabled={busy} onClick={() => void copyInvite()}>
                   {t("telegramRelayCopyInvite")}
@@ -214,9 +378,13 @@ export function TelegramSection() {
                 </Button>
               </div>
               <span className="notion-label">{t("telegramRelayInviteHint")}</span>
-            </>
-          ) : (
-            <>
+            </div>
+          ) : null}
+
+          {!relay && !enrolled ? (
+            <div className="dispatch-divider">
+              <span className="settings-kicker">{t("telegramRelayLegacyTitle")}</span>
+              <span className="notion-label">{t("telegramRelayLegacyHint")}</span>
               <label className="notion-label" htmlFor="telegram-relay-invite">
                 {t("telegramRelayInvite")}
               </label>
@@ -290,8 +458,8 @@ export function TelegramSection() {
                   {t("telegramRelaySave")}
                 </Button>
               </div>
-            </>
-          )}
+            </div>
+          ) : null}
         </div>
       </Card>
       <Banner tone="info">{t("telegramRelayHint")}</Banner>

@@ -85,3 +85,28 @@ it("首页在 <head> 之后立刻注入令牌和偏好，且早于页面自带�
     expect(value.prefs.k).toBe("</script><b>");
   });
 });
+
+it("更新 T3 端点偏好后回收不再使用的转发，无关偏好不触发", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "yb-ui-prefs-t3-"));
+  const staticDir = join(dir, "web");
+  mkdirSync(staticDir);
+  writeFileSync(join(staticDir, "index.html"), "<!doctype html><html><head></head><body></body></html>");
+  const kept: string[][] = [];
+  const deps = {
+    uiPrefs: new UiPrefsStore(join(dir, "ui-prefs.json")),
+    deck: { t3Retain: (keep: string[]) => { kept.push(keep); } },
+  } as unknown as HttpDeps;
+  const server = await startDaemonHttp({ dataDir: dir, staticDir, deps });
+  try {
+    await call(server, "PUT", { set: { other: "1" } });
+    expect(kept).toEqual([]);
+    const endpoints = JSON.stringify([{ id: "a", name: "VPS", url: "http://127.0.0.1:3774/" }, { id: "b", name: "坏", url: "http://example.com/" }]);
+    await call(server, "PUT", { set: { "you-brain.deck.t3-endpoints": endpoints } });
+    expect(kept).toEqual([["http://127.0.0.1:3773/", "http://127.0.0.1:3774/"]]);
+    await call(server, "PUT", { remove: ["you-brain.deck.t3-endpoints"] });
+    expect(kept.at(-1)).toEqual(["http://127.0.0.1:3773/"]);
+  } finally {
+    await server.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

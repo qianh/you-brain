@@ -9,6 +9,7 @@ export {
   createMcpServer,
   createToolHandlers,
   serveMcp,
+  type McpDispatchClient,
   type McpServices,
   type PortraitContent,
   type SessionContent,

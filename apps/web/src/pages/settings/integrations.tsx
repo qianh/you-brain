@@ -7,6 +7,7 @@ import { SourceTile } from "../../components/tile.js";
 import { Toggle } from "../../components/toggle.js";
 import { useDaemon } from "../../daemon-context.js";
 import { sourceLabel } from "../../lib/format.js";
+import { DispatchSection } from "./dispatch.js";
 import { toggleMember } from "./logic.js";
 import { NotionSection } from "./notion.js";
 import { SearchKeySection } from "./search-key.js";
@@ -63,6 +64,7 @@ export function IntegrationsSection({
       </Section>
       <WebhookSection />
       <TelegramSection />
+      <DispatchSection />
       <NotionSection />
       <SearchKeySection />
     </div>

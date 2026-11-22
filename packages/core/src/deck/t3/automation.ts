@@ -193,6 +193,35 @@ export class T3Automation implements TaskAutomationPort {
     return { threadId: launched.threadId, threadUrl: await this.#threadUrl(url, launched.threadId) };
   }
 
+  /**
+   * 跨设备派活：在项目根目录开普通会话。
+   * 模型沿用 start()（项目默认，否则该项目最近一次会话）；不走 worktree / plan。
+   */
+  async launchThread(input: {
+    projectId: string;
+    title: string;
+    prompt: string;
+    requestId: string;
+    runtimeMode: "auto-accept-edits" | "auto" | "full-access";
+  }): Promise<{ threadId: string; threadUrl: string }> {
+    const url = await this.#url();
+    const project = (await this.#projects()).find((item) => item.id === input.projectId);
+    if (!project) throw new T3AutomationError("INVALID_INPUT", "T3 中已找不到这个项目，请重新选择项目。");
+    const history = await this.#threads(project.id);
+    const latest = history.find((thread) => text(thread.providerInstanceId) && text(thread.model));
+    const selection = model(project.defaultModelSelection) ? project.defaultModelSelection
+      : latest ? { instanceId: latest.providerInstanceId, model: latest.model } : undefined;
+    if (!selection) throw new T3AutomationError("INVALID_INPUT", "请先在 T3 中为这个项目选择模型或创建一次会话");
+    const launched = await this.#call("t3_thread_launch", {
+      projectId: project.id, title: input.title, message: input.prompt, modelSelection: selection,
+      runtimeMode: input.runtimeMode, interactionMode: "default",
+      workspaceStrategy: { type: "root" },
+      clientRequestId: `u-brain-dispatch-${input.requestId}`,
+    }, 60_000);
+    if (!object(launched) || !text(launched.threadId)) invalidResponse();
+    return { threadId: launched.threadId, threadUrl: await this.#threadUrl(url, launched.threadId) };
+  }
+
   async #uploadImage(url: string, image: TaskImageData): Promise<{ id: string; type: "image"; name: string; mimeType: string; sizeBytes: number }> {
     const { name, mimeType, sizeBytes, bytes } = image;
     const upload = { type: "image" as const, name, mimeType, sizeBytes };

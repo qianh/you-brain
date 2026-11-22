@@ -48,6 +48,8 @@ const PREF_KEYS: ReadonlySet<string> = new Set([
   "you-brain.deck.rail-top",
   "you-brain.deck.tty7-open",
   "you-brain.deck.t3-url",
+  "you-brain.deck.t3-endpoints",
+  "you-brain.deck.t3-active",
   "you-brain.deck.tty7-harness",
   "you-brain.deck.tty7-active-only",
   "you-brain.deck.tty7-expanded",

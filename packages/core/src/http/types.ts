@@ -3,6 +3,7 @@ import { DSH_LOGIN_PROVIDER_IDS } from "../deck/dsh/login.js";
 import {
   DeviceCapabilitySchema,
   IsoTimestampSchema,
+  LaunchModeSchema,
   LlmProviderSchema,
   ReminderActionSchema,
   SessionKeySchema,
@@ -12,6 +13,7 @@ import {
   type EventActor,
   type EventOf,
   type EventType,
+  type HelloDispatch,
   type TodoStatus,
   type TopicStatus,
 } from "@you-brain/protocol";
@@ -1368,6 +1370,14 @@ export const DeckTelegramActionBodySchema = z.discriminatedUnion("action", [
       name: z.string().trim().max(40).optional(),
     })
     .strict(),
+  z
+    .object({
+      action: z.literal("enroll-relay"),
+      url: z.string().trim().min(1).max(300),
+      code: z.string().trim().min(1).max(64),
+      name: z.string().trim().max(40).optional(),
+    })
+    .strict(),
   z.object({ action: z.literal("clear-relay") }).strict(),
 ]);
 
@@ -1437,5 +1447,110 @@ export interface ReferenceMaterializeResponse extends ReferenceContentView {
   path: string;
   fileMention: string;
 }
+
+// ---- 跨设备派活（dispatch） ----
+
+export interface DispatchDeviceView {
+  id: string;
+  name: string;
+  online: boolean;
+  self: boolean;
+  enrolled: boolean;
+  dispatch?: HelloDispatch;
+}
+
+export interface DispatchDevicesResponse {
+  self: { deviceId: string; name: string };
+  connected: boolean;
+  enrolled: boolean;
+  devices: DispatchDeviceView[];
+}
+
+export const DispatchStartThreadBodySchema = z
+  .object({
+    to: z.string().trim().min(1).max(128),
+    projectId: z.string().trim().min(1).max(200),
+    title: z.string().trim().min(1).max(200),
+    prompt: z
+      .string()
+      .max(60_000)
+      .refine((value) => value.trim().length > 0, { message: "任务内容不能为空" }),
+    mode: LaunchModeSchema.optional(),
+  })
+  .strict();
+
+export type DispatchStartThreadBody = z.infer<typeof DispatchStartThreadBodySchema>;
+
+export type DispatchStartThreadResponse = import("../dispatch/hub.js").DispatchStartResult;
+
+export const DispatchFollowupBodySchema = z
+  .object({
+    prompt: z
+      .string()
+      .max(60_000)
+      .refine((value) => value.trim().length > 0, { message: "消息内容不能为空" }),
+  })
+  .strict();
+
+export type DispatchFollowupBody = z.infer<typeof DispatchFollowupBodySchema>;
+
+export type DispatchFollowupResponse = import("../dispatch/hub.js").DispatchFollowupResult;
+
+export type DispatchOutboxEntry = import("../dispatch/hub.js").OutboxEntry;
+
+export interface DispatchOutboxResponse {
+  entries: DispatchOutboxEntry[];
+}
+
+export interface DispatchOutboxItemResponse {
+  entry: DispatchOutboxEntry;
+  refreshed: boolean;
+  read?: {
+    state: "planning" | "running" | "ready" | "failed";
+    summary: string;
+    error?: string;
+    link: string | null;
+  };
+  refreshError?: string;
+}
+
+export const DispatchSendBodySchema = z
+  .object({
+    to: z.string().trim().min(1).max(128),
+    kind: z.string().trim().min(1).max(100),
+    args: z.unknown(),
+  })
+  .strict();
+
+export type DispatchSendBody = z.infer<typeof DispatchSendBodySchema>;
+
+export type DispatchSendResponse = import("../dispatch/ledger.js").CommandOutcome;
+
+export interface DispatchKnownSenderView {
+  deviceId: string;
+  name: string;
+  enrolled: boolean;
+  publicKey?: string;
+}
+
+export type DispatchPolicyView = import("../dispatch/policy.js").DispatchPolicy;
+
+export interface DispatchPolicyResponse {
+  policy: DispatchPolicyView;
+  projects: Array<{ id: string; name: string }>;
+  knownSenders: DispatchKnownSenderView[];
+}
+
+export const DispatchPolicyPutBodySchema = z
+  .object({
+    enabled: z.boolean().optional(),
+    notify: z.boolean().optional(),
+    maxMode: LaunchModeSchema.optional(),
+    allowedProjects: z.array(z.string().trim().min(1).max(200)).max(200).optional(),
+    allowedSenders: z.array(z.string().trim().min(1).max(128)).max(200).optional(),
+  })
+  .strict();
+
+export type DispatchPolicyPutBody = z.infer<typeof DispatchPolicyPutBodySchema>;
 
 export type { QuotaAccount, QuotaTokens, QuotaTokenUsage, QuotaView, QuotaWindow } from "../quota/types.js";

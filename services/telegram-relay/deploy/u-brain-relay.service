@@ -1,0 +1,36 @@
+[Unit]
+Description=U-Brain Telegram relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=u-brain-relay
+Group=u-brain-relay
+EnvironmentFile=/etc/u-brain-relay.env
+WorkingDirectory=/opt/u-brain-relay
+ExecStart=/usr/local/bin/bun /opt/u-brain-relay/src/main.ts
+Restart=always
+RestartSec=2
+TimeoutStopSec=15
+# 对应 /var/lib/u-brain-relay，和 RELAY_DATA_DIR 的默认值一致。
+StateDirectory=u-brain-relay
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+# Bun 的 JIT 需要可写可执行页，不能开 MemoryDenyWriteExecute。
+
+[Install]
+WantedBy=multi-user.target

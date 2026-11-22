@@ -88,6 +88,19 @@ import {
   type ReferenceKind,
   type ReferenceMaterializeBody,
   type ReferenceMaterializeResponse,
+  type DeckTelegramActionBody,
+  type DeckTelegramStatusResponse,
+  type DispatchDevicesResponse,
+  type DispatchFollowupBody,
+  type DispatchFollowupResponse,
+  type DispatchOutboxItemResponse,
+  type DispatchOutboxResponse,
+  type DispatchPolicyPutBody,
+  type DispatchPolicyResponse,
+  type DispatchSendBody,
+  type DispatchSendResponse,
+  type DispatchStartThreadBody,
+  type DispatchStartThreadResponse,
 } from "./types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 import type { UiPrefs, UiPrefsPatch } from "../ui-prefs/store.js";
@@ -204,6 +217,16 @@ export interface DaemonClient {
     label?: string;
   }): Promise<ReferenceContentView>;
   materializeReference(body: ReferenceMaterializeBody): Promise<ReferenceMaterializeResponse>;
+  deckTelegramStatus?(): Promise<DeckTelegramStatusResponse>;
+  deckTelegramAction?(body: DeckTelegramActionBody): Promise<DeckTelegramStatusResponse>;
+  dispatchDevices?(): Promise<DispatchDevicesResponse>;
+  dispatchStartThread?(body: DispatchStartThreadBody): Promise<DispatchStartThreadResponse>;
+  dispatchFollowup?(dispatchId: string, body: DispatchFollowupBody): Promise<DispatchFollowupResponse>;
+  dispatchOutbox?(): Promise<DispatchOutboxResponse>;
+  dispatchOutboxItem?(dispatchId: string, options?: { refresh?: boolean }): Promise<DispatchOutboxItemResponse>;
+  dispatchSend?(body: DispatchSendBody): Promise<DispatchSendResponse>;
+  dispatchPolicy?(): Promise<DispatchPolicyResponse>;
+  updateDispatchPolicy?(body: DispatchPolicyPutBody): Promise<DispatchPolicyResponse>;
   events(
     listener: (event: DaemonEvent) => void,
     options?: { signal?: AbortSignal },
@@ -363,6 +386,21 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
       return request("GET", qs === "" ? "/api/references/content" : `/api/references/content?${qs}`);
     },
     materializeReference: (body) => request("POST", "/api/references/materialize", body),
+    deckTelegramStatus: () => request("GET", "/api/deck/telegram"),
+    deckTelegramAction: (body) => request("POST", "/api/deck/telegram", body),
+    dispatchDevices: () => request("GET", "/api/dispatch/devices"),
+    dispatchStartThread: (body) => request("POST", "/api/dispatch/threads", body),
+    dispatchFollowup: (dispatchId, body) =>
+      request("POST", `/api/dispatch/outbox/${encodeURIComponent(dispatchId)}/followup`, body),
+    dispatchOutbox: () => request("GET", "/api/dispatch/outbox"),
+    dispatchOutboxItem: (dispatchId, opts) =>
+      request(
+        "GET",
+        `/api/dispatch/outbox/${encodeURIComponent(dispatchId)}${opts?.refresh ? "?refresh=1" : ""}`,
+      ),
+    dispatchSend: (body) => request("POST", "/api/dispatch/send", body),
+    dispatchPolicy: () => request("GET", "/api/dispatch/policy"),
+    updateDispatchPolicy: (body) => request("PUT", "/api/dispatch/policy", body),
     events: (listener, eventOptions) =>
       readEvents(fetchImpl, baseUrl, options.token, listener, eventOptions?.signal),
   };

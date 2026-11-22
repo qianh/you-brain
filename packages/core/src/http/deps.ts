@@ -107,6 +107,17 @@ import type {
   DeckTty7SessionsResponse,
   DeckTty7StartBody,
   DeckTty7StartResponse,
+  DispatchDevicesResponse,
+  DispatchFollowupBody,
+  DispatchFollowupResponse,
+  DispatchOutboxItemResponse,
+  DispatchOutboxResponse,
+  DispatchPolicyPutBody,
+  DispatchPolicyResponse,
+  DispatchSendBody,
+  DispatchSendResponse,
+  DispatchStartThreadBody,
+  DispatchStartThreadResponse,
   TopicReorganizeApplyBody,
   TopicReorganizeResult,
   TopicReorganizeStatus,
@@ -220,6 +231,8 @@ export interface HttpDeps {
   notionMovePage?(body: NotionMovePageBody): Promise<NotionArchivePageResult>;
   /** 指挥台（deck）。The daemon always supplies it. */
   deck?: DeckHttpPort;
+  /** 跨设备派活（dispatch）。真实 daemon 在 dataDir 就绪后装配。 */
+  dispatch?: DispatchHttpPort;
   /** 界面偏好（只认键和值）。页面来自随机端口，偏好存在 daemon 这边才能跨重启保留。 */
   uiPrefs: {
     read(): Promise<UiPrefs>;
@@ -234,6 +247,8 @@ export interface DeckHttpPort {
   dshWeb(retry?: boolean): Promise<DeckDshWebResponse>;
   /** T3 iframe 该加载的转发地址（注入多巴胺底色与 @ 引用）；不支持或起不来时为 null。 */
   t3Frame?(upstream: string): string | null;
+  /** 只保留这些上游的 T3 转发，其余停掉（指挥台删除端点后回收）。 */
+  t3Retain?(keep: string[]): void;
   dshLogin(): Promise<DeckDshLoginResponse>;
   dshLoginAction(body: DeckDshLoginBody): Promise<DeckDshLoginResponse>;
   /** GUI App 桥：给 DSH 的 u-brain-bridge 插件用。 */
@@ -265,4 +280,16 @@ export interface DeckHttpPort {
   telegramAction?(body: DeckTelegramActionBody): Promise<DeckTelegramStatusResponse>;
   /** 中转连接信息（含密钥），给另一台电脑粘贴用。 */
   telegramInvite?(): Promise<{ invite: string }>;
+}
+
+/** 跨设备派活的 HTTP 端口。实现由 daemon 装配 DispatchHub 与 DispatchExecutor。 */
+export interface DispatchHttpPort {
+  devices(): Promise<DispatchDevicesResponse>;
+  startThread(body: DispatchStartThreadBody): Promise<DispatchStartThreadResponse>;
+  followup(dispatchId: string, body: DispatchFollowupBody): Promise<DispatchFollowupResponse>;
+  outbox(): Promise<DispatchOutboxResponse>;
+  getOutbox(dispatchId: string, options?: { refresh?: boolean }): Promise<DispatchOutboxItemResponse | null>;
+  send(body: DispatchSendBody): Promise<DispatchSendResponse>;
+  policy(): Promise<DispatchPolicyResponse>;
+  updatePolicy(body: DispatchPolicyPutBody): Promise<DispatchPolicyResponse>;
 }

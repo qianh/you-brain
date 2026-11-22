@@ -16,7 +16,12 @@ describe("owned you-brain skills", () => {
     const root = await mkdtemp(join(tmpdir(), "you-brain-skills-"));
     await installYouBrainSkills("codex", root);
     const names = await readdir(join(root, ".codex", "skills"));
-    expect(names.sort()).toEqual(["you-brain", "you-brain-portrait", "you-brain-ref"]);
+    expect(names.sort()).toEqual([
+      "you-brain",
+      "you-brain-dispatch",
+      "you-brain-portrait",
+      "you-brain-ref",
+    ]);
     await writeFile(join(root, ".codex/skills/you-brain/notes.md"), "keep");
     await writeFile(join(root, ".codex/skills/you-brain-portrait/SKILL.md"), "edited");
     await uninstallYouBrainSkills("codex", root);

@@ -168,4 +168,91 @@ describe("RelayCore", () => {
     expect(hooks.map((call) => call.params.url)).toEqual(["https://r.example/telegram", "https://r2.example/telegram"]);
     expect(hooks[0]!.params.secret_token).toBe("s");
   });
+
+  it("webhook 已指向别处就重新注册，storage 里的旧标记不算数", async () => {
+    const calls: Array<{ method: string; params: Record<string, unknown> }> = [];
+    let current = "https://old.example/telegram";
+    // 旧实现会把「77|目标 url」当成已经设过，从而跳过 setWebhook。
+    const store = new Map<string, unknown>([["webhook", "77|https://new.example/telegram"]]);
+    const puts: string[] = [];
+    const core = new RelayCore({
+      storage: {
+        get: async <T>(key: string) => structuredClone(store.get(key)) as T | undefined,
+        put: async (key, value) => {
+          puts.push(key);
+          store.set(key, structuredClone(value));
+        },
+        delete: async (key) => store.delete(key),
+      },
+      sockets: () => [],
+      telegram: async <T>(method: string, params: Record<string, unknown>) => {
+        calls.push({ method, params });
+        if (method === "getMe") return { id: 77, username: "ub_bot", first_name: "UB" } as T;
+        if (method === "getWebhookInfo") return { url: current } as T;
+        if (method === "setWebhook") {
+          current = String(params.url ?? "");
+          return true as T;
+        }
+        return true as T;
+      },
+      now: () => 1_000,
+      randomInt: () => 0,
+    });
+    await core.ensureWebhook("https://new.example/telegram", "secret");
+    const hooks = calls.filter((call) => call.method === "setWebhook");
+    expect(hooks.map((call) => call.params.url)).toEqual(["https://new.example/telegram"]);
+    expect(hooks[0]!.params.secret_token).toBe("secret");
+    expect(puts).not.toContain("webhook");
+  });
+
+  it("webhook 已经指向目标时不调 setWebhook，60 秒内不重复查询", async () => {
+    const calls: Array<{ method: string }> = [];
+    let now = 5_000;
+    const core = new RelayCore({
+      storage: {
+        get: async () => undefined,
+        put: async () => undefined,
+        delete: async () => undefined,
+      },
+      sockets: () => [],
+      telegram: async <T>(method: string) => {
+        calls.push({ method });
+        if (method === "getMe") return { id: 77, username: "ub_bot", first_name: "UB" } as T;
+        if (method === "getWebhookInfo") return { url: "https://r.example/telegram" } as T;
+        return true as T;
+      },
+      now: () => now,
+      randomInt: () => 0,
+    });
+    await core.ensureWebhook("https://r.example/telegram", "s");
+    await core.ensureWebhook("https://r.example/telegram", "s");
+    expect(calls.filter((call) => call.method === "setWebhook")).toHaveLength(0);
+    expect(calls.filter((call) => call.method === "getWebhookInfo")).toHaveLength(1);
+    now += 60_000;
+    await core.ensureWebhook("https://r.example/telegram", "s");
+    expect(calls.filter((call) => call.method === "getWebhookInfo")).toHaveLength(2);
+    expect(calls.filter((call) => call.method === "setWebhook")).toHaveLength(0);
+  });
+
+  it("getWebhookInfo 失败时抛错，不调用 setWebhook", async () => {
+    const calls: string[] = [];
+    const core = new RelayCore({
+      storage: {
+        get: async () => undefined,
+        put: async () => undefined,
+        delete: async () => undefined,
+      },
+      sockets: () => [],
+      telegram: async <T>(method: string) => {
+        calls.push(method);
+        if (method === "getMe") return { id: 77, username: "ub_bot", first_name: "UB" } as T;
+        if (method === "getWebhookInfo") throw new Error("Telegram：暂时不可用");
+        return true as T;
+      },
+      now: () => 1_000,
+      randomInt: () => 0,
+    });
+    await expect(core.ensureWebhook("https://r.example/telegram", "s")).rejects.toThrow("暂时不可用");
+    expect(calls).not.toContain("setWebhook");
+  });
 });

@@ -228,11 +228,6 @@ export function DshDeckPage() {
     postToT3(dshThemeMessage(theme));
   }, [theme, postToT3]);
 
-  // T3 重新加载（刷新、换地址）后要等注入脚本重新报到；直连 T3 时不会报到，退回复制到剪贴板。
-  useEffect(() => {
-    setT3Injected(false);
-  }, [t3ReloadVersion]);
-
   // 切到别的菜单（常驻但隐藏）时不确认；切回时立即确认一次，地址变了就换。
   useEffect(() => {
     if (readyUrl === null || !pageActive) return undefined;
@@ -365,6 +360,7 @@ export function DshDeckPage() {
                 settingsOpen={t3SettingsOpen}
                 onSettingsChange={setT3SettingsOpen}
                 onReload={() => setT3ReloadVersion((value) => value + 1)}
+                onLocalReload={() => setT3Injected(false)}
               />
             ) : null}
           </div>

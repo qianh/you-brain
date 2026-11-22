@@ -1,0 +1,13 @@
+# relay.example.com 换成你的域名。Caddy 会自动申请证书。
+# WebSocket 走同一条反代，不需要额外配置。
+# 反代默认带上 X-Forwarded-Proto，中转用它拼 webhook 地址。
+# /admin/* 只给 VPS 本机使用，对外一律返回 404。
+relay.example.com {
+	handle /admin/* {
+		respond 404
+	}
+	handle /admin {
+		respond 404
+	}
+	reverse_proxy 127.0.0.1:8787
+}

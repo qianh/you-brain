@@ -16,8 +16,9 @@ import {
   type SessionNoticeDismissInput,
   type SessionNoticeList,
 } from "./session-notices.js";
+import type { DeviceIdentity } from "../dispatch/identity.js";
 import { startT3Proxy, type T3Proxy } from "./t3/proxy.js";
-import { TelegramBridge, type TelegramFetch } from "./telegram/index.js";
+import { TelegramBridge, type TelegramDispatchPort, type TelegramFetch } from "./telegram/index.js";
 import { Tty7, type Tty7SessionsView } from "./tty7.js";
 import {
   GUI_APPS,
@@ -64,6 +65,14 @@ export interface DeckServiceOptions {
   telegramToken?: SecretStore;
   /** Telegram 中转的设备密钥存储；不传就不能用中转。 */
   telegramRelayKey?: SecretStore;
+  /** Telegram 中转入网后的设备专属令牌存储；优先于 telegramRelayKey。 */
+  telegramRelayToken?: SecretStore;
+  /** 跨设备派活中枢（由 daemon 创建后注入）。 */
+  dispatch?: TelegramDispatchPort;
+  /** 跨设备派活本机身份（Ed25519 密钥对）。 */
+  dispatchIdentity?: DeviceIdentity;
+  /** 跨设备派活与中转共用的稳定设备 ID。 */
+  deviceId?: string;
   /** Telegram 桥状态变了（连接、绑定）。 */
   onTelegram?: () => void;
   telegramFetch?: TelegramFetch;
@@ -80,14 +89,25 @@ const DSH_WARM_DELAY_MS = 3_000;
 /** 提醒分析读屏幕的行数与模型调用超时。 */
 const NOTICE_SCREEN_LINES = 150;
 const NOTICE_SUMMARY_TIMEOUT_MS = 40_000;
+/** 同一时刻最多保留 8 个 T3 转发，超出时淘汰最久未使用的。 */
+const MAX_T3_PROXIES = 8;
+
+function t3ProxyKey(upstream: string): string {
+  try {
+    return `${new URL(upstream).origin}/`;
+  } catch {
+    return upstream;
+  }
+}
 
 export class DeckService {
   readonly #options: DeckServiceOptions;
   readonly #dsh: Pick<DshRuntime, "close" | "webState" | "loginView" | "loginAction"> &
     Partial<Pick<DshRuntime, "refresh">>;
   #stopped = false;
-  /** T3 转发（ADR-0004）：指挥台的 T3 iframe 经它加载，才能注入多巴胺底色和 @ 引用。 */
-  #t3Proxy: T3Proxy | null = null;
+  /** T3 转发池（ADR-0004 / M6）：按上游地址复用，最多保留 8 个，用于多端点独立转发与 Cookie 隔离。 */
+  readonly #t3Proxies = new Map<string, { proxy: T3Proxy; lastUsed: number }>();
+  #t3UseSeq = 0;
   /** tty7 会话桥（ADR-0004）：与 dsh 无关，dsh 没起来也能用。 */
   readonly tty7: Tty7;
   /** 终端会话提醒：盯着 tty7 会话状态，工作中 → 等你回复/已完成时记一条。 */
@@ -135,6 +155,10 @@ export class DeckService {
             configPath: join(options.dataDir, "deck", "telegram.json"),
             token: options.telegramToken,
             ...(options.telegramRelayKey ? { relayKey: options.telegramRelayKey } : {}),
+            ...(options.telegramRelayToken ? { relayToken: options.telegramRelayToken } : {}),
+            ...(options.dispatch ? { dispatch: options.dispatch } : {}),
+            ...(options.dispatchIdentity ? { dispatchIdentity: options.dispatchIdentity } : {}),
+            ...(options.deviceId ? { deviceId: options.deviceId } : {}),
             notices: () => this.notices.list(),
             sessions: () => this.tty7.sessions(),
             send: (input) => this.tty7.send(input),
@@ -165,24 +189,53 @@ export class DeckService {
       });
   }
 
-  /** 返回 T3 iframe 该加载的转发地址；T3 地址变了就换一个转发。起不来返回 null，网页退回直连。 */
+  /** 返回 T3 iframe 该加载的转发地址；按上游地址复用，超出上限时淘汰最久未使用的。起不来返回 null，网页退回直连。 */
   t3Frame(upstream: string): string | null {
     if (this.#stopped) return null;
-    if (this.#t3Proxy?.upstream === upstream) return this.#t3Proxy.url;
-    this.#t3Proxy?.stop();
-    this.#t3Proxy = null;
+    const key = t3ProxyKey(upstream);
+    const existing = this.#t3Proxies.get(key);
+    if (existing) {
+      existing.lastUsed = ++this.#t3UseSeq;
+      return existing.proxy.url;
+    }
+    let proxy: T3Proxy;
     try {
-      this.#t3Proxy = startT3Proxy(upstream);
-      return this.#t3Proxy.url;
+      proxy = startT3Proxy(upstream);
     } catch {
       return null;
+    }
+    if (this.#t3Proxies.size >= MAX_T3_PROXIES) {
+      let oldestKey: string | null = null;
+      let oldestUsed = Infinity;
+      for (const [entryKey, entry] of this.#t3Proxies) {
+        if (entry.lastUsed < oldestUsed) {
+          oldestUsed = entry.lastUsed;
+          oldestKey = entryKey;
+        }
+      }
+      if (oldestKey !== null) {
+        this.#t3Proxies.get(oldestKey)?.proxy.stop();
+        this.#t3Proxies.delete(oldestKey);
+      }
+    }
+    this.#t3Proxies.set(key, { proxy, lastUsed: ++this.#t3UseSeq });
+    return proxy.url;
+  }
+
+  /** 只保留 keep 里的上游转发，其余全部停掉。 */
+  t3Retain(keep: string[]): void {
+    const keepSet = new Set(keep.map(t3ProxyKey));
+    for (const [key, entry] of this.#t3Proxies) {
+      if (keepSet.has(key)) continue;
+      entry.proxy.stop();
+      this.#t3Proxies.delete(key);
     }
   }
 
   stop(): void {
     this.#stopped = true;
-    this.#t3Proxy?.stop();
-    this.#t3Proxy = null;
+    for (const entry of this.#t3Proxies.values()) entry.proxy.stop();
+    this.#t3Proxies.clear();
     this.notices.stop();
     this.telegram?.stop();
     this.activity.stop();

@@ -1,6 +1,6 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { TodoStatusSchema, TopicStatusSchema } from "@you-brain/protocol";
+import { LaunchModeSchema, TodoStatusSchema, TopicStatusSchema, type LaunchModeName } from "@you-brain/protocol";
 import { z } from "zod";
 
 import {
@@ -16,6 +16,12 @@ import {
 import {
   ReferenceKindSchema,
   type ActionResponse,
+  type DispatchDevicesResponse,
+  type DispatchFollowupBody,
+  type DispatchFollowupResponse,
+  type DispatchOutboxItemResponse,
+  type DispatchStartThreadBody,
+  type DispatchStartThreadResponse,
   type NotionPageView,
   type NotionSearchView,
   type PortraitCorrectionResult,
@@ -88,6 +94,13 @@ export interface GetPortraitMcpInput {
   fullProjects?: boolean;
 }
 
+export interface McpDispatchClient {
+  devices(): Promise<DispatchDevicesResponse>;
+  startThread(body: DispatchStartThreadBody): Promise<DispatchStartThreadResponse>;
+  getOutbox(dispatchId: string, options?: { refresh?: boolean }): Promise<DispatchOutboxItemResponse>;
+  followup(dispatchId: string, body: DispatchFollowupBody): Promise<DispatchFollowupResponse>;
+}
+
 export interface McpServices {
   searchSessions(input: SearchRequest & { limit?: number }): Promise<SearchResponse>;
   getSession(input: {
@@ -124,6 +137,8 @@ export interface McpServices {
     query?: string;
     kind?: ReferenceKind;
   }): Promise<{ content: ReferenceContentView | null; candidates: ReferenceCandidateView[] }>;
+  /** 跨设备派活（经本机 daemon HTTP）；未提供时工具返回明确错误。 */
+  dispatch?: McpDispatchClient;
 }
 
 type ToolResult = {
@@ -152,6 +167,46 @@ function failure(error: unknown): ToolResult {
     structuredContent: { error: { code, message } },
     isError: true,
   };
+}
+
+function failureWithDetails(
+  code: string,
+  message: string,
+  details: Record<string, unknown> = {},
+): ToolResult {
+  return {
+    content: [{ type: "text", text: `${code}: ${message}` }],
+    structuredContent: { error: { code, message }, ...details },
+    isError: true,
+  };
+}
+
+function requireDispatch(services: McpServices): McpDispatchClient {
+  if (!services.dispatch) {
+    throw Object.assign(new Error("当前环境未连接本机 daemon，无法使用跨设备派活"), {
+      code: "DAEMON_NOT_RUNNING",
+    });
+  }
+  return services.dispatch;
+}
+
+function resolveByIdOrName<T extends { id: string; name: string }>(
+  items: readonly T[],
+  query: string,
+): { status: "matched"; item: T } | { status: "none" } | { status: "ambiguous"; matches: T[] } {
+  const trimmed = query.trim();
+  const byId = items.filter((item) => item.id === trimmed);
+  if (byId.length === 1) return { status: "matched", item: byId[0]! };
+  const lower = trimmed.toLowerCase();
+  const byName = items.filter((item) => item.name.trim().toLowerCase() === lower);
+  if (byName.length === 1) return { status: "matched", item: byName[0]! };
+  if (byName.length > 1) return { status: "ambiguous", matches: byName };
+  return { status: "none" };
+}
+
+function formatCandidates(items: ReadonlyArray<{ id: string; name: string }>): string {
+  if (items.length === 0) return "（无可用候选）";
+  return items.map((item) => `${item.name} (${item.id})`).join("、");
 }
 
 const UpdateTopicSchema = z.discriminatedUnion("action", [
@@ -563,6 +618,212 @@ export function createToolHandlers(services: McpServices) {
         return failure(error);
       }
     },
+    list_devices: async (): Promise<ToolResult> => {
+      try {
+        const dispatch = requireDispatch(services);
+        const state = await dispatch.devices();
+        const enrolledDevices = state.devices
+          .filter((device) => device.enrolled)
+          .map((device) => ({
+            id: device.id,
+            name: device.name,
+            online: device.online,
+            self: device.self,
+            acceptsDispatch: device.dispatch?.enabled === true,
+            t3Ready: device.dispatch?.t3.ready === true,
+            maxMode: device.dispatch?.maxMode ?? null,
+            projects: device.dispatch?.projects ?? [],
+          }));
+        const output = {
+          self: state.self,
+          connected: state.connected,
+          enrolled: state.enrolled,
+          devices: enrolledDevices,
+        };
+        if (!state.connected && enrolledDevices.length === 0) {
+          return success(output, "当前未连接到中转，暂不可见其他设备。");
+        }
+        if (enrolledDevices.length === 0) {
+          return success(output, "当前没有已入网的设备。");
+        }
+        const lines = enrolledDevices.map((device) => {
+          const flags = [
+            device.online ? "在线" : "离线",
+            device.self ? "本机" : null,
+            device.acceptsDispatch ? "接受派活" : "未开启接收派活",
+            device.maxMode ? `权限上限:${device.maxMode}` : null,
+          ]
+            .filter(Boolean)
+            .join(" · ");
+          const projects =
+            device.projects.length > 0
+              ? `；可派项目：${device.projects.map((p) => p.name).join("、")}`
+              : "；可派项目：无";
+          return `- ${device.name} (${device.id}) [${flags}]${projects}`;
+        });
+        return success(output, lines.join("\n"));
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    dispatch_to_device: async (input: {
+      device: string;
+      project: string;
+      title: string;
+      prompt: string;
+      mode?: LaunchModeName | undefined;
+    }): Promise<ToolResult> => {
+      try {
+        const dispatch = requireDispatch(services);
+        const state = await dispatch.devices();
+        const enrolledDevices = state.devices.filter((device) => device.enrolled);
+        const deviceMatch = resolveByIdOrName(enrolledDevices, input.device);
+        if (deviceMatch.status === "none") {
+          const candidates = enrolledDevices.map((d) => ({
+            id: d.id,
+            name: d.name,
+            online: d.online,
+            acceptsDispatch: d.dispatch?.enabled === true,
+          }));
+          return failureWithDetails(
+            "DEVICE_NOT_FOUND",
+            `找不到匹配的已入网设备「${input.device}」。可选设备：${formatCandidates(candidates)}`,
+            { candidates },
+          );
+        }
+        if (deviceMatch.status === "ambiguous") {
+          const candidates = deviceMatch.matches.map((d) => ({
+            id: d.id,
+            name: d.name,
+            online: d.online,
+            acceptsDispatch: d.dispatch?.enabled === true,
+          }));
+          return failureWithDetails(
+            "AMBIGUOUS_DEVICE",
+            `设备名「${input.device}」匹配到多台设备，请改用设备 ID 重试：${formatCandidates(candidates)}`,
+            { candidates },
+          );
+        }
+        const target = deviceMatch.item;
+        if (!target.dispatch?.enabled) {
+          return failureWithDetails(
+            "DISPATCH_DISABLED",
+            `目标设备「${target.name}」未开启接收派活`,
+            { device: { id: target.id, name: target.name } },
+          );
+        }
+        if (!target.online) {
+          return failureWithDetails(
+            "DEVICE_OFFLINE",
+            `目标设备「${target.name}」当前不在线`,
+            { device: { id: target.id, name: target.name } },
+          );
+        }
+        const projects = target.dispatch.projects ?? [];
+        const projectMatch = resolveByIdOrName(projects, input.project);
+        if (projectMatch.status === "none") {
+          return failureWithDetails(
+            "PROJECT_NOT_ALLOWED",
+            `目标设备「${target.name}」的可派项目列表里没有「${input.project}」。可选项目：${formatCandidates(projects)}`,
+            { device: { id: target.id, name: target.name }, candidates: projects },
+          );
+        }
+        if (projectMatch.status === "ambiguous") {
+          return failureWithDetails(
+            "AMBIGUOUS_PROJECT",
+            `项目名「${input.project}」在设备「${target.name}」上匹配到多个项目，请改用项目 ID 重试：${formatCandidates(projectMatch.matches)}`,
+            { device: { id: target.id, name: target.name }, candidates: projectMatch.matches },
+          );
+        }
+        const project = projectMatch.item;
+        const started = await dispatch.startThread({
+          to: target.id,
+          projectId: project.id,
+          title: input.title,
+          prompt: input.prompt,
+          ...(input.mode !== undefined ? { mode: input.mode } : {}),
+        });
+        if (!started.ok) {
+          return failureWithDetails("DISPATCH_FAILED", started.error, {
+            dispatchId: started.dispatchId,
+          });
+        }
+        const output = {
+          dispatchId: started.dispatchId,
+          threadId: started.threadId,
+          threadUrl: started.threadUrl,
+          mode: started.mode,
+          capped: started.capped,
+          device: { id: target.id, name: target.name },
+          project,
+        };
+        const cappedNote = started.capped ? "（已按对方上限降级）" : "";
+        return success(
+          output,
+          `已派活到「${target.name}」的项目「${project.name}」\ndispatchId: ${started.dispatchId}\nmode: ${started.mode}${cappedNote}\nthreadUrl: ${started.threadUrl}`,
+        );
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    get_dispatch_result: async (input: {
+      dispatchId: string;
+      refresh?: boolean | undefined;
+    }): Promise<ToolResult> => {
+      try {
+        const dispatch = requireDispatch(services);
+        const res = await dispatch.getOutbox(
+          input.dispatchId,
+          input.refresh !== undefined ? { refresh: input.refresh } : undefined,
+        );
+        const entry = res.entry;
+        const summary = res.read?.summary ?? entry.lastSummary ?? "";
+        const errorMessage = res.read?.error ?? entry.error;
+        const link = res.read?.link ?? entry.threadUrl ?? null;
+        const output = {
+          dispatchId: entry.dispatchId,
+          status: entry.status,
+          deviceName: entry.deviceName,
+          title: entry.title,
+          mode: entry.mode,
+          threadId: entry.threadId ?? null,
+          threadUrl: entry.threadUrl ?? null,
+          link,
+          summary,
+          ...(errorMessage !== undefined ? { error: errorMessage } : {}),
+          refreshed: res.refreshed,
+          ...(res.refreshError !== undefined ? { refreshError: res.refreshError } : {}),
+        };
+        const parts = [
+          `派活任务 ${entry.dispatchId}（${entry.deviceName} · ${entry.title}）`,
+          `状态：${entry.status}`,
+          ...(link ? [`链接：${link}`] : []),
+          ...(errorMessage ? [`错误：${errorMessage}`] : []),
+          ...(res.refreshError ? [`刷新失败：${res.refreshError}`] : []),
+          ...(summary ? ["", summary] : []),
+        ];
+        return success(output, parts.join("\n"));
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    send_to_dispatch: async (input: {
+      dispatchId: string;
+      message: string;
+    }): Promise<ToolResult> => {
+      try {
+        const dispatch = requireDispatch(services);
+        const res = await dispatch.followup(input.dispatchId, { prompt: input.message });
+        if (!res.ok) {
+          return failureWithDetails("DISPATCH_FAILED", res.error, {
+            dispatchId: res.dispatchId,
+          });
+        }
+        return success(res, `已向派活任务 ${res.dispatchId} 发送后续指令。`);
+      } catch (error) {
+        return failure(error);
+      }
+    },
   };
 }
 
@@ -751,6 +1012,59 @@ export function createMcpServer(services: McpServices): McpServer {
       },
     },
     handlers.get_reference,
+  );
+  server.registerTool(
+    "list_devices",
+    {
+      description:
+        "列出已入网的设备（名称、在线状态、是否接受派活、可派项目列表与权限上限）。派活前先调用此工具确认目标设备和白名单项目",
+      inputSchema: {},
+    },
+    handlers.list_devices,
+  );
+  server.registerTool(
+    "dispatch_to_device",
+    {
+      description:
+        "向另一台开启了接收派活的已入网设备派发一个 T3 任务会话。device 与 project 可传名称或 ID（不猜模糊匹配，只派给对方白名单里的项目），返回 dispatchId、threadUrl 与实际生效权限 mode",
+      inputSchema: {
+        device: z.string().trim().min(1),
+        project: z.string().trim().min(1),
+        title: z.string().trim().min(1).max(200),
+        prompt: z
+          .string()
+          .max(60_000)
+          .refine((value) => value.trim().length > 0, { message: "任务内容不能为空" }),
+        mode: LaunchModeSchema.optional(),
+      },
+    },
+    handlers.dispatch_to_device,
+  );
+  server.registerTool(
+    "get_dispatch_result",
+    {
+      description:
+        "查看一条跨设备派活任务的当前状态（running/waiting/done/failed）与最后一条回答摘要；传 refresh=true 可实时向目标设备刷新",
+      inputSchema: {
+        dispatchId: z.string().trim().min(1),
+        refresh: z.boolean().optional(),
+      },
+    },
+    handlers.get_dispatch_result,
+  );
+  server.registerTool(
+    "send_to_dispatch",
+    {
+      description: "向一条已发起的跨设备派活任务追加下一条指令（followup）",
+      inputSchema: {
+        dispatchId: z.string().trim().min(1),
+        message: z
+          .string()
+          .max(60_000)
+          .refine((value) => value.trim().length > 0, { message: "消息内容不能为空" }),
+      },
+    },
+    handlers.send_to_dispatch,
   );
   server.registerResource(
     "u-brain-reference",

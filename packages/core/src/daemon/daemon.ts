@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { watch, type FSWatcher } from "node:fs";
 import { foldEventsCached } from "../topics/book-cache.js";
-import { access, unlink } from "node:fs/promises";
+import { access, chmod, readFile, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -62,7 +63,7 @@ import {
 import type { DriveEntry, DrivePort } from "../drive/drive-port.js";
 import { isInboxSessionFile } from "../drive/inbox-file.js";
 import { readInboxSession } from "../mcp/local.js";
-import { HttpError } from "../http/handlers.js";
+import { createDispatchHttpPort, HttpError } from "../http/handlers.js";
 import { ChangeHub } from "../http/hub.js";
 import {
   listPortraitSnapshots,
@@ -75,6 +76,7 @@ import { startDaemonHttp, type DaemonHttpServer } from "../http/server.js";
 import type {
   HttpDeps,
   DeckHttpPort,
+  DispatchHttpPort,
 } from "../http/deps.js";
 import type {
   LlmKeyPutBody,
@@ -244,7 +246,21 @@ import { UploadService } from "../upload/upload-service.js";
 import type { UploadIndex } from "../upload/types.js";
 import { NotionService } from "../notion/service.js";
 import { DeckService, type DeckServiceOptions } from "../deck/index.js";
-import { telegramRelayKeyStore, telegramTokenStore } from "../auth/telegram-secrets.js";
+import {
+  dispatchIdentityStore,
+  telegramRelayKeyStore,
+  telegramRelayTokenStore,
+  telegramTokenStore,
+} from "../auth/telegram-secrets.js";
+import {
+  DeviceIdentity as DispatchDeviceIdentity,
+  DispatchExecutor,
+  DispatchHub,
+  type DispatchReadResult,
+  type OutboxEntry,
+} from "../dispatch/index.js";
+import { writeFileAtomic } from "../domain/atomic.js";
+import type { TelegramDispatchNotice } from "../deck/telegram/index.js";
 import { DEFAULT_T3_URL, normalizeT3Url } from "../deck/t3/index.js";
 import { T3Automation } from "../deck/t3/automation.js";
 import { T3ThreadWatcher } from "../deck/t3/watch.js";
@@ -705,6 +721,130 @@ export function resolveDaemonEmbedder(options: {
   return options.injected ?? options.openDefault();
 }
 
+const DISPATCH_DEVICE_ID_PATTERN = /^[A-Za-z0-9_-]{8,64}$/;
+const DISPATCH_SUMMARY_LIMIT = 1_500;
+const DISPATCH_DEDUP_LIMIT = 500;
+
+/** 解析本机稳定的派活/中转设备 ID：优先沿用 telegram.json 的 relay.deviceId，再读 dispatch/device-id，否则新生成并写入（0600）。 */
+export async function resolveDispatchDeviceId(dataDir: string): Promise<string> {
+  const idFile = join(dataDir, "dispatch", "device-id");
+  let fromTelegram: string | null = null;
+  try {
+    const raw = JSON.parse(await readFile(join(dataDir, "deck", "telegram.json"), "utf8")) as {
+      relay?: { deviceId?: unknown } | null;
+    };
+    const candidate = typeof raw?.relay?.deviceId === "string" ? raw.relay.deviceId.trim() : "";
+    if (DISPATCH_DEVICE_ID_PATTERN.test(candidate)) fromTelegram = candidate;
+  } catch {
+    // telegram.json 不存在或损坏时回落到 device-id 文件。
+  }
+  if (fromTelegram) {
+    try {
+      await access(idFile);
+    } catch {
+      await writeFileAtomic(idFile, `${fromTelegram}\n`, { mode: 0o600 });
+      await chmod(idFile, 0o600);
+    }
+    return fromTelegram;
+  }
+  try {
+    const saved = (await readFile(idFile, "utf8")).trim();
+    if (DISPATCH_DEVICE_ID_PATTERN.test(saved)) return saved;
+  } catch {
+    // 文件不存在或不可读时新生成。
+  }
+  const generated = randomUUID();
+  await writeFileAtomic(idFile, `${generated}\n`, { mode: 0o600 });
+  await chmod(idFile, 0o600);
+  return generated;
+}
+
+/** 构造 DispatchHub.onEvent 处理器：去重（dispatchId + 状态 + latestRun），拉摘要并截到 1500 字后推 Telegram。 */
+export function createDispatchEventHandler(deps: {
+  read(dispatchId: string): Promise<DispatchReadResult>;
+  push(notice: TelegramDispatchNotice): void;
+  onChange?(): void;
+}): {
+  onEvent(entry: OutboxEntry, event: { kind: string; data: unknown }): Promise<void>;
+  reset(dispatchId: string): void;
+} {
+  const lastNotice = new Map<string, string>();
+  const pushedWithRun = new Set<string>();
+
+  return {
+    reset(dispatchId: string) {
+      lastNotice.delete(dispatchId);
+    },
+    async onEvent(entry: OutboxEntry, event: { kind: string; data: unknown }) {
+      deps.onChange?.();
+      if (event.kind !== "thread.status") return;
+      const data =
+        event.data && typeof event.data === "object" && !Array.isArray(event.data)
+          ? (event.data as Record<string, unknown>)
+          : {};
+      const rawStatus = typeof data.status === "string" ? data.status : "";
+      if (
+        rawStatus === "preparing" ||
+        rawStatus === "queued" ||
+        rawStatus === "starting" ||
+        rawStatus === "running" ||
+        rawStatus === "planning"
+      ) {
+        lastNotice.delete(entry.dispatchId);
+        return;
+      }
+      const kind: "done" | "waiting" | "failed" | null =
+        rawStatus === "completed" || rawStatus === "ready" || rawStatus === "done"
+          ? "done"
+          : rawStatus === "waiting"
+            ? "waiting"
+            : rawStatus === "failed"
+              ? "failed"
+              : null;
+      if (kind === null) return;
+
+      const latestRun =
+        typeof data.latestRunId === "string"
+          ? data.latestRunId
+          : typeof data.latestRun === "string"
+            ? data.latestRun
+            : "";
+      const dedupKey = `${entry.dispatchId}\0${kind}\0${latestRun}`;
+      if (latestRun !== "") {
+        if (pushedWithRun.has(dedupKey)) return;
+        pushedWithRun.add(dedupKey);
+        if (pushedWithRun.size > DISPATCH_DEDUP_LIMIT) {
+          pushedWithRun.delete(pushedWithRun.values().next().value!);
+        }
+      } else if (lastNotice.get(entry.dispatchId) === dedupKey) {
+        return;
+      }
+      lastNotice.set(entry.dispatchId, dedupKey);
+
+      const eventTitle = typeof data.title === "string" && data.title.trim() !== "" ? data.title : entry.title;
+      const eventLink = typeof data.link === "string" && data.link.trim() !== "" ? data.link : null;
+
+      let rawBody = "";
+      let link = eventLink ?? entry.threadUrl ?? null;
+      const read = await deps.read(entry.dispatchId).catch(() => null);
+      if (read?.ok) {
+        rawBody = read.summary.trim();
+        if (kind === "failed" && rawBody === "" && read.error) rawBody = read.error.trim();
+        if (read.link) link = read.link;
+      }
+      const body =
+        rawBody.length > DISPATCH_SUMMARY_LIMIT ? `${rawBody.slice(0, DISPATCH_SUMMARY_LIMIT)}…` : rawBody;
+      deps.push({
+        deviceName: entry.deviceName,
+        title: eventTitle,
+        kind,
+        ...(body !== "" ? { body } : {}),
+        link,
+      });
+    },
+  };
+}
+
 export async function startDaemon(options: DaemonOptions = {}): Promise<YouBrainDaemon> {
   if (process.env.YOU_BRAIN_CAPTURE_WORKER === "1") {
     const { runCaptureWorker } = await import("./capture-scan.js");
@@ -810,6 +950,14 @@ export class YouBrainDaemon {
   #taskAutomation: T3Automation | null = null;
   /** T3 会话监视：Telegram 已绑定时把「做完一轮 / 等你处理」推到手机。 */
   #t3Watch: T3ThreadWatcher | null = null;
+  /** 跨设备派活（稳定设备 ID、令牌、Ed25519 身份、执行器与中枢）。 */
+  #dispatchDeviceId: string | null = null;
+  #dispatchRelayToken: SecretStore | null = null;
+  #dispatchIdentity: DispatchDeviceIdentity | null = null;
+  #dispatchExecutor: DispatchExecutor | null = null;
+  #dispatchHub: DispatchHub | null = null;
+  #dispatchPort: DispatchHttpPort | null = null;
+  #dispatchEvents: ReturnType<typeof createDispatchEventHandler> | null = null;
   #uiPrefs: UiPrefsStore | null = null;
   #uploader: UploadService | null = null;
   #portrait: PortraitService | null = null;
@@ -1078,6 +1226,7 @@ export class YouBrainDaemon {
       this.#mountOutput();
     });
     this.#rememberDevice();
+    await log.time("initDispatch", () => this.#initDispatch());
     const http = await log.time("http", () =>
       startDaemonHttp({
         dataDir: this.#paths.dataDir,
@@ -1330,6 +1479,12 @@ export class YouBrainDaemon {
     }
     this.#t3Watch?.stop();
     this.#t3Watch = null;
+    this.#dispatchExecutor?.stop();
+    this.#dispatchExecutor = null;
+    this.#dispatchHub?.attach(null);
+    this.#dispatchHub = null;
+    this.#dispatchPort = null;
+    this.#dispatchEvents = null;
     this.#deck?.telegram?.attachT3(null);
     const backgroundConsolidation = [
       this.#consolidationJob?.promise,
@@ -3624,7 +3779,7 @@ export class YouBrainDaemon {
       this.#deck.startNotices();
     }
     if (this.#paths && this.#tasks === null) {
-      this.#taskAutomation = new T3Automation({
+      this.#taskAutomation ??= new T3Automation({
         getUrl: async () => normalizeT3Url((await this.#uiPrefsStore().read())["you-brain.deck.t3-url"] ?? "") ?? DEFAULT_T3_URL,
         env: this.#env,
         homeDir: this.#homeDir,
@@ -3925,6 +4080,7 @@ export class YouBrainDaemon {
         return { roots: result.roots };
       },
       ...(this.#deck === null ? {} : { deck: this.#deckPort() as DeckHttpPort }),
+      ...(this.#dispatchHub === null ? {} : { dispatch: this.#dispatchHttpPort() }),
       ...(this.#tasks === null ? {} : { tasks: this.#tasks }),
       uiPrefs: this.#uiPrefsStore(),
       status: () => {
@@ -4057,6 +4213,113 @@ export class YouBrainDaemon {
     watch.start();
   }
 
+  /** 装配跨设备派活（只在 paths 就绪的真实 daemon 里启用）。 */
+  async #initDispatch(): Promise<void> {
+    const paths = this.#paths;
+    if (!paths || this.#dispatchHub !== null) return;
+    const deviceId = await resolveDispatchDeviceId(paths.dataDir);
+    this.#dispatchDeviceId = deviceId;
+    this.#taskAutomation ??= new T3Automation({
+      getUrl: async () => normalizeT3Url((await this.#uiPrefsStore().read())["you-brain.deck.t3-url"] ?? "") ?? DEFAULT_T3_URL,
+      env: this.#env,
+      homeDir: this.#homeDir,
+    });
+    const secretOptions = { platform: this.#platform, backend: this.#secretBackend };
+    const relayToken = telegramRelayTokenStore(secretOptions);
+    const identity = new DispatchDeviceIdentity({
+      store: dispatchIdentityStore(secretOptions),
+    });
+    this.#dispatchRelayToken = relayToken;
+    this.#dispatchIdentity = identity;
+
+    let hub: DispatchHub | null = null;
+    const events = createDispatchEventHandler({
+      read: (dispatchId) => {
+        if (!hub) return Promise.resolve({ ok: false, dispatchId, error: "派活中枢未就绪" });
+        return hub.read(dispatchId);
+      },
+      push: (notice) => {
+        this.#deck?.telegram?.pushDispatch(notice);
+      },
+      onChange: () => {
+        this.changes.publish("deck", this.#clock.now().toISOString());
+      },
+    });
+    this.#dispatchEvents = events;
+
+    const automation = this.#taskAutomation;
+    const executor = automation
+      ? new DispatchExecutor({
+          dataDir: paths.dataDir,
+          deviceId,
+          now: () => this.#clock.nowMs(),
+          t3: automation,
+          emitEvent: (to, frame) => {
+            hub?.emitEvent(to, frame);
+          },
+          notify: ({ fromName, projectName, title }) => {
+            console.info(`[dispatch] ${fromName} 在项目 ${projectName} 里派了任务：${title}`);
+          },
+        })
+      : null;
+
+    hub = new DispatchHub({
+      dataDir: paths.dataDir,
+      deviceId,
+      deviceName: this.#local.displayName,
+      identity,
+      executor,
+      version: this.#appVersion,
+      now: () => this.#clock.nowMs(),
+      onEvent: (entry, event) => {
+        void events.onEvent(entry, event);
+      },
+    });
+    this.#dispatchExecutor = executor;
+    this.#dispatchHub = hub;
+    executor?.start();
+  }
+
+  #dispatchHttpPort(): DispatchHttpPort {
+    if (this.#dispatchPort) return this.#dispatchPort;
+    const hub = this.#dispatchHub!;
+    const deviceId = this.#dispatchDeviceId!;
+    this.#dispatchPort = createDispatchHttpPort({
+      hub,
+      executor: this.#dispatchExecutor,
+      deviceId,
+      selfName: () => {
+        const relayName = this.#deck?.telegram?.status().relay?.name;
+        if (relayName) return relayName;
+        const self = hub.devices().find((device) => device.self);
+        return self?.name || this.#local.displayName;
+      },
+      isConnected: () => {
+        const status = this.#deck?.telegram?.status();
+        return Boolean(status && status.relay !== null && status.connection === "ok");
+      },
+      isEnrolled: async () => {
+        const self = hub.devices().find((device) => device.self);
+        if (self) return self.enrolled;
+        const token = (await this.#dispatchRelayToken?.get().catch(() => null))?.trim() ?? "";
+        return token !== "";
+      },
+      projects: async () => {
+        if (!this.#taskAutomation) return [];
+        const list = await this.#taskAutomation.projects();
+        return list.map(({ id, name }) => ({ id, name }));
+      },
+      onFollowup: (dispatchId) => {
+        this.#dispatchEvents?.reset(dispatchId);
+        this.changes.publish("deck", this.#clock.now().toISOString());
+      },
+      onPolicyChanged: () => {
+        this.changes.publish("deck", this.#clock.now().toISOString());
+      },
+    });
+    return this.#dispatchPort;
+  }
+
   #deckOptions(): DeckServiceOptions {
     const paths = this.#paths;
     if (!paths) throw new YouBrainError("INVALID_INPUT", "paths is not open");
@@ -4074,6 +4337,10 @@ export class YouBrainDaemon {
       noticeLlm: async () => this.#llm,
       telegramToken: telegramTokenStore({ platform: this.#platform, backend: this.#secretBackend }),
       telegramRelayKey: telegramRelayKeyStore({ platform: this.#platform, backend: this.#secretBackend }),
+      ...(this.#dispatchRelayToken ? { telegramRelayToken: this.#dispatchRelayToken } : {}),
+      ...(this.#dispatchHub ? { dispatch: this.#dispatchHub } : {}),
+      ...(this.#dispatchIdentity ? { dispatchIdentity: this.#dispatchIdentity } : {}),
+      ...(this.#dispatchDeviceId ? { deviceId: this.#dispatchDeviceId } : {}),
       onTelegram: () => this.changes.publish("deck", this.#clock.now().toISOString()),
     };
   }
@@ -4090,6 +4357,7 @@ export class YouBrainDaemon {
     return {
       dshWeb: (retry) => deck.dshWeb(retry === true),
       t3Frame: (upstream) => deck.t3Frame(upstream),
+      t3Retain: (keep) => deck.t3Retain(keep),
       dshLogin: async () => ({ providers: await deck.dshLogin() }),
       dshLoginAction: async (body) => ({ providers: await deck.dshLoginAction(body.action, body.provider) }),
       bridgeApps: async () => ({ apps: await deck.bridgeApps() }),

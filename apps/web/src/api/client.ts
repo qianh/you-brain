@@ -91,6 +91,17 @@ import type {
   DeckT3WebResponse,
   DeckTelegramActionBody,
   DeckTelegramStatusResponse,
+  DispatchDevicesResponse,
+  DispatchFollowupBody,
+  DispatchFollowupResponse,
+  DispatchOutboxItemResponse,
+  DispatchOutboxResponse,
+  DispatchPolicyPutBody,
+  DispatchPolicyResponse,
+  DispatchSendBody,
+  DispatchSendResponse,
+  DispatchStartThreadBody,
+  DispatchStartThreadResponse,
   DeckTty7PasteImageResponse,
   DeckTty7ScreenResponse,
   DeckTty7SendBody,
@@ -452,6 +463,21 @@ export function createBrowserDaemon(options?: {
     deckTelegram: () => request<DeckTelegramStatusResponse>("GET", "/api/deck/telegram"),
     deckTelegramAction: (body) => request<DeckTelegramStatusResponse>("POST", "/api/deck/telegram", body),
     deckTelegramInvite: () => request<{ invite: string }>("POST", "/api/deck/telegram/invite"),
+    dispatchDevices: () => request<DispatchDevicesResponse>("GET", "/api/dispatch/devices"),
+    dispatchStartThread: (body: DispatchStartThreadBody) =>
+      request<DispatchStartThreadResponse>("POST", "/api/dispatch/threads", body),
+    dispatchFollowup: (dispatchId: string, body: DispatchFollowupBody) =>
+      request<DispatchFollowupResponse>("POST", `/api/dispatch/outbox/${encodeURIComponent(dispatchId)}/followup`, body),
+    dispatchOutbox: () => request<DispatchOutboxResponse>("GET", "/api/dispatch/outbox"),
+    dispatchOutboxItem: (dispatchId: string, opts?: { refresh?: boolean }) =>
+      request<DispatchOutboxItemResponse>(
+        "GET",
+        `/api/dispatch/outbox/${encodeURIComponent(dispatchId)}${opts?.refresh ? "?refresh=1" : ""}`,
+      ),
+    dispatchSend: (body: DispatchSendBody) => request<DispatchSendResponse>("POST", "/api/dispatch/send", body),
+    dispatchPolicy: () => request<DispatchPolicyResponse>("GET", "/api/dispatch/policy"),
+    updateDispatchPolicy: (body: DispatchPolicyPutBody) =>
+      request<DispatchPolicyResponse>("PUT", "/api/dispatch/policy", body),
     deckNoticeDismiss: (body: DeckNoticeDismissBody) =>
       request<{ ok: true }>("POST", "/api/deck/notices/dismiss", body),
     deckTty7Screen: (pane: number, lines?: number) =>
