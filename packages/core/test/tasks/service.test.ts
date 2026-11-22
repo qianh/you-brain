@@ -23,12 +23,15 @@ async function setup() {
   const followups: Array<{ threadId: string; prompt: string; commandId: string }> = [];
   const merges: string[] = [];
   const syncs: string[] = [];
+  const publishes: string[] = [];
+  const cleanups: string[] = [];
   const states = new Map<string, "planning" | "running" | "ready" | "failed">();
   let startFailure = false;
   let followupFailure = false;
   let online = true;
   let projectCwd = "/repo/one";
-  let failDoneWrite = false;
+  let failRemovalWrite = false;
+  let savedCount = 0;
   const created: Array<{ id: string; name: string; cwd: string }> = [];
   const store = new TaskStore(join(dir, "tasks", "board.json"));
   const automation: TaskAutomationPort = {
@@ -64,6 +67,8 @@ async function setup() {
       merges.push(approvedSha);
     },
     async syncDevelop() { syncs.push("merged"); return "merged"; },
+    async publish(_project, run) { publishes.push(run.branch); return "pushed"; },
+    async cleanup(_project, run) { cleanups.push(run.branch); },
   };
   const options = {
     dataDir: dir, automation, git, homeDir: "/Users/hong",
@@ -72,11 +77,12 @@ async function setup() {
     store: {
       read: () => store.read(),
       async write(state: Parameters<TaskStore["write"]>[0]) {
-        if (failDoneWrite && state.tasks.some((task) => task.status === "done")) {
-          failDoneWrite = false;
+        if (failRemovalWrite && state.tasks.length < savedCount) {
+          failRemovalWrite = false;
           throw new Error("fixture disk failure");
         }
         await store.write(state);
+        savedCount = state.tasks.length;
       },
     },
   };
@@ -89,12 +95,12 @@ async function setup() {
     return (await board()).tasks.find((task) => task.id === current.id)!;
   };
   return {
-    dir, service, starts, merges, syncs, states, followups, board, ready, options, created,
+    dir, service, starts, merges, syncs, publishes, cleanups, states, followups, board, ready, options, created,
     setStartFailure(value: boolean) { startFailure = value; },
     setFollowupFailure(value: boolean) { followupFailure = value; },
     setOnline(value: boolean) { online = value; },
     setProjectCwd(value: string) { projectCwd = value; },
-    failNextDoneWrite() { failDoneWrite = true; },
+    failNextRemovalWrite() { failRemovalWrite = true; },
   };
 }
 
@@ -216,8 +222,12 @@ describe("T3 TODO parallel queue", () => {
     await expect(f.service.action({ action: "approve", id: review.id, reviewSha: BASE })).rejects.toThrow("核对版本已变化");
     expect(f.merges).toHaveLength(0);
     const detail = await f.service.review(review.id);
-    await f.service.action({ action: "approve", id: review.id, reviewSha: detail.headSha });
-    expect((await f.service.action({ action: "complete", id: review.id })).tasks[0]?.completedManually).toBeUndefined();
+    const approved = await f.service.action({ action: "approve", id: review.id, reviewSha: detail.headSha });
+    // 合并后推送 develop、删除任务分支和工作树，并从列表移除这个 TODO。
+    expect(approved.tasks.map((item) => item.title)).toEqual(["second"]);
+    expect(f.publishes).toEqual([`task/${review.id}`]);
+    expect(f.cleanups).toEqual([`task/${review.id}`]);
+    await expect(f.service.action({ action: "complete", id: review.id })).rejects.toThrow("TODO 不存在");
     await f.service.tick();
     expect(f.merges).toEqual([SHA]);
     expect(f.starts.map((item) => item.title)).toEqual(["first", "second"]);
@@ -302,7 +312,9 @@ describe("T3 TODO parallel queue", () => {
     const resumed = new TaskService(f.options);
     try {
       await resumed.tick();
-      expect((await resumed.board()).tasks[0]).toMatchObject({ status: "done", error: null, run: { error: null, summary: "验证结果" } });
+      expect((await resumed.board()).tasks.map((item) => item.title)).toEqual(["second"]);
+      expect(f.publishes).toEqual([`task/${task.id}`]);
+      expect(f.cleanups).toEqual([`task/${task.id}`]);
       expect(f.merges).toHaveLength(0);
       expect(f.followups).toHaveLength(0);
       await resumed.tick();
@@ -321,7 +333,10 @@ describe("T3 TODO parallel queue", () => {
     } else {
       await f.ready();
     }
-    expect((await f.board()).tasks[0]).toMatchObject({ status: "done", error: null, run: { error: null, summary: "验证结果" } });
+    // 外部合并同样推送 develop、清理分支并移除任务；本身不再合并。
+    expect((await f.board()).tasks).toEqual([]);
+    expect(f.publishes).toEqual([`task/${task.id}`]);
+    expect(f.cleanups).toEqual([`task/${task.id}`]);
     expect(f.merges).toHaveLength(0);
   }));
 
@@ -405,36 +420,54 @@ describe("T3 TODO parallel queue", () => {
     await expect(f.service.action({ action: "start", id: (await f.board()).tasks[3]!.id })).rejects.toThrow("项目已有 3 个");
   }));
 
-  test("approving a task whose branch is behind develop merges develop in and hands it back to T3 for checks", () => fixture(async (f) => {
+  test("approving a task whose branch is behind develop syncs develop in, then merges, pushes and removes it", () => fixture(async (f) => {
     await f.service.create({ title: "first", projectId: "one" });
     await f.service.create({ title: "second", projectId: "one" });
     await enable(f.service);
     const merge = f.options.git.merge;
-    let behind = true;
     f.options.git.merge = async (...args) => {
-      if (behind) throw new TaskBehindDevelopError("任务分支尚未包含最新的 develop");
+      if (f.syncs.length === 0) throw new TaskBehindDevelopError("任务分支尚未包含最新的 develop");
       return merge(...args);
     };
     const task = await f.ready();
-    const board = await f.service.action({ action: "approve", id: task.id, reviewSha: SHA });
-    expect(board.tasks[0]).toMatchObject({ status: "running", error: null, run: { reviewSha: null } });
-    expect(board.tasks[0]?.run?.pendingFeedback).toBeUndefined();
-    expect(f.syncs).toEqual(["merged"]);
-    expect(f.merges).toHaveLength(0);
-    expect(f.followups).toHaveLength(1);
-    expect(f.followups[0]).toMatchObject({ threadId: task.run!.threadId });
-    expect(f.followups[0]?.prompt).toContain("已按用户授权把最新本地 develop 合入当前任务分支");
-    expect(f.followups[0]?.prompt).toContain("禁止修改 develop");
-
     const synced = "c".repeat(40);
-    behind = false;
     f.options.git.review = async () => ({ headSha: synced, baseSha: SHA, stat: "1 file", diff: "+change", truncated: false });
-    f.states.set(task.run!.threadId!, "ready");
-    await f.service.tick();
-    expect((await f.board()).tasks[0]).toMatchObject({ status: "review", run: { reviewSha: synced } });
-    await f.service.action({ action: "approve", id: task.id, reviewSha: synced });
+    const board = await f.service.action({ action: "approve", id: task.id, reviewSha: SHA });
+    // 同步 develop 后以合并提交为准继续快进，不再回 T3、不再要求重新核对。
+    expect(f.syncs).toEqual(["merged"]);
+    expect(f.followups).toHaveLength(0);
     expect(f.merges).toEqual([synced]);
-    expect((await f.board()).tasks[0]?.status).toBe("done");
+    expect(f.publishes).toEqual([`task/${task.id}`]);
+    expect(f.cleanups).toEqual([`task/${task.id}`]);
+    expect(board.tasks.map((item) => item.title)).toEqual(["second"]);
+  }));
+
+  test("a push failure keeps the merged task for manual handling; retry only pushes again", () => fixture(async (f) => {
+    await f.service.create({ title: "task", projectId: "one" });
+    await enable(f.service);
+    const task = await f.ready();
+    let pushFails = true;
+    f.options.git.publish = async (_project, run) => {
+      f.publishes.push(run.branch);
+      if (pushFails) throw new Error("已合并到本地 develop，但推送到 origin 失败：non-fast-forward。请人工处理后点“重试”");
+      return "pushed";
+    };
+    await expect(f.service.action({ action: "approve", id: task.id, reviewSha: SHA })).rejects.toThrow("推送到 origin 失败");
+    expect((await f.board()).tasks[0]).toMatchObject({ status: "failed", run: { merged: true } });
+    expect(f.merges).toEqual([SHA]);
+    expect(f.cleanups).toHaveLength(0);
+    // 轮询不会自动反复推送。
+    await f.service.tick();
+    await f.service.tick();
+    expect(f.publishes).toHaveLength(1);
+    expect((await f.board()).tasks[0]?.status).toBe("failed");
+
+    pushFails = false;
+    const board = await f.service.action({ action: "retry", id: task.id });
+    expect(board.tasks).toEqual([]);
+    expect(f.publishes).toHaveLength(2);
+    expect(f.cleanups).toEqual([`task/${task.id}`]);
+    expect(f.merges).toEqual([SHA]);
   }));
 
   test("a conflicting develop sync is undone and T3 is asked to merge and resolve it", () => fixture(async (f) => {
@@ -579,19 +612,20 @@ describe("T3 TODO parallel queue", () => {
     expect((await f.board()).projects[0]?.enabled).toBe(false);
   }));
 
-  test("a successful merge with a failed done write recovers the approved merging state", () => fixture(async (f) => {
+  test("a successful merge with a failed removal write recovers the approved merging state", () => fixture(async (f) => {
     await f.service.create({ title: "task", projectId: "one" });
     await enable(f.service);
     const task = await f.ready();
-    f.failNextDoneWrite();
+    f.failNextRemovalWrite();
     await expect(f.service.action({ action: "approve", id: task.id, reviewSha: SHA })).rejects.toThrow("状态保存失败");
     expect(f.merges).toHaveLength(1);
     expect((await f.board()).tasks[0]?.status).toBe("merging");
-    expect((await f.board()).tasks[0]?.run?.reviewSha).toBe(SHA);
+    expect((await f.board()).tasks[0]?.run).toMatchObject({ reviewSha: SHA, merged: true });
     await expect(f.service.action({ action: "complete", id: task.id })).rejects.toThrow("合并中");
     await f.service.tick();
-    expect((await f.board()).tasks[0]?.status).toBe("done");
-    expect(f.merges).toEqual([SHA, SHA]);
+    // 恢复时不再重复合并，只补做推送、清理和移除。
+    expect((await f.board()).tasks).toEqual([]);
+    expect(f.merges).toEqual([SHA]);
     expect(f.starts).toHaveLength(1);
   }));
 

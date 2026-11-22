@@ -1,16 +1,17 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 
 import type { TaskGitPort, TaskProject, TaskReview, TaskWorktreeBlock, TaskWorktreeRun } from "./types.js";
 
 const DIFF_LIMIT = 128 * 1024;
 const COMMAND_LIMIT = 1024 * 1024;
+const PUSH_TIMEOUT_MS = 120_000;
 const SHA = /^[a-f0-9]{40,64}$/u;
 const TASK_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,100}$/u;
 
-interface GitResult { text: string; code: number; truncated: boolean }
+interface GitResult { text: string; err: string; code: number; truncated: boolean }
 interface Worktree { path: string; branch: string | null }
 interface Owner {
   version: 1;
@@ -204,6 +205,55 @@ export class TaskGit implements TaskGitPort {
     });
   }
 
+  /**
+   * 把本地 develop 推到远端：只推 develop 一个分支，不强推。
+   * 远端领先、被拒绝或网络、认证失败都会抛错并带上 Git 的原因，由人处理后重试；本地 develop 不受影响。
+   */
+  async publish(project: TaskProject, run: TaskWorktreeRun): Promise<"pushed" | "no-remote"> {
+    this.#assertProject(project, run);
+    const repo = await this.#repo(project);
+    return this.#serialize(repo, async () => {
+      await this.#develop(repo);
+      const configured = (await this.#git(repo, ["config", "--get", "branch.develop.remote"], { allowFailure: true })).text.trim();
+      const remote = configured !== "" ? configured : "origin";
+      const remotes = (await this.#git(repo, ["remote"])).text.split("\n").map((item) => item.trim()).filter(Boolean);
+      if (!remotes.includes(remote)) return "no-remote";
+      const pushed = await this.#git(repo, ["push", remote, "refs/heads/develop:refs/heads/develop"], { allowFailure: true, stderr: true, timeoutMs: PUSH_TIMEOUT_MS });
+      if (pushed.code !== 0) {
+        throw new Error(`已合并到本地 develop，但推送到 ${remote} 失败：${redact(pushed.err).slice(0, 300) || `退出码 ${pushed.code}`}。请人工处理后点“重试”`);
+      }
+      return "pushed";
+    });
+  }
+
+  /** 合并并推送完成后删除任务工作树、任务分支和归属记录；每一步都容忍已经做过。 */
+  async cleanup(project: TaskProject, run: TaskWorktreeRun): Promise<void> {
+    this.#assertProject(project, run);
+    const repo = await this.#repo(project);
+    return this.#serialize(repo, async () => {
+      const id = run.branch.startsWith("task/") ? run.branch.slice(5) : "";
+      if (!TASK_ID.test(id)) throw new Error("任务分支记录不正确");
+      const location = await this.#location(repo, id);
+      const owner = await this.#readOwner(location.ownerFile);
+      if (owner === null) return;
+      this.#assertOwner(owner, repo, run.branch, location.worktreePath);
+      const branchRef = `refs/heads/${owner.branch}`;
+      const branchSha = (await this.#hasRef(repo, branchRef)) ? await this.#sha(repo, branchRef) : null;
+      // 只删已经完整进入 develop 的分支，避免丢掉没合并的提交。
+      if (branchSha !== null && !(await this.#isAncestor(repo, branchSha, "refs/heads/develop"))) {
+        throw new Error("任务分支还有未合入 develop 的提交，已保留分支和工作树");
+      }
+      const entry = (await this.#worktrees(repo)).find((item) => resolve(item.path) === owner.worktreePath);
+      if (entry) {
+        if (entry.branch !== branchRef) throw new Error("任务工作树已切换分支，已保留现场");
+        await this.#clean(owner.worktreePath, "任务工作树有未提交或未跟踪的内容，已保留现场");
+        await this.#git(repo, ["worktree", "remove", owner.worktreePath]);
+      }
+      if (branchSha !== null) await this.#git(repo, ["update-ref", "-d", branchRef, branchSha]);
+      await rm(location.ownerFile, { force: true });
+    });
+  }
+
   async #repo(project: TaskProject): Promise<string> {
     if (!isAbsolute(project.cwd)) throw new Error("项目路径必须是绝对路径");
     const path = await realpath(project.cwd);
@@ -342,31 +392,44 @@ export class TaskGit implements TaskGitPort {
     return next;
   }
 
-  #git(cwd: string, args: string[], options: { allowFailure?: boolean; limit?: number } = {}): Promise<GitResult> {
+  #git(cwd: string, args: string[], options: { allowFailure?: boolean; limit?: number; stderr?: boolean; timeoutMs?: number } = {}): Promise<GitResult> {
     return new Promise((accept, reject) => {
-      const env = { ...(this.#options.env ?? process.env), GIT_TERMINAL_PROMPT: "0" };
+      const env: NodeJS.ProcessEnv = { ...(this.#options.env ?? process.env), GIT_TERMINAL_PROMPT: "0" };
+      // 推送不能停在等人输入密码或确认主机上，宁可失败也不要挂住。
+      if (options.stderr === true && env.GIT_SSH_COMMAND === undefined) env.GIT_SSH_COMMAND = "ssh -o BatchMode=yes";
       const binary = process.platform === "win32" ? "git" : "/usr/bin/git";
-      const child = spawn(binary, ["-c", "core.fsmonitor=false", ...args], { cwd, env, stdio: ["ignore", "pipe", "ignore"] });
+      const child = spawn(binary, ["-c", "core.fsmonitor=false", ...args], { cwd, env, stdio: ["ignore", "pipe", options.stderr === true ? "pipe" : "ignore"] });
       const limit = options.limit ?? COMMAND_LIMIT;
       const chunks: Buffer[] = [];
+      const errors: Buffer[] = [];
       let bytes = 0;
+      let errorBytes = 0;
       let truncated = false;
       let timedOut = false;
-      const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, 30_000);
-      child.stdout.on("data", (chunk: Buffer) => {
+      const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, options.timeoutMs ?? 30_000);
+      child.stdout?.on("data", (chunk: Buffer) => {
         if (bytes + chunk.length > limit) truncated = true;
         if (bytes < limit) chunks.push(chunk.subarray(0, limit - bytes));
         bytes += chunk.length;
+      });
+      child.stderr?.on("data", (chunk: Buffer) => {
+        if (errorBytes < 8192) errors.push(chunk.subarray(0, 8192 - errorBytes));
+        errorBytes += chunk.length;
       });
       child.on("error", (error) => { clearTimeout(timer); reject(error); });
       child.on("close", (code) => {
         clearTimeout(timer);
         if (timedOut) { reject(new Error(`Git ${args[0] ?? ""} 超时，已保留现场`)); return; }
         if (code !== 0 && options.allowFailure !== true) { reject(new Error(`Git ${args[0] ?? ""} 失败（退出码 ${code ?? "unknown"}），已保留现场`)); return; }
-        accept({ text: Buffer.concat(chunks).toString("utf8"), code: code ?? -1, truncated });
+        accept({ text: Buffer.concat(chunks).toString("utf8"), err: Buffer.concat(errors).toString("utf8"), code: code ?? -1, truncated });
       });
     });
   }
+}
+
+/** Git 的报错里可能带着含凭据的远端地址，只保留一行并抹掉 `://用户:密码@`。 */
+function redact(text: string): string {
+  return text.replace(/:\/\/[^/@\s]+@/gu, "://").replace(/\s+/gu, " ").trim();
 }
 
 function isMissing(error: unknown): boolean {

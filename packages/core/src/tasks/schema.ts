@@ -53,6 +53,7 @@ const runDetails = z.object({
   threadId: z.string().nullable(), threadUrl: z.string().nullable(), reviewSha: z.string().nullable(),
   summary: z.string(), error: z.string().nullable(),
   pendingFeedback: z.object({ commandId: z.string(), prompt: z.string() }).optional(),
+  merged: z.literal(true).optional(),
 });
 
 export const TaskRecordSchema = z.object({

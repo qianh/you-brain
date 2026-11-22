@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
@@ -17,7 +17,7 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   return stdout.trim();
 }
 
-test("HTTP manual start → T3 plan → parallel TODO → review → develop → behind task synced and merged", async () => {
+test("HTTP manual start → T3 plan → parallel TODO → review → develop pushed → behind task synced, merged and removed", async () => {
   const dir = await realpath(await mkdtemp(join(tmpdir(), "yb-todo-flow-")));
   const repo = join(dir, "repo");
   const homeDir = join(dir, "home");
@@ -31,6 +31,12 @@ test("HTTP manual start → T3 plan → parallel TODO → review → develop →
   await git(repo, "add", "result.txt");
   await git(repo, "commit", "-m", "fixture base");
   const original = await git(repo, "rev-parse", "develop");
+  const remote = join(dir, "origin.git");
+  await mkdir(remote);
+  await git(remote, "init", "--bare", "-b", "develop");
+  await git(repo, "remote", "add", "origin", remote);
+  await git(repo, "push", "-u", "origin", "develop");
+  const exists = (path: string) => access(path).then(() => true, () => false);
   const modelSelection = { instanceId: "fixture-provider", model: "fixture-model" };
   const fake = fakeT3({ projects: [{ id: "project", title: "Fixture", workspaceRoot: repo, defaultModelSelection: modelSelection }], environmentId: "test-env" });
   const dispatched = () => fake.calls.filter((call) => call.name === "t3_thread_launch").map((call) => call.args.title);
@@ -85,10 +91,14 @@ test("HTTP manual start → T3 plan → parallel TODO → review → develop →
     await service.tick();
     expect(await git(repo, "rev-parse", "develop")).toBe(review.headSha);
     expect(dispatched()).toEqual(["high", "low"]);
+    // 合并后自动推送 develop，删除任务分支和工作树，并从列表移除这个 TODO。
+    expect(await git(remote, "rev-parse", "develop")).toBe(review.headSha);
     const board = await call<TaskBoard>("/api/tasks");
-    expect(board.tasks.find((task) => task.id === active.id)?.status).toBe("done");
+    expect(board.tasks.find((task) => task.id === active.id)).toBeUndefined();
+    expect(await git(repo, "branch", "--list", run.branch!)).toBe("");
+    expect(await exists(run.worktreePath)).toBe(false);
 
-    // 低优先级任务从旧 develop 出发，确认时自动合入新 develop，交回 T3 检查后重新核对。
+    // 低优先级任务从旧 develop 出发：确认时先把新 develop 合入任务分支，再快进、推送、清理，一步完成。
     const lowRun = low.run!;
     if (!lowRun.worktreePath || !lowRun.threadId) throw new Error("Expected the parallel task worktree");
     await writeFile(join(lowRun.worktreePath, "low.txt"), "low change\n");
@@ -101,24 +111,18 @@ test("HTTP manual start → T3 plan → parallel TODO → review → develop →
     expect(lowReview.headSha).toBe(lowHead);
     expect(lowReview.diff).toContain("+low change");
     expect(lowReview.diff).not.toContain("task change");
-    const handedBack = await call<TaskBoard>("/api/tasks/action", "POST", { action: "approve", id: low.id, reviewSha: lowHead });
-    expect(handedBack.tasks.find((task) => task.id === low.id)).toMatchObject({ status: "running", run: { reviewSha: null } });
-    expect(await git(repo, "rev-parse", "develop")).toBe(review.headSha);
-    expect(await git(lowRun.worktreePath, "rev-parse", "HEAD^1")).toBe(lowHead);
-    expect(await git(lowRun.worktreePath, "rev-parse", "HEAD^2")).toBe(review.headSha);
+    const merged = await call<TaskBoard>("/api/tasks/action", "POST", { action: "approve", id: low.id, reviewSha: lowHead });
+    expect(merged.tasks.find((task) => task.id === low.id)).toBeUndefined();
+    const developHead = await git(repo, "rev-parse", "develop");
+    expect(await git(repo, "rev-parse", "develop^1")).toBe(lowHead);
+    expect(await git(repo, "rev-parse", "develop^2")).toBe(review.headSha);
+    expect(await git(repo, "show", "develop:low.txt")).toBe("low change");
+    expect(await git(repo, "show", "develop:result.txt")).toBe("task change");
+    expect(await git(remote, "rev-parse", "develop")).toBe(developHead);
+    expect(await git(repo, "branch", "--list", lowRun.branch!)).toBe("");
+    expect(await exists(lowRun.worktreePath)).toBe(false);
     const lowThread = fake.threads.find((thread) => thread.threadId === lowRun.threadId)!;
-    const handBack = lowThread.items.at(-1);
-    expect(handBack?.type).toBe("user_message");
-    expect(handBack?.text).toContain("合入当前任务分支");
-    fake.complete(lowRun.threadId, "合入 develop 后检查通过");
-    await service.tick();
-    const resynced = await call<TaskReview>(`/api/tasks/review?id=${encodeURIComponent(low.id)}`);
-    expect(resynced.headSha).not.toBe(lowHead);
-    expect(resynced.diff).toContain("+low change");
-    expect(resynced.diff).not.toContain("task change");
-    await call("/api/tasks/action", "POST", { action: "approve", id: low.id, reviewSha: resynced.headSha });
-    expect(await git(repo, "rev-parse", "develop")).toBe(resynced.headSha);
-    expect((await call<TaskBoard>("/api/tasks")).tasks.find((task) => task.id === low.id)?.status).toBe("done");
+    expect(lowThread.items.some((item) => String(item.text ?? "").includes("合入当前任务分支"))).toBe(false);
 
     const created = await call<TaskBoard>("/api/tasks", "POST", { title: "standalone" });
     const id = created.tasks.find((task) => task.title === "standalone")!.id;
@@ -135,7 +139,7 @@ test("HTTP manual start → T3 plan → parallel TODO → review → develop →
     fake.complete(thread.threadId, "按计划完成");
     await service.tick();
     expect((await call<TaskBoard>("/api/tasks")).tasks.find((task) => task.id === id)).toMatchObject({ status: "done", run: { reviewSha: null } });
-    expect(await git(repo, "rev-parse", "develop")).toBe(resynced.headSha);
+    expect(await git(repo, "rev-parse", "develop")).toBe(developHead);
   } finally {
     await service.stop(); await http.stop(); await automation.close(); await t3.stop(true);
     await rm(dir, { recursive: true, force: true });

@@ -68,6 +68,72 @@ describe("TaskGit", () => {
     expect(existsSync(run.worktreePath)).toBe(true);
   });
 
+  test("publish 只推 develop 到远端；没有远端时跳过，被拒绝时带原因且抹掉地址里的凭据", async () => {
+    const run = await task();
+    const head = commit(run.worktreePath);
+    await git.review(project, run);
+    await git.merge(project, { ...run, reviewSha: head }, head);
+    expect(await git.publish(project, run)).toBe("no-remote");
+
+    const remote = join(dir, "origin.git");
+    command(dir, ["init", "--bare", "--initial-branch=develop", remote]);
+    command(repo, ["remote", "add", "origin", remote]);
+    expect(await git.publish(project, run)).toBe("pushed");
+    expect(command(remote, ["rev-parse", "develop"])).toBe(head);
+    expect(command(remote, ["branch", "--list"]).replace(/[*\s]/gu, "")).toBe("develop");
+    // 重复推送没有变化，不报错。
+    expect(await git.publish(project, run)).toBe("pushed");
+
+    // 远端 develop 另有提交：非快进被拒绝，保留本地 develop，不强推。
+    const other = join(dir, "other");
+    command(dir, ["clone", remote, other]);
+    command(other, ["config", "user.name", "Other"]);
+    command(other, ["config", "user.email", "other@example.invalid"]);
+    commit(other, "other.txt", "remote work\n");
+    command(other, ["push", "origin", "develop"]);
+    const remoteHead = command(remote, ["rev-parse", "develop"]);
+    commit(repo, "local.txt", "local work\n");
+    await expect(git.publish(project, run)).rejects.toThrow("已合并到本地 develop，但推送到 origin 失败");
+    expect(command(remote, ["rev-parse", "develop"])).toBe(remoteHead);
+
+    command(repo, ["remote", "set-url", "origin", "https://user:secret-token@127.0.0.1:1/none.git"]);
+    const failure = await git.publish(project, run).then(() => "", (error: Error) => error.message);
+    expect(failure).toContain("推送到 origin 失败");
+    expect(failure).not.toContain("secret-token");
+  });
+
+  test("cleanup 在合并后删除任务工作树、分支和记录，可重复调用", async () => {
+    const run = await task();
+    const head = commit(run.worktreePath);
+    await git.review(project, run);
+    await git.merge(project, { ...run, reviewSha: head }, head);
+    await git.cleanup(project, run);
+    expect(existsSync(run.worktreePath)).toBe(false);
+    expect(command(repo, ["branch", "--list", run.branch])).toBe("");
+    expect(command(repo, ["worktree", "list", "--porcelain"])).not.toContain(run.worktreePath);
+    expect(command(repo, ["rev-parse", "develop"])).toBe(head);
+    await git.cleanup(project, run);
+    // 同编号可以重新领取。
+    expect((await git.prepare(project, "one")).baseSha).toBe(head);
+  });
+
+  test("cleanup 拒绝删除未合入 develop 的分支或有未提交内容的工作树", async () => {
+    const run = await task();
+    commit(run.worktreePath);
+    await expect(git.cleanup(project, run)).rejects.toThrow("未合入 develop");
+    expect(existsSync(run.worktreePath)).toBe(true);
+    expect(command(repo, ["branch", "--list", run.branch])).not.toBe("");
+
+    const merged = await task("two");
+    const head = commit(merged.worktreePath, "two.txt", "two\n");
+    await git.review(project, merged);
+    await git.merge(project, { ...merged, reviewSha: head }, head);
+    writeFileSync(join(merged.worktreePath, "dirty.txt"), "unsaved\n");
+    await expect(git.cleanup(project, merged)).rejects.toThrow("未提交或未跟踪");
+    expect(existsSync(join(merged.worktreePath, "dirty.txt"))).toBe(true);
+    expect(command(repo, ["branch", "--list", merged.branch])).not.toBe("");
+  });
+
   test("只有未核对的提交不能直接合并，空任务也不能核对", async () => {
     const run = await task();
     await expect(git.review(project, run)).rejects.toThrow("没有可核对的提交");

@@ -39,6 +39,8 @@ interface TaskRunDetails {
   error: string | null;
   /** 返工投递失败时以同一命令重试，避免重复 turn 或把旧结果当作返工完成。 */
   pendingFeedback?: { commandId: string; prompt: string } | undefined;
+  /** 已快进合并到本地 develop；之后只剩推送和清理。推送失败时靠它让“重试”只补做后半段。 */
+  merged?: true | undefined;
 }
 
 export interface TaskWorktreeRun extends TaskRunDetails {
@@ -136,6 +138,10 @@ export interface TaskGitPort {
   merge(project: TaskProject, run: TaskWorktreeRun, approvedSha: string): Promise<void>;
   /** 合并被分叉阻止时，把本地 develop 合入任务分支；冲突时还原并返回 conflict。 */
   syncDevelop(project: TaskProject, run: TaskWorktreeRun, approvedSha: string): Promise<"merged" | "conflict" | "current">;
+  /** 把本地 develop 推到远端（不强推）。没有可用的远端时返回 "no-remote"；推送失败抛错，保留现场。 */
+  publish(project: TaskProject, run: TaskWorktreeRun): Promise<"pushed" | "no-remote">;
+  /** 任务已合入 develop 后删除任务工作树和分支；可重复调用，工作树有未提交内容或分支未合入时拒绝。 */
+  cleanup(project: TaskProject, run: TaskWorktreeRun): Promise<void>;
 }
 
 type TaskLaunchInput = { title: string; prompt: string; cwd: string; requestId: string; images?: TaskImageData[] } & (

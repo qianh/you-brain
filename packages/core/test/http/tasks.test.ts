@@ -68,6 +68,8 @@ test("pasted TODO images survive restart, can be edited, and reach the first T3 
       async merge() { throw new Error("unexpected Git"); },
       async isMerged() { throw new Error("unexpected Git"); },
       async syncDevelop() { throw new Error("unexpected Git"); },
+      async publish() { throw new Error("unexpected Git"); },
+      async cleanup() { throw new Error("unexpected Git"); },
     },
   };
   const service = new TaskService(options);

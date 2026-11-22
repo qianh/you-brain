@@ -37,6 +37,8 @@ const ACTIVE = new Set<TaskStatus>(["preparing", "planning", "running", "review"
 const EXECUTING = new Set<TaskStatus>(["preparing", "planning", "running", "merging"]);
 /** 同一仓库同时执行的 TODO 上限；待核对、执行后受阻的任务不占名额。 */
 export const PROJECT_PARALLEL_LIMIT = 3;
+/** 同步 develop 后快进失败（develop 又被其他任务推进）时，最多再同步几次。 */
+const SYNC_RETRIES = 2;
 const LEGACY_DIRTY_WORKTREE = "任务工作树有未提交或未跟踪的内容，请在 T3 中提交后重新检查";
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const samePath = (a: string, b: string): boolean => a.replace(/\/+$/u, "") === b.replace(/\/+$/u, "");
@@ -280,6 +282,16 @@ export class TaskService implements TaskHttpPort {
           catch (error) { await this.#fail(task, error); throw new TaskError(409, message(error)); }
         } else {
           if (task.status !== "failed") throw new TaskError(409, "当前 TODO 不需要重试。");
+          if (project && task.run?.merged && task.run.branch !== null) {
+            // 本地 develop 已合并，只补做推送和清理。
+            task.status = "merging";
+            task.error = null;
+            task.run.error = null;
+            await this.#save(task);
+            try { await this.#publishAndRemove(project, task, task.run); }
+            catch (error) { await this.#fail(task, error); throw new TaskError(409, message(error)); }
+            return this.#board();
+          }
           if (task.run?.threadUrl && task.run.threadId && !task.run.pendingFeedback) {
             const live = await this.options.automation.inspect(task.run.threadId, task.manual);
             if (live.state === "failed") {
@@ -315,7 +327,7 @@ export class TaskService implements TaskHttpPort {
         await this.#save(task);
         return { task: structuredClone(task), ...result };
       } catch (error) {
-        if (error instanceof TaskAlreadyMergedError) await this.#complete(task);
+        if (error instanceof TaskAlreadyMergedError) await this.#finishMerged(project, task);
         else await this.#fail(task, error);
         throw new TaskError(409, message(error));
       }
@@ -382,7 +394,7 @@ export class TaskService implements TaskHttpPort {
       catch (error) {
         if (error instanceof TaskAlreadyMergedError) {
           run.summary = summary;
-          await this.#complete(task);
+          await this.#finishMerged(project, task);
           return;
         }
         if (!(error instanceof TaskNoCommitError)) throw error;
@@ -409,7 +421,8 @@ export class TaskService implements TaskHttpPort {
    * 不必再点重试；之前核对的版本作废，等这一轮做完重新核对。
    */
   async #resume(project: TaskProject | null, task: DevelopmentTask): Promise<void> {
-    if (!task.run?.threadId || task.run.pendingFeedback) return;
+    // 已合入 develop、只差推送或清理的任务不自动重试，等人处理后点“重试”。
+    if (!task.run?.threadId || task.run.pendingFeedback || task.run.merged) return;
     let live: Awaited<ReturnType<TaskAutomationPort["inspect"]>>;
     try { live = await this.options.automation.inspect(task.run.threadId, task.manual); }
     catch { return; }
@@ -421,7 +434,7 @@ export class TaskService implements TaskHttpPort {
     if (live.state === "ready" && project && task.run.branch !== null &&
       await this.options.git.isMerged(project, task.run).catch(() => false)) {
       if (live.summary) task.run.summary = live.summary;
-      await this.#complete(task);
+      await this.#finishMerged(project, task);
       return;
     }
     if (live.state !== "planning" && live.state !== "running") return;
@@ -441,29 +454,70 @@ export class TaskService implements TaskHttpPort {
     await this.#save(task);
   }
 
+  /**
+   * 确认合并：先把最新 develop 同步进任务分支（并行任务可能已先合入），再快进本地 develop，
+   * 然后推送 develop、删除任务分支和工作树、移除这个 TODO。任何一步失败都保留现场等人处理。
+   */
   async #merge(project: TaskProject, task: DevelopmentTask): Promise<void> {
-    if (!task.run?.reviewSha || !task.run.threadId || task.run.branch === null) throw new Error("缺少人工核对版本，不能合并。");
-    const live = await this.options.automation.inspect(task.run.threadId, task.manual);
+    const run = task.run;
+    if (!run?.reviewSha || !run.threadId || run.branch === null) throw new Error("缺少人工核对版本，不能合并。");
+    const live = await this.options.automation.inspect(run.threadId, task.manual);
     if (live.state !== "ready") throw new Error("T3 会话在核对后发生变化，请完成处理并重新核对。");
-    try { await this.options.git.merge(project, task.run, task.run.reviewSha); }
-    catch (error) {
-      if (!(error instanceof TaskBehindDevelopError)) throw error;
-      await this.#syncDevelop(project, task, task.run);
-      return;
+    if (!run.merged) {
+      if (!(await this.#mergeIntoDevelop(project, task, run))) return;
+      // 先记下“已合并”：之后推送失败或崩溃，都只补做后半段，不再重复合并。
+      run.merged = true;
+      await this.#save(task);
     }
-    await this.#complete(task);
+    await this.#publishAndRemove(project, task, run);
   }
 
-  /**
-   * 并行任务先合并后，后面的任务分支与 develop 分叉、不能快进：把 develop 合入任务分支，
-   * 交回原 T3 会话检查（有冲突时由 T3 解决），完成后重新进入人工核对。
-   */
-  async #syncDevelop(project: TaskProject, task: DevelopmentTask, run: TaskWorktreeRun): Promise<void> {
-    const result = await this.options.git.syncDevelop(project, run, run.reviewSha!);
-    if (result === "current") throw new TaskMergeBlockedError("本地 develop 刚刚发生变化，请重新核对后再确认合并。");
-    const prompt = result === "merged"
-      ? "确认合并时，本地 develop 已有其他任务合入的新提交。U-Brain 已按用户授权把最新本地 develop 合入当前任务分支（已生成合并提交）。请在当前工作树运行适用检查，确认本任务与 develop 的新改动一起工作正常；如有问题修复并提交到任务分支。"
-      : "确认合并时，本地 develop 已有其他任务合入的新提交，自动合入有冲突，已撤销。用户授权你在当前工作树执行 git merge develop（不要 rebase），解决冲突并提交合并结果，然后运行适用检查，如有问题修复并提交到任务分支。";
+  /** 返回 false 表示同步 develop 时有冲突，已交回 T3 处理，不继续合并。 */
+  async #mergeIntoDevelop(project: TaskProject, task: DevelopmentTask, run: TaskWorktreeRun): Promise<boolean> {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await this.options.git.merge(project, run, run.reviewSha!);
+        return true;
+      } catch (error) {
+        if (!(error instanceof TaskBehindDevelopError)) throw error;
+        if (attempt >= SYNC_RETRIES) throw new TaskMergeBlockedError("本地 develop 刚刚发生变化，请重新核对后再确认合并。");
+        const result = await this.options.git.syncDevelop(project, run, run.reviewSha!);
+        if (result === "conflict") {
+          await this.#handBack(task, run, "确认合并时，本地 develop 已有其他任务合入的新提交，自动合入有冲突，已撤销。用户授权你在当前工作树执行 git merge develop（不要 rebase），解决冲突并提交合并结果，然后运行适用检查，如有问题修复并提交到任务分支。");
+          return false;
+        }
+        if (result === "merged") {
+          // develop 已合入任务分支：以合并后的提交为准继续快进，不再要求人工重新核对。
+          run.reviewSha = (await this.options.git.review(project, run)).headSha;
+          await this.#save(task);
+        }
+      }
+    }
+  }
+
+  async #publishAndRemove(project: TaskProject, task: DevelopmentTask, run: TaskWorktreeRun): Promise<void> {
+    await this.options.git.publish(project, run);
+    await this.options.git.cleanup(project, run);
+    const images = task.images ?? [];
+    const state = this.#state!;
+    state.tasks.splice(state.tasks.indexOf(task), 1);
+    await this.#save();
+    await this.#images.remove(images);
+  }
+
+  /** 任务提交已在本地 develop（外部合并）：同样推送、清理并移除；失败则保留任务等人处理。 */
+  async #finishMerged(project: TaskProject, task: DevelopmentTask): Promise<void> {
+    const run = task.run;
+    if (!run || run.branch === null) { await this.#complete(task); return; }
+    try {
+      if (!run.merged) { run.merged = true; await this.#save(task); }
+      task.status = "merging";
+      await this.#publishAndRemove(project, task, run);
+    } catch (error) { await this.#fail(task, error); }
+  }
+
+  /** 交回原 T3 会话处理；完成后重新进入人工核对。 */
+  async #handBack(task: DevelopmentTask, run: TaskWorktreeRun, prompt: string): Promise<void> {
     run.pendingFeedback = {
       commandId: randomUUID(),
       prompt: `${prompt}完成后说明处理内容和验证结果，等待人工重新核对。禁止修改 develop、push 或部署。`,

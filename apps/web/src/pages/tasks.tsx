@@ -354,8 +354,8 @@ function TaskReviewDialog({ task, onClose, onChanged }: { task: DevelopmentTask;
         ? { action, id: task.id, reviewSha: review.headSha }
         : { action, id: task.id, feedback: feedback.trim() });
       onChanged(next);
-      // 确认合并时若 develop 已前进，任务被合入 develop 后交回 T3，而不是直接完成。
-      const synced = action === "approve" && next.tasks.find((item) => item.id === task.id)?.status !== "done";
+      // 合并成功后任务已从列表移除；只有同步 develop 时发生冲突，任务才会交回 T3 继续处理。
+      const synced = action === "approve" && next.tasks.find((item) => item.id === task.id)?.status === "running";
       push({ message: t(action === "approve" ? (synced ? "tasksApproveSynced" : "tasksApproved") : "tasksRejected"), tone: synced ? "info" : "success" });
       onClose();
     } catch (error) {
