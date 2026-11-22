@@ -219,7 +219,9 @@ describe("Bun relay server", () => {
 
       const issued = await fetch(`${world.base}/invite`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
       expect(issued.status).toBe(200);
-      const { code } = (await issued.json()) as { code: string };
+      const { code, url } = (await issued.json()) as { code: string; url: string };
+      // 中转告诉设备自己的对外地址：没配固定地址时用请求的 origin。
+      expect(url).toBe(world.base);
       const joined = await fetch(`${world.base}/enroll`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -495,6 +497,42 @@ describe("Bun relay server", () => {
       } finally {
         client.ws.close();
       }
+    } finally {
+      await relay.stop();
+      telegram.server.stop(true);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("配置了固定公网地址时 /invite 返回它，经回环地址申请的设备也能把可用地址写进云盘", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ub-relay-"));
+    const telegram = startTelegram(TOKEN);
+    const relay = await startRelayServer({
+      port: 0,
+      host: "127.0.0.1",
+      botToken: TOKEN,
+      relayKey: KEY,
+      dataDir: dir,
+      telegramApi: `http://127.0.0.1:${telegram.port}`,
+      publicOrigin: "https://relay.example.com/",
+    });
+    try {
+      const base = `http://127.0.0.1:${relay.port}`;
+      const adminInvite = (await (await fetch(`${base}/admin/invite`, { method: "POST", headers: { Authorization: `Bearer ${KEY}` } })).json()) as { code: string };
+      const { publicKey } = generateKeyPairSync("ed25519");
+      const enrolled = await fetch(`${base}/enroll`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          code: adminInvite.code,
+          deviceId: DEVICE_A,
+          name: "VPS",
+          publicKey: Buffer.from(publicKey.export({ type: "spki", format: "der" })).toString("base64url"),
+        }),
+      });
+      const { token } = (await enrolled.json()) as { token: string };
+      const issued = (await (await fetch(`${base}/invite`, { method: "POST", headers: { Authorization: `Bearer ${token}` } })).json()) as { url: string };
+      expect(issued.url).toBe("https://relay.example.com");
     } finally {
       await relay.stop();
       telegram.server.stop(true);

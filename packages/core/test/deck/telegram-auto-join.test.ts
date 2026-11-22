@@ -106,6 +106,39 @@ describe("同账号设备自动入网", () => {
     expect(await w.auto.run()).toBe("skipped");
   });
 
+  it("本机经回环地址连中转（VPS 上的 daemon）：云盘里写中转返回的公网地址，且不会每次心跳都换新码", async () => {
+    const w = world({
+      enrolledUrl: async () => "http://127.0.0.1:8787",
+      requestInvite: async () => {
+        w.state.requested += 1;
+        return { url: URL, code: `CODE${w.state.requested}XYZ`, expiresAt: new Date(w.now() + 10 * MIN).toISOString() };
+      },
+    });
+    expect(await w.auto.run()).toBe("published");
+    expect(w.state.drive?.url).toBe(URL);
+    expect(await w.auto.run()).toBe("fresh");
+    expect(w.state.requested).toBe(1);
+  });
+
+  it("中转没给公网地址、只有回环地址时不往云盘写（别的设备连不上）", async () => {
+    const w = world({
+      enrolledUrl: async () => "http://127.0.0.1:8787",
+      requestInvite: async () => ({ url: "http://127.0.0.1:8787", code: "LOOPCODE1", expiresAt: new Date(w.now() + 10 * MIN).toISOString() }),
+    });
+    expect(await w.auto.run()).toBe("skipped");
+    expect(w.state.drive).toBeNull();
+  });
+
+  it("云盘里的邀请码是回环地址（旧版 VPS 写的）：不去兑换，继续等", async () => {
+    for (const url of ["http://127.0.0.1:8787", "http://localhost:8787", "http://[::1]:8787"]) {
+      const w = world({
+        drive: { url, code: "LOOPCODE1", expiresAt: new Date(1_000_000 + 5 * MIN).toISOString(), issuedBy: "device-vps" },
+      });
+      expect(await w.auto.run()).toBe("waiting");
+      expect(w.state.joined).toEqual([]);
+    }
+  });
+
   it("申请或写云盘出错只返回 failed，不抛出", async () => {
     const w = world({ enrolled: true, requestInvite: async () => Promise.reject(new Error("中转不通")) });
     expect(await w.auto.run()).toBe("failed");

@@ -953,7 +953,8 @@ export class TelegramBridge {
   async requestInvite(): Promise<{ url: string; code: string; expiresAt: string } | null> {
     const access = await this.enrolledRelay();
     if (!access) return null;
-    return { url: access.url, ...(await requestRelayInvite(access.url, access.token, this.#options.relayFetch)) };
+    const { url, ...invite } = await requestRelayInvite(access.url, access.token, this.#options.relayFetch);
+    return { url: url ?? access.url, ...invite };
   }
 
   /** 能不能自动入网：还没有设备令牌，且没有在用自己的 Bot Token 直连。 */

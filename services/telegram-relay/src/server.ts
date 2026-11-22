@@ -411,7 +411,8 @@ export async function startRelayServer(options: RelayServerOptions): Promise<Rel
           }
           recent.push(now);
           inviteIssued.set(matched.deviceId, recent);
-          return Response.json(await enroll.createInvite());
+          // 带上中转的对外地址：VPS 上的设备经回环地址连中转，不能把回环地址写进云盘给别的设备用。
+          return Response.json({ ...(await enroll.createInvite()), url: publicOrigin(request, fixedOrigin) });
         });
       }
 

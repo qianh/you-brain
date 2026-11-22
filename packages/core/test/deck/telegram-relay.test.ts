@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
@@ -499,6 +499,42 @@ describe("TelegramRelayClient 扩展与入网", () => {
 
     expect(await fresh.bridge.requestInvite()).toEqual({ url: URL_, code: "NEWCODE12", expiresAt: "2026-11-22T15:00:00.000Z" });
     expect(calls.at(-1)).toEqual({ url: `${URL_}/invite`, auth: "Bearer ubd_joined_token_123" });
+  });
+
+  it("TelegramBridge 经回环地址入网（VPS）时，邀请里的地址用中转返回的公网地址", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ub-telegram-autojoin-loop-"));
+    const list: SessionNoticeList = { epoch: "e1", latest: 0, notices: [] };
+    const make = (inviteUrl: unknown) =>
+      new TelegramBridge({
+        configPath: join(dir, String(Math.random()), "telegram.json"),
+        token: new MemorySecretStore(null),
+        relayKey: new MemorySecretStore(null),
+        relayToken: new MemorySecretStore(null),
+        dispatchIdentity: new DeviceIdentity({ store: new MemorySecretStore(null) }),
+        notices: () => list,
+        sessions: async () => ({ available: true, detail: "", workspaces: [], sessions: [], harnesses: [], appearance: null }),
+        send: async () => undefined,
+        dismiss: () => undefined,
+        relayFetch: async (url) => {
+          if (String(url).endsWith("/enroll")) return Response.json({ token: "ubd_vps_token_1234" });
+          return Response.json({ code: "NEWCODE12", expiresAt: "2026-11-22T15:00:00.000Z", ...(inviteUrl === undefined ? {} : { url: inviteUrl }) });
+        },
+      });
+    try {
+      const vps = make("https://relay.example.com/");
+      await vps.joinRelay("http://127.0.0.1:8787", "GOODCODE1");
+      expect((await vps.requestInvite())?.url).toBe("https://relay.example.com");
+
+      // 旧中转不返回地址、或返回的不合法：沿用本机的中转地址。
+      const old = make(undefined);
+      await old.joinRelay("http://127.0.0.1:8787", "GOODCODE1");
+      expect((await old.requestInvite())?.url).toBe("http://127.0.0.1:8787");
+      const bad = make("ftp://x");
+      await bad.joinRelay("https://relay.example.com", "GOODCODE1");
+      expect((await bad.requestInvite())?.url).toBe("https://relay.example.com");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("TelegramBridge enroll-relay：入网保存令牌、删旧 relayKey、用令牌连接并接通 dispatch 钩子", async () => {

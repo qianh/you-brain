@@ -78,6 +78,16 @@ const DEFAULT_PING_MS = 30_000;
 const OPEN = 1;
 
 /** 用户填的地址：`https://xxx.workers.dev`（末尾斜杠可有可无）。 */
+/** 回环地址的中转只有本机连得上，不能写进云盘给别的设备用。 */
+export function isLoopbackRelayUrl(input: string): boolean {
+  try {
+    const host = new URL(input).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    return host === "localhost" || host === "::1" || /^127\./.test(host);
+  } catch {
+    return false;
+  }
+}
+
 export function normalizeRelayUrl(input: string): string {
   let url: URL;
   try {
@@ -192,7 +202,7 @@ export async function requestRelayInvite(
   url: string,
   token: string,
   fetchImpl: RelayFetch = fetch,
-): Promise<{ code: string; expiresAt: string }> {
+): Promise<{ code: string; expiresAt: string; url?: string }> {
   let response: Response;
   try {
     response = await fetchImpl(`${url}/invite`, {
@@ -204,12 +214,19 @@ export async function requestRelayInvite(
   } catch (error) {
     throw new Error(`连不上中转：${redactSecret(error instanceof Error ? error.message : String(error), token)}`);
   }
-  const body = (await response.json().catch(() => ({}))) as { code?: unknown; expiresAt?: unknown; error?: unknown };
+  const body = (await response.json().catch(() => ({}))) as { code?: unknown; expiresAt?: unknown; url?: unknown; error?: unknown };
   if (!response.ok) {
     throw new Error(typeof body.error === "string" && body.error ? body.error : `中转拒绝了邀请码申请（${response.status}）`);
   }
   if (typeof body.code !== "string" || typeof body.expiresAt !== "string") throw new Error("中转没有返回有效的邀请码");
-  return { code: body.code, expiresAt: body.expiresAt };
+  // 新版中转会带上自己的对外地址；旧版没有，或给的地址不合法时由调用方沿用本机的中转地址。
+  let publicUrl: string | undefined;
+  try {
+    publicUrl = typeof body.url === "string" ? normalizeRelayUrl(body.url) : undefined;
+  } catch {
+    publicUrl = undefined;
+  }
+  return { code: body.code, expiresAt: body.expiresAt, ...(publicUrl ? { url: publicUrl } : {}) };
 }
 
 export class TelegramRelayClient {
