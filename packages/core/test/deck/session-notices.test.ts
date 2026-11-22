@@ -168,6 +168,28 @@ describe("SessionNoticeWatcher", () => {
     h.watcher.stop();
   });
 
+  it("别的会话不停发事件（如转圈动画）时，短的一轮也不会漏：读取不被一再推迟", async () => {
+    const h = harness();
+    h.set(view([session(1, "done")])); // 上一轮已结束，基线不是「工作中」
+    h.watcher.start();
+    await settle();
+    expect(h.reads()).toBe(1);
+    // 事件间隔（4ms）比去抖时间（10ms）短，持续 60ms；期间本会话从工作到完成。
+    const spinner = setInterval(() => h.line(), 4);
+    try {
+      h.set(view([session(1, "working")]));
+      await settle(25);
+      h.set(view([session(1, "done", { statusMessage: "好了" })]));
+      await settle(35);
+    } finally {
+      clearInterval(spinner);
+    }
+    await settle();
+    expect(h.watcher.list().notices).toHaveLength(1);
+    expect(h.watcher.list().notices[0]).toMatchObject({ pane: 1, kind: "done" });
+    h.watcher.stop();
+  });
+
   it("waits for the summary and uses it as the body", async () => {
     let release: (value: { task: string | null; body: string } | null) => void = () => undefined;
     const h = harness({

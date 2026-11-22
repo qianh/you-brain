@@ -245,7 +245,9 @@ export class SessionNoticeWatcher {
 
   #schedule(): void {
     if (!this.#started) return;
-    if (this.#debounceTimer !== null) clearTimeout(this.#debounceTimer);
+    // 已经排上的读取不再往后推：别的会话会不停发事件（转圈动画几十毫秒一条），
+    // 每来一条都重新计时的话永远读不到，短的一轮就会漏掉提醒。
+    if (this.#debounceTimer !== null) return;
     this.#debounceTimer = setTimeout(() => {
       this.#debounceTimer = null;
       void this.#read();
