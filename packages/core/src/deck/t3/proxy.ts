@@ -24,7 +24,7 @@ export interface T3Proxy {
 interface SocketData {
   target: string;
   headers: Record<string, string>;
-  upstream: WebSocket | null;
+  upstream: WebSocket | TransportSocket | null;
   pending: Array<string | ArrayBuffer | Uint8Array>;
 }
 
@@ -189,9 +189,30 @@ export function responseHeaders(
   return out;
 }
 
+/** 非本机 T3 的传输：请求经设备间隧道发到对端的 T3，而不是直连 `upstreamUrl`（那时它只是个虚拟源）。 */
+export interface T3Transport {
+  fetch(path: string, init: { method: string; headers: Array<[string, string]>; body?: Uint8Array }): Promise<Response>;
+  openSocket(path: string, headers: Array<[string, string]>): Promise<TransportSocket>;
+}
+
+/** 转发用到的 WebSocket 最小接口（TunnelSocket 满足）。 */
+export interface TransportSocket {
+  readyState: number;
+  binaryType: "arraybuffer" | "blob";
+  addEventListener(type: "open" | "message" | "close" | "error", listener: (event: never) => void): void;
+  send(data: string | ArrayBuffer | Uint8Array): void;
+  close(code?: number, reason?: string): void;
+}
+
 export interface T3ProxyOptions {
   /** 返回一次性配对凭据；该上游不能自动配对（不是本机 T3、CLI 不可用）时返回 null。 */
   pairCredential?: () => Promise<string | null>;
+  /** 走隧道的上游（另一台设备的 T3）。 */
+  transport?: T3Transport;
+  /** Cookie 隔离前缀；走隧道时必须给（按设备区分），缺省按上游端口。 */
+  cookiePrefix?: string;
+  /** 转发服务端口；缺省取「上游端口 + 10000」。 */
+  port?: number;
 }
 
 /** 请求是不是浏览器打开页面（而不是接口、脚本、WebSocket）。 */
@@ -209,9 +230,27 @@ export function startT3Proxy(upstreamUrl: string, options: T3ProxyOptions = {}):
   const upstream = new URL(upstreamUrl);
   const upstreamOrigin = upstream.origin;
   const wsOrigin = upstreamOrigin.replace(/^http/u, "ws");
-  const cookiePrefix = t3CookiePrefix(upstreamUrl);
+  const cookiePrefix = options.cookiePrefix ?? t3CookiePrefix(upstreamUrl);
+  const transport = options.transport;
   let proxyOrigin = "";
   let pairFailedAt = 0;
+
+  /** 向上游发请求：本机 T3 直连，其他设备的 T3 走隧道。path 含查询串。 */
+  async function upstreamFetch(path: string, init: { method: string; headers: Headers; body?: ArrayBuffer }): Promise<Response> {
+    if (!transport) {
+      return fetch(`${upstreamOrigin}${path}`, {
+        method: init.method,
+        headers: init.headers,
+        ...(init.body === undefined ? {} : { body: init.body }),
+        redirect: "manual",
+      });
+    }
+    return transport.fetch(path, {
+      method: init.method,
+      headers: [...init.headers.entries()],
+      ...(init.body === undefined ? {} : { body: new Uint8Array(init.body) }),
+    });
+  }
 
   /** 没登录时用一次性凭据换 T3 的登录 Cookie；返回要写回浏览器的 Set-Cookie（已加前缀），不需要或失败返回空数组。 */
   async function autoPair(request: Request): Promise<string[]> {
@@ -219,33 +258,35 @@ export function startT3Proxy(upstreamUrl: string, options: T3ProxyOptions = {}):
     if (!pairCredential || Date.now() - pairFailedAt < PAIR_RETRY_MS) return [];
     const headers = forwardHeaders(request.headers, proxyOrigin, upstreamOrigin, HOP_HEADERS, cookiePrefix);
     try {
-      const session = await fetch(`${upstreamOrigin}/api/auth/session`, { headers, redirect: "manual", signal: AbortSignal.timeout(5_000) });
-      if (!session.ok) return [];
+      const session = await upstreamFetch("/api/auth/session", { method: "GET", headers });
+      if (!session.ok) throw new Error(`会话探测返回 ${session.status}`);
       if ((await session.json() as { authenticated?: unknown }).authenticated === true) return [];
       const credential = await pairCredential();
-      if (credential === null) return [];
-      const paired = await fetch(`${upstreamOrigin}/api/auth/browser-session`, {
+      if (credential === null) throw new Error("没有拿到配对凭据");
+      const paired = await upstreamFetch("/api/auth/browser-session", {
         method: "POST",
-        headers: { "content-type": "application/json", origin: upstreamOrigin },
-        body: JSON.stringify({ credential }),
-        redirect: "manual",
-        signal: AbortSignal.timeout(10_000),
+        headers: new Headers({ "content-type": "application/json", origin: upstreamOrigin }),
+        body: new TextEncoder().encode(JSON.stringify({ credential })).buffer as ArrayBuffer,
       });
-      if (!paired.ok) throw new Error("pair rejected");
+      if (!paired.ok) throw new Error(`换取登录失败 ${paired.status}`);
       const cookies: string[] = [];
       for (const cookie of paired.headers.getSetCookie()) {
         const rewritten = prefixSetCookie(cookie, cookiePrefix);
         if (rewritten !== null) cookies.push(rewritten);
       }
       return cookies;
-    } catch {
+    } catch (error) {
       pairFailedAt = Date.now();
+      // 只记原因，不含凭据与 Cookie。
+      console.error(`[t3-proxy] 自动登录没成功：${error instanceof Error ? error.message : "未知错误"}`);
       return [];
     }
   }
 
   const handler = {
     hostname: "127.0.0.1",
+    // 经隧道取大文件时两次写之间可能隔好几秒，默认 10 秒空闲超时会把连接直接掐断（浏览器看到的是「Failed to fetch」）。
+    idleTimeout: 120,
     async fetch(request: Request, server: Server<SocketData>): Promise<Response | undefined> {
       const url = new URL(request.url);
       if (url.pathname === T3_INJECT_PATH) {
@@ -253,27 +294,30 @@ export function startT3Proxy(upstreamUrl: string, options: T3ProxyOptions = {}):
           headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-store" },
         });
       }
-      const target = `${upstreamOrigin}${url.pathname}${url.search}`;
       if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
         const headers: Record<string, string> = {};
         forwardHeaders(request.headers, proxyOrigin, upstreamOrigin, WS_SKIP_HEADERS, cookiePrefix).forEach((value, key) => {
           headers[key] = value;
         });
-        const data: SocketData = { target: `${wsOrigin}${url.pathname}${url.search}`, headers, upstream: null, pending: [] };
+        const data: SocketData = { target: transport ? `${url.pathname}${url.search}` : `${wsOrigin}${url.pathname}${url.search}`, headers, upstream: null, pending: [] };
         if (server.upgrade(request, { data })) return undefined;
         return new Response("WebSocket 升级失败", { status: 400 });
       }
       let response: Response;
       try {
-        response = await fetch(target, {
+        response = await upstreamFetch(`${url.pathname}${url.search}`, {
           method: request.method,
           headers: forwardHeaders(request.headers, proxyOrigin, upstreamOrigin, HOP_HEADERS, cookiePrefix),
           ...(request.method === "GET" || request.method === "HEAD" ? {} : { body: await request.arrayBuffer() }),
-          redirect: "manual",
         });
-      } catch {
-        return new Response("T3 服务没有响应", { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });
+      } catch (error) {
+        const reason = transport && error instanceof Error ? `：${error.message}` : "";
+        return new Response(`${transport ? "对端设备的 T3 没有响应" : "T3 服务没有响应"}${reason}`, {
+          status: 502,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        });
       }
+      if (transport && response.status >= 400) console.error(`[t3-proxy] 隧道 HTTP ${response.status} ${request.method} ${url.pathname}`);
       const headers = responseHeaders(response.headers, proxyOrigin, upstreamOrigin, cookiePrefix);
       if (options.pairCredential && isNavigation(request) && response.headers.get("content-type")?.toLowerCase().includes("text/html")) {
         for (const cookie of await autoPair(request)) headers.append("set-cookie", cookie);
@@ -286,36 +330,49 @@ export function startT3Proxy(upstreamUrl: string, options: T3ProxyOptions = {}):
     },
     websocket: {
       open(socket: ServerWebSocket<SocketData>) {
-        const remote = new WebSocket(socket.data.target, { headers: socket.data.headers } as unknown as string[]);
-        remote.binaryType = "arraybuffer";
-        socket.data.upstream = remote;
-        remote.addEventListener("open", () => {
-          for (const message of socket.data.pending) remote.send(message);
-          socket.data.pending = [];
-        });
-        remote.addEventListener("message", (event) => {
-          socket.send(event.data as string | ArrayBuffer);
-        });
-        remote.addEventListener("close", (event) => {
-          socket.close(event.code === 1005 || event.code === 1006 ? 1011 : event.code, event.reason);
-        });
-        remote.addEventListener("error", () => socket.close(1011, "T3 连接中断"));
+        const attach = (remote: TransportSocket): void => {
+          remote.binaryType = "arraybuffer";
+          socket.data.upstream = remote;
+          const open = (): void => {
+            for (const message of socket.data.pending) remote.send(message);
+            socket.data.pending = [];
+          };
+          remote.addEventListener("open", open);
+          remote.addEventListener("message", ((event: { data: string | ArrayBuffer }) => {
+            socket.send(event.data);
+          }) as (event: never) => void);
+          remote.addEventListener("close", ((event: { code: number; reason: string }) => {
+            if (transport) console.error(`[t3-proxy] 隧道 WebSocket 关闭 ${socket.data.target.split("?")[0]} code=${event.code} reason=${event.reason}`);
+            socket.close(event.code === 1005 || event.code === 1006 ? 1011 : event.code, event.reason);
+          }) as (event: never) => void);
+          remote.addEventListener("error", (() => socket.close(1011, "T3 连接中断")) as (event: never) => void);
+        };
+        if (transport) {
+          transport
+            .openSocket(socket.data.target, Object.entries(socket.data.headers))
+            .then(attach, (error: unknown) => {
+              console.error(`[t3-proxy] 隧道 WebSocket 打开失败 ${socket.data.target.split("?")[0]}：${error instanceof Error ? error.message : String(error)}`);
+              socket.close(1011, "对端设备的 T3 连接失败");
+            });
+          return;
+        }
+        attach(new WebSocket(socket.data.target, { headers: socket.data.headers } as unknown as string[]) as unknown as TransportSocket);
       },
       message(socket: ServerWebSocket<SocketData>, message: string | Buffer) {
         const remote = socket.data.upstream;
         const payload = typeof message === "string" ? message : new Uint8Array(message);
-        if (remote?.readyState === WebSocket.OPEN) remote.send(payload);
+        if (remote?.readyState === 1) remote.send(payload);
         else socket.data.pending.push(payload);
       },
       close(socket: ServerWebSocket<SocketData>) {
         const remote = socket.data.upstream;
-        if (remote && remote.readyState <= WebSocket.OPEN) remote.close();
+        if (remote && remote.readyState <= 1) remote.close();
       },
     },
   };
 
   let server: Server<SocketData>;
-  const preferred = preferredProxyPort(upstreamUrl);
+  const preferred = options.port ?? preferredProxyPort(upstreamUrl);
   try {
     server = Bun.serve<SocketData, never>({ ...handler, port: preferred });
   } catch {

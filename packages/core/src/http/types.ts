@@ -1208,6 +1208,9 @@ export type DeckDshWebResponse = import("../deck/dsh/web.js").DshWebState;
 /** T3 独立服务的公开页面连通性；不代表账号已登录或会话已连接。 */
 export type DeckT3WebResponse = import("../deck/t3/index.js").T3WebState;
 
+/** 另一台设备的 T3（经设备间隧道）：就绪时给本地转发地址，否则给原因（对端没开放、不在线、身份不对…）。 */
+export type DeckT3DeviceResponse = { state: "ready"; frameUrl: string } | { state: "error"; reason: string };
+
 export const DeckBridgeSendBodySchema = z.object({
   app: z.string().min(1).max(60),
   prompt: z.string().min(1).max(20_000),
@@ -1544,6 +1547,7 @@ export interface DispatchPolicyResponse {
 export const DispatchPolicyPutBodySchema = z
   .object({
     enabled: z.boolean().optional(),
+    viewT3: z.boolean().optional(),
     notify: z.boolean().optional(),
     maxMode: LaunchModeSchema.optional(),
     allowedProjects: z.array(z.string().trim().min(1).max(200)).max(200).optional(),

@@ -569,6 +569,19 @@ export async function handleApi(
   if (path === "/api/deck/dsh") {
     return method(request, "GET", async () => json(await deck(context).dshWeb(url.searchParams.get("retry") === "1")));
   }
+  if (path === "/api/deck/t3/device") {
+    return method(request, "GET", async () => {
+      const id = url.searchParams.get("id") ?? "";
+      if (id === "") return apiError(400, "INVALID_INPUT", "缺少设备 id");
+      const port = deck(context);
+      if (!port.t3DeviceFrame) notSupported();
+      try {
+        return json({ state: "ready", frameUrl: await port.t3DeviceFrame(id) });
+      } catch (error) {
+        return json({ state: "error", reason: error instanceof Error ? error.message : "连不上对端设备的 T3" });
+      }
+    });
+  }
   if (path === "/api/deck/t3") {
     return method(request, "GET", async () => {
       const probed = await probeT3Web(url.searchParams.get("url") ?? "");
@@ -1888,6 +1901,7 @@ export function createDispatchHttpPort(options: DispatchHttpPortOptions): Dispat
       }
       const patch: Partial<DispatchPolicy> = {};
       if (body.enabled !== undefined) patch.enabled = body.enabled;
+      if (body.viewT3 !== undefined) patch.viewT3 = body.viewT3;
       if (body.notify !== undefined) patch.notify = body.notify;
       if (body.maxMode !== undefined) patch.maxMode = body.maxMode;
       if (body.allowedProjects !== undefined) patch.allowedProjects = body.allowedProjects;

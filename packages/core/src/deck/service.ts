@@ -1,5 +1,6 @@
 import type { LlmProvider } from "@you-brain/protocol";
 
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 
 import type { SearchProvider } from "../auth/search-secrets.js";
@@ -17,6 +18,7 @@ import {
   type SessionNoticeList,
 } from "./session-notices.js";
 import type { DeviceIdentity } from "../dispatch/identity.js";
+import type { TunnelSession } from "../dispatch/tunnel.js";
 import { startT3Proxy, type T3Proxy } from "./t3/proxy.js";
 import { TelegramBridge, createLlmRouteJudge, type TelegramDispatchPort, type TelegramFetch } from "./telegram/index.js";
 import { Tty7, type Tty7SessionsView } from "./tty7.js";
@@ -41,6 +43,8 @@ export interface DeckServiceOptions {
   env?: NodeJS.ProcessEnv;
   /** T3 转发自动登录用：返回某个上游的一次性配对凭据；不是本机 T3 或拿不到时返回 null。 */
   t3PairCredential?: (upstream: string) => Promise<string | null>;
+  /** 到另一台设备的 T3 隧道（指挥台设备栏）；不给则不支持。 */
+  t3Tunnel?: (deviceId: string) => Promise<TunnelSession>;
   /** 设置里的各供应商 Key 经这里交给 dsh 做环境层凭据（daemon 传钥匙串读取）。 */
   getApiKey?: (provider: LlmProvider) => string | null | undefined | Promise<string | null | undefined>;
   /** 设置里的 LLM 选择（provider + 地址）；选了 magpie 时指挥台照它挂网关路由。 */
@@ -93,6 +97,9 @@ const NOTICE_SCREEN_LINES = 150;
 const NOTICE_SUMMARY_TIMEOUT_MS = 40_000;
 /** 同一时刻最多保留 8 个 T3 转发，超出时淘汰最久未使用的。 */
 const MAX_T3_PROXIES = 8;
+const MAX_T3_DEVICE_PROXIES = 6;
+/** 走隧道的上游只是个虚拟源，本身不会被连接。 */
+const T3_TUNNEL_UPSTREAM = "http://t3.tunnel/";
 
 function t3ProxyKey(upstream: string): string {
   try {
@@ -109,6 +116,7 @@ export class DeckService {
   #stopped = false;
   /** T3 转发池（ADR-0004 / M6）：按上游地址复用，最多保留 8 个，用于多端点独立转发与 Cookie 隔离。 */
   readonly #t3Proxies = new Map<string, { proxy: T3Proxy; lastUsed: number }>();
+  readonly #t3DeviceProxies = new Map<string, { proxy: T3Proxy; lastUsed: number }>();
   #t3UseSeq = 0;
   /** tty7 会话桥（ADR-0004）：与 dsh 无关，dsh 没起来也能用。 */
   readonly tty7: Tty7;
@@ -226,6 +234,49 @@ export class DeckService {
     return proxy.url;
   }
 
+  /**
+   * 另一台设备的 T3：先经隧道握手（对端没开放、不在线、身份不对会在这里抛错并带原因），再起一个走隧道的本地转发。
+   * 转发按设备复用；会话断了下次请求会自动重新握手。
+   */
+  async t3DeviceFrame(deviceId: string): Promise<string> {
+    const tunnel = this.#options.t3Tunnel;
+    if (this.#stopped || !tunnel) throw new Error("本机不支持查看其他设备的 T3");
+    await tunnel(deviceId);
+    const existing = this.#t3DeviceProxies.get(deviceId);
+    if (existing) {
+      existing.lastUsed = ++this.#t3UseSeq;
+      return existing.proxy.url;
+    }
+    const hash = createHash("sha256").update(deviceId).digest();
+    const stablePort = 20_000 + (hash.readUInt16BE(0) % 20_000);
+    const session = (): Promise<TunnelSession> => tunnel(deviceId);
+    const proxy = startT3Proxy(T3_TUNNEL_UPSTREAM, {
+      cookiePrefix: `ubd${hash.toString("hex").slice(0, 8)}_`,
+      port: stablePort,
+      pairCredential: async () => (await session()).pair(),
+      transport: {
+        fetch: async (path, init) => (await session()).fetch(path, init),
+        openSocket: async (path, headers) => (await session()).socket(path, headers),
+      },
+    });
+    if (this.#t3DeviceProxies.size >= MAX_T3_DEVICE_PROXIES) {
+      let oldestKey: string | null = null;
+      let oldestUsed = Infinity;
+      for (const [key, entry] of this.#t3DeviceProxies) {
+        if (entry.lastUsed < oldestUsed) {
+          oldestUsed = entry.lastUsed;
+          oldestKey = key;
+        }
+      }
+      if (oldestKey !== null) {
+        this.#t3DeviceProxies.get(oldestKey)?.proxy.stop();
+        this.#t3DeviceProxies.delete(oldestKey);
+      }
+    }
+    this.#t3DeviceProxies.set(deviceId, { proxy, lastUsed: ++this.#t3UseSeq });
+    return proxy.url;
+  }
+
   /** 只保留 keep 里的上游转发，其余全部停掉。 */
   t3Retain(keep: string[]): void {
     const keepSet = new Set(keep.map(t3ProxyKey));
@@ -240,6 +291,8 @@ export class DeckService {
     this.#stopped = true;
     for (const entry of this.#t3Proxies.values()) entry.proxy.stop();
     this.#t3Proxies.clear();
+    for (const entry of this.#t3DeviceProxies.values()) entry.proxy.stop();
+    this.#t3DeviceProxies.clear();
     this.notices.stop();
     this.telegram?.stop();
     this.activity.stop();

@@ -16,3 +16,4 @@ export * from "./virtual-device.js";
 export * from "./status.js";
 export * from "./ulid.js";
 export * from "./version.js";
+export * from "./tunnel.js";

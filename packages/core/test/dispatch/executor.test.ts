@@ -430,6 +430,29 @@ describe("目标端执行器", () => {
     expect(h.events).toHaveLength(1);
   });
 
+  test("查看 T3（authorizeView）：默认关闭；开了之后仍要名单、验签、目标、时效、重放都过，且与「接收派活」开关无关", async () => {
+    const h = track(await make({ enabled: false }));
+    const open = (overrides = {}) => h.frame({ cmd: { kind: "t3.tunnel.open", args: { sid: "sid-12345678", epk: "k" } }, ...overrides });
+
+    expect(await h.executor.authorizeView(open())).toEqual({ ok: false, error: "本机没有开放 T3 查看" });
+    expect((await h.executor.hello()).viewT3).toBe(false);
+
+    await h.executor.updatePolicy({ viewT3: true });
+    expect((await h.executor.hello()).viewT3).toBe(true);
+    const frame = open({ nonce: "n-1" });
+    expect(await h.executor.authorizeView(frame)).toMatchObject({ ok: true, sender: { deviceId: SENDER_ID } });
+    // 同一个 nonce 重放被拒
+    expect(await h.executor.authorizeView(frame)).toMatchObject({ ok: false });
+    // 签名不是名单里那把密钥
+    expect(await h.executor.authorizeView(open({ privateKey: h.other.privateKey, nonce: "n-2" }))).toMatchObject({ ok: false });
+    // 不在名单里的设备
+    expect(await h.executor.authorizeView(open({ from: "device-stranger", nonce: "n-3" }))).toMatchObject({ ok: false });
+    // 目标不是本机
+    expect(await h.executor.authorizeView(open({ to: "device-other", nonce: "n-4" }))).toMatchObject({ ok: false });
+    // 过期
+    expect(await h.executor.authorizeView(open({ ts: h.now - 120_000, nonce: "n-5" }))).toMatchObject({ ok: false });
+  });
+
   test("hello 只返回白名单里且 T3 存在的项目，T3 出错时 ready 为 false", async () => {
     const h = track(await make());
     expect(await h.executor.hello()).toEqual({
@@ -437,6 +460,7 @@ describe("目标端执行器", () => {
       t3: { ready: true },
       projects: [{ id: "p1", name: "you-brain" }],
       maxMode: "auto",
+      viewT3: false,
     });
     const listed = await h.executor.handle(h.frame({ cmdId: "c-projects", cmd: { kind: "t3.projects", args: {} } }));
     expect(listed).toEqual({ ok: true, result: { projects: [{ id: "p1", name: "you-brain" }] } });

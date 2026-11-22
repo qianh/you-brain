@@ -266,6 +266,8 @@ export function DispatchSection(props: DispatchSectionProps = {}) {
   const selfDevice = sortedDevices.find((device) => device.self);
   const policy = policyData?.policy ?? null;
   const controlsDisabled = savingPolicy || !policy?.enabled;
+  // 发送方名单同时服务「派活」与「查看 T3」，任何一个开着都能勾选。
+  const sendersDisabled = savingPolicy || (!policy?.enabled && !policy?.viewT3);
   const senderOptions = policyData ? buildSenderOptions(policyData.knownSenders, policyData.policy) : [];
   const t3Unavailable =
     policyData !== null &&
@@ -386,6 +388,19 @@ export function DispatchSection(props: DispatchSectionProps = {}) {
               />
             </SettingRow>
 
+            <SettingRow
+              title={t("dispatchPolicyViewT3")}
+              hint={t("dispatchPolicyViewT3Hint")}
+              control="toggle"
+            >
+              <Toggle
+                checked={policy.viewT3}
+                label={t("dispatchPolicyViewT3")}
+                disabled={savingPolicy}
+                onChange={(checked) => void savePolicy({ viewT3: checked })}
+              />
+            </SettingRow>
+
             <div className={controlsDisabled ? "dispatch-block is-disabled" : "dispatch-block"}>
               <span className="settings-kicker">{t("dispatchPolicyMaxMode")}</span>
               <span className="notion-label">{t("dispatchPolicyMaxModeHint")}</span>
@@ -471,7 +486,7 @@ export function DispatchSection(props: DispatchSectionProps = {}) {
               )}
             </div>
 
-            <div className={controlsDisabled ? "dispatch-block is-disabled" : "dispatch-block"}>
+            <div className={sendersDisabled ? "dispatch-block is-disabled" : "dispatch-block"}>
               <span className="settings-kicker">{t("dispatchPolicySenders")}</span>
               <span className="notion-label">{t("dispatchPolicySendersHint")}</span>
               {senderOptions.length === 0 ? (
@@ -479,7 +494,7 @@ export function DispatchSection(props: DispatchSectionProps = {}) {
               ) : (
                 <div className="dispatch-options">
                   {senderOptions.map((sender) => {
-                    const disabled = controlsDisabled || !sender.selectable;
+                    const disabled = sendersDisabled || !sender.selectable;
                     return (
                       <label
                         key={sender.deviceId}

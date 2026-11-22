@@ -138,7 +138,7 @@ async function tmp(): Promise<string> {
   return dir;
 }
 
-async function makeDevice(relayUrl: string, deviceId: string, name: string, withExecutor: boolean) {
+async function makeDevice(relayUrl: string, deviceId: string, name: string, withExecutor: boolean, t3Url?: string) {
   const dir = await tmp();
   const identity = new DeviceIdentity({ store: new MemorySecretStore(null) });
   const { publicKey } = await identity.ensure();
@@ -154,7 +154,14 @@ async function makeDevice(relayUrl: string, deviceId: string, name: string, with
   const executor = withExecutor
     ? new DispatchExecutor({ dataDir: dir, deviceId, t3, emitEvent: (to, frame) => hub.emitEvent(to, frame) })
     : null;
-  hub = new DispatchHub({ dataDir: dir, deviceId, deviceName: name, identity, executor });
+  hub = new DispatchHub({
+    dataDir: dir,
+    deviceId,
+    deviceName: name,
+    identity,
+    executor,
+    t3Tunnel: { localUrl: async () => t3Url ?? "http://127.0.0.1:1/", pairCredential: async () => "one-time" },
+  });
   const client: TelegramRelayClient = new TelegramRelayClient({
     url: relayUrl,
     token,
@@ -171,6 +178,9 @@ async function makeDevice(relayUrl: string, deviceId: string, name: string, with
   cleanups.push(() => client.stop());
   return { hub, executor, t3, publicKey, token, client };
 }
+
+const BIG_BODY = crypto.getRandomValues(new Uint8Array(700 * 1024 + 123));
+const BIG_JS = Array.from({ length: 40_000 }, (_, index) => `export const v${index} = ${index * 7};`).join("\n");
 
 describe("真实中转 + 真实设备端：派活全链路", () => {
   test("A 经真实中转把任务派给 B，B 状态变化后 A 的 outbox 更新；撤销 B 后再派失败", async () => {
@@ -234,5 +244,73 @@ describe("真实中转 + 真实设备端：派活全链路", () => {
     await until(() => a.hub.devices().find((d) => d.id === "device-bbb-0002")?.online === false, "B 下线");
     const offline = await a.hub.dispatch("device-bbb-0002", "t3.projects", {});
     expect(offline.ok).toBe(false);
+  }, 30_000);
+
+  test("T3 隧道：A 经真实中转看 B 的 T3（密文转发）；B 没开放、没勾选 A、吊销后都不通", async () => {
+    const telegram = startFakeTelegram();
+    cleanups.push(() => telegram.stop(true));
+    const relay: RelayServer = await startRelayServer({
+      port: 0,
+      host: "127.0.0.1",
+      botToken: "123456:TEST-TOKEN",
+      relayKey: RELAY_KEY,
+      dataDir: await tmp(),
+      telegramApi: `http://127.0.0.1:${telegram.port}`,
+    });
+    cleanups.push(() => relay.stop());
+    const url = `http://127.0.0.1:${relay.port}`;
+
+    const t3 = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) => {
+        const path = new URL(request.url).pathname;
+        if (path === "/big") return new Response(BIG_BODY);
+        if (path === "/app.js") return new Response(BIG_JS, { headers: { "content-type": "text/javascript" } });
+        return new Response(`B 的 T3：${path}`, { headers: { "x-from": "t3" } });
+      },
+    });
+    cleanups.push(() => t3.stop(true));
+
+    const a = await makeDevice(url, "device-aaa-0001", "Mac A", true);
+    const b = await makeDevice(url, "device-bbb-0002", "Mac B", true, `http://127.0.0.1:${t3.port}/`);
+    await until(() => a.hub.devices().find((d) => d.id === "device-bbb-0002")?.online === true, "A 看到 B 在线");
+
+    // 默认不开放
+    await expect(a.hub.t3Tunnel("device-bbb-0002")).rejects.toThrow("本机没有开放 T3 查看");
+
+    // 开了但没勾选 A
+    await b.executor!.updatePolicy({ viewT3: true });
+    await b.hub.refreshHello();
+    await until(() => a.hub.devices().find((d) => d.id === "device-bbb-0002")?.dispatch?.viewT3 === true, "A 看到 B 开放了 T3");
+    await expect(a.hub.t3Tunnel("device-bbb-0002")).rejects.toThrow();
+
+    // 勾选 A 后通了
+    await b.executor!.updatePolicy({ allowedSenders: [{ deviceId: "device-aaa-0001", name: "Mac A", publicKey: a.publicKey }] });
+    const session = await a.hub.t3Tunnel("device-bbb-0002");
+    const response = await session.fetch("/hello?x=1", { method: "GET", headers: [] });
+    expect(await response.text()).toBe("B 的 T3：/hello");
+    expect(response.headers.get("x-from")).toBe("t3");
+    expect(await session.pair()).toBe("one-time");
+    // 大响应（几百 KB，分多个满块帧）：帧超过中转上限会被丢，隧道就此卡死——真实中转上必须完整到达，且之后的请求仍然通
+    const big = new Uint8Array(await (await session.fetch("/big", { method: "GET", headers: [] })).arrayBuffer());
+    expect(big.length).toBe(BIG_BODY.length);
+    expect(Buffer.from(big).equals(Buffer.from(BIG_BODY))).toBe(true);
+    // 文本类资源经 gzip 传输，客户端收到的仍是原文。
+    const js = await session.fetch("/app.js", { method: "GET", headers: [] });
+    expect(js.headers.get("content-type")).toBe("text/javascript");
+    expect(await js.text()).toBe(BIG_JS);
+    expect(await (await session.fetch("/after", { method: "GET", headers: [] })).text()).toBe("B 的 T3：/after");
+    // 会话复用
+    expect(await a.hub.t3Tunnel("device-bbb-0002")).toBe(session);
+
+    // 吊销 B 后，会话上的请求失败
+    await fetch(`${url}/admin/revoke`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${RELAY_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ deviceId: "device-bbb-0002" }),
+    });
+    await until(() => a.hub.devices().find((d) => d.id === "device-bbb-0002")?.online === false, "B 下线");
+    await expect(a.hub.t3Tunnel("device-bbb-0002").then((next) => next.fetch("/x", { method: "GET", headers: [] }))).rejects.toThrow();
   }, 30_000);
 });

@@ -22,7 +22,7 @@ export interface TelegramRelayState {
 }
 
 export interface DispatchRelayFrame {
-  t: "cmd" | "cmdres" | "event";
+  t: "cmd" | "cmdres" | "event" | "tun";
   [k: string]: unknown;
 }
 
@@ -413,7 +413,7 @@ export class TelegramRelayClient {
       clearTimeout(pending.timer);
       if (frame.ok === true) pending.resolve(frame.result);
       else pending.reject(new Error(typeof frame.error === "string" ? frame.error : "中转处理失败"));
-    } else if (frame.t === "cmd" || frame.t === "cmdres" || frame.t === "event") {
+    } else if (frame.t === "cmd" || frame.t === "cmdres" || frame.t === "event" || frame.t === "tun") {
       try {
         const res: unknown = this.#options.onDispatchFrame?.(frame as DispatchRelayFrame);
         if (res && typeof (res as PromiseLike<unknown>).then === "function") {

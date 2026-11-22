@@ -1,4 +1,4 @@
-import { derivePublicKey, generateKeyPair, signCommand, type CommandSigningFields } from "@you-brain/protocol";
+import { derivePublicKey, generateKeyPair, signCommand, signTunnelTranscript, type CommandSigningFields } from "@you-brain/protocol";
 
 import type { SecretStore } from "../auth/secret-store.js";
 
@@ -46,6 +46,16 @@ export class DeviceIdentity {
     const { privateKey } = await this.ensure();
     try {
       return signCommand(privateKey, frame);
+    } catch {
+      throw new Error("使用本机派活私钥签名失败");
+    }
+  }
+
+  /** 对 T3 隧道握手记录签名，让对端确认这条隧道确实通到本机。 */
+  async signTranscript(transcript: string): Promise<string> {
+    const { privateKey } = await this.ensure();
+    try {
+      return signTunnelTranscript(privateKey, transcript);
     } catch {
       throw new Error("使用本机派活私钥签名失败");
     }

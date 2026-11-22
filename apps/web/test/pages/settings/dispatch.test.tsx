@@ -40,6 +40,7 @@ function makeStubClient(overrides: Partial<BrowserDaemon> = {}): BrowserDaemon {
       policy: {
         enabled: false,
         notify: true,
+        viewT3: false,
         maxMode: "auto",
         allowedProjects: [],
         allowedSenders: [],
@@ -125,6 +126,7 @@ describe("DispatchSection 渲染与交互", () => {
       policy: {
         enabled: true,
         notify: true,
+        viewT3: false,
         maxMode: "auto",
         allowedProjects: ["p1"],
         allowedSenders: [{ deviceId: "dev-vps", name: "VPS 主控", publicKey: "pk-vps" }],
@@ -205,6 +207,7 @@ describe("DispatchSection 渲染与交互", () => {
       policy: {
         enabled: false,
         notify: true,
+        viewT3: false,
         maxMode: "auto",
         allowedProjects: [],
         allowedSenders: [],
@@ -258,6 +261,7 @@ describe("DispatchSection 渲染与交互", () => {
         policy: {
           enabled: true,
           notify: true,
+          viewT3: false,
           maxMode: "auto",
           allowedProjects: [],
           allowedSenders: [],

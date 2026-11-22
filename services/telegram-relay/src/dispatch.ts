@@ -22,6 +22,7 @@ export interface HelloDispatch {
   };
   projects: Array<{ id: string; name: string }>;
   maxMode: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
+  viewT3?: boolean;
 }
 
 export type DispatchTimer = ReturnType<typeof globalThis.setTimeout>;
@@ -59,6 +60,10 @@ const CMD_TTL_MS = 60_000;
 const RATE_WINDOW_MS = 60_000;
 const CMD_RATE_LIMIT = 30;
 const EVENT_RATE_LIMIT = 120;
+/** T3 隧道帧（端到端加密，中转只转发）：单帧上限与每台发起设备每分钟的帧数。 */
+const TUN_FRAME_MAX_BYTES = 160 * 1024;
+const TUN_RATE_LIMIT = 12_000;
+const TUN_SID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const DEFAULT_PENDING_TIMEOUT_MS = 5 * 60_000;
 
 const ALLOWED_MODES = new Set(["approval-required", "auto-accept-edits", "auto", "full-access"]);
@@ -102,6 +107,9 @@ function validateHelloDispatch(value: unknown): { ok: true; dispatch: HelloDispa
   if (typeof value.maxMode !== "string" || !ALLOWED_MODES.has(value.maxMode)) {
     return { ok: false, error: "hello.dispatch.maxMode 不合法" };
   }
+  if (value.viewT3 !== undefined && typeof value.viewT3 !== "boolean") {
+    return { ok: false, error: "hello.dispatch.viewT3 必须是布尔值" };
+  }
   const normalized: HelloDispatch = {
     enabled: value.enabled,
     t3: {
@@ -110,6 +118,7 @@ function validateHelloDispatch(value: unknown): { ok: true; dispatch: HelloDispa
     },
     projects,
     maxMode: value.maxMode as HelloDispatch["maxMode"],
+    ...(value.viewT3 !== undefined ? { viewT3: value.viewT3 } : {}),
   };
   if (Buffer.byteLength(JSON.stringify(normalized), "utf8") > HELLO_DISPATCH_MAX_BYTES) {
     return { ok: false, error: "hello.dispatch 内容过大" };
@@ -127,6 +136,8 @@ export class DispatchRouter {
   readonly #cmdRates = new Map<string, number[]>();
   /** 目标方 deviceId → 最近 1 分钟 event 时间戳列表 */
   readonly #eventRates = new Map<string, number[]>();
+  /** 发起方 deviceId → 当前 1 分钟窗口的隧道帧数（帧很多，用固定窗口计数而不是时间戳列表）。 */
+  readonly #tunRates = new Map<string, { start: number; count: number }>();
   #stopped = false;
 
   constructor(ports: DispatchPorts) {
@@ -171,7 +182,7 @@ export class DispatchRouter {
     }
     if (!isPlainObject(parsed) || parsed.t !== "req" || typeof parsed.id !== "string") return false;
     const op = parsed.op;
-    if (op !== "hello" && op !== "cmd" && op !== "result" && op !== "event") return false;
+    if (op !== "hello" && op !== "cmd" && op !== "result" && op !== "event" && op !== "tun") return false;
 
     const id = parsed.id;
     const byteLength = Buffer.byteLength(raw, "utf8");
@@ -188,7 +199,45 @@ export class DispatchRouter {
       case "event":
         await this.#handleEvent(socket, id, parsed, byteLength);
         return true;
+      case "tun":
+        await this.#handleTun(socket, id, parsed, byteLength);
+        return true;
     }
+  }
+
+  /**
+   * T3 隧道帧：`d` 是端到端加密后的密文，中转不解析、不存、不逐帧审计，只校验双方都已入网、转发并限速。
+   * 目标不在线立即回错，不排队。
+   */
+  async #handleTun(socket: DispatchSocket, id: string, frame: Record<string, unknown>, byteLength: number): Promise<void> {
+    const now = this.#ports.now();
+    const to = typeof frame.to === "string" ? frame.to.trim() : "";
+    if (socket.auth !== "enrolled") {
+      await this.#ports.audit({ ts: now, from: socket.deviceId, to: to || null, kind: "tun", outcome: "rejected:not_enrolled" });
+      sendJson(socket, { t: "res", id, ok: false, error: "请先入网" });
+      return;
+    }
+    if (byteLength > TUN_FRAME_MAX_BYTES) {
+      sendJson(socket, { t: "res", id, ok: false, error: "隧道帧过大" });
+      return;
+    }
+    const sid = typeof frame.sid === "string" ? frame.sid : "";
+    if (to === "" || !TUN_SID_RE.test(sid) || typeof frame.d !== "string" || frame.d === "") {
+      sendJson(socket, { t: "res", id, ok: false, error: "隧道帧格式不合法" });
+      return;
+    }
+    if (!this.#consumeWindow(socket.deviceId, now)) {
+      await this.#ports.audit({ ts: now, from: socket.deviceId, to, kind: "tun", outcome: "rejected:rate_limited" });
+      sendJson(socket, { t: "res", id, ok: false, error: "隧道流量过大" });
+      return;
+    }
+    const target = this.#findEnrolledSocket(to);
+    if (!target) {
+      sendJson(socket, { t: "res", id, ok: false, error: "目标设备不在线" });
+      return;
+    }
+    const delivered = sendJson(target, { t: "tun", from: socket.deviceId, sid, d: frame.d });
+    sendJson(socket, delivered ? { t: "res", id, ok: true, result: {} } : { t: "res", id, ok: false, error: "目标设备不在线" });
   }
 
   async #handleHello(socket: DispatchSocket, id: string, frame: Record<string, unknown>): Promise<void> {
@@ -519,6 +568,16 @@ export class DispatchRouter {
     for (const [key, expiresAt] of this.#nonces) {
       if (expiresAt <= now) this.#nonces.delete(key);
     }
+  }
+
+  #consumeWindow(key: string, now: number): boolean {
+    let entry = this.#tunRates.get(key);
+    if (!entry || now - entry.start >= RATE_WINDOW_MS) {
+      entry = { start: now, count: 0 };
+      this.#tunRates.set(key, entry);
+    }
+    entry.count += 1;
+    return entry.count <= TUN_RATE_LIMIT;
   }
 
   #consumeRate(bucket: Map<string, number[]>, key: string, limit: number, now: number): boolean {

@@ -183,6 +183,31 @@ export class DispatchExecutor {
     }
   }
 
+  /**
+   * T3 隧道的授权：开放查看 → 发送方在允许名单且验签 → 目标是本机 → 未过期 → nonce 不重放。
+   * 和接收派活（enabled）互相独立；只返回发送方，不执行任何 T3 操作。
+   */
+  async authorizeView(frame: CmdFrame): Promise<{ ok: true; sender: DispatchSender } | { ok: false; error: string }> {
+    const now = this.#now();
+    const from = frameFrom(frame);
+    const kind = frameKind(frame);
+    const policy = await this.#policy.read();
+    const fail = async (reason: string, error = REJECTED): Promise<{ ok: false; error: string }> => {
+      await this.#reject(now, from, kind, reason, error);
+      return { ok: false, error };
+    };
+    if (!policy.viewT3) return fail("未开放 T3 查看", "本机没有开放 T3 查看");
+    const sender = policy.allowedSenders.find((item) => item.deviceId === from);
+    if (!sender) return fail("发送方未允许");
+    if (!verifyCommand(sender.publicKey, frame)) return fail("验签失败");
+    if (frame.to !== this.#deviceId) return fail("目标不是本机");
+    if (typeof frame.ts !== "number" || !Number.isFinite(frame.ts) || Math.abs(now - frame.ts) > TTL_MS) return fail("指令过期");
+    if (typeof frame.nonce !== "string" || frame.nonce === "") return fail("nonce 无效");
+    if (this.#replay(from, frame.nonce, now)) return fail("nonce 重放");
+    await this.#audit.write({ ts: now, from, kind, outcome: "ok" });
+    return { ok: true, sender };
+  }
+
   async hello(): Promise<HelloDispatch> {
     const policy = await this.#policy.read();
     try {
@@ -191,9 +216,10 @@ export class DispatchExecutor {
         t3: { ready: true },
         projects: await this.#visibleProjects(policy.allowedProjects),
         maxMode: policy.maxMode,
+        viewT3: policy.viewT3,
       };
     } catch {
-      return { enabled: policy.enabled, t3: { ready: false }, projects: [], maxMode: policy.maxMode };
+      return { enabled: policy.enabled, t3: { ready: false }, projects: [], maxMode: policy.maxMode, viewT3: policy.viewT3 };
     }
   }
 

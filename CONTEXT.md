@@ -84,7 +84,7 @@
 - **发起端 / 目标端**：一台设备两种角色都可以有。发起端签名指令并记录发出的派活（`outbox`）；目标端验签、按本机策略判断后调用本机 T3。
 - **目标端策略**：`enabled`（默认关）、允许的发起设备（按本机确认过的公钥）、允许的项目、权限上限 `maxMode`（`auto-accept-edits` < `auto` < `full-access`，默认 `auto`；没有 `approval-required`）。实际权限取请求值与上限的较小者，被降级时结果里标明。
 - **指令**：第一期只有 T3：`t3.projects` / `t3.start` / `t3.followup` / `t3.read` / `t3.threads`；只能读写账本里由派活创建的会话。目标离线立即失败，不排队；指令 60 秒内有效，幂等由目标端账本保证。
-- **界面与工具**：设置「集成」里有入网入口和「跨设备派活」区；`you-brain mcp` 提供 `list_devices` / `dispatch_to_device` / `get_dispatch_result` / `send_to_dispatch`，技能 `you-brain-dispatch` 约束主控的用法；指挥台可添加多个 T3 端点（经隧道映射到本机回环），每个端点的转发用 Cookie 名前缀隔离登录。
+- **界面与工具**：设置「集成」里有入网入口和「跨设备派活」区；`you-brain mcp` 提供 `list_devices` / `dispatch_to_device` / `get_dispatch_result` / `send_to_dispatch`，技能 `you-brain-dispatch` 约束主控的用法；指挥台可添加多个 T3 端点（经隧道映射到本机回环），每个端点的转发用 Cookie 名前缀隔离登录；同账号其他设备的 T3 经**T3 隧道**（端到端加密、经中转）自动列进设备栏，目标设备的策略多一个 `viewT3`（默认关，与接收派活独立）。
 
 ## 提醒
 

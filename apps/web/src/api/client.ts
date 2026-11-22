@@ -88,6 +88,7 @@ import type {
   DeckMuseStreamEvent,
   DeckNoticeDismissBody,
   DeckNoticesResponse,
+  DeckT3DeviceResponse,
   DeckT3WebResponse,
   DeckTelegramActionBody,
   DeckTelegramStatusResponse,
@@ -236,6 +237,7 @@ export interface BrowserDaemon
   /** 指挥台。 */
   deckDsh(retry?: boolean): Promise<DeckDshWebResponse>;
   deckT3(url: string): Promise<DeckT3WebResponse>;
+  deckT3Device(deviceId: string): Promise<DeckT3DeviceResponse>;
   deckMuse(): Promise<DeckMuseOverviewResponse>;
   deckMuseSession(id?: string): Promise<DeckMuseSessionResponse>;
   deckMuseAction(body: DeckMuseActionBody): Promise<DeckMuseActionResponse>;
@@ -443,6 +445,8 @@ export function createBrowserDaemon(options?: {
     deckDsh: (retry?: boolean) =>
       request<DeckDshWebResponse>("GET", retry === true ? "/api/deck/dsh?retry=1" : "/api/deck/dsh"),
     deckT3: (url: string) => request<DeckT3WebResponse>("GET", `/api/deck/t3?url=${encodeURIComponent(url)}`),
+    deckT3Device: (deviceId: string) =>
+      request<DeckT3DeviceResponse>("GET", `/api/deck/t3/device?id=${encodeURIComponent(deviceId)}`),
     deckMuse: () => request<DeckMuseOverviewResponse>("GET", "/api/deck/muse"),
     deckMuseSession: (id?: string) =>
       request<DeckMuseSessionResponse>(

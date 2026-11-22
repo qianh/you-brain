@@ -127,7 +127,7 @@ describe("HTTP /api/dispatch/* routes and validation", () => {
       },
       async policy() {
         return {
-          policy: { enabled: false, notify: true, maxMode: "auto", allowedSenders: [], allowedProjects: [] },
+          policy: { enabled: false, viewT3: false, notify: true, maxMode: "auto", allowedSenders: [], allowedProjects: [] },
           projects: [{ id: "p1", name: "you-brain" }],
           knownSenders: [],
         };
@@ -135,7 +135,7 @@ describe("HTTP /api/dispatch/* routes and validation", () => {
       async updatePolicy(body) {
         calls.push({ name: "updatePolicy", args: body });
         return {
-          policy: { enabled: body.enabled ?? false, notify: true, maxMode: body.maxMode ?? "auto", allowedSenders: [], allowedProjects: body.allowedProjects ?? [] },
+          policy: { enabled: body.enabled ?? false, viewT3: false, notify: true, maxMode: body.maxMode ?? "auto", allowedSenders: [], allowedProjects: body.allowedProjects ?? [] },
           projects: [{ id: "p1", name: "you-brain" }],
           knownSenders: [],
         };

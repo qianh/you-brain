@@ -571,6 +571,53 @@ describe("设备间指令路由与 hello/state（集成）", () => {
   });
 });
 
+describe("T3 隧道帧转发（集成）", () => {
+  it("密文原样转给目标且 from 由中转填；离线、未入网、格式不对、超大都被拒；hello 带 viewT3", async () => {
+    const world = await createWorld();
+    try {
+      const aCred = await world.enrollDevice(DEVICE_A, "Mac A");
+      const bCred = await world.enrollDevice(DEVICE_B, "Mac B");
+      const a = await world.connect(aCred.token, DEVICE_A, "Mac A");
+      const b = await world.connect(bCred.token, DEVICE_B, "Mac B");
+      const legacy = await world.connect(KEY, DEVICE_C, "旧设备");
+      await waitFor(() => a.frames.some((f) => f.t === "state") && b.frames.some((f) => f.t === "state"), "AB 在线");
+
+      const hello = await sendReq(b, {
+        op: "hello",
+        protocolVersion: 1,
+        dispatch: { enabled: false, t3: { ready: true }, projects: [], maxMode: "auto", viewT3: true },
+      });
+      expect(hello.ok).toBe(true);
+      await waitFor(
+        () =>
+          a.frames.some(
+            (f) =>
+              f.t === "state" &&
+              (f.devices as Array<{ id: string; dispatch?: { viewT3?: boolean } }>).some((d) => d.id === DEVICE_B && d.dispatch?.viewT3 === true),
+          ),
+        "A 看到 B 的 viewT3",
+      );
+      expect(
+        (await sendReq(b, { op: "hello", protocolVersion: 1, dispatch: { enabled: false, t3: { ready: true }, projects: [], maxMode: "auto", viewT3: "yes" } })).ok,
+      ).toBe(false);
+
+      const sent = await sendReq(a, { op: "tun", to: DEVICE_B, sid: "session-0001", d: "Y2lwaGVydGV4dA" });
+      expect(sent).toMatchObject({ ok: true });
+      await waitFor(() => b.frames.some((f) => f.t === "tun"), "B 收到隧道帧");
+      expect(b.frames.find((f) => f.t === "tun")).toEqual({ t: "tun", from: DEVICE_A, sid: "session-0001", d: "Y2lwaGVydGV4dA" });
+
+      expect((await sendReq(a, { op: "tun", to: "nobody-online", sid: "session-0001", d: "x" })).error).toBe("目标设备不在线");
+      expect((await sendReq(a, { op: "tun", to: DEVICE_B, sid: "bad sid!", d: "x" })).ok).toBe(false);
+      expect((await sendReq(a, { op: "tun", to: DEVICE_B, sid: "session-0001" })).ok).toBe(false);
+      expect((await sendReq(a, { op: "tun", to: DEVICE_B, sid: "session-0001", d: "A".repeat(170 * 1024) })).error).toBe("隧道帧过大");
+      expect((await sendReq(legacy, { op: "tun", to: DEVICE_B, sid: "session-0001", d: "x" })).error).toBe("请先入网");
+      expect(b.frames.filter((f) => f.t === "tun")).toHaveLength(1);
+    } finally {
+      await world.stop();
+    }
+  });
+});
+
 describe("DispatchRouter 纯逻辑单元测试", () => {
   it("event 目标限速 120 条/分钟，第 121 条被拒，60 秒后恢复", async () => {
     let clock = 5_000_000;

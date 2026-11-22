@@ -33,6 +33,7 @@ function makePolicyResponse(overrides?: Partial<DispatchPolicyResponse>): Dispat
     policy: {
       enabled: true,
       notify: true,
+      viewT3: false,
       maxMode: "auto",
       allowedProjects: ["proj-1"],
       allowedSenders: [{ deviceId: "dev-a", name: "Mac A", publicKey: "pk-a" }],

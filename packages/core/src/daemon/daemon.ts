@@ -3201,6 +3201,7 @@ export class YouBrainDaemon {
       canJoin: () => telegram.canAutoJoin(),
       join: (url, code) => telegram.joinRelay(url, code),
       now: () => this.#clock.now().getTime(),
+      log: (message) => console.error(`[relay] ${message}`),
     });
     void this.#relayAutoJoin.run().catch(() => undefined);
   }
@@ -4303,6 +4304,17 @@ export class YouBrainDaemon {
       onEvent: (entry, event) => {
         void events.onEvent(entry, event);
       },
+      t3Tunnel: {
+        localUrl: async () => normalizeT3Url((await this.#uiPrefsStore().read())["you-brain.deck.t3-url"] ?? "") ?? DEFAULT_T3_URL,
+        pairCredential: async () => {
+          try {
+            return (await this.#taskAutomation?.pairingCredential()) ?? null;
+          } catch (error) {
+            console.error(`[dispatch] 为对端签发 T3 配对凭据失败：${error instanceof Error ? error.message : "未知错误"}`);
+            return null;
+          }
+        },
+      },
     });
     this.#dispatchExecutor = executor;
     this.#dispatchHub = hub;
@@ -4373,6 +4385,7 @@ export class YouBrainDaemon {
       telegramRelayKey: telegramRelayKeyStore({ platform: this.#platform, backend: this.#secretBackend }),
       ...(this.#dispatchRelayToken ? { telegramRelayToken: this.#dispatchRelayToken } : {}),
       ...(this.#dispatchHub ? { dispatch: this.#dispatchHub } : {}),
+      ...(this.#dispatchHub ? { t3Tunnel: (deviceId: string) => this.#dispatchHub!.t3Tunnel(deviceId) } : {}),
       ...(this.#dispatchIdentity ? { dispatchIdentity: this.#dispatchIdentity } : {}),
       ...(this.#dispatchDeviceId ? { deviceId: this.#dispatchDeviceId } : {}),
       onTelegram: () => this.changes.publish("deck", this.#clock.now().toISOString()),
@@ -4391,6 +4404,7 @@ export class YouBrainDaemon {
     return {
       dshWeb: (retry) => deck.dshWeb(retry === true),
       t3Frame: (upstream) => deck.t3Frame(upstream),
+      t3DeviceFrame: (deviceId) => deck.t3DeviceFrame(deviceId),
       t3Retain: (keep) => deck.t3Retain(keep),
       dshLogin: async () => ({ providers: await deck.dshLogin() }),
       dshLoginAction: async (body) => ({ providers: await deck.dshLoginAction(body.action, body.provider) }),

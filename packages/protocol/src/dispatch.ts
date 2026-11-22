@@ -164,6 +164,8 @@ export const HelloDispatchSchema = z.strictObject({
   }),
   projects: z.array(z.strictObject({ id: z.string(), name: z.string() })),
   maxMode: RuntimeModeSchema,
+  /** 本机允许被同账号的已授权设备在指挥台里查看 T3（隧道）。旧版本不带这个字段，按 false 处理。 */
+  viewT3: z.boolean().optional(),
 });
 
 export type HelloDispatch = z.infer<typeof HelloDispatchSchema>;

@@ -154,6 +154,55 @@ describe("startT3Proxy（假的 T3 上游）", () => {
     expect(code).not.toBe(-1);
   });
 
+  it("走隧道传输：请求经 transport 发出，自动配对、Cookie 前缀按设备、WebSocket 经 transport 打开", async () => {
+    const seen: string[] = [];
+    let paired = 0;
+    upstream = Bun.serve<{ cookie: string }, never>({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        seen.push(`${request.method} ${url.pathname}`);
+        const cookie = request.headers.get("cookie") ?? "";
+        if (url.pathname === "/api/auth/session") return Response.json({ authenticated: cookie.includes("t3_session=ok") });
+        if (url.pathname === "/api/auth/browser-session") {
+          const body = (await request.json()) as { credential?: string };
+          if (body.credential !== "from-peer") return new Response("no", { status: 401 });
+          paired += 1;
+          return new Response("{}", { headers: { "set-cookie": "t3_session=ok; Path=/; HttpOnly" } });
+        }
+        return new Response("<!doctype html><html><head></head><body>peer</body></html>", { headers: { "content-type": "text/html" } });
+      },
+    });
+    const port = upstream.port;
+    const opened: string[] = [];
+    proxy = startT3Proxy("http://t3.tunnel/", {
+      cookiePrefix: "ubdabc12345_",
+      port: 0,
+      pairCredential: async () => "from-peer",
+      transport: {
+        fetch: async (path, init) =>
+          fetch(`http://127.0.0.1:${port}${path}`, {
+            method: init.method,
+            headers: init.headers,
+            ...(init.body ? { body: init.body } : {}),
+            redirect: "manual",
+          }),
+        openSocket: async (path) => {
+          opened.push(path);
+          throw new Error("not in this test");
+        },
+      },
+    });
+    const page = await fetch(proxy.url, { headers: { "sec-fetch-dest": "iframe" } });
+    expect(await page.text()).toContain("peer");
+    expect(page.headers.getSetCookie()).toEqual(["ubdabc12345_t3_session=ok; Path=/; HttpOnly"]);
+    expect(paired).toBe(1);
+    const again = await fetch(proxy.url, { headers: { "sec-fetch-dest": "iframe", cookie: "ubdabc12345_t3_session=ok" } });
+    expect(again.headers.getSetCookie()).toEqual([]);
+    expect(paired).toBe(1);
+  });
+
   it("自动配对：没登录的页面导航换到登录 Cookie 写回浏览器；已登录、接口请求、失败后限频都不再配", async () => {
     const credentials: string[] = [];
     let sessions = 0;

@@ -10,6 +10,7 @@ import {
   type CmdFrame,
   type HelloDispatch,
   type LaunchModeName,
+  TUNNEL_OPEN_KIND,
 } from "@you-brain/protocol";
 
 import type { DispatchRelayFrame, TelegramRelayState } from "../deck/telegram/relay.js";
@@ -17,6 +18,7 @@ import { writeFileAtomic } from "../domain/atomic.js";
 import type { DispatchExecutor, ThreadStatusEvent } from "./executor.js";
 import type { DeviceIdentity } from "./identity.js";
 import type { CommandOutcome } from "./ledger.js";
+import { PeerPins, TunnelClient, TunnelHost, type TunnelSession } from "./tunnel.js";
 
 const DEFAULT_TIMEOUT_MS = 45_000;
 const MAX_RESULT_BYTES = 256 * 1024;
@@ -111,6 +113,11 @@ export interface DispatchHubOptions {
   timeoutMs?: number;
   onEvent?(entry: OutboxEntry, event: { kind: string; data: unknown }): void;
   newId?: () => string;
+  /** T3 隧道：本机 T3 的地址与浏览器配对凭据来源。缺省则本机既不开放也不发起 T3 隧道。 */
+  t3Tunnel?: {
+    localUrl(): Promise<string>;
+    pairCredential(): Promise<string | null>;
+  };
 }
 
 interface StoredOutboxRecord {
@@ -241,6 +248,8 @@ export class DispatchHub {
   readonly #timeoutMs: number;
   readonly #onEvent: DispatchHubOptions["onEvent"];
   readonly #newId: () => string;
+  readonly #tunnelHost: TunnelHost | null;
+  readonly #tunnelClient: TunnelClient | null;
 
   #link: DispatchLink | null = null;
   #devices: DispatchDeviceInfo[] = [];
@@ -260,6 +269,39 @@ export class DispatchHub {
     this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.#onEvent = options.onEvent;
     this.#newId = options.newId ?? (() => ulid(this.#now()));
+    const tunnel = options.t3Tunnel;
+    const sendTun = async (to: string, sid: string, d: string): Promise<void> => {
+      const link = this.#link;
+      if (!link) throw new Error(NOT_CONNECTED_ERROR);
+      await link.request("tun", { to, sid, d });
+    };
+    this.#tunnelHost =
+      tunnel && this.#executor
+        ? new TunnelHost({
+            deviceId: this.#deviceId,
+            authorize: (frame) => this.#executor!.authorizeView(frame),
+            signTranscript: (transcript) => this.#identity.signTranscript(transcript),
+            localUrl: tunnel.localUrl,
+            pairCredential: tunnel.pairCredential,
+            send: sendTun,
+          })
+        : null;
+    this.#tunnelClient = tunnel
+      ? new TunnelClient({
+          deviceId: this.#deviceId,
+          dispatch: (to, kind, args, opts) => this.dispatch(to, kind, args, opts),
+          send: sendTun,
+          peerKey: (id) => this.#devices.find((device) => device.id === id)?.publicKey,
+          pins: new PeerPins(options.dataDir),
+        })
+      : null;
+  }
+
+  /** 到另一台设备的 T3 隧道（握手后复用）；本机没有启用 T3 隧道时抛错。 */
+  async t3Tunnel(deviceId: string): Promise<TunnelSession> {
+    if (!this.#tunnelClient) throw new Error("本机没有启用 T3 隧道");
+    if (!this.#link) throw new Error(NOT_CONNECTED_ERROR);
+    return this.#tunnelClient.session(deviceId);
   }
 
   /** 连上或断开中转时由桥调用；连上自动发 hello，断开立即让等待中的请求失败。 */
@@ -268,10 +310,12 @@ export class DispatchHub {
     if (link === null) {
       this.#link = null;
       this.#failAllWaiters(DISCONNECTED_ERROR);
+      this.#closeTunnels();
       return;
     }
     if (previous !== null && previous !== link) {
       this.#failAllWaiters(DISCONNECTED_ERROR);
+      this.#closeTunnels();
     }
     this.#link = link;
     void this.refreshHello();
@@ -345,7 +389,20 @@ export class DispatchHub {
       this.#handleCmdRes(frame);
     } else if (frame.t === "event") {
       void this.#handleEvent(frame);
+    } else if (frame.t === "tun") {
+      const from = typeof frame.from === "string" ? frame.from : "";
+      const sid = typeof frame.sid === "string" ? frame.sid : "";
+      const data = typeof frame.d === "string" ? frame.d : "";
+      if (from === "" || sid === "" || data === "") return;
+      // 会话 id 只属于其中一边：目标端查自己的会话表，发起端查自己的，另一边找不到就丢弃。
+      this.#tunnelHost?.onFrame(from, sid, data);
+      this.#tunnelClient?.onFrame(from, sid, data);
     }
+  }
+
+  #closeTunnels(): void {
+    this.#tunnelHost?.closeAll();
+    this.#tunnelClient?.closeAll();
   }
 
   /** 发送一条签名指令并等待目标端回传 `cmdres`。 */
@@ -636,6 +693,14 @@ export class DispatchHub {
   }
 
   async #executeCmd(frame: DispatchRelayFrame): Promise<CommandOutcome> {
+    if ((frame.cmd as { kind?: unknown } | undefined)?.kind === TUNNEL_OPEN_KIND) {
+      if (!this.#tunnelHost) return { ok: false, error: "本机没有开放 T3 查看" };
+      try {
+        return await this.#tunnelHost.open(frame as unknown as CmdFrame);
+      } catch {
+        return { ok: false, error: "T3 隧道握手失败" };
+      }
+    }
     if (!this.#executor) return { ok: false, error: "本机不接受派活" };
     try {
       return await this.#executor.handle(frame as unknown as CmdFrame);

@@ -14,6 +14,8 @@ export interface DispatchSender {
 
 export interface DispatchPolicy {
   enabled: boolean;
+  /** 允许「允许的发起设备」在它们的指挥台里查看并操作本机 T3（经加密隧道）。与 enabled（接收派活）各自独立。 */
+  viewT3: boolean;
   notify: boolean;
   maxMode: RuntimeModeName;
   allowedSenders: DispatchSender[];
@@ -21,7 +23,7 @@ export interface DispatchPolicy {
 }
 
 export function defaultDispatchPolicy(): DispatchPolicy {
-  return { enabled: false, notify: true, maxMode: "auto", allowedSenders: [], allowedProjects: [] };
+  return { enabled: false, viewT3: false, notify: true, maxMode: "auto", allowedSenders: [], allowedProjects: [] };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -60,6 +62,7 @@ export function normalizeDispatchPolicy(value: unknown): DispatchPolicy {
   if (!isRecord(value)) return defaultDispatchPolicy();
   return {
     enabled: value.enabled === true,
+    viewT3: value.viewT3 === true,
     notify: value.notify !== false,
     maxMode: isRuntimeMode(value.maxMode) ? value.maxMode : "auto",
     allowedSenders: dedupeSenders(value.allowedSenders),
@@ -89,6 +92,7 @@ export class PolicyStore {
       const current = await this.#read();
       const next = normalizeDispatchPolicy({
         enabled: patch.enabled ?? current.enabled,
+        viewT3: patch.viewT3 ?? current.viewT3,
         notify: patch.notify ?? current.notify,
         maxMode: patch.maxMode !== undefined ? patch.maxMode : current.maxMode,
         allowedSenders: patch.allowedSenders ?? current.allowedSenders,

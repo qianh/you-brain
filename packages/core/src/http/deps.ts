@@ -247,6 +247,8 @@ export interface DeckHttpPort {
   dshWeb(retry?: boolean): Promise<DeckDshWebResponse>;
   /** T3 iframe 该加载的转发地址（注入多巴胺底色与 @ 引用）；不支持或起不来时为 null。 */
   t3Frame?(upstream: string): string | null;
+  /** 另一台设备的 T3 转发地址（经设备间隧道）；失败时抛带原因的错误。 */
+  t3DeviceFrame?(deviceId: string): Promise<string>;
   /** 只保留这些上游的 T3 转发，其余停掉（指挥台删除端点后回收）。 */
   t3Retain?(keep: string[]): void;
   dshLogin(): Promise<DeckDshLoginResponse>;
