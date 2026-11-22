@@ -222,6 +222,36 @@ describe("QuotaService", () => {
     ]);
   });
 
+  it.each([
+    ["magpie lists Claude without any window", JSON.stringify([{ agent: "claude", user: "someone@example.com", plan: "pro", active: true, windows: [] }, { agent: "grok", user: "y", active: true, windows: [{ name: "7 days", used: 2, remaining: 98 }] }])],
+    ["magpie does not list Claude at all", JSON.stringify([{ agent: "grok", user: "y", active: true, windows: [{ name: "7 days", used: 2, remaining: 98 }] }])],
+  ])("builds the Claude account from the live probe when %s", async (_name, magpie) => {
+    const { service } = harness({ reads: [async () => magpie], claudeLives: [async () => LIVE] });
+    await service.refresh();
+    const accounts = service.snapshot().accounts;
+    const claude = accounts.filter((account) => account.agent === "claude");
+    expect(claude).toHaveLength(1);
+    expect(claude[0]).toMatchObject({ active: true, stale: false, readAt: "2026-11-16T12:00:00.000Z" });
+    expect(claude[0]?.windows.map((window) => [window.name, window.used])).toEqual([
+      ["5 hours", 8],
+      ["7 days", 62],
+      ["7 days · Opus", 12],
+    ]);
+    expect(accounts.map((account) => account.agent)).toContain("grok");
+  });
+
+  it("shows Claude from the live probe even when magpie itself fails, without duplicating it later", async () => {
+    const { service, clock } = harness({
+      reads: [() => Promise.reject(new Error("magpie missing")), async () => SAMPLE_CACHED],
+      claudeLives: [async () => LIVE],
+    });
+    await service.refresh();
+    expect(service.snapshot().accounts.map((account) => account.agent)).toEqual(["claude"]);
+    clock.now += 11 * 60_000;
+    await service.refresh();
+    expect(service.snapshot().accounts.filter((account) => account.agent === "claude")).toHaveLength(1);
+  });
+
   it("keeps magpie's cached Claude numbers when the live probe fails", async () => {
     const { service } = harness({
       reads: [async () => SAMPLE_CACHED],

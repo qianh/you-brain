@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { antigravityAccount, parseAntigravityQuota } from "./antigravity.js";
 import { ClaudeUsageError, readClaudeAccessToken, readClaudeUsage, type ClaudeUsageWindows } from "./claude-usage.js";
 import { parseMagpieAccounts } from "./parse.js";
@@ -120,7 +122,7 @@ export class QuotaService {
         .then((text) => parseUsageLog(text, TOKEN_AGENTS.map(({ name }) => name), tokenWindowCutoffs(this.#ports.nowMs())))
         .catch(() => null);
       const antigravity = await this.#probeAntigravity();
-      if (magpie === null && antigravity === null) throw new Error("magpie 与本机 agent 都没有可用的额度");
+      if (magpie === null && antigravity === null && claudeProbe === null) throw new Error("magpie 与本机 agent 都没有可用的额度");
       const parsed = magpie ?? [];
       const now = this.#ports.nowMs();
       const readAt = new Date(now).toISOString();
@@ -140,12 +142,30 @@ export class QuotaService {
       if (claudeProbe !== null) {
         fresh = fresh.map((account) => (account.agent === "claude" ? claudeAccount(account, claudeProbe.windows, claudeProbe.atMs, now) : account));
       }
+      // magpie may not list Claude at all, or list it without windows (filtered out above). The live
+      // probe is the same data Claude Code's /usage shows, so it can stand in for the account.
+      if (claudeProbe !== null && !fresh.some((account) => account.agent === "claude")) {
+        const known = parsed.find((account) => account.agent === "claude");
+        const base: QuotaAccount = {
+          id: known?.id ?? createHash("sha256").update("claude").digest("hex").slice(0, 12),
+          agent: "claude",
+          plan: known?.plan ?? null,
+          active: true,
+          windows: [],
+          readAt,
+          stale: false,
+        };
+        const account = claudeAccount(base, claudeProbe.windows, claudeProbe.atMs, now);
+        if (account.windows.length > 0) fresh.push(account);
+      }
       if (antigravity !== null && antigravity.windows !== null && !fresh.some((account) => account.agent === "antigravity")) {
         fresh.push(antigravityAccount(antigravity.windows, antigravity.atMs, now));
       }
       // One subscription failing to answer must not wipe its numbers: keep the last good ones a while.
       const kept = this.#view.accounts
         .filter((old) => !fresh.some((account) => account.id === old.id))
+        // A stand-in Claude account has no magpie id; do not keep an older copy beside it.
+        .filter((old) => !(old.agent === "claude" && fresh.some((account) => account.agent === "claude")))
         .filter((old) => now - Date.parse(old.readAt) < QUOTA_KEEP_MS)
         .map((old) => ({ ...old, stale: true }));
       this.#view = {
