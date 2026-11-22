@@ -497,4 +497,61 @@ describe("executeConsolidation", () => {
     expect(state.backoffMs).toBe(0);
     expect(state.retryAtMs).toBeNull();
   });
+
+  it("records which step failed the run, ignoring an earlier advisory failure", async () => {
+    const clock = clockFrom(TODAY);
+    const state = emptyConsolidationState();
+    const outcome = await executeConsolidation(
+      runtime(clock, {
+        steps: [
+          {
+            id: "portrait_eval",
+            advisory: true,
+            async run() {
+              throw new Error("评测超时");
+            },
+          },
+          {
+            id: "portrait_monthly",
+            async run() {
+              throw new Error("月度对比失败");
+            },
+          },
+        ],
+      }),
+      state,
+      { manual: false, force: false },
+    );
+    expect(outcome).toMatchObject({ status: "done", result: { ok: false } });
+    expect(state.lastRun).toMatchObject({ ok: false, step: "portrait_monthly", error: "月度对比失败" });
+  });
+
+  it("keeps the failed advisory step in lastRun.warnings when the run still succeeds", async () => {
+    const clock = clockFrom(TODAY);
+    const state = emptyConsolidationState();
+    let lease = null as ConsolidateLease | null;
+    const outcome = await executeConsolidation(
+      runtime(clock, {
+        writeLease: async (next) => {
+          lease = next;
+        },
+        steps: [
+          { id: "portrait", async run() {} },
+          {
+            id: "portrait_eval",
+            advisory: true,
+            async run() {
+              throw new Error("步骤执行超时");
+            },
+          },
+        ],
+      }),
+      state,
+      { manual: false, force: false },
+    );
+    expect(outcome).toMatchObject({ status: "done", result: { ok: true } });
+    expect(lease?.date).toBe("2026-10-23");
+    expect(state.lastRun).toMatchObject({ ok: true, warnings: ["portrait_eval：步骤执行超时"] });
+    expect(state.lastRun?.step).toBeUndefined();
+  });
 });

@@ -4433,8 +4433,19 @@ export class YouBrainDaemon {
     if (consolidation.status === "stale") {
       warnings.push({ code: "CONSOLIDATION_STALE", message: "超过 1 天未沉淀" });
     }
-    if (consolidation.enabled && this.#consolidationState.lastRun && !this.#consolidationState.lastRun.ok) {
-      warnings.push({ code: "CONSOLIDATION_FAILED", message: "每日沉淀没有完成" });
+    const lastRun = this.#consolidationState.lastRun;
+    if (consolidation.enabled && lastRun && !lastRun.ok) {
+      // 带上失败的步骤和原因，免得只能到主设备上翻才知道卡在哪一步。
+      const detail = lastRun.step ? `${lastRun.step}：${lastRun.error ?? "失败"}` : "";
+      warnings.push({
+        code: "CONSOLIDATION_FAILED",
+        message: detail === "" ? "每日沉淀没有完成" : `每日沉淀没有完成（${detail}）`,
+      });
+    } else if (consolidation.enabled && lastRun?.warnings && lastRun.warnings.length > 0) {
+      warnings.push({
+        code: "CONSOLIDATION_STEP_FAILED",
+        message: `每日沉淀已完成，但有辅助步骤没做完（${lastRun.warnings.join("；")}）`,
+      });
     }
     const processor = resolveWebProcessor(this.#roles);
     const isLocalProcessor = processor !== null && processor === this.#local.deviceId;

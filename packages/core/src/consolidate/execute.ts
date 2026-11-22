@@ -20,6 +20,10 @@ export interface ConsolidationLastRun {
   day: string;
   ok: boolean;
   error?: string;
+  /** The step that failed the run (failures only). */
+  step?: string;
+  /** Advisory steps that failed without failing the run, as `步骤：原因`. */
+  warnings?: string[];
   finishedAt: string;
 }
 
@@ -178,10 +182,12 @@ export async function executeConsolidation(
     }
     const finishedAt = runtime.clock.now().toISOString();
     if (!result.ok) {
+      const failed = failedStep(result, steps);
       rememberFailure(state, runtime.clock.nowMs(), {
         day,
         ok: false,
-        error: runError(result),
+        error: failed?.error ?? "每日沉淀没有完成",
+        ...(failed ? { step: failed.id } : {}),
         finishedAt,
       });
       return { status: "done", attempted: true, result };
@@ -211,9 +217,11 @@ export async function executeConsolidation(
   }
   state.backoffMs = 0;
   state.retryAtMs = null;
+  const skipped = advisoryFailures(last, steps);
   state.lastRun = {
     day: last.day,
     ok: true,
+    ...(skipped.length > 0 ? { warnings: skipped } : {}),
     finishedAt: runtime.clock.now().toISOString(),
   };
   return { status: "done", attempted: true, result: last };
@@ -229,6 +237,18 @@ function rememberFailure(
   state.lastRun = lastRun;
 }
 
-function runError(result: ConsolidationRunResult): string {
-  return result.steps.find((step) => !step.ok)?.error ?? "每日沉淀没有完成";
+/** The step that failed the run: the first failed one that is not advisory. */
+function failedStep(
+  result: ConsolidationRunResult,
+  steps: readonly ConsolidationStep[],
+): ConsolidationRunResult["steps"][number] | undefined {
+  const advisory = new Set(steps.filter((step) => step.advisory).map((step) => step.id));
+  return result.steps.find((step) => !step.ok && !advisory.has(step.id));
+}
+
+function advisoryFailures(result: ConsolidationRunResult, steps: readonly ConsolidationStep[]): string[] {
+  const advisory = new Set(steps.filter((step) => step.advisory).map((step) => step.id));
+  return result.steps
+    .filter((step) => !step.ok && advisory.has(step.id))
+    .map((step) => `${step.id}：${step.error ?? "失败"}`);
 }

@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { platformPaths, portraitFile } from "../../src/domain/paths.js";
 import {
   PORTRAIT_EVAL_CURSOR,
+  PORTRAIT_EVAL_STAGE_CURSOR,
   PORTRAIT_MONTHLY_CURSOR,
   PORTRAIT_STAGE_CURSOR,
   PORTRAIT_TURNS_CURSOR,
@@ -979,6 +980,97 @@ describe("portrait eval", () => {
       return JSON.stringify({ answers: ids.map((id, index) => ({ id, answer: pick[index] ?? "✗" })) });
     };
   }
+
+  it("is advisory: a failed or timed-out evaluation does not fail the day", async () => {
+    expect(portraitEvalStep.advisory).toBe(true);
+    const box = await world();
+    await seedTwin(box);
+    await seed(box.drive, PROBES, `${JSON.stringify(probe)}\n`);
+    const result = await run(
+      box,
+      () => {
+        throw new LlmRequestError("client", "评测调用失败", { status: 400 });
+      },
+      { steps: [portraitEvalStep] },
+    );
+    expect(result.ok).toBe(true);
+    expect(result.steps).toEqual([{ id: "portrait_eval", ok: false, error: "数字分身没有写完：评测调用失败" }]);
+    expect(result.warnings).toEqual(["portrait_eval：数字分身没有写完：评测调用失败"]);
+    expect(box.cursors.get(PORTRAIT_EVAL_CURSOR)).toBeUndefined();
+  });
+
+  it("resumes a half-finished evaluation from its stage cache instead of starting over", async () => {
+    const marks = { twin: ["✓"], old: [], generic: ["✗"], blank: ["✗"] };
+    const box = await world();
+    await seedTwin(box);
+    await seed(box.drive, PROBES, `${JSON.stringify(probe)}\n`);
+    box.sessions = [{ sessionKey: "s1", title: "会话一", turns: ["先别跑，我还没确认"] }];
+
+    // Probe writer, then two rounds of the twin (answer + judge each), then the blank group dies.
+    let calls = 0;
+    const failAt = 5;
+    const first = await run(
+      box,
+      (request) => {
+        if (calls++ === failAt) throw new LlmRequestError("client", "超时", { status: 400 });
+        return scripted(marks)(request);
+      },
+      { steps: [portraitEvalStep] },
+    );
+    expect(first.steps).toEqual([{ id: "portrait_eval", ok: false, error: "数字分身没有写完：超时" }]);
+    expect(box.requests).toHaveLength(failAt + 1);
+    expect(box.cursors.get(PORTRAIT_EVAL_STAGE_CURSOR)).toBeTruthy();
+    expect(box.cursors.get(PORTRAIT_EVAL_CURSOR)).toBeUndefined();
+    // The probe the writer already saved stays pending.
+    expect(jsonl(await textAt(box.drive, PENDING_PROBES))).toHaveLength(1);
+
+    box.requests.length = 0;
+    const second = await run(box, scripted(marks), { steps: [portraitEvalStep] });
+    expect(second.ok).toBe(true);
+    expect(second.steps).toEqual([{ id: "portrait_eval", ok: true }]);
+    // The writer and the twin's two rounds come from the cache; only blank and generic are asked now.
+    // Generic's judge prompts equal blank's (same answer text, same round), so those hit the cache too.
+    expect(box.requests.map((request) => request.system)).toEqual([
+      TWIN_EVAL_BLANK_SYSTEM_PROMPT,
+      TWIN_EVAL_JUDGE_SYSTEM_PROMPT,
+      TWIN_EVAL_BLANK_SYSTEM_PROMPT,
+      TWIN_EVAL_JUDGE_SYSTEM_PROMPT,
+      TWIN_EVAL_ANSWER_SYSTEM_PROMPT,
+      TWIN_EVAL_ANSWER_SYSTEM_PROMPT,
+    ]);
+    // Retrying does not write the probes a second time.
+    expect(jsonl(await textAt(box.drive, PENDING_PROBES))).toEqual([
+      { id: "p02", layer: "coding", situation: "用户说先别跑", expect: "停下不执行", day: LOCAL_DAY },
+    ]);
+    expect(await textAt(box.drive, CHANGELOG)).toContain("- 新出 1 道题，1 道等你过目后才计分");
+    expect(JSON.parse(box.cursors.get(PORTRAIT_EVAL_CURSOR) ?? "{}")).toMatchObject({ day: LOCAL_DAY, pass: 1, total: 1 });
+    expect(box.cursors.get(PORTRAIT_EVAL_STAGE_CURSOR)).toBe("");
+  });
+
+  it("still samples each condition for several rounds when the prompts are identical", async () => {
+    const box = await world();
+    await seedTwin(box);
+    await seed(box.drive, PROBES, `${JSON.stringify(probe)}\n`);
+    // Round one passes and round two fails, so the split needs a third round with the same prompt.
+    let twinAnswers = 0;
+    const result = await run(
+      box,
+      (request) => {
+        if (request.system === TWIN_EVAL_JUDGE_SYSTEM_PROMPT) {
+          return JSON.stringify({ results: [{ id: "p01", pass: request.user.includes("回答：✓") }] });
+        }
+        const twin = request.system === TWIN_EVAL_ANSWER_SYSTEM_PROMPT && request.user.includes(FULL_TEXT);
+        const mark = twin && twinAnswers++ === 1 ? "✗" : twin ? "✓" : "✗";
+        return JSON.stringify({ answers: [{ id: "p01", answer: mark }] });
+      },
+      { steps: [portraitEvalStep] },
+    );
+    expect(result.ok).toBe(true);
+    const twinCalls = box.requests.filter(
+      (request) => request.system === TWIN_EVAL_ANSWER_SYSTEM_PROMPT && request.user.includes(FULL_TEXT),
+    );
+    expect(twinCalls).toHaveLength(3);
+  });
 
   it("stops scoring when the step signal aborts, without finishing the remaining rounds", async () => {
     const box = await world();

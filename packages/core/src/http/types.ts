@@ -516,6 +516,10 @@ export interface StatusResponse {
       day: string;
       ok: boolean;
       error?: string;
+      /** The step that failed the run (failures only). */
+      step?: string;
+      /** Advisory steps that failed without failing the run, as `步骤：原因`. */
+      warnings?: string[];
       finishedAt: string;
     };
   };

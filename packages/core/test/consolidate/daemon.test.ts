@@ -279,9 +279,10 @@ describe("consolidation daemon", () => {
       ok: false,
       error: "部分话题概要没有写完",
     });
+    expect(status.consolidation.lastRun?.step).toBe("topic_summaries");
     expect(status.warnings).toContainEqual({
       code: "CONSOLIDATION_FAILED",
-      message: "每日沉淀没有完成",
+      message: "每日沉淀没有完成（topic_summaries：部分话题概要没有写完）",
     });
     expect(await drive.readPath(DRIVE_PATHS.consolidateLease)).toBeNull();
     const topics = await getJson<{ topics: Array<{ name: string; summary: string }> }>(

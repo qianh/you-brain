@@ -104,7 +104,11 @@ const PROBE_SESSION_UNITS = 4_000;
 export const PORTRAIT_TURNS_CURSOR = "portrait.turns";
 export const PORTRAIT_EVAL_CURSOR = "portrait.eval";
 export const PORTRAIT_STAGE_CURSOR = "portrait.stages";
+/** 保真评测自己的断点缓存。不和 `portrait.stages` 共用：portrait 步骤结束时会清空后者。 */
+export const PORTRAIT_EVAL_STAGE_CURSOR = "portrait.eval_stages";
 const MAX_STAGE_CACHE_ENTRIES = 64;
+/** 一次评测最多二三十次模型调用，缓存要装得下一整轮。 */
+const MAX_EVAL_STAGE_CACHE_ENTRIES = 160;
 
 interface PortraitStageCacheState {
   day: string;
@@ -120,6 +124,10 @@ type StageCompleter = <T>(
   signal?: AbortSignal,
   cacheKeyInput?: string,
 ) => Promise<T>;
+
+/** 没有断点缓存时（命令行单独跑评测）直接问模型。 */
+const completeWithoutCache: StageCompleter = (_stage, llm, prompt, jsonSchema, parse, signal) =>
+  completeJson(llm, prompt, jsonSchema, parse, signal);
 
 function parseStageCache(raw: string | null, day: string): PortraitStageCacheState {
   if (!raw || raw.trim() === "") return { day, entries: {} };
@@ -140,9 +148,11 @@ function parseStageCache(raw: string | null, day: string): PortraitStageCacheSta
 function createStageCompleter(
   cursors: { get(key: string): string | null; set(key: string, value: string): void },
   day: string,
+  cursorKey: string = PORTRAIT_STAGE_CURSOR,
+  maxEntries: number = MAX_STAGE_CACHE_ENTRIES,
 ): { complete: StageCompleter; clear: () => void } {
-  const state = parseStageCache(cursors.get(PORTRAIT_STAGE_CURSOR), day);
-  let hasStored = cursors.get(PORTRAIT_STAGE_CURSOR) !== null && cursors.get(PORTRAIT_STAGE_CURSOR) !== "";
+  const state = parseStageCache(cursors.get(cursorKey), day);
+  let hasStored = cursors.get(cursorKey) !== null && cursors.get(cursorKey) !== "";
 
   const complete: StageCompleter = async (
     stage,
@@ -163,11 +173,11 @@ function createStageCompleter(
     const result = await completeJson(llm, prompt, jsonSchema, parse, signal);
     state.entries[key] = result;
     const keys = Object.keys(state.entries);
-    while (keys.length > MAX_STAGE_CACHE_ENTRIES) {
+    while (keys.length > maxEntries) {
       const oldest = keys.shift();
       if (oldest !== undefined) delete state.entries[oldest];
     }
-    cursors.set(PORTRAIT_STAGE_CURSOR, JSON.stringify(state));
+    cursors.set(cursorKey, JSON.stringify(state));
     hasStored = true;
     return result;
   };
@@ -176,7 +186,7 @@ function createStageCompleter(
     if (!hasStored) return;
     hasStored = false;
     state.entries = {};
-    cursors.set(PORTRAIT_STAGE_CURSOR, "");
+    cursors.set(cursorKey, "");
   };
 
   return { complete, clear };
@@ -447,24 +457,39 @@ export const portraitStep: ConsolidationStep = {
 export const portraitEvalStep: ConsolidationStep = {
   id: "portrait_eval",
   dependsOn: ["portrait"],
+  // 评测只是质量指标，不是当天的沉淀产物：超时或失败只记警告，不能让整天算作未沉淀、租约写不上。
+  advisory: true,
   async run(ctx) {
     const portrait = ctx.portrait;
     if (!portrait) return;
     const last = parseEvalCursor(ctx.cursors.get(PORTRAIT_EVAL_CURSOR));
     if (last && last.day > shiftDateKey(ctx.day, -EVAL_INTERVAL_DAYS)) return;
+    // 评测要串行调二三十次模型，一个步骤的时间预算可能不够；已完成的调用记在断点缓存里，
+    // 下次重试接着跑，不从头来。整轮评测做完才清空。
+    const stageCache = createStageCompleter(
+      ctx.cursors,
+      ctx.day,
+      PORTRAIT_EVAL_STAGE_CURSOR,
+      MAX_EVAL_STAGE_CACHE_ENTRIES,
+    );
     const result = await evaluateTwin({
       llm: ctx.llm,
       portrait,
       day: ctx.day,
       newProbes: WEEKLY_PROBES,
+      complete: stageCache.complete,
       ...(ctx.signal ? { signal: ctx.signal } : {}),
     });
-    if (!result) return;
+    if (!result) {
+      stageCache.clear();
+      return;
+    }
     const { twin } = result.current;
     ctx.cursors.set(
       PORTRAIT_EVAL_CURSOR,
       JSON.stringify({ day: ctx.day, pass: twin.pass, total: twin.total, ...result.sizes }),
     );
+    stageCache.clear();
     const notes: string[] = [];
     if (twin.total > 0) {
       await portrait.appendChangelog(twinEvalLog(ctx.day, result));
@@ -529,8 +554,11 @@ export async function evaluateTwin(input: {
   day: string;
   newProbes: number;
   signal?: AbortSignal;
+  /** 带断点缓存的调用；不传就每次都直接问模型。 */
+  complete?: StageCompleter;
 }): Promise<TwinEvalResult | null> {
   const { llm, portrait, day, signal } = input;
+  const complete = input.complete ?? completeWithoutCache;
   const files = await portrait.read();
   if (!files.full || !files.coding) return null;
   const sizes = { full: byteSize(files.full.text), coding: byteSize(files.coding.text) };
@@ -543,16 +571,22 @@ export async function evaluateTwin(input: {
     if (turns !== "") {
       const existing = [...probes, ...pending];
       const prompt = buildTwinProbesPrompt({ turns, existing, limit: input.newProbes });
-      const drafts = (await completeJson(llm, prompt, TWIN_PROBES_JSON_SCHEMA, parseTwinProbes, signal)).slice(
-        0,
-        input.newProbes,
-      );
-      if (drafts.length > 0) {
+      // 缓存键只取当天：出题后 pending 会变，提示词里的“已有题”跟着变，按内容做键重试时会再出一批题。
+      const drafts = (
+        await complete("probes", llm, prompt, TWIN_PROBES_JSON_SCHEMA, parseTwinProbes, signal, `probes\n${day}`)
+      ).slice(0, input.newProbes);
+      // 上一次尝试已经存下的题（同一天、同一情境）不再重复存，也照样算这次新出的。
+      const saved = (draft: { situation: string }) => existing.some((item) => item.situation === draft.situation);
+      const fresh = drafts.filter((draft) => !saved(draft));
+      const resumed = drafts.filter((draft) =>
+        existing.some((item) => item.situation === draft.situation && item.day === day),
+      ).length;
+      if (fresh.length > 0) {
         let next = nextProbeNumber(existing);
-        pending = [...pending, ...drafts.map((draft) => ({ id: `p${String(next++).padStart(2, "0")}`, ...draft, day }))];
+        pending = [...pending, ...fresh.map((draft) => ({ id: `p${String(next++).padStart(2, "0")}`, ...draft, day }))];
         await portrait.savePendingProbes(pending);
-        added = drafts.length;
       }
+      added = fresh.length + resumed;
     }
   }
   if (probes.length === 0) {
@@ -568,9 +602,9 @@ export async function evaluateTwin(input: {
   }
 
   const current: TwinEvalScores = {
-    twin: await scoreProbes(llm, twinProfile(files.full.text, files.coding.text), probes, signal),
-    blank: await scoreProbes(llm, [], probes, signal),
-    generic: await scoreProbes(llm, [{ title: "人设", text: TWIN_EVAL_GENERIC_PERSONA }], probes, signal),
+    twin: await scoreProbes(llm, twinProfile(files.full.text, files.coding.text), probes, signal, complete),
+    blank: await scoreProbes(llm, [], probes, signal, complete),
+    generic: await scoreProbes(llm, [{ title: "人设", text: TWIN_EVAL_GENERIC_PERSONA }], probes, signal, complete),
   };
   const flat = flatProbes(probes, current);
   const marked = probes.map(({ flat: _, ...probe }): TwinProbe =>
@@ -594,7 +628,7 @@ export async function evaluateTwin(input: {
     for (const [before, group] of groups) {
       const old = await portrait.twinBefore(before);
       if (!old) continue;
-      scores.push(await scoreProbes(llm, twinProfile(old.full, old.coding), group, signal));
+      scores.push(await scoreProbes(llm, twinProfile(old.full, old.coding), group, signal, complete));
       for (const probe of group) scored.add(probe.id);
     }
     if (scored.size > 0) {
@@ -706,6 +740,7 @@ async function scoreProbes(
   profile: readonly { title: string; text: string }[],
   probes: readonly TwinProbe[],
   signal?: AbortSignal,
+  complete: StageCompleter = completeWithoutCache,
 ): Promise<TwinEvalScore> {
   const majority = Math.floor(EVAL_ROUNDS / 2) + 1;
   const passes = new Map<string, number>();
@@ -713,7 +748,7 @@ async function scoreProbes(
   let open = [...probes];
   for (let round = 0; round < EVAL_ROUNDS && open.length > 0; round += 1) {
     signal?.throwIfAborted();
-    const passed = await scoreRound(llm, profile, open, signal);
+    const passed = await scoreRound(llm, profile, open, round, signal, complete);
     for (const probe of open) {
       const tally = passed.has(probe.id) ? passes : fails;
       tally.set(probe.id, (tally.get(probe.id) ?? 0) + 1);
@@ -731,30 +766,50 @@ async function scoreRound(
   llm: LlmBackend,
   profile: readonly { title: string; text: string }[],
   probes: readonly TwinProbe[],
+  round: number,
   signal?: AbortSignal,
+  complete: StageCompleter = completeWithoutCache,
 ): Promise<Set<string>> {
-  const answers = await completeJson(
+  // 每种身份要重复采样几轮取多数，相同提示词的几轮不能被缓存并成一次，所以键里带上轮次。
+  const keyed = (stage: string, prompt: { system: string; user: string }) =>
+    `${stage}\nround:${round}\n${prompt.system}\n${prompt.user}`;
+  const answerPrompt = buildTwinEvalAnswerPrompt({ profile, probes });
+  const answers = await complete(
+    "eval_answer",
     llm,
-    buildTwinEvalAnswerPrompt({ profile, probes }),
+    answerPrompt,
     TWIN_EVAL_ANSWERS_JSON_SCHEMA,
-    parseTwinAnswers,
+    parseAnswerRecord,
     signal,
+    keyed("eval_answer", answerPrompt),
   );
-  const verdicts = await completeJson(
+  const judgePrompt = buildTwinEvalJudgePrompt({
+    items: probes.map((probe) => ({
+      id: probe.id,
+      situation: probe.situation,
+      expect: probe.expect,
+      answer: answers[probe.id] ?? "",
+    })),
+  });
+  const verdicts = await complete(
+    "eval_judge",
     llm,
-    buildTwinEvalJudgePrompt({
-      items: probes.map((probe) => ({
-        id: probe.id,
-        situation: probe.situation,
-        expect: probe.expect,
-        answer: answers.get(probe.id) ?? "",
-      })),
-    }),
+    judgePrompt,
     TWIN_EVAL_JUDGE_JSON_SCHEMA,
-    parseTwinJudge,
+    parseJudgeRecord,
     signal,
+    keyed("eval_judge", judgePrompt),
   );
-  return new Set(probes.filter((probe) => verdicts.get(probe.id) === true).map((probe) => probe.id));
+  return new Set(probes.filter((probe) => verdicts[probe.id] === true).map((probe) => probe.id));
+}
+
+/** 断点缓存存成 JSON，Map 会丢内容，所以评测的作答和评判结果用普通对象。 */
+function parseAnswerRecord(input: unknown): Record<string, string> {
+  return Object.fromEntries(parseTwinAnswers(input));
+}
+
+function parseJudgeRecord(input: unknown): Record<string, boolean> {
+  return Object.fromEntries(parseTwinJudge(input));
 }
 
 function scoreSubset(score: TwinEvalScore, ids: ReadonlySet<string>): TwinEvalScore {

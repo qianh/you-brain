@@ -73,7 +73,7 @@ export async function runConsolidation(
             ? error.message.trim()
             : "";
       const short = clip(message === "" ? "步骤失败" : message);
-      warnings.push(short);
+      warnings.push(`${step.id}：${short}`);
       steps.push({ id: step.id, ok: false, error: short });
       if (!step.advisory) failed.add(step.id);
     } finally {
