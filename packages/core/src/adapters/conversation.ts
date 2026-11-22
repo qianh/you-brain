@@ -24,7 +24,7 @@ const SYSTEM_WRAPPER_BLOCKS = [
 const BUILTIN_CONTROL_COMMAND =
   /^\/?(?:clear|compact|exit|quit|status|cost|context|help|login|logout|doctor|model|permissions|vim|config|terminal-setup|release-notes)(?:\s+[\w.:-]+)?$/iu;
 
-const RAW_LOG_INPUT = /(?:\S+\.(?:raw\.txt|jsonl|log)\b|指定时段的\s*raw\s*文本|时段原始记录)/iu;
+const RAW_LOG_INPUT = /(?:\S{1,200}\.(?:raw\.txt|jsonl|log)\b|指定时段的\s*raw\s*文本|时段原始记录)/iu;
 const OVERWRITE_DIGEST_OUTPUT = /(?:覆盖写入|覆盖保存|整理[^\n]{0,30}(?:纪要|日报|摘要))/u;
 const UNATTENDED_CONSTRAINT = /(?:^只根据|不调用\s*\S+|不读其他|不要询问|不要反问|写完文件后不再输出)/u;
 

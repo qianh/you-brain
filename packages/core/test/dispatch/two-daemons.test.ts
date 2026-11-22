@@ -368,6 +368,7 @@ describe("resolveDispatchDeviceId & keychain accounts", () => {
       data: { threadId: "t-1", status: "waiting", previous: "running", title: "任务", link: null, latestRunId: "run-2" },
     });
     expect(pushed).toHaveLength(2);
-    expect(pushed[0]).toEqual({ deviceName: "Mac B", title: "任务", kind: "waiting", link: "https://t3/t-1" });
+    expect(pushed[0]).toMatchObject({ deviceName: "Mac B", title: "任务", kind: "waiting", link: "https://t3/t-1" });
+    expect(pushed[0]?.dispatchId).toBeTruthy();
   });
 });

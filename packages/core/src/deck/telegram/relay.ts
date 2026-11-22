@@ -53,12 +53,24 @@ export interface TelegramRelayClientOptions {
   name: string;
   onState(state: TelegramRelayState): void;
   onMessage(message: TelegramMessage): void;
+  /** 本机被配成路由设备时，中转把「没引用的消息 + 候选推送」交给这里判断。 */
+  onRoute?(message: TelegramMessage, candidates: TelegramRouteCandidate[]): void;
   onConnection(connection: "connecting" | "ok" | "error", error: string | null): void;
   onDispatchFrame?(frame: DispatchRelayFrame): void;
   socket?: RelaySocketFactory;
   retryMs?: readonly number[];
   pingMs?: number;
   requestTimeoutMs?: number;
+}
+
+/** 中转给路由设备的候选：最近推送过的一条提醒。 */
+export interface TelegramRouteCandidate {
+  /** 那条推送的 Telegram 消息 id（forward 的目标）。 */
+  id: number;
+  deviceId: string;
+  deviceName: string;
+  preview: string;
+  at: number;
 }
 
 const DEFAULT_RETRY_MS = [2_000, 5_000, 15_000, 30_000, 60_000] as const;
@@ -337,6 +349,21 @@ export class TelegramRelayClient {
       });
     } else if (frame.t === "message" && frame.message && typeof frame.message === "object") {
       this.#options.onMessage(frame.message as TelegramMessage);
+    } else if (frame.t === "route" && frame.message && typeof frame.message === "object" && Array.isArray(frame.candidates)) {
+      const candidates = (frame.candidates as Array<Record<string, unknown>>).flatMap((item) =>
+        typeof item.id === "number" && typeof item.deviceId === "string" && typeof item.preview === "string"
+          ? [
+              {
+                id: item.id,
+                deviceId: item.deviceId,
+                deviceName: typeof item.deviceName === "string" ? item.deviceName : "",
+                preview: item.preview,
+                at: typeof item.at === "number" ? item.at : 0,
+              },
+            ]
+          : [],
+      );
+      this.#options.onRoute?.(frame.message as TelegramMessage, candidates);
     } else if (frame.t === "res" && typeof frame.id === "string") {
       const pending = this.#pending.get(frame.id);
       if (!pending) return;
@@ -385,5 +412,10 @@ export class TelegramRelayClient {
       ...(options.push ? { push: true } : {}),
     });
     return result.messageId;
+  }
+
+  /** 路由设备判断完：把这条消息当作「回复了 target 那条推送」转给那条推送所属的设备。 */
+  async forward(message: TelegramMessage, target: number): Promise<void> {
+    await this.request("forward", { message, target });
   }
 }

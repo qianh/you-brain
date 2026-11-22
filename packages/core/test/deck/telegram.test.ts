@@ -5,7 +5,7 @@ import { describe, expect, it } from "bun:test";
 
 import { MemorySecretStore } from "../../src/auth/secret-store.js";
 import type { SessionNotice, SessionNoticeList } from "../../src/deck/session-notices.js";
-import { TelegramBridge, noticeText } from "../../src/deck/telegram/bridge.js";
+import { TelegramBridge, noticeText, type TelegramDispatchPort } from "../../src/deck/telegram/bridge.js";
 import type { TelegramUpdate } from "../../src/deck/telegram/api.js";
 import type { Tty7Session, Tty7SendInput, Tty7SessionsView } from "../../src/deck/tty7.js";
 
@@ -109,7 +109,7 @@ async function until(check: () => boolean, label: string): Promise<void> {
   throw new Error(`timed out: ${label}`);
 }
 
-async function setup(options: { token?: string | null } = {}) {
+async function setup(options: { token?: string | null; dispatch?: TelegramDispatchPort } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "ub-telegram-"));
   const telegram = new FakeTelegram();
   const list: SessionNoticeList = { epoch: "e1", latest: 0, notices: [] };
@@ -140,6 +140,7 @@ async function setup(options: { token?: string | null } = {}) {
     now: () => clock.now,
     pollTimeoutSec: 0,
     retryMs: [5],
+    ...(options.dispatch ? { dispatch: options.dispatch } : {}),
   });
   return {
     clock,
@@ -157,8 +158,8 @@ async function setup(options: { token?: string | null } = {}) {
 }
 
 /** 配好 Token 并完成绑定。 */
-async function paired(notifications = true) {
-  const ctx = await setup();
+async function paired(notifications = true, dispatch?: TelegramDispatchPort) {
+  const ctx = await setup(dispatch ? { dispatch } : {});
   await ctx.bridge.start();
   await ctx.bridge.action({ action: "set-token", token: TOKEN });
   const status = await ctx.bridge.action({ action: "pair" });
@@ -460,7 +461,40 @@ describe("TelegramBridge", () => {
     ctx.bridge.stop();
   });
 
-  it("pushDispatch pushes with 🛰 device prefix, respects notificationsEnabled, and does not register reply routing", async () => {
+  it("直接回复（不引用）派活推送，消息经派活中枢进到被派的会话；引用回复同样可用", async () => {
+    const followups: Array<{ dispatchId: string; prompt: string }> = [];
+    let fail: string | null = null;
+    const port: TelegramDispatchPort = {
+      attach() {},
+      onFrame() {},
+      setState() {},
+      followup: async (dispatchId, prompt) => {
+        followups.push({ dispatchId, prompt });
+        return fail ? { ok: false, error: fail } : { ok: true };
+      },
+    };
+    const ctx = await paired(true, port);
+    ctx.bridge.pushDispatch({ dispatchId: "d-1", deviceName: "VPS 主控", title: "回复路由验证", kind: "done", body: "等待你的回复" });
+    await ctx.bridge.flush();
+    const pushedId = 500 + ctx.telegram.nextId - 1;
+
+    ctx.telegram.say(OWNER, "收到");
+    await until(() => followups.length === 1, "plain reply to dispatch");
+    expect(followups[0]).toEqual({ dispatchId: "d-1", prompt: "收到" });
+    await until(() => ctx.telegram.sent.some((item) => item.text.includes("已发送到派出的会话「回复路由验证」")), "dispatch ack");
+    expect(ctx.sends).toEqual([]);
+
+    ctx.telegram.say(OWNER, "引用的一句", pushedId);
+    await until(() => followups.length === 2, "quoted reply to dispatch");
+    expect(followups[1]).toEqual({ dispatchId: "d-1", prompt: "引用的一句" });
+
+    fail = "目标设备不在线";
+    ctx.telegram.say(OWNER, "再来一句");
+    await until(() => ctx.telegram.sent.some((item) => item.text.includes("发送失败：目标设备不在线")), "dispatch failure surfaced");
+    ctx.bridge.stop();
+  });
+
+  it("pushDispatch pushes with 🛰 device prefix, respects notificationsEnabled, and without a dispatchId does not register reply routing", async () => {
     const ctx = await paired();
     ctx.bridge.pushDispatch({
       deviceName: "Mac Studio",
@@ -489,7 +523,7 @@ describe("TelegramBridge", () => {
     expect(ctx.telegram.sent[1]!.text).toContain("⏳ 🛰 Mac Studio「部署确认」在等你处理授权或提问");
     expect(ctx.telegram.sent[2]!.text).toContain("❌ 🛰 Mac Studio「跑单测」执行失败");
 
-    // 未登记 #sent 与 #recent：回复它或直接发消息都不会路由到本机会话
+    // 没带 dispatchId：不登记 #sent 与 #recent，回复它或直接发消息都不会路由到任何会话
     const pushedId = 500 + ctx.telegram.nextId - 1;
     ctx.telegram.say(OWNER, "继续", pushedId);
     await until(() => ctx.telegram.sent.some((item) => item.text.includes("不是可回复的提醒")), "dispatch reply rejected");

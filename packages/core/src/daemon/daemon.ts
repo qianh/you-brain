@@ -835,6 +835,7 @@ export function createDispatchEventHandler(deps: {
       const body =
         rawBody.length > DISPATCH_SUMMARY_LIMIT ? `${rawBody.slice(0, DISPATCH_SUMMARY_LIMIT)}…` : rawBody;
       deps.push({
+        dispatchId: entry.dispatchId,
         deviceName: entry.deviceName,
         title: eventTitle,
         kind,

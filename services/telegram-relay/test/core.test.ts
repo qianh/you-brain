@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { RECENT_DEVICE_TTL_MS, RelayCore, type RelaySocket, type TgMessage } from "../src/core.js";
+import { CANDIDATE_TTL_MS, RECENT_DEVICE_TTL_MS, RelayCore, type RelayPorts, type RelaySocket, type TgMessage } from "../src/core.js";
 
 const OWNER = 1001;
 const STRANGER = 2002;
@@ -12,7 +12,7 @@ class World {
   clock = 1_000_000;
   nextId = 900;
   nextIncoming = 1;
-  core = new RelayCore({
+  ports: RelayPorts = {
     storage: {
       get: async <T>(key: string) => structuredClone(this.store.get(key)) as T | undefined,
       put: async (key, value) => void this.store.set(key, structuredClone(value)),
@@ -27,7 +27,8 @@ class World {
     },
     now: () => this.clock,
     randomInt: () => 0,
-  });
+  };
+  core = new RelayCore(this.ports);
 
   async connect(deviceId: string, name: string) {
     const socket = { deviceId, name, frames: [] as Array<Record<string, unknown>>, send: (frame: string) => socket.frames.push(JSON.parse(frame)) };
@@ -111,6 +112,65 @@ describe("RelayCore", () => {
     await world.say(OWNER, "给 mini", fromMini.messageId);
     await world.say(OWNER, "还是 mini");
     expect(mini.frames.filter((f) => f.t === "message").map((f) => (f.message as TgMessage).text)).toEqual(["给 mini", "还是 mini"]);
+  });
+
+  it("配了路由设备：不引用的消息带候选清单交给它，由它 forward 到指定推送所属设备", async () => {
+    const world = new World();
+    const vps = await world.connect("device-vps-0000", "VPS 主控");
+    const mac = await world.connect("device-mac-0001", "MacBook");
+    const mini = await world.connect("device-mini-0002", "Mac mini");
+    await world.bind(vps);
+    world.ports.routerDeviceId = "device-vps-0000";
+
+    // 没有候选推送：走原来的帮助文案，不打扰路由设备。
+    await world.say(OWNER, "在吗");
+    expect(world.sent().at(-1)?.text).toContain("直接发消息");
+    expect(vps.frames.filter((f) => f.t === "route")).toHaveLength(0);
+
+    const a = (await world.request(mac, { op: "send", text: "✅ 修登录 做完了\n\n改好了", push: true })).result as { messageId: number };
+    const b = (await world.request(mini, { op: "send", text: "⏳ 跑迁移 在等你", push: true })).result as { messageId: number };
+
+    const message = await world.say(OWNER, "迁移那个批准");
+    const routed = vps.frames.filter((f) => f.t === "route");
+    expect(routed).toHaveLength(1);
+    expect(routed[0]!.message).toMatchObject({ text: "迁移那个批准" });
+    expect(routed[0]!.candidates).toEqual([
+      { id: b.messageId, deviceId: "device-mini-0002", deviceName: "Mac mini", preview: "⏳ 跑迁移 在等你", at: world.clock },
+      { id: a.messageId, deviceId: "device-mac-0001", deviceName: "MacBook", preview: "✅ 修登录 做完了 改好了", at: world.clock },
+    ]);
+    // 路由设备判断前，其他设备都收不到。
+    expect(mac.frames.filter((f) => f.t === "message")).toHaveLength(0);
+    expect(mini.frames.filter((f) => f.t === "message")).toHaveLength(0);
+
+    const forwarded = await world.request(vps, { op: "forward", message, target: b.messageId });
+    expect(forwarded.ok).toBe(true);
+    const got = mini.frames.filter((f) => f.t === "message").map((f) => f.message as TgMessage);
+    expect(got).toHaveLength(1);
+    expect(got[0]).toMatchObject({ text: "迁移那个批准", reply_to_message: { message_id: b.messageId } });
+    expect(mac.frames.filter((f) => f.t === "message")).toHaveLength(0);
+
+    // 只有路由设备能 forward；目标过期或离线都明确报错。
+    expect((await world.request(mac, { op: "forward", message, target: b.messageId })).ok).toBe(false);
+    expect((await world.request(vps, { op: "forward", message, target: 424242 })).error).toContain("已过期");
+    world.drop("device-mini-0002");
+    expect((await world.request(vps, { op: "forward", message, target: b.messageId })).error).toContain("现在不在线");
+    expect((await world.request(vps, { op: "forward", message: { ...message, chat: { id: STRANGER, type: "private" } }, target: a.messageId })).ok).toBe(false);
+
+    // 引用回复仍然精确路由，不经过路由设备。
+    const before = vps.frames.filter((f) => f.t === "route").length;
+    await world.say(OWNER, "精确回", a.messageId);
+    expect(mac.frames.filter((f) => f.t === "message")).toHaveLength(1);
+    expect(vps.frames.filter((f) => f.t === "route")).toHaveLength(before);
+
+    // 候选过期后不再交给路由设备，路由设备下线时退回最近设备。
+    world.clock += CANDIDATE_TTL_MS + 1;
+    await world.say(OWNER, "太久了");
+    expect(vps.frames.filter((f) => f.t === "route")).toHaveLength(before);
+    world.ports.routerDeviceId = "device-gone-9999";
+    const c = (await world.request(mac, { op: "send", text: "✅ 新的", push: true })).result as { messageId: number };
+    void c;
+    await world.say(OWNER, "回最近");
+    expect(mac.frames.filter((f) => f.t === "message")).toHaveLength(2);
   });
 
   it("设备不在线、未知消息、太久以前的最近设备都不转发，并告诉用户", async () => {

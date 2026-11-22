@@ -18,7 +18,7 @@ import {
 } from "./session-notices.js";
 import type { DeviceIdentity } from "../dispatch/identity.js";
 import { startT3Proxy, type T3Proxy } from "./t3/proxy.js";
-import { TelegramBridge, type TelegramDispatchPort, type TelegramFetch } from "./telegram/index.js";
+import { TelegramBridge, createLlmRouteJudge, type TelegramDispatchPort, type TelegramFetch } from "./telegram/index.js";
 import { Tty7, type Tty7SessionsView } from "./tty7.js";
 import {
   GUI_APPS,
@@ -159,6 +159,7 @@ export class DeckService {
             ...(options.dispatch ? { dispatch: options.dispatch } : {}),
             ...(options.dispatchIdentity ? { dispatchIdentity: options.dispatchIdentity } : {}),
             ...(options.deviceId ? { deviceId: options.deviceId } : {}),
+            routeJudge: createLlmRouteJudge(async () => (options.noticeLlm ? await options.noticeLlm() : null)),
             notices: () => this.notices.list(),
             sessions: () => this.tty7.sessions(),
             send: (input) => this.tty7.send(input),

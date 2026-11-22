@@ -9,7 +9,8 @@ import { TelegramBridge } from "../../src/deck/telegram/bridge.js";
 import { normalizeRelayUrl, type RelaySocketLike } from "../../src/deck/telegram/relay.js";
 import { decodeRelayInvite, encodeRelayInvite } from "../../src/deck/telegram/invite.js";
 import type { Tty7Session, Tty7SendInput } from "../../src/deck/tty7.js";
-import { RelayCore, type RelaySocket, type TgMessage } from "../../../../services/telegram-relay/src/core.js";
+import { RelayCore, type RelayPorts, type RelaySocket, type TgMessage } from "../../../../services/telegram-relay/src/core.js";
+import type { TelegramRouteJudge } from "../../src/deck/telegram/router.js";
 
 const KEY = "relay-key-0123456789abcdef";
 const URL_ = "https://relay.example.workers.dev";
@@ -23,7 +24,7 @@ class FakeRelay {
   nextId = 700;
   nextIncoming = 1;
   rejectKey = false;
-  core = new RelayCore({
+  ports: RelayPorts = {
     storage: {
       get: async <T>(key: string) => structuredClone(this.store.get(key)) as T | undefined,
       put: async (key, value) => void this.store.set(key, structuredClone(value)),
@@ -40,7 +41,8 @@ class FakeRelay {
     },
     now: () => Date.now(),
     randomInt: () => 1,
-  });
+  };
+  core = new RelayCore(this.ports);
 
   fetch = async (url: string, init: RequestInit): Promise<Response> => {
     expect(url).toBe(`${URL_}/check`);
@@ -144,7 +146,7 @@ function notice(seq: number, pane: number, title: string): SessionNotice {
   };
 }
 
-async function device(relay: FakeRelay, name: string, token: string | null = null) {
+async function device(relay: FakeRelay, name: string, token: string | null = null, routeJudge?: TelegramRouteJudge) {
   const dir = await mkdtemp(join(tmpdir(), "ub-telegram-relay-"));
   const list: SessionNoticeList = { epoch: "e1", latest: 0, notices: [] };
   const sends: Tty7SendInput[] = [];
@@ -160,6 +162,7 @@ async function device(relay: FakeRelay, name: string, token: string | null = nul
     relayFetch: relay.fetch,
     relaySocket: relay.socket,
     retryMs: [5],
+    ...(routeJudge ? { routeJudge } : {}),
   });
   await bridge.start();
   const push = (item: SessionNotice) => {
@@ -223,6 +226,55 @@ describe("TelegramBridge 中转模式", () => {
 
     mac.bridge.stop();
     mini.bridge.stop();
+  });
+
+  it("路由设备：没引用的消息由它按内容判断转给哪条推送；拿不准就列序号让用户选，回序号再转", async () => {
+    const relay = new FakeRelay();
+    const judged: Array<{ text: string; names: string[] }> = [];
+    let verdict: "mini" | null = "mini";
+    const vps = await device(relay, "VPS 主控", null, async ({ text, candidates }) => {
+      judged.push({ text, names: candidates.map((item) => item.deviceName) });
+      return verdict === "mini" ? candidates.findIndex((item) => item.deviceName === "Mac mini") : null;
+    });
+    const mac = await device(relay, "MacBook");
+    const mini = await device(relay, "Mac mini");
+    for (const [bridge, name] of [[vps, "VPS 主控"], [mac, "MacBook"], [mini, "Mac mini"]] as const) {
+      await bridge.bridge.action({ action: "set-relay", url: URL_, key: KEY, name });
+    }
+    await until(() => [vps, mac, mini].every((item) => item.bridge.status().connection === "ok"), "connected");
+    const pairing = (await vps.bridge.action({ action: "pair" })).pairing!;
+    await relay.say(`/start ${pairing.code}`);
+    await until(() => [vps, mac, mini].every((item) => item.bridge.bound()), "bound on all");
+    relay.ports.routerDeviceId = relay.sockets.find((socket) => socket.name === "VPS 主控")!.deviceId;
+    await mac.bridge.action({ action: "set-notifications", enabled: true });
+    await mini.bridge.action({ action: "set-notifications", enabled: true });
+
+    mac.push(notice(1, 1, "mac 在等你"));
+    await until(() => relay.sent.some((item) => item.text.includes("mac 在等你")), "mac push");
+    mini.push(notice(1, 1, "迁移要批准吗"));
+    await until(() => relay.sent.some((item) => item.text.includes("迁移要批准吗")), "mini push");
+
+    // 内容能判断：只进 mini，不打扰 mac。
+    await relay.say("迁移批准");
+    await until(() => mini.sends.length === 1, "judged to mini");
+    expect(mini.sends[0]).toEqual({ pane: 1, text: "迁移批准", enter: true });
+    expect(mac.sends).toHaveLength(0);
+    expect(judged).toEqual([{ text: "迁移批准", names: ["Mac mini", "MacBook"] }]);
+
+    // 判断不了：列出来让用户选，用户回「2」就把原话转给第 2 条（mac）。
+    verdict = null;
+    await relay.say("收到");
+    await until(() => relay.sent.some((item) => item.text.includes("这句话是回哪一条")), "asked to choose");
+    const asked = relay.sent.find((item) => item.text.includes("这句话是回哪一条"))!.text;
+    expect(asked).toContain("1. Mac mini：");
+    expect(asked).toContain("2. MacBook：");
+    expect(mac.sends).toHaveLength(0);
+    await relay.say("2");
+    await until(() => mac.sends.length === 1, "chosen mac");
+    expect(mac.sends[0]).toEqual({ pane: 1, text: "收到", enter: true });
+    expect(mini.sends).toHaveLength(1);
+
+    for (const item of [vps, mac, mini]) item.bridge.stop();
   });
 
   it("连接信息：已连中转的电脑导出地址和密钥，新电脑粘贴即可连上", async () => {

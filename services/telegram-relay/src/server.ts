@@ -33,6 +33,8 @@ export interface RelayServerOptions {
   pendingTimeoutMs?: number;
   /** 固定的公网地址（如 https://relay.example.com）。设置后 webhook 地址不再从请求头推断，经隧道时更稳。 */
   publicOrigin?: string;
+  /** 路由设备（VPS 的 deviceId）：不引用的 Telegram 消息交给它按内容判断是回哪条推送。 */
+  routerDeviceId?: string;
   now?: () => number;
   randomInt?: (max: number) => number;
 }
@@ -257,6 +259,7 @@ export async function startRelayServer(options: RelayServerOptions): Promise<Rel
     },
     now,
     randomInt,
+    ...(options.routerDeviceId ? { routerDeviceId: options.routerDeviceId } : {}),
     deviceMeta: async (deviceId) => {
       const active = await enroll.getActive(deviceId);
       const hello = active ? dispatch.getHello(deviceId) : undefined;

@@ -39,6 +39,7 @@ const server = await startRelayServer({
   dataDir,
   acceptLegacyKey,
   publicOrigin: optional("RELAY_PUBLIC_ORIGIN", ""),
+  routerDeviceId: optional("RELAY_ROUTER_DEVICE", ""),
 });
 
 console.log(`U-Brain Telegram relay 监听 http://${host}:${server.port}`);

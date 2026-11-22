@@ -16,6 +16,7 @@ export {
   type TelegramT3Port,
 } from "./bridge.js";
 export { decodeRelayInvite, encodeRelayInvite } from "./invite.js";
+export { createLlmRouteJudge, type TelegramRouteJudge } from "./router.js";
 export {
   TelegramRelayClient,
   checkRelay,

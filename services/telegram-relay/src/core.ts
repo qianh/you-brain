@@ -4,13 +4,16 @@
  * 一个 Bot 只能有一个消费者：Telegram 把消息 webhook 到这里，这里再按设备分发。
  * - 设备推送提醒：经这里调 sendMessage，记下「这条消息属于哪台设备」。
  * - 手机回复某条提醒：按被回复的消息找到设备，转给它。
- * - 手机直接发消息：转给最近推送过（或最近被回复过）的设备。
+ * - 手机直接发消息：配了「路由设备」（VPS）且在线时，带上候选推送清单交给它判断是回哪一条，
+ *   由它用 `forward` 指定目标；没配或不在线时，转给最近推送过（或最近被回复过）的设备。
  * - 绑定私聊：设备申请绑定码，手机 `/start <码>` 后，这个中转只认这一个私聊。
  *
  * 设备 ⇄ 中转的帧（JSON 文本）：
  * - 设备 → 中转 `{t:"req", id, op:"send", text, replyTo?, push?}` / `{t:"req", id, op:"pair"}` / `{t:"req", id, op:"unbind"}`
  * - 中转 → 设备 `{t:"res", id, ok:true, result}` / `{t:"res", id, ok:false, error}`
+ * - 设备（仅路由设备）→ 中转 `{t:"req", id, op:"forward", message, target}`：把一条没引用的消息转给 `target` 那条推送的设备
  * - 中转 → 设备 `{t:"state", bot, bound, devices}` / `{t:"message", message}`
+ * - 中转 → 路由设备 `{t:"route", message, candidates:[{id, deviceId, deviceName, preview, at}]}`
  * - 心跳：设备发文本 `ping`，运行时自动回 `pong`，不唤醒 Durable Object。
  */
 
@@ -41,6 +44,8 @@ export interface RelayPorts {
   now(): number;
   /** 取 [0, max) 的随机整数，生成绑定码用。 */
   randomInt(max: number): number;
+  /** 可选：路由设备的 deviceId。不引用的消息交给它按内容判断是回哪条推送。 */
+  routerDeviceId?: string;
   /** 可选：为 state.devices 补充入网状态、公钥与最近一次 hello 的 dispatch 信息。 */
   deviceMeta?: (deviceId: string) => Promise<RelayDeviceMeta | undefined> | RelayDeviceMeta | undefined;
 }
@@ -78,8 +83,16 @@ interface Bot {
   name: string;
 }
 type Devices = Record<string, { name: string; seenAt: number }>;
-/** [Telegram 消息 id, 设备 id]，新的在后。 */
-type Routes = Array<[number, string]>;
+/** [Telegram 消息 id, 设备 id, 正文摘要, 推送时间]，新的在后；老数据只有前两项。 */
+type Routes = Array<[number, string, string?, number?]>;
+
+export interface RelayRouteCandidate {
+  id: number;
+  deviceId: string;
+  deviceName: string;
+  preview: string;
+  at: number;
+}
 
 export interface RelayStateDevice {
   id: string;
@@ -97,6 +110,10 @@ export interface RelayState {
 }
 
 const ROUTES_KEPT = 1_000;
+/** 交给路由设备判断时带上多少条最近的推送，以及多久以前的不再算。 */
+const CANDIDATES_MAX = 8;
+export const CANDIDATE_TTL_MS = 6 * 60 * 60_000;
+const PREVIEW_MAX = 160;
 const DEVICES_KEPT = 200;
 const PAIR_TTL_MS = 10 * 60_000;
 const PAIR_MAX_FAILURES = 5;
@@ -117,6 +134,22 @@ function displayName(message: TgMessage): string {
   const from = message.from;
   if (from?.username) return `@${from.username}`;
   return [from?.first_name, from?.last_name].filter(Boolean).join(" ") || String(message.chat.id);
+}
+
+interface RelayRequest {
+  t?: unknown;
+  id?: unknown;
+  op?: unknown;
+  text?: unknown;
+  replyTo?: unknown;
+  push?: unknown;
+  message?: unknown;
+  target?: unknown;
+}
+
+function previewOf(text: string): string {
+  const flat = text.replace(/\s+/gu, " ").trim();
+  return flat.length > PREVIEW_MAX ? `${flat.slice(0, PREVIEW_MAX)}…` : flat;
 }
 
 export class RelayCore {
@@ -209,7 +242,7 @@ export class RelayCore {
   }
 
   async frame(socket: RelaySocket, raw: string): Promise<void> {
-    let request: { t?: unknown; id?: unknown; op?: unknown; text?: unknown; replyTo?: unknown; push?: unknown };
+    let request: RelayRequest;
     try {
       request = JSON.parse(raw) as typeof request;
     } catch {
@@ -227,9 +260,11 @@ export class RelayCore {
 
   async #request(
     socket: RelaySocket,
-    request: { op?: unknown; text?: unknown; replyTo?: unknown; push?: unknown },
+    request: RelayRequest,
   ): Promise<unknown> {
     switch (request.op) {
+      case "forward":
+        return this.#forward(socket, request);
       case "send": {
         const chat = await this.#get<Chat>("chat");
         if (!chat) throw new Error("还没有绑定 Telegram");
@@ -241,7 +276,7 @@ export class RelayCore {
         const prefix = push && Object.keys(devices).length > 1 ? `💻 ${socket.name}\n` : "";
         const sent = await this.#send(chat.id, `${prefix}${request.text}`, replyTo);
         if (push) {
-          await this.#route(sent, socket.deviceId);
+          await this.#route(sent, socket.deviceId, previewOf(request.text));
           await this.#ports.storage.put("recent", { deviceId: socket.deviceId, at: this.#ports.now() } satisfies Recent);
         }
         return { messageId: sent };
@@ -278,9 +313,9 @@ export class RelayCore {
     return sent.message_id;
   }
 
-  async #route(messageId: number, deviceId: string): Promise<void> {
+  async #route(messageId: number, deviceId: string, preview: string): Promise<void> {
     const routes = (await this.#get<Routes>("routes")) ?? [];
-    routes.push([messageId, deviceId]);
+    routes.push([messageId, deviceId, preview, this.#ports.now()]);
     await this.#ports.storage.put("routes", routes.slice(-ROUTES_KEPT));
   }
 
@@ -311,6 +346,7 @@ export class RelayCore {
         return;
       }
     } else {
+      if (await this.#routeToRouter(message)) return;
       const recent = await this.#get<Recent>("recent");
       if (!recent || this.#ports.now() - recent.at > RECENT_DEVICE_TTL_MS) {
         await this.#reply(message, await this.#help());
@@ -327,6 +363,53 @@ export class RelayCore {
     const frame = JSON.stringify({ t: "message", message });
     for (const socket of sockets) socket.send(frame);
     await this.#ports.storage.put("recent", { deviceId, at: this.#ports.now() } satisfies Recent);
+  }
+
+  /** 不引用的消息：路由设备在线且有候选推送时交给它判断；返回 false 表示走原来的「最近设备」。 */
+  async #routeToRouter(message: TgMessage): Promise<boolean> {
+    const routerId = this.#ports.routerDeviceId;
+    if (!routerId) return false;
+    const sockets = this.#ports.sockets().filter((socket) => socket.deviceId === routerId);
+    if (sockets.length === 0) return false;
+    const candidates = await this.#candidates();
+    if (candidates.length === 0) return false;
+    const frame = JSON.stringify({ t: "route", message, candidates });
+    for (const socket of sockets) socket.send(frame);
+    return true;
+  }
+
+  /** 最近还没过期的推送，新的在前。 */
+  async #candidates(): Promise<RelayRouteCandidate[]> {
+    const now = this.#ports.now();
+    const devices = (await this.#get<Devices>("devices")) ?? {};
+    const result: RelayRouteCandidate[] = [];
+    for (const [id, deviceId, preview, at] of [...((await this.#get<Routes>("routes")) ?? [])].reverse()) {
+      if (typeof preview !== "string" || typeof at !== "number" || now - at > CANDIDATE_TTL_MS) continue;
+      result.push({ id, deviceId, deviceName: devices[deviceId]?.name ?? "未知设备", preview, at });
+      if (result.length >= CANDIDATES_MAX) break;
+    }
+    return result;
+  }
+
+  /** 路由设备判断完：把这条消息当作「回复了 target 那条推送」转给对应设备。 */
+  async #forward(socket: RelaySocket, request: { message?: unknown; target?: unknown }): Promise<unknown> {
+    if (!this.#ports.routerDeviceId || socket.deviceId !== this.#ports.routerDeviceId) throw new Error("这台设备不是路由设备");
+    const chat = await this.#get<Chat>("chat");
+    const message = request.message as TgMessage | undefined;
+    if (!chat || !message || typeof message.message_id !== "number" || message.chat?.id !== chat.id) throw new Error("消息无效");
+    if (typeof request.target !== "number") throw new Error("缺少目标");
+    const route = ((await this.#get<Routes>("routes")) ?? []).find(([id]) => id === request.target);
+    if (!route) throw new Error("目标推送已过期");
+    const deviceId = route[1];
+    const sockets = this.#ports.sockets().filter((item) => item.deviceId === deviceId);
+    if (sockets.length === 0) {
+      const name = ((await this.#get<Devices>("devices")) ?? {})[deviceId]?.name ?? "那台设备";
+      throw new Error(`「${name}」现在不在线（U-Brain 没开或断网），这条没有发送。`);
+    }
+    const frame = JSON.stringify({ t: "message", message: { ...message, reply_to_message: { message_id: request.target } } });
+    for (const item of sockets) item.send(frame);
+    await this.#ports.storage.put("recent", { deviceId, at: this.#ports.now() } satisfies Recent);
+    return {};
   }
 
   async #help(): Promise<string> {

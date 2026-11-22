@@ -25,8 +25,15 @@ import {
   type RelayFetch,
   type RelaySocketFactory,
   type TelegramRelayState,
+  type TelegramRouteCandidate,
 } from "./relay.js";
 import { encodeRelayInvite } from "./invite.js";
+import {
+  PENDING_CHOICE_TTL_MS,
+  formatChoiceList,
+  parseChoiceReply,
+  type TelegramRouteJudge,
+} from "./router.js";
 
 /**
  * Telegram 桥：把「终端会话在等你回复」推到绑定的 Telegram 私聊；
@@ -68,6 +75,8 @@ export interface TelegramDispatchPort {
   attach(link: TelegramDispatchLink | null): void;
   onFrame(frame: DispatchRelayFrame): void;
   setState(state: TelegramRelayState): void;
+  /** 向已派出的会话追加一条消息（手机上直接回复派活推送时用）。 */
+  followup?(dispatchId: string, prompt: string): Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
 export interface TelegramDispatchIdentity {
@@ -86,6 +95,8 @@ export interface TelegramBridgeOptions {
   dispatch?: TelegramDispatchPort;
   /** 跨设备派活本机身份（入网时提供公钥）。 */
   dispatchIdentity?: DeviceIdentity;
+  /** 本机被中转配成路由设备时，按内容判断「没引用的消息」回的是哪条推送；缺省视为拿不准，直接让用户选。 */
+  routeJudge?: TelegramRouteJudge;
   notices(): SessionNoticeList;
   sessions(): Promise<Tty7SessionsView>;
   send(input: Tty7SendInput): Promise<void>;
@@ -144,7 +155,9 @@ export const RECENT_TARGET_TTL_MS = 2 * 60 * 60_000;
 /** 推送过的提醒对应的会话：tty7 终端会话或 T3 会话。 */
 type SentNotice =
   | { kind: "tty7"; pane: number; cwd: string; name: string }
-  | { kind: "t3"; threadId: string; name: string };
+  | { kind: "t3"; threadId: string; name: string }
+  /** 跨设备派活出去的会话：回复经派活中枢追加给目标设备上的那个会话。 */
+  | { kind: "dispatch"; dispatchId: string; name: string };
 
 /** T3 会话的读写（daemon 在 T3 适配器就绪后挂上）。 */
 export interface TelegramT3Port {
@@ -164,6 +177,8 @@ export interface TelegramT3Notice {
 }
 
 export interface TelegramDispatchNotice {
+  /** 派活 ID；带上才能把这条推送登记成「最近的会话」，让手机上直接回复进到被派的会话。 */
+  dispatchId?: string;
   deviceName: string;
   title: string;
   kind: "done" | "waiting" | "failed";
@@ -250,6 +265,8 @@ export class TelegramBridge {
   readonly #sent = new Map<number, SentNotice>();
   /** 直接发的消息（没回复某条提醒）发给它：最近推送过、或最近回复过的会话。 */
   #recent: { target: SentNotice; at: number } | null = null;
+  /** 路由设备问过用户「是哪一条」之后，等用户回序号。 */
+  #pendingChoice: { message: TelegramMessage; candidates: TelegramRouteCandidate[]; at: number } | null = null;
   #t3: TelegramT3Port | null = null;
   #pushChain: Promise<void> = Promise.resolve();
   #relay: TelegramRelayClient | null = null;
@@ -581,6 +598,12 @@ export class TelegramBridge {
         if (this.#relay !== client) return;
         void this.#handleBound(message, message.text?.trim() ?? "").catch(() => undefined);
       },
+      onRoute: (message, candidates) => {
+        if (this.#relay !== client) return;
+        void this.#handleRoute(client, message, candidates).catch((error: unknown) => {
+          console.error(`[telegram] 路由处理失败：${error instanceof Error ? error.message : String(error)}`);
+        });
+      },
       onConnection: (connection, error) => {
         if (this.#relay !== client) return;
         this.#connection = connection;
@@ -741,6 +764,49 @@ export class TelegramBridge {
     await this.#deliver(message, target, text);
   }
 
+  /**
+   * 本机是路由设备：手机上没引用的消息先到这里。
+   * 先看是不是在回「请选序号」；只有一条候选直接转；否则按内容判断；拿不准就列出来让用户选。
+   */
+  async #handleRoute(client: TelegramRelayClient, message: TelegramMessage, candidates: TelegramRouteCandidate[]): Promise<void> {
+    const text = message.text?.trim() ?? "";
+    if (!text) {
+      await this.#reply(message, "目前只支持文字。");
+      return;
+    }
+    const forward = async (original: TelegramMessage, candidate: TelegramRouteCandidate): Promise<void> => {
+      try {
+        await client.forward(original, candidate.id);
+      } catch (error) {
+        await this.#reply(message, `转发失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+    };
+
+    const pending = this.#pendingChoice;
+    this.#pendingChoice = null;
+    if (pending && this.#now() - pending.at <= PENDING_CHOICE_TTL_MS) {
+      const index = parseChoiceReply(text, pending.candidates.length);
+      if (index !== null) {
+        await forward(pending.message, pending.candidates[index]!);
+        return;
+      }
+    }
+
+    let index: number | null = candidates.length === 1 ? 0 : null;
+    if (index === null && candidates.length > 1) {
+      console.log(`[telegram] 路由判断：${candidates.length} 个候选`);
+      index = (await this.#options.routeJudge?.({ text, candidates, now: this.#now() }).catch(() => null)) ?? null;
+      console.log(`[telegram] 路由判断结果：${index === null ? "拿不准" : index + 1}`);
+    }
+    const chosen = index === null ? undefined : candidates[index];
+    if (chosen) {
+      await forward(message, chosen);
+      return;
+    }
+    this.#pendingChoice = { message, candidates, at: this.#now() };
+    await this.#reply(message, formatChoiceList(candidates));
+  }
+
   async #handleStranger(message: TelegramMessage, text: string, boundToOther: boolean): Promise<void> {
     // 已经绑了别人：一概不理，不暴露任何信息。
     if (boundToOther) return;
@@ -782,6 +848,10 @@ export class TelegramBridge {
       await this.#deliverT3(message, target, text);
       return;
     }
+    if (target.kind === "dispatch") {
+      await this.#deliverDispatch(message, target, text);
+      return;
+    }
     let view: Tty7SessionsView;
     try {
       view = await this.#options.sessions();
@@ -808,6 +878,31 @@ export class TelegramBridge {
     this.#options.dismiss({ pane: target.pane });
     this.#recent = { target, at: this.#now() };
     await this.#reply(message, `✓ 已发送到「${target.name}」`);
+  }
+
+  async #deliverDispatch(
+    message: TelegramMessage,
+    target: Extract<SentNotice, { kind: "dispatch" }>,
+    text: string,
+  ): Promise<void> {
+    const port = this.#options.dispatch;
+    if (!port?.followup) {
+      await this.#reply(message, "跨设备派活暂时不可用，没有发送。");
+      return;
+    }
+    let result: { ok: true } | { ok: false; error: string };
+    try {
+      result = await port.followup(target.dispatchId, text);
+    } catch (error) {
+      await this.#reply(message, `发送失败：${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (!result.ok) {
+      await this.#reply(message, `发送失败：${result.error}`);
+      return;
+    }
+    this.#recent = { target, at: this.#now() };
+    await this.#reply(message, `✓ 已发送到派出的会话「${target.name}」`);
   }
 
   async #deliverT3(
@@ -881,7 +976,7 @@ export class TelegramBridge {
     });
   }
 
-  /** 跨设备派活结果到达时推送到绑定的私聊；不登记回复路由，由中转帮助文案接手回复。 */
+  /** 跨设备派活结果到达时推送到绑定的私聊；带 dispatchId 时登记为「最近的会话」，直接回复就进被派的会话。 */
   pushDispatch(notice: TelegramDispatchNotice): void {
     const revision = this.#notificationRevision;
     if (!this.#canNotify(revision)) return;
@@ -889,13 +984,20 @@ export class TelegramBridge {
       if (!this.#canNotify(revision)) return;
       try {
         const text = dispatchNoticeText(notice);
+        let sent: number;
         if (this.#relay) {
-          await this.#relay.send(text);
+          sent = await this.#relay.send(text, { push: true });
         } else {
           const api = this.#api;
           const chatId = this.#stored.chatId;
           if (!api || chatId === null) return;
-          await api.sendMessage(chatId, text);
+          sent = (await api.sendMessage(chatId, text)).message_id;
+        }
+        if (notice.dispatchId) {
+          const target: SentNotice = { kind: "dispatch", dispatchId: notice.dispatchId, name: notice.title };
+          this.#sent.set(sent, target);
+          this.#recent = { target, at: this.#now() };
+          if (this.#sent.size > SENT_KEPT) this.#sent.delete(this.#sent.keys().next().value!);
         }
       } catch {
         // 推送失败只丢这一条。
