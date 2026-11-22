@@ -260,7 +260,7 @@ import {
   type OutboxEntry,
 } from "../dispatch/index.js";
 import { writeFileAtomic } from "../domain/atomic.js";
-import type { TelegramDispatchNotice } from "../deck/telegram/index.js";
+import { RelayAutoJoin, type TelegramDispatchNotice } from "../deck/telegram/index.js";
 import { DEFAULT_T3_URL, normalizeT3Url } from "../deck/t3/index.js";
 import { T3Automation } from "../deck/t3/automation.js";
 import { T3ThreadWatcher } from "../deck/t3/watch.js";
@@ -947,6 +947,7 @@ export class YouBrainDaemon {
   #embedderClose: (() => Promise<void>) | null = null;
   #notion: NotionService | null = null;
   #deck: DeckService | null = null;
+  #relayAutoJoin: RelayAutoJoin | null = null;
   #tasks: TaskService | null = null;
   #taskAutomation: T3Automation | null = null;
   /** T3 会话监视：Telegram 已绑定时把「做完一轮 / 等你处理」推到手机。 */
@@ -3179,6 +3180,31 @@ export class YouBrainDaemon {
     if (update.removedDevices?.length) this.changes.publish("devices", this.#clock.now().toISOString());
   }
 
+  /**
+   * 同一个云盘账号下的设备自动入网：已入网的设备把一次性邀请码放进云盘，没入网的读到就兑换，不用人填。
+   * 失败一律吞掉，下次心跳再试。
+   */
+  #runRelayAutoJoin(): void {
+    const sync = this.#sync;
+    const telegram = this.#deck?.telegram;
+    if (!sync || !telegram || this.#stopped) return;
+    this.#relayAutoJoin ??= new RelayAutoJoin({
+      readInvite: () => sync.readRelayInvite(),
+      writeInvite: (invite) => sync.writeRelayInvite(invite),
+      deviceId: () => this.#local.deviceId,
+      enrolledUrl: async () => (await telegram.enrolledRelay())?.url ?? null,
+      requestInvite: async () => {
+        const invite = await telegram.requestInvite();
+        if (!invite) throw new Error("这台设备还没有入网");
+        return invite;
+      },
+      canJoin: () => telegram.canAutoJoin(),
+      join: (url, code) => telegram.joinRelay(url, code),
+      now: () => this.#clock.now().getTime(),
+    });
+    void this.#relayAutoJoin.run().catch(() => undefined);
+  }
+
   async #heartbeat(): Promise<void> {
     if (this.#sync) {
       try {
@@ -3188,6 +3214,7 @@ export class YouBrainDaemon {
         await this.#reviewDrive(error);
       }
       this.#retryConfigPush();
+      this.#runRelayAutoJoin();
     }
     this.#rememberDevice();
     // Open pages only learn the new lastSeenAt from this event. Without it they show this device offline.
@@ -3778,6 +3805,7 @@ export class YouBrainDaemon {
       // 本机 CLI/应用的探测在后台预热,指挥台与其他功能打开时直接读缓存。
       this.#deck.warmDsh();
       this.#deck.startNotices();
+      this.#runRelayAutoJoin();
     }
     if (this.#paths && this.#tasks === null) {
       this.#taskAutomation ??= new T3Automation({

@@ -13,6 +13,7 @@ export const DRIVE_PATHS = {
   devicesDir: "you-brain/devices",
   eventsDir: "you-brain/events",
   consolidateLease: "you-brain/leases/consolidate.json",
+  relayInvite: "you-brain/relay/invite.json",
 } as const;
 
 function assertSegment(value: string, label: string): string {

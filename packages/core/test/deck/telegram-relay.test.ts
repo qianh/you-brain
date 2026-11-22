@@ -457,6 +457,50 @@ describe("TelegramRelayClient 扩展与入网", () => {
     }
   });
 
+  it("TelegramBridge 同账号自动入网：没入网且没直连才能入网，入网后能向中转要邀请码", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ub-telegram-autojoin-"));
+    const list: SessionNoticeList = { epoch: "e1", latest: 0, notices: [] };
+    const calls: Array<{ url: string; auth: string }> = [];
+    const make = (name: string, botToken: string | null) => {
+      const relayToken = new MemorySecretStore(null);
+      const bridge = new TelegramBridge({
+        configPath: join(dir, name, "telegram.json"),
+        token: new MemorySecretStore(botToken),
+        relayKey: new MemorySecretStore(null),
+        relayToken,
+        dispatchIdentity: new DeviceIdentity({ store: new MemorySecretStore(null) }),
+        notices: () => list,
+        sessions: async () => ({ available: true, detail: "", workspaces: [], sessions: [], harnesses: [], appearance: null }),
+        send: async () => undefined,
+        dismiss: () => undefined,
+        relayFetch: async (url, init) => {
+          const headers = (init.headers ?? {}) as Record<string, string>;
+          calls.push({ url: String(url), auth: headers.Authorization ?? "" });
+          if (String(url).endsWith("/enroll")) return Response.json({ token: "ubd_joined_token_123" });
+          return Response.json({ code: "NEWCODE12", expiresAt: "2026-11-22T15:00:00.000Z" });
+        },
+      });
+      return { bridge, relayToken };
+    };
+
+    // 在用自己 Bot Token 直连的设备不自动入网。
+    const direct = make("direct", "123:abc");
+    expect(await direct.bridge.canAutoJoin()).toBe(false);
+
+    const fresh = make("fresh", null);
+    expect(await fresh.bridge.canAutoJoin()).toBe(true);
+    expect(await fresh.bridge.enrolledRelay()).toBeNull();
+    expect(await fresh.bridge.requestInvite()).toBeNull();
+
+    await fresh.bridge.joinRelay(URL_, "GOODCODE1");
+    expect(await fresh.relayToken.get()).toBe("ubd_joined_token_123");
+    expect(await fresh.bridge.canAutoJoin()).toBe(false);
+    expect(await fresh.bridge.enrolledRelay()).toEqual({ url: URL_, token: "ubd_joined_token_123" });
+
+    expect(await fresh.bridge.requestInvite()).toEqual({ url: URL_, code: "NEWCODE12", expiresAt: "2026-11-22T15:00:00.000Z" });
+    expect(calls.at(-1)).toEqual({ url: `${URL_}/invite`, auth: "Bearer ubd_joined_token_123" });
+  });
+
   it("TelegramBridge enroll-relay：入网保存令牌、删旧 relayKey、用令牌连接并接通 dispatch 钩子", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ub-telegram-enroll-"));
     const list: SessionNoticeList = { epoch: "e1", latest: 0, notices: [] };

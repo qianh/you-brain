@@ -187,6 +187,31 @@ export async function enrollRelay(
   return { token: body.token.trim() };
 }
 
+/** 已入网的设备凭自己的令牌向中转要一个一次性邀请码（写进云盘给同账号的新设备用）。 */
+export async function requestRelayInvite(
+  url: string,
+  token: string,
+  fetchImpl: RelayFetch = fetch,
+): Promise<{ code: string; expiresAt: string }> {
+  let response: Response;
+  try {
+    response = await fetchImpl(`${url}/invite`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(15_000),
+      redirect: "error",
+    });
+  } catch (error) {
+    throw new Error(`连不上中转：${redactSecret(error instanceof Error ? error.message : String(error), token)}`);
+  }
+  const body = (await response.json().catch(() => ({}))) as { code?: unknown; expiresAt?: unknown; error?: unknown };
+  if (!response.ok) {
+    throw new Error(typeof body.error === "string" && body.error ? body.error : `中转拒绝了邀请码申请（${response.status}）`);
+  }
+  if (typeof body.code !== "string" || typeof body.expiresAt !== "string") throw new Error("中转没有返回有效的邀请码");
+  return { code: body.code, expiresAt: body.expiresAt };
+}
+
 export class TelegramRelayClient {
   readonly #options: TelegramRelayClientOptions;
   #socket: RelaySocketLike | null = null;

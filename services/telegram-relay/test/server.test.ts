@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto";
 import { mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -190,6 +191,56 @@ describe("Bun relay server", () => {
         },
       });
       expect(badDevice.status).toBe(400);
+    } finally {
+      await world.stop();
+    }
+  });
+
+  it("已入网设备用自己的令牌换邀请码，新设备用它入网；没令牌和限速都拒绝", async () => {
+    const world = await withRelay();
+    try {
+      const adminInvite = await fetch(`${world.base}/admin/invite`, { method: "POST", headers: { Authorization: `Bearer ${KEY}` } });
+      const first = (await adminInvite.json()) as { code: string };
+      const keyOf = () => {
+        const { publicKey } = generateKeyPairSync("ed25519");
+        return Buffer.from(publicKey.export({ type: "spki", format: "der" })).toString("base64url");
+      };
+      const enrolled = await fetch(`${world.base}/enroll`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: first.code, deviceId: DEVICE_A, name: "Mac A", publicKey: keyOf() }),
+      });
+      const { token } = (await enrolled.json()) as { token: string };
+      expect(token).toMatch(/^ubd_/);
+
+      // 没令牌、旧共享密钥都不行。
+      expect((await fetch(`${world.base}/invite`, { method: "POST" })).status).toBe(401);
+      expect((await fetch(`${world.base}/invite`, { method: "POST", headers: { Authorization: `Bearer ${KEY}` } })).status).toBe(401);
+
+      const issued = await fetch(`${world.base}/invite`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+      expect(issued.status).toBe(200);
+      const { code } = (await issued.json()) as { code: string };
+      const joined = await fetch(`${world.base}/enroll`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, deviceId: DEVICE_B, name: "Mac B", publicKey: keyOf() }),
+      });
+      expect(joined.status).toBe(200);
+      // 邀请码一次性。
+      const reuse = await fetch(`${world.base}/enroll`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, deviceId: "device-ccc-0003", name: "Mac C", publicKey: keyOf() }),
+      });
+      expect(reuse.status).not.toBe(200);
+
+      // 每小时 30 个。
+      let limited = 0;
+      for (let index = 0; index < 34; index += 1) {
+        const response = await fetch(`${world.base}/invite`, { method: "POST", headers: { Authorization: `Bearer ${token}` } });
+        if (response.status === 429) limited += 1;
+      }
+      expect(limited).toBeGreaterThan(0);
     } finally {
       await world.stop();
     }

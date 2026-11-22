@@ -11,6 +11,7 @@ import {
   parseDeviceRecord,
   parseEventsJsonl,
   parseProtocolFile,
+  parseRelayInvite,
   parseRoles,
   parseSharedConfig,
   serializeEventsJsonl,
@@ -19,6 +20,7 @@ import {
   type EventOf,
   type EventType,
   type ProtocolFile,
+  type RelayInviteFile,
   type Roles,
   type SharedConfig,
 } from "@you-brain/protocol";
@@ -331,6 +333,15 @@ export class ProtocolSync {
     const current = await readJson(this.#drive, DRIVE_PATHS.sharedConfig);
     if (current === null) return createDefaultSharedConfig();
     return parseSharedConfig(current);
+  }
+
+  /** 云盘里同账号设备留下的入网邀请；没有、格式不对都当没有。 */
+  async readRelayInvite(): Promise<RelayInviteFile | null> {
+    return parseRelayInvite(await readJson(this.#drive, DRIVE_PATHS.relayInvite).catch(() => null));
+  }
+
+  async writeRelayInvite(invite: RelayInviteFile): Promise<void> {
+    await updateJsonWithMerge<RelayInviteFile>(this.#drive, DRIVE_PATHS.relayInvite, () => invite);
   }
 
   async readRoles(): Promise<Roles> {

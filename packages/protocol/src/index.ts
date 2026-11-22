@@ -9,6 +9,7 @@ export * from "./formats.js";
 export * from "./merge.js";
 export * from "./paths.js";
 export * from "./refine.js";
+export * from "./relay-invite.js";
 export * from "./session-file.js";
 export * from "./session.js";
 export * from "./virtual-device.js";

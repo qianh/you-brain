@@ -103,6 +103,25 @@ describe("event log lines and zoned days", () => {
 });
 
 describe("protocol sync", () => {
+  it("同账号设备经云盘交接中转邀请码：没有、坏文件当没有，写入后另一台能读到", async () => {
+    const drive = new MemoryDrive();
+    const a = openStore();
+    const b = openStore();
+    try {
+      const syncA = new ProtocolSync({ drive, store: a.store, device: identity(DEVICE_A, "VPS") });
+      const syncB = new ProtocolSync({ drive, store: b.store, device: identity(DEVICE_B, "MacBook Air") });
+      expect(await syncB.readRelayInvite()).toBeNull();
+      const invite = { url: "https://relay.example.com", code: "GOODCODE1", expiresAt: "2026-11-22T15:00:00.000Z", issuedBy: DEVICE_A };
+      await syncA.writeRelayInvite(invite);
+      expect(await syncB.readRelayInvite()).toEqual(invite);
+      await syncA.writeRelayInvite({ ...invite, code: "NEWCODE12" });
+      expect((await syncB.readRelayInvite())?.code).toBe("NEWCODE12");
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+
   it("applies local events immediately and replicates them on pull", async () => {
     const drive = new MemoryDrive();
     const local = openStore();

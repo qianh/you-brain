@@ -20,6 +20,7 @@ import {
   TelegramRelayClient,
   checkRelay,
   enrollRelay,
+  requestRelayInvite,
   normalizeRelayUrl,
   type DispatchRelayFrame,
   type RelayFetch,
@@ -939,6 +940,34 @@ export class TelegramBridge {
     const key = relay ? ((await this.#options.relayKey?.get().catch(() => null))?.trim() ?? "") : "";
     if (!relay || !key) throw new YouBrainError("INVALID_INPUT", "这台电脑还没有连接中转");
     return encodeRelayInvite(relay.url, key);
+  }
+
+  /** 已入网（有设备令牌）时返回中转地址和令牌，没入网返回 null。同账号设备自动入网时用。 */
+  async enrolledRelay(): Promise<{ url: string; token: string } | null> {
+    const relay = this.#stored.relay;
+    const token = relay ? ((await this.#options.relayToken?.get().catch(() => null))?.trim() ?? "") : "";
+    return relay && token ? { url: relay.url, token } : null;
+  }
+
+  /** 向中转要一个一次性邀请码；只有已入网的设备能要。 */
+  async requestInvite(): Promise<{ url: string; code: string; expiresAt: string } | null> {
+    const access = await this.enrolledRelay();
+    if (!access) return null;
+    return { url: access.url, ...(await requestRelayInvite(access.url, access.token, this.#options.relayFetch)) };
+  }
+
+  /** 能不能自动入网：还没有设备令牌，且没有在用自己的 Bot Token 直连。 */
+  async canAutoJoin(): Promise<boolean> {
+    if (!this.#options.relayToken || !this.#options.dispatchIdentity) return false;
+    if (await this.enrolledRelay()) return false;
+    if (this.#stored.relay) return true;
+    return !((await this.#options.token.get().catch(() => null))?.trim() ?? "");
+  }
+
+  /** 用云盘里同账号设备留下的邀请码入网。 */
+  async joinRelay(url: string, code: string): Promise<void> {
+    await this.#enrollRelay({ url, code });
+    this.#changed();
   }
 
   /** daemon 的 T3 适配器就绪后挂上；null 表示卸下。 */

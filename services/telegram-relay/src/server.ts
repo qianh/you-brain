@@ -46,6 +46,9 @@ export interface RelayServer {
 
 const WEBHOOK_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token";
 const OPEN = 1;
+/** 每台设备每小时最多申请 30 个邀请码。 */
+const INVITE_RATE_MAX = 30;
+const INVITE_RATE_WINDOW_MS = 60 * 60_000;
 
 interface SocketData {
   deviceId: string;
@@ -271,6 +274,7 @@ export async function startRelayServer(options: RelayServerOptions): Promise<Rel
     },
   });
 
+  const inviteIssued = new Map<string, number[]>();
   const authenticateDeviceOrLegacy = async (request: Request): Promise<RequestAuth | null> => {
     const bearer = bearerToken(request);
     if (bearer === null) return null;
@@ -391,6 +395,23 @@ export async function startRelayServer(options: RelayServerOptions): Promise<Rel
           const body = payload as { code?: unknown; deviceId?: unknown; name?: unknown; publicKey?: unknown };
           const result = await enroll.redeem(body);
           return Response.json(result.body, { status: result.status });
+        });
+      }
+
+      // 已入网设备凭自己的令牌换一个邀请码：设备把它写进同一个云盘账号，新设备读到后自动入网。
+      if (url.pathname === "/invite" && request.method === "POST") {
+        return queue.run(async () => {
+          const bearer = bearerToken(request);
+          const matched = bearer?.startsWith(TOKEN_PREFIX) ? await enroll.authenticateToken(bearer) : null;
+          if (!matched) return Response.json({ error: "unauthorized" }, { status: 401 });
+          const now = Date.now();
+          const recent = (inviteIssued.get(matched.deviceId) ?? []).filter((at) => now - at < INVITE_RATE_WINDOW_MS);
+          if (recent.length >= INVITE_RATE_MAX) {
+            return Response.json({ error: "申请邀请码太频繁，请稍后再试" }, { status: 429 });
+          }
+          recent.push(now);
+          inviteIssued.set(matched.deviceId, recent);
+          return Response.json(await enroll.createInvite());
         });
       }
 

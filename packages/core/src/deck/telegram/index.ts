@@ -16,11 +16,13 @@ export {
   type TelegramT3Port,
 } from "./bridge.js";
 export { decodeRelayInvite, encodeRelayInvite } from "./invite.js";
+export { RelayAutoJoin, type AutoJoinPorts, type AutoJoinResult } from "./auto-join.js";
 export { createLlmRouteJudge, type TelegramRouteJudge } from "./router.js";
 export {
   TelegramRelayClient,
   checkRelay,
   enrollRelay,
+  requestRelayInvite,
   normalizeRelayUrl,
   type DispatchRelayFrame,
   type EnrollRelayInput,
