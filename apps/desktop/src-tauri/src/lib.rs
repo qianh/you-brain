@@ -951,6 +951,31 @@ fn open_local_path(path: String) -> Result<(), String> {
         .map_err(|err| format!("打开失败: {err}"))
 }
 
+/// 只把 http/https 链接交给系统浏览器,其他 scheme 一律忽略。
+fn is_browser_link(url: &url::Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+}
+
+/// 页面(含嵌入的 T3 iframe)里 target=_blank / window.open 发出的新窗口请求:
+/// WKWebView 默认直接丢弃,这里改为用系统默认浏览器打开,App 内不开新窗口。
+fn open_in_browser<R: tauri::Runtime>(
+    url: url::Url,
+    _features: tauri::webview::NewWindowFeatures,
+) -> tauri::webview::NewWindowResponse<R> {
+    if is_browser_link(&url) {
+        #[cfg(target_os = "macos")]
+        let mut command = std::process::Command::new("open");
+        #[cfg(target_os = "windows")]
+        let mut command = std::process::Command::new("explorer");
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let mut command = std::process::Command::new("xdg-open");
+        if let Err(err) = command.arg(url.as_str()).spawn() {
+            eprintln!("you-brain: 用浏览器打开链接失败: {err}");
+        }
+    }
+    tauri::webview::NewWindowResponse::Deny
+}
+
 /// 弹框页面回复/忽略完队列后把自己收起来；Esc 也走这里。
 #[tauri::command]
 fn hide_reminder_popup(app: tauri::AppHandle) {
@@ -1247,6 +1272,7 @@ fn build_panel(app: &tauri::AppHandle, url: WebviewUrl) -> tauri::Result<Webview
         .skip_taskbar(true)
         .always_on_top(true)
         .focused(false)
+        .on_new_window(open_in_browser)
         .build()?;
     let panel = window.clone();
     window.on_window_event(move |event| match event {
@@ -1272,6 +1298,7 @@ fn build_main(app: &tauri::AppHandle, url: WebviewUrl) -> tauri::Result<WebviewW
         .visible(false)
         // 保留知识库和 Muse 的原生网页拖放；终端单独补上文件路径。
         .disable_drag_drop_handler()
+        .on_new_window(open_in_browser)
         .center();
     // The Web UI's top bar shares the row with the traffic lights; the bar is 56px in
     // overlay mode (see shell.css `html.shell-overlay`), centre 28. Measured on a live
@@ -1439,7 +1466,17 @@ fn now_millis() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{daemon_origin, normalize_app_path, spa_route_script, MAX_APP_PATH};
+    use super::{daemon_origin, is_browser_link, normalize_app_path, spa_route_script, MAX_APP_PATH};
+
+    #[test]
+    fn only_web_links_go_to_browser() {
+        let link = |raw: &str| is_browser_link(&url::Url::parse(raw).unwrap());
+        assert!(link("https://accounts.google.com/o/oauth2/auth"));
+        assert!(link("http://127.0.0.1:3773/x"));
+        assert!(!link("file:///etc/passwd"));
+        assert!(!link("javascript:alert(1)"));
+        assert!(!link("about:blank"));
+    }
 
     #[test]
     fn accepts_same_origin_paths() {
