@@ -84,6 +84,19 @@ class DeviceIdentityStore(context: Context) {
     }
 
     @Synchronized
+    fun updateEnrolledDeviceName(newName: String): Pair<EnrollmentConfig, String>? {
+        val (current, token) = getEnrollment() ?: return null
+        val clean = newName
+            .replace(Regex("[\\u0000-\\u001f]"), "")
+            .trim()
+            .ifEmpty { defaultDeviceName() }
+            .take(40)
+        val updated = current.copy(deviceName = clean)
+        prefs.edit().putString(KEY_CONFIG, json.encodeToString(updated)).apply()
+        return updated to token
+    }
+
+    @Synchronized
     fun clearEnrollment() {
         prefs.edit()
             .remove(KEY_CONFIG)

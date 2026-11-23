@@ -152,7 +152,10 @@ function errorText(error: unknown): string {
  * 后发出的请求总是覆盖先发出的，旧响应不会把新数据冲掉。
  * 传 deviceId 时轮询对应远端设备的 tty7，排序偏好和缓存按设备隔离。
  */
-export function useTty7Sessions(deviceId: string | null = null): {
+export function useTty7Sessions(
+  deviceId: string | null = null,
+  knownDeviceIds: readonly string[] = [],
+): {
   deviceKey: string;
   view: DeckTty7SessionsResponse | null;
   error: string | null;
@@ -160,12 +163,16 @@ export function useTty7Sessions(deviceId: string | null = null): {
   move: MoveTty7Item;
   /** 返回这次重新加载得到的列表；失败返回 null。 */
   reload(): Promise<DeckTty7SessionsResponse | null>;
+  /** 按设备键读取已缓存的会话列表（供后台保持挂载的其他设备整屏终端读取标题与外观）。 */
+  viewFor?: (deviceKey: string) => DeckTty7SessionsResponse | null;
 } {
   const { client } = useDaemon();
   const pageActive = usePageActive();
   const targetKey = deviceId ?? "local";
   const orderKey = tty7OrderKey(deviceId);
   const cacheRef = useRef(new Map<string, DeckTty7SessionsResponse>());
+  const prefetchedRef = useRef(new Set<string>());
+  const [cacheTick, setCacheTick] = useState(0);
   const [list, setList] = useState<{ deviceKey: string; view: DeckTty7SessionsResponse | null; order: Tty7Order }>(() => ({
     deviceKey: targetKey,
     view: null,
@@ -207,6 +214,7 @@ export function useTty7Sessions(deviceId: string | null = null): {
     try {
       const next = await client.deckTty7Sessions(deviceId);
       cacheRef.current.set(targetKey, next);
+      prefetchedRef.current.add(targetKey);
       // 即使被更新的请求取代，这份数据仍是请求之后加载的，可以返回给调用方。
       if (mine === sequence.current) {
         setList((current) => {
@@ -236,11 +244,45 @@ export function useTty7Sessions(deviceId: string | null = null): {
     return () => clearInterval(timer);
   }, [reload, pageActive]);
 
+  // 在线远端设备（及切到远端时的本机）后台预拉一次会话列表，点击设备标签时右侧面板 0ms 秒出。
+  const knownSignature = knownDeviceIds.join("\n");
+  useEffect(() => {
+    if (!pageActive || typeof client.deckTty7Sessions !== "function") return;
+    const candidates: Array<{ key: string; id: string | null }> = [];
+    if (deviceId !== null) candidates.push({ key: "local", id: null });
+    for (const id of knownDeviceIds) {
+      if (id !== deviceId) candidates.push({ key: id, id });
+    }
+    const timers: Array<ReturnType<typeof setTimeout>> = [];
+    for (const candidate of candidates) {
+      if (cacheRef.current.has(candidate.key) || prefetchedRef.current.has(candidate.key)) continue;
+      prefetchedRef.current.add(candidate.key);
+      void client.deckTty7Sessions(candidate.id).then(
+        (next) => {
+          cacheRef.current.set(candidate.key, next);
+          setCacheTick((value) => value + 1);
+        },
+        () => {
+          timers.push(setTimeout(() => prefetchedRef.current.delete(candidate.key), 15_000));
+        },
+      );
+    }
+    return () => {
+      for (const timer of timers) clearTimeout(timer);
+    };
+  }, [client, pageActive, deviceId, knownSignature]);
+
+  const viewFor = useCallback(
+    (key: string): DeckTty7SessionsResponse | null =>
+      list.deviceKey === key ? list.view : (cacheRef.current.get(key) ?? null),
+    [list.deviceKey, list.view, cacheTick],
+  );
+
   const view = list.deviceKey === targetKey ? list.view : (cacheRef.current.get(targetKey) ?? null);
   const order = list.deviceKey === targetKey ? list.order : readTty7Order(prefs.getItem(orderKey));
   const error = errorState.deviceKey === targetKey ? errorState.message : null;
 
-  return { deviceKey: targetKey, view, error, order, move, reload };
+  return { deviceKey: targetKey, view, error, order, move, reload, viewFor };
 }
 
 /**

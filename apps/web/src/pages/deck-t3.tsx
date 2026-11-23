@@ -68,6 +68,7 @@ interface DeviceTab {
 function DeckT3EndpointPane({
   url,
   deviceId,
+  prewarmedFrameUrl,
   name,
   active,
   reloadCount,
@@ -80,6 +81,8 @@ function DeckT3EndpointPane({
   url: string;
   /** 有值表示这是另一台设备的 T3（经设备间隧道），url 只用于显示。 */
   deviceId?: string;
+  /** 后台预热已拿到的本地转发地址；首次切过去直接渲染 iframe，免去握手等待圈。 */
+  prewarmedFrameUrl?: string;
   name: string;
   active: boolean;
   reloadCount: number;
@@ -90,11 +93,23 @@ function DeckT3EndpointPane({
   onProbeStart?: () => void;
 }) {
   const { client, t } = useDaemon();
-  const [view, setView] = useState<T3View | { state: "device-error"; reason: string }>({ state: "checking" });
+  const [view, setView] = useState<T3View | { state: "device-error"; reason: string }>(() =>
+    deviceId !== undefined && prewarmedFrameUrl !== undefined && reloadCount === 0
+      ? { state: "ready", url: prewarmedFrameUrl, frameUrl: prewarmedFrameUrl }
+      : { state: "checking" },
+  );
   const onProbeStartRef = useRef(onProbeStart);
   onProbeStartRef.current = onProbeStart;
 
   useEffect(() => {
+    if (deviceId !== undefined && prewarmedFrameUrl !== undefined && reloadCount === 0) {
+      setView((current) =>
+        current.state === "ready" && current.frameUrl === prewarmedFrameUrl
+          ? current
+          : { state: "ready", url: prewarmedFrameUrl, frameUrl: prewarmedFrameUrl },
+      );
+      return;
+    }
     let cancelled = false;
     setView({ state: "checking" });
     onProbeStartRef.current?.();
@@ -113,7 +128,7 @@ function DeckT3EndpointPane({
       );
     }
     return () => { cancelled = true; };
-  }, [client, url, deviceId, reloadCount]);
+  }, [client, url, deviceId, prewarmedFrameUrl, reloadCount]);
 
   return (
     <div className="deck-t3-pane" hidden={!active}>
@@ -173,6 +188,7 @@ export function DeckT3Panel({
   onReload,
   onLocalReload,
   onActiveDeviceChange,
+  onDevicesChange,
   frameRef,
   threadUrl,
 }: {
@@ -185,12 +201,16 @@ export function DeckT3Panel({
   onLocalReload?: () => void;
   /** 当前激活端点是否为同账号下的远端设备；切到本机或手动地址端点时回调 null。 */
   onActiveDeviceChange?: (device: ActiveT3Device | null) => void;
+  /** 同账号下当前在线且开放了 T3 的远端设备列表（用于预拉会话列表与保留设备显示名）。 */
+  onDevicesChange?: (devices: ActiveT3Device[]) => void;
   frameRef?: RefObject<HTMLIFrameElement | null>;
   threadUrl: string | null;
 }) {
   const { client, t } = useDaemon();
   const [localUrl, setLocalUrl] = useState(savedLocalUrl);
   const [deviceTabs, setDeviceTabs] = useState<DeviceTab[]>([]);
+  const [warmedUrls, setWarmedUrls] = useState<Record<string, string>>({});
+  const warmingDevicesRef = useRef(new Set<string>());
   const [endpoints, setEndpoints] = useState<T3Endpoint[]>(() => savedEndpoints(localUrl));
   const [activeId, setActiveId] = useState<string>(() => savedActive(endpoints, threadUrl));
   const [visited, setVisited] = useState<ReadonlySet<string>>(() => new Set([activeId]));
@@ -206,8 +226,28 @@ export function DeckT3Panel({
   activeIdRef.current = activeId;
   const onActiveDeviceChangeRef = useRef(onActiveDeviceChange);
   onActiveDeviceChangeRef.current = onActiveDeviceChange;
+  const onDevicesChangeRef = useRef(onDevicesChange);
+  onDevicesChangeRef.current = onDevicesChange;
 
-  // 同账号下已入网、在线、并向本机开放了 T3 的设备，自动列进标签栏。
+  const warmDevice = (deviceId: string): void => {
+    if (typeof client.deckT3Device !== "function") return;
+    if (warmingDevicesRef.current.has(deviceId)) return;
+    warmingDevicesRef.current.add(deviceId);
+    void client.deckT3Device(deviceId).then(
+      (next) => {
+        if (next.state === "ready") {
+          setWarmedUrls((current) => (current[deviceId] === next.frameUrl ? current : { ...current, [deviceId]: next.frameUrl }));
+        } else {
+          warmingDevicesRef.current.delete(deviceId);
+        }
+      },
+      () => {
+        warmingDevicesRef.current.delete(deviceId);
+      },
+    );
+  };
+
+  // 同账号下已入网、在线、并向本机开放了 T3 的设备，自动列进标签栏，并在后台预热加密隧道与构建产物缓存。
   useEffect(() => {
     if (typeof client.dispatchDevices !== "function") return;
     const listDevices = client.dispatchDevices.bind(client);
@@ -233,6 +273,13 @@ export function DeckT3Panel({
       clearInterval(timer);
     };
   }, [client]);
+
+  useEffect(() => {
+    onDevicesChangeRef.current?.(deviceTabs.map((tab) => ({ id: tab.deviceId, name: tab.name })));
+    for (const tab of deviceTabs) {
+      if (warmedUrls[tab.deviceId] === undefined) warmDevice(tab.deviceId);
+    }
+  }, [deviceTabs]);
 
   const selectEndpoint = (id: string): void => {
     if (id.startsWith(DEVICE_ID_PREFIX)) {
@@ -374,6 +421,8 @@ export function DeckT3Panel({
                 aria-selected={selected}
                 className={["deck-t3-tab", selected ? "is-active" : ""].filter(Boolean).join(" ")}
                 title={item.url}
+                onMouseEnter={() => { if (item.deviceId !== undefined && warmedUrls[item.deviceId] === undefined) warmDevice(item.deviceId); }}
+                onFocus={() => { if (item.deviceId !== undefined && warmedUrls[item.deviceId] === undefined) warmDevice(item.deviceId); }}
                 onClick={() => selectEndpoint(item.id)}
               >
                 <Icon name={item.isLocal ? "laptop" : item.deviceId !== undefined ? "monitor" : "server"} size={14} />
@@ -398,6 +447,7 @@ export function DeckT3Panel({
               key={item.id}
               url={item.url}
               {...(item.deviceId !== undefined ? { deviceId: item.deviceId } : {})}
+              {...(item.deviceId !== undefined && warmedUrls[item.deviceId] !== undefined ? { prewarmedFrameUrl: warmedUrls[item.deviceId] } : {})}
               name={item.name}
               active={item.id === shownActiveId}
               reloadCount={reloadCounts[item.id] ?? 0}

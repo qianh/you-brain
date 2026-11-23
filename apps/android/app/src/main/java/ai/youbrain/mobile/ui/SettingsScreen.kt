@@ -1,6 +1,9 @@
 package ai.youbrain.mobile.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -8,19 +11,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -28,15 +25,26 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import ai.youbrain.mobile.data.ConnectionState
 import ai.youbrain.mobile.net.AppUiState
 import ai.youbrain.mobile.net.UBrainRepository
+import ai.youbrain.mobile.ui.components.IosHairline
+import ai.youbrain.mobile.ui.components.IosIconBadge
+import ai.youbrain.mobile.ui.components.IosIcons
+import ai.youbrain.mobile.ui.components.IosInsetGroup
+import ai.youbrain.mobile.ui.components.IosModalSheet
+import ai.youbrain.mobile.ui.components.IosRow
+import ai.youbrain.mobile.ui.components.IosSwitch
+import ai.youbrain.mobile.ui.theme.IosTheme
 
 @Composable
 fun SettingsScreen(
@@ -45,195 +53,271 @@ fun SettingsScreen(
     onToggleBackgroundService: (Boolean) -> Unit,
     onUnenroll: () -> Unit,
 ) {
+    val c = IosTheme.colors
     val clipboard = LocalClipboardManager.current
     var copiedTip by remember { mutableStateOf(false) }
     var confirmExit by remember { mutableStateOf(false) }
+    var renameTarget by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(c.groupedBg)
             .verticalScroll(rememberScrollState())
-            .padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(20.dp),
     ) {
-        // 连接与本机身份
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-            Column(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("中转连接", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        text = when (state.connectionState) {
-                            ConnectionState.OK -> "● 已连接"
-                            ConnectionState.CONNECTING -> "◌ 连接中"
-                            ConnectionState.ERROR -> "✕ 出错"
-                            ConnectionState.OFF -> "○ 已断开"
-                        },
-                        color = when (state.connectionState) {
-                            ConnectionState.OK -> MaterialTheme.colorScheme.secondary
-                            ConnectionState.ERROR -> MaterialTheme.colorScheme.error
-                            else -> MaterialTheme.colorScheme.onSurfaceVariant
-                        },
-                        style = MaterialTheme.typography.labelLarge,
-                    )
-                }
-                Text("中转地址: ${state.relayUrl}", style = MaterialTheme.typography.bodySmall)
-                Text("设备名称: ${state.deviceName}", style = MaterialTheme.typography.bodySmall)
+        val statusText = when (state.connectionState) {
+            ConnectionState.OK -> "已连接"
+            ConnectionState.CONNECTING -> "连接中"
+            ConnectionState.ERROR -> "连接出错"
+            ConnectionState.OFF -> "已断开"
+        }
+        IosInsetGroup(
+            header = "本机身份与中转",
+            footer = "手机入网后，可在任意电脑端 U-Brain「设置 → 接入 → 跨设备派活」对本手机点击「信任此设备」，即可自动同步到全部 Mac 与 VPS。",
+        ) {
+            IosRow(
+                title = "连接状态",
+                subtitle = state.relayUrl.ifBlank { null },
+                value = statusText,
+                icon = IosIcons.Server,
+                iconBg = when (state.connectionState) {
+                    ConnectionState.OK -> c.green
+                    ConnectionState.CONNECTING -> c.orange
+                    else -> c.red
+                },
+                showChevron = false,
+                showDivider = true,
+                onClick = { repository.reconnectNow() },
+            )
+            IosRow(
+                title = "本机展示名称",
+                value = state.deviceName,
+                icon = IosIcons.Pencil,
+                iconBg = c.blue,
+                showChevron = true,
+                showDivider = true,
+                onClick = { renameTarget = state.deviceId to state.deviceName },
+            )
+            IosRow(
+                title = if (copiedTip) "已复制本机公钥" else "复制本机公钥",
+                value = state.publicKeyFingerprint,
+                icon = IosIcons.Key,
+                iconBg = c.indigo,
+                showChevron = true,
+                showDivider = true,
+                onClick = {
+                    clipboard.setText(AnnotatedString(state.publicKey))
+                    copiedTip = true
+                },
+            )
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Text("设备 ID", fontSize = 12.sp, color = c.secondaryLabel)
+                Spacer(modifier = Modifier.height(2.dp))
                 SelectionContainer {
                     Text(
-                        text = "设备 ID: ${state.deviceId}\n公钥指纹: ${state.publicKeyFingerprint}",
-                        style = MaterialTheme.typography.bodySmall,
+                        text = state.deviceId,
+                        fontSize = 12.sp,
                         fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = c.secondaryLabel,
                     )
                 }
                 if (state.connectionError != null) {
+                    Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = state.connectionError,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.5.sp,
+                        color = c.red,
                     )
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { repository.reconnectNow() }) { Text("立即重连") }
-                    OutlinedButton(
-                        onClick = {
-                            clipboard.setText(AnnotatedString(state.publicKey))
-                            copiedTip = true
+            }
+        }
+
+        IosInsetGroup(
+            header = "通知与后台连接",
+            footer = "开启后使用轻量前台服务维持 WebSocket 长连接并支持锁屏/通知栏快捷回复（约 30MB 内存）。",
+        ) {
+            IosRow(
+                title = "后台常驻收推送",
+                icon = IosIcons.Bell,
+                iconBg = c.red,
+                showChevron = false,
+                showDivider = false,
+                trailing = {
+                    IosSwitch(
+                        checked = state.backgroundKeepAlive,
+                        onCheckedChange = { enabled ->
+                            repository.setBackgroundKeepAlive(enabled)
+                            onToggleBackgroundService(enabled)
                         },
-                    ) { Text(if (copiedTip) "已复制公钥" else "复制公钥") }
-                }
-                Text(
-                    text = "提示：手机入网后，可在任意电脑端 U-Brain「设置 → 接入 → 跨设备派活」里对本手机点击「信任此设备」，即可一次同步到同一云盘账号下的全部 Mac 与 VPS。",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-
-        // 后台保活
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("后台常驻收推送", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        text = "使用轻量前台服务保持 WebSocket 长连接与通知栏快捷回复（内存约 30MB）",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                }
-                Switch(
-                    checked = state.backgroundKeepAlive,
-                    onCheckedChange = { enabled ->
-                        repository.setBackgroundKeepAlive(enabled)
-                        onToggleBackgroundService(enabled)
-                    },
-                )
-            }
+                },
+            )
         }
 
-        // 在线设备总览
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-            Column(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("同中转设备 (${state.relayState.devices.size})", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                state.relayState.devices.forEach { dev ->
+        IosInsetGroup(header = "同中转设备（${state.relayState.devices.size}）") {
+            if (state.relayState.devices.isEmpty()) {
+                IosRow(
+                    title = "暂未发现其他设备",
+                    showDivider = false,
+                )
+            } else {
+                state.relayState.devices.forEachIndexed { idx, dev ->
                     val flags = buildList {
                         if (dev.id == state.deviceId) add("本机")
                         if (dev.dispatch?.role == "server") add("VPS 主控")
                         if (dev.dispatch?.viewT3 == true) add("可看 T3")
                         if (dev.dispatch?.enabled == true) add("可派活")
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = "${if (dev.online) "● " else "○ "}${dev.name}",
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Text(
-                            text = flags.joinToString(" · ").ifEmpty { if (dev.enrolled == true) "已入网" else "未入网" },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            softWrap = false,
-                        )
-                    }
-                }
-            }
-        }
+                    }.joinToString(" · ").ifEmpty { if (dev.enrolled == true) "已入网" else "未入网" }
+                    val display = state.displayName(dev)
+                    val titleLine = if (state.hasCustomAlias(dev.id)) "$display (${dev.name})" else display
+                    val dotColor = if (dev.online) c.green else c.tertiaryLabel
 
-        // 对端公钥固定管理
-        if (state.pinnedPeers.isNotEmpty()) {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-                Column(modifier = Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { renameTarget = dev.id to dev.name },
                     ) {
-                        Text("T3 隧道公钥固定", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
-                        TextButton(onClick = { repository.clearAllPins() }) { Text("全部重置") }
-                    }
-                    state.pinnedPeers.forEach { (id, pk) ->
-                        val name = state.relayState.devices.firstOrNull { it.id == id }?.name ?: id
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
                             verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
-                            Text(
-                                text = "$name (${pk.take(10)}…)",
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.weight(1f),
+                            IosIconBadge(
+                                icon = if (dev.dispatch?.role == "server") IosIcons.Server else IosIcons.Laptop,
+                                background = if (dev.online) c.blue else c.secondaryLabel,
                             )
-                            TextButton(onClick = { repository.forgetPeerPin(id) }) { Text("忘记") }
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .clip(CircleShape)
+                                            .background(dotColor),
+                                    )
+                                    Text(
+                                        text = titleLine,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = c.label,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                Text(
+                                    text = flags,
+                                    fontSize = 12.5.sp,
+                                    color = c.secondaryLabel,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                            Text(
+                                text = "改名",
+                                fontSize = 14.sp,
+                                color = c.blue,
+                            )
+                        }
+                        if (idx < state.relayState.devices.lastIndex) {
+                            IosHairline(startIndent = 54.dp)
                         }
                     }
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(4.dp))
-        Button(
-            onClick = { confirmExit = true },
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("退出入网并清除本机凭据")
+        if (state.pinnedPeers.isNotEmpty()) {
+            IosInsetGroup(
+                header = "T3 隧道公钥固定",
+                footer = "如果某台电脑重装了系统或重新初始化密钥，点击「忘记」即可重新固定其公钥。",
+            ) {
+                val entries = state.pinnedPeers.entries.toList()
+                entries.forEachIndexed { idx, (id, pk) ->
+                    val rawName = state.relayState.devices.firstOrNull { it.id == id }?.name ?: id
+                    val name = state.displayName(id, rawName)
+                    IosRow(
+                        title = name,
+                        value = "${pk.take(8)}… · 忘记",
+                        icon = IosIcons.Shield,
+                        iconBg = c.teal,
+                        showDivider = idx < entries.lastIndex,
+                        onClick = { repository.forgetPeerPin(id) },
+                    )
+                }
+                if (entries.size > 1) {
+                    IosHairline(startIndent = 54.dp)
+                    IosRow(
+                        title = "全部重置公钥固定",
+                        destructive = true,
+                        showDivider = false,
+                        onClick = { repository.clearAllPins() },
+                    )
+                }
+            }
         }
+
+        IosInsetGroup {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .clickable { confirmExit = true },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "退出入网并清除本机凭据",
+                    color = c.red,
+                    fontSize = 15.5.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
     }
 
     if (confirmExit) {
-        AlertDialog(
-            onDismissRequest = { confirmExit = false },
-            title = { Text("确认退出入网？") },
-            text = { Text("退出后将断开中转连接并清除本机保存的设备令牌与推送缓存，下次需用新邀请码重新入网。") },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        confirmExit = false
-                        onUnenroll()
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
-                ) { Text("确认退出") }
+        IosModalSheet(
+            title = "确认退出入网？",
+            onDismiss = { confirmExit = false },
+            confirmText = "确认退出",
+            confirmDestructive = true,
+            onConfirm = {
+                confirmExit = false
+                onUnenroll()
             },
-            dismissButton = {
-                TextButton(onClick = { confirmExit = false }) { Text("取消") }
+        ) {
+            Text(
+                text = "退出后将断开中转连接并清除本机保存的设备令牌与推送缓存，下次需用新邀请码重新入网。",
+                fontSize = 13.5.sp,
+                lineHeight = 19.sp,
+                color = c.secondaryLabel,
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+
+    renameTarget?.let { (targetId, rawName) ->
+        RenameDeviceDialog(
+            rawName = rawName,
+            currentDisplayName = state.displayName(targetId, rawName),
+            isSelf = targetId == state.deviceId,
+            hasAlias = state.hasCustomAlias(targetId),
+            onConfirm = { draft ->
+                repository.renameDevice(targetId, draft)
+                renameTarget = null
             },
+            onReset = {
+                repository.renameDevice(targetId, "")
+                renameTarget = null
+            },
+            onDismiss = { renameTarget = null },
         )
     }
 }

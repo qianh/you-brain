@@ -1,6 +1,7 @@
 package ai.youbrain.mobile
 
 import ai.youbrain.mobile.net.LocalT3ProxyServer
+import ai.youbrain.mobile.net.T3AssetCache
 import ai.youbrain.mobile.net.T3Upstream
 import ai.youbrain.mobile.net.TunnelHttpResponse
 import ai.youbrain.mobile.net.UpstreamWs
@@ -20,13 +21,17 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
 import java.net.Socket
 import java.net.URL
+import java.nio.file.Files
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 class LocalT3ProxyServerTest {
     private data class RecordedCall(
@@ -61,12 +66,16 @@ class LocalT3ProxyServerTest {
                     body = "<html><head><title>T3</title></head><body>ok</body></html>".toByteArray(Charsets.UTF_8),
                 )
 
-                path == "/api/auth/session" && method == "GET" -> TunnelHttpResponse(
-                    status = 200,
-                    statusText = "OK",
-                    headers = listOf("Content-Type" to "application/json"),
-                    body = """{"authenticated":false}""".toByteArray(Charsets.UTF_8),
-                )
+                path == "/api/auth/session" && method == "GET" -> {
+                    val cookie = headers.firstOrNull { it.first.equals("cookie", ignoreCase = true) }?.second.orEmpty()
+                    val authed = cookie.contains("t3_sid=session-xyz")
+                    TunnelHttpResponse(
+                        status = 200,
+                        statusText = "OK",
+                        headers = listOf("Content-Type" to "application/json"),
+                        body = """{"authenticated":$authed}""".toByteArray(Charsets.UTF_8),
+                    )
+                }
 
                 path == "/api/auth/browser-session" && method == "POST" -> TunnelHttpResponse(
                     status = 200,
@@ -324,6 +333,62 @@ class LocalT3ProxyServerTest {
         } finally {
             proxy.stop()
             scope.cancel()
+        }
+    }
+
+    @Test
+    fun instantSeedHtmlAndTransparentSessionAutoPair() {
+        val dir = Files.createTempDirectory("t3-proxy-seed-").toFile()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val upstream = FakeUpstream()
+        val cache = T3AssetCache(dir, scope)
+        val zipBytes = ByteArrayOutputStream().use { bos ->
+            ZipOutputStream(bos).use { zos ->
+                zos.putNextEntry(ZipEntry("index.html"))
+                zos.write("<html><head><title>Seed</title></head><body>seed-shell</body></html>".toByteArray())
+                zos.closeEntry()
+            }
+            bos.toByteArray()
+        }
+        cache.loadSeedZipAsync { ByteArrayInputStream(zipBytes) }
+
+        val capturedSetCookies = CopyOnWriteArrayList<String>()
+        val proxy = LocalT3ProxyServer(
+            scope = scope,
+            upstream = upstream,
+            cookiePrefix = "dev_seed__",
+            preferredPort = 0,
+            onSetCookies = { _, cookies -> capturedSetCookies.addAll(cookies) },
+            assetCache = cache,
+        )
+
+        try {
+            // 1) GET / 立刻返回内置种子壳 HTML（注入 proxy 脚本），不阻塞等上游返回
+            val rootConn = (URL(proxy.baseUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                setRequestProperty("Accept", "text/html")
+                setRequestProperty("Connection", "close")
+            }
+            assertEquals(200, rootConn.responseCode)
+            val html = rootConn.inputStream.bufferedReader().readText()
+            assertTrue(html.contains("seed-shell"))
+            assertTrue(html.contains("""<script src="/__ubrain_t3_inject.js"></script>"""))
+
+            // 2) React 启动后请求 /api/auth/session：未带 Cookie 时代理透明完成 pair 登录并回写 Max-Age=2592000 的 Set-Cookie
+            val sessionConn = (URL("${proxy.origin}/api/auth/session").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                setRequestProperty("Connection", "close")
+            }
+            assertEquals(200, sessionConn.responseCode)
+            val sessionBody = sessionConn.inputStream.bufferedReader().readText()
+            assertEquals("""{"authenticated":true}""", sessionBody)
+            val setCookies = sessionConn.headerFields["Set-Cookie"].orEmpty()
+            assertTrue(setCookies.any { it.startsWith("dev_seed__t3_sid=session-xyz") && it.contains("Max-Age=2592000") })
+            assertTrue(capturedSetCookies.any { it.startsWith("dev_seed__t3_sid=session-xyz") && it.contains("Max-Age=2592000") })
+        } finally {
+            proxy.stop()
+            scope.cancel()
+            dir.deleteRecursively()
         }
     }
 }

@@ -88,6 +88,29 @@ describe("Tty7.sessions", () => {
     expect(view.detail).toContain("could not reach");
     expect(view.sessions).toEqual([]);
   });
+
+  it("skips tab ls for workspaces with no live panes and coalesces concurrent sessions() calls", async () => {
+    let wsCalls = 0;
+    const { tty7, calls } = fake({
+      "ws ls": () => {
+        wsCalls += 1;
+        return WORKSPACES;
+      },
+      "pane ls": {
+        panes: [
+          { pane: 7, workspace: "ws-a", tab: "t1", cwd: "/repo/a", live: true, hibernated: false },
+          { pane: 8, workspace: "ws-b", tab: "t2", cwd: "/repo/b", live: false, hibernated: false },
+        ],
+      },
+      agents: { agents: [] },
+      "tab ls ws-a": { tabs: [{ id: "t1", name: null, label: "活跃标签", agent: "Codex", panes: [7] }] },
+    });
+    const [first, second] = await Promise.all([tty7.sessions(), tty7.sessions({ withActivity: false })]);
+    expect(wsCalls).toBe(1);
+    expect(calls.some((call) => call.args.join(" ").startsWith("tab ls ws-b"))).toBe(false);
+    expect(first.sessions.map((item) => item.tabLabel)).toEqual(["活跃标签"]);
+    expect(second.sessions.map((item) => item.tabLabel)).toEqual(["活跃标签"]);
+  });
 });
 
 describe("Tty7.send", () => {

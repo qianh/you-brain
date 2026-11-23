@@ -19,6 +19,7 @@ import {
 } from "./session-notices.js";
 import type { DeviceIdentity } from "../dispatch/identity.js";
 import type { TunnelSession } from "../dispatch/tunnel.js";
+import { T3AssetCache } from "./t3/asset-cache.js";
 import { startT3Proxy, type T3Proxy } from "./t3/proxy.js";
 import { TelegramBridge, createLlmRouteJudge, type TelegramDispatchPort, type TelegramFetch } from "./telegram/index.js";
 import { Tty7, type Tty7ScreenView, type Tty7SendInput, type Tty7SessionsView, type Tty7StartInput, type Tty7StartResult } from "./tty7.js";
@@ -119,6 +120,8 @@ export class DeckService {
   /** T3 转发池（ADR-0004 / M6）：按上游地址复用，最多保留 8 个，用于多端点独立转发与 Cookie 隔离。 */
   readonly #t3Proxies = new Map<string, { proxy: T3Proxy; lastUsed: number }>();
   readonly #t3DeviceProxies = new Map<string, { proxy: T3Proxy; lastUsed: number }>();
+  readonly #t3AssetCache: T3AssetCache;
+  #localT3Origin: string = "http://127.0.0.1:3773";
   #t3UseSeq = 0;
   /** tty7 会话桥（ADR-0004）：与 dsh 无关，dsh 没起来也能用。 */
   readonly tty7: Tty7;
@@ -133,6 +136,10 @@ export class DeckService {
 
   constructor(options: DeckServiceOptions) {
     this.#options = options;
+    this.#t3AssetCache = new T3AssetCache({
+      cacheDir: join(options.dataDir, "cache", "t3-assets"),
+      localOrigin: () => this.#localT3Origin,
+    });
     this.tty7 = options.tty7 ?? new Tty7({ env: options.env });
     this.muse = new MuseDeckRuntime({
       dataDir: options.dataDir,
@@ -206,6 +213,14 @@ export class DeckService {
   t3Frame(upstream: string): string | null {
     if (this.#stopped) return null;
     const key = t3ProxyKey(upstream);
+    try {
+      const parsed = new URL(upstream);
+      if (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost") {
+        this.#localT3Origin = parsed.origin;
+      }
+    } catch {
+      // 非标准 URL 忽略。
+    }
     const existing = this.#t3Proxies.get(key);
     if (existing) {
       existing.lastUsed = ++this.#t3UseSeq;
@@ -247,6 +262,7 @@ export class DeckService {
     const existing = this.#t3DeviceProxies.get(deviceId);
     if (existing) {
       existing.lastUsed = ++this.#t3UseSeq;
+      existing.proxy.warm?.();
       return existing.proxy.url;
     }
     const hash = createHash("sha256").update(deviceId).digest();
@@ -255,6 +271,7 @@ export class DeckService {
     const proxy = startT3Proxy(T3_TUNNEL_UPSTREAM, {
       cookiePrefix: `ubd${hash.toString("hex").slice(0, 8)}_`,
       port: stablePort,
+      assetCache: this.#t3AssetCache,
       pairCredential: async () => (await session()).pair(),
       transport: {
         fetch: async (path, init) => (await session()).fetch(path, init),
@@ -276,6 +293,7 @@ export class DeckService {
       }
     }
     this.#t3DeviceProxies.set(deviceId, { proxy, lastUsed: ++this.#t3UseSeq });
+    proxy.warm?.();
     return proxy.url;
   }
 

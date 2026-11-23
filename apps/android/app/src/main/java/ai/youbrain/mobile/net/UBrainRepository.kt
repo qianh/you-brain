@@ -10,6 +10,7 @@ import ai.youbrain.mobile.data.AgentSendResponse
 import ai.youbrain.mobile.data.AgentSessionResponse
 import ai.youbrain.mobile.data.AgentSessionSummary
 import ai.youbrain.mobile.data.AppStore
+import ai.youbrain.mobile.data.CachedAgentSnapshot
 import ai.youbrain.mobile.data.ConnectionState
 import ai.youbrain.mobile.data.DeviceIdentityStore
 import ai.youbrain.mobile.data.DispatchFollowupResponse
@@ -53,6 +54,8 @@ data class AgentUiState(
     val defaultProject: DispatchProject? = null,
     val threadUrl: String? = null,
     val conversationState: String = "idle",
+    val activity: String? = null,
+    val quickInspectText: String? = null,
     val messages: List<AgentMessage> = emptyList(),
     val outbox: List<OutboxEntry> = emptyList(),
     val loading: Boolean = false,
@@ -84,13 +87,23 @@ data class AppUiState(
     val connectionState: ConnectionState = ConnectionState.OFF,
     val connectionError: String? = null,
     val relayState: RelayState = RelayState(),
+    val deviceAliases: Map<String, String> = emptyMap(),
     val pushes: List<MobilePushItem> = emptyList(),
     val unreadPushCount: Int = 0,
     val backgroundKeepAlive: Boolean = true,
     val pinnedPeers: Map<String, String> = emptyMap(),
     val agent: AgentUiState = AgentUiState(),
     val navTarget: NavigationTarget? = null,
-)
+) {
+    fun displayName(id: String, rawName: String): String {
+        if (id == deviceId && deviceName.isNotBlank()) return deviceName
+        return deviceAliases[id]?.takeIf { it.isNotBlank() } ?: rawName
+    }
+
+    fun displayName(device: RelayDevice): String = displayName(device.id, device.name)
+
+    fun hasCustomAlias(id: String): Boolean = id != deviceId && !deviceAliases[id].isNullOrBlank()
+}
 
 class UBrainRepository(context: Context) {
     private val appContext = context.applicationContext
@@ -152,17 +165,19 @@ class UBrainRepository(context: Context) {
                 it.id != selfId && it.online && it.enrolled == true && it.dispatch?.viewT3 == true
             }
             prewarmedT3.retainAll(onlineViewPeers.map { it.id }.toSet())
-            val warmCandidates = onlineViewPeers
+            val warmIds = onlineViewPeers
                 .sortedByDescending { it.id == masterId }
-                .take(4)
-            for (dev in warmCandidates) {
-                if (prewarmedT3.add(dev.id)) {
-                    scope.launch {
-                        runCatching {
-                            val proxy = getOrCreateT3Proxy(dev.id)
-                            proxy.warmup()
-                        }.onFailure {
-                            prewarmedT3.remove(dev.id)
+                .take(3)
+                .map { it.id }
+                .filter { prewarmedT3.add(it) }
+            if (warmIds.isNotEmpty()) {
+                scope.launch {
+                    // 优先串行打通主控与常用设备的加密隧道，避免同时并发风暴拖慢主通道
+                    for (devId in warmIds) {
+                        if (ensureT3Tunnel(devId).isSuccess) {
+                            getOrCreateT3ProxyImmediate(devId)
+                        } else {
+                            prewarmedT3.remove(devId)
                         }
                     }
                 }
@@ -201,10 +216,14 @@ class UBrainRepository(context: Context) {
     )
 
     init {
+        assetCache.loadSeedZipAsync {
+            runCatching { appContext.assets.open("t3_boot_seed.zip") }.getOrNull()
+        }
         val deviceId = identityStore.getOrCreateDeviceId()
         identity = identityStore.getOrCreateIdentity()
         val cachedPushes = appStore.loadCachedPushes()
         val savedEnrollment = identityStore.getEnrollment()
+        val initialMasterId = appStore.getSelectedMasterDeviceId()
         _uiState.value = AppUiState(
             enrolled = savedEnrollment != null,
             deviceId = savedEnrollment?.first?.deviceId ?: deviceId,
@@ -212,14 +231,45 @@ class UBrainRepository(context: Context) {
             relayUrl = savedEnrollment?.first?.relayUrl ?: "",
             publicKey = identity.publicKey,
             publicKeyFingerprint = identity.shortFingerprint(),
+            deviceAliases = appStore.getDeviceAliases(),
             pushes = cachedPushes,
             backgroundKeepAlive = appStore.isBackgroundKeepAliveEnabled(),
             pinnedPeers = pinStore.listPins(),
-            agent = AgentUiState(masterDeviceId = appStore.getSelectedMasterDeviceId()),
+            agent = hydratedAgentState(initialMasterId),
         )
         if (savedEnrollment != null) {
             startConnection(savedEnrollment.first, savedEnrollment.second)
         }
+    }
+
+    private fun hydratedAgentState(masterId: String?): AgentUiState {
+        val snap = appStore.loadAgentSnapshot(masterId)
+        return if (snap != null && masterId != null) {
+            AgentUiState(
+                masterDeviceId = masterId,
+                activeSessionId = snap.activeSessionId,
+                threadUrl = snap.threadUrl,
+                sessions = snap.sessions,
+                messages = snap.messages,
+                outbox = snap.outbox,
+            )
+        } else {
+            AgentUiState(masterDeviceId = masterId)
+        }
+    }
+
+    private fun persistAgentSnapshot(agent: AgentUiState) {
+        val masterId = agent.masterDeviceId ?: return
+        appStore.saveAgentSnapshot(
+            CachedAgentSnapshot(
+                masterDeviceId = masterId,
+                activeSessionId = agent.activeSessionId,
+                threadUrl = agent.threadUrl,
+                sessions = agent.sessions,
+                messages = agent.messages,
+                outbox = agent.outbox,
+            ),
+        )
     }
 
     private fun startConnection(config: EnrollmentConfig, token: String) {
@@ -238,6 +288,27 @@ class UBrainRepository(context: Context) {
 
     fun reconnectIfDisconnected() {
         relayClient.reconnectIfDisconnected()
+    }
+
+    fun resolveDisplayName(id: String, rawName: String): String =
+        _uiState.value.displayName(id, rawName)
+
+    fun renameDevice(targetDeviceId: String, newName: String) {
+        if (targetDeviceId == _uiState.value.deviceId) {
+            val clean = newName
+                .replace(Regex("[\\u0000-\\u001f]"), "")
+                .trim()
+                .ifEmpty { identityStore.defaultDeviceName() }
+                .take(40)
+            val updated = identityStore.updateEnrolledDeviceName(clean)
+            _uiState.update { it.copy(deviceName = clean) }
+            if (updated != null) {
+                startConnection(updated.first, updated.second)
+            }
+        } else {
+            val next = appStore.setDeviceAlias(targetDeviceId, newName)
+            _uiState.update { it.copy(deviceAliases = next) }
+        }
     }
 
     suspend fun enroll(relayUrl: String, code: String, name: String) {
@@ -340,12 +411,68 @@ class UBrainRepository(context: Context) {
         loadedMasterKey = deviceId
         _uiState.update {
             it.copy(
-                agent = AgentUiState(masterDeviceId = deviceId),
+                agent = hydratedAgentState(deviceId),
             )
         }
         scope.launch {
             loadAgentSessions(deviceId)
         }
+    }
+
+    fun dismissQuickInspect() {
+        _uiState.update { it.copy(agent = it.agent.copy(quickInspectText = null)) }
+    }
+
+    fun runQuickDeviceInspect() {
+        val state = _uiState.value
+        val devices = state.relayState.devices.filter { it.id != state.deviceId && it.enrolled == true }
+        val text = buildString {
+            appendLine("⚡ 实时设备与项目快查（直读中转状态，零等待）")
+            if (devices.isEmpty()) {
+                append("暂未发现其他已入网设备。")
+            } else {
+                devices.forEach { d ->
+                    val status = if (d.online) "● 在线" else "○ 离线"
+                    val roleTag = if (d.dispatch?.role == "server") " · VPS 主控" else ""
+                    val caps = buildList {
+                        if (d.dispatch?.enabled == true) add("可派活(${d.dispatch.maxMode})")
+                        if (d.dispatch?.viewT3 == true) add("可看 T3")
+                    }.joinToString(" · ")
+                    appendLine("- ${state.displayName(d)} [$status$roleTag]${if (caps.isNotEmpty()) "：$caps" else ""}")
+                    val projs = d.dispatch?.projects.orEmpty()
+                    if (projs.isNotEmpty()) {
+                        appendLine("  可派项目：${projs.joinToString("、") { it.name }}")
+                    }
+                }
+            }
+        }.trim()
+        _uiState.update { it.copy(agent = it.agent.copy(quickInspectText = text)) }
+    }
+
+    suspend fun runQuickOutboxInspect() {
+        refreshOutboxList()
+        val state = _uiState.value
+        val outbox = state.agent.outbox
+        val text = buildString {
+            appendLine("📋 最近派活任务速览（${outbox.size} 项）")
+            if (outbox.isEmpty()) {
+                append("当前主控尚未派出任何跨设备任务。")
+            } else {
+                outbox.take(8).forEach { e ->
+                    val st = when (e.status) {
+                        "running", "sending" -> "执行中"
+                        "waiting" -> "待处理"
+                        "done" -> "已完成"
+                        else -> "失败"
+                    }
+                    appendLine("- [${st}] ${state.displayName(e.to, e.deviceName)} · ${e.title}")
+                    e.lastSummary?.takeIf { it.isNotBlank() }?.let {
+                        appendLine("  ${it.replace("\n", " ").take(90)}")
+                    }
+                }
+            }
+        }.trim()
+        _uiState.update { it.copy(agent = it.agent.copy(quickInspectText = text)) }
     }
 
     private suspend fun refreshAgentOnConnect() {
@@ -384,21 +511,78 @@ class UBrainRepository(context: Context) {
                     _uiState.update { it.copy(agent = it.agent.copy(loading = false, error = "主控返回格式不兼容")) }
                     return
                 }
-                _uiState.update {
-                    it.copy(
-                        agent = it.agent.copy(
+                val bundled = resp.conversation
+                var latestAgent: AgentUiState? = null
+                _uiState.update { cur ->
+                    val nextAgent = if (bundled != null) {
+                        mergeConversationResponse(
+                            cur = cur.agent.copy(
+                                masterDeviceId = target,
+                                activeSessionId = resp.activeSessionId,
+                                sessions = resp.sessions,
+                                defaultProject = resp.defaultProject,
+                                loading = false,
+                                error = null,
+                            ),
+                            resp = bundled,
+                            incremental = false,
+                        )
+                    } else {
+                        cur.agent.copy(
                             masterDeviceId = target,
                             activeSessionId = resp.activeSessionId,
                             sessions = resp.sessions,
                             defaultProject = resp.defaultProject,
                             loading = false,
                             error = null,
-                        ),
-                    )
+                        )
+                    }
+                    latestAgent = nextAgent
+                    cur.copy(agent = nextAgent)
                 }
-                readAgentConversation(target, resp.activeSessionId)
+                latestAgent?.let { persistAgentSnapshot(it) }
+                if (bundled == null) {
+                    readAgentConversation(target, resp.activeSessionId)
+                }
             }
         }
+    }
+
+    private fun mergeConversationResponse(
+        cur: AgentUiState,
+        resp: AgentReadResponse,
+        incremental: Boolean,
+    ): AgentUiState {
+        val sortedConfirmed = if (incremental) {
+            val confirmed = cur.messages.filter { it.position < 1_000_000 }
+            val byPos = LinkedHashMap<Int, AgentMessage>()
+            for (m in confirmed) byPos[m.position] = m
+            for (m in resp.messages) byPos[m.position] = m
+            byPos.values.sortedBy { it.position }
+        } else {
+            resp.messages
+        }
+        val pendingOptimistic = if (resp.state == "running") {
+            val confirmedUserTexts = sortedConfirmed
+                .filter { it.role == "user" }
+                .map { it.text }
+                .toSet()
+            cur.messages.filter {
+                it.position >= 1_000_000 && !confirmedUserTexts.contains(it.text)
+            }
+        } else {
+            emptyList()
+        }
+        val mergedMessages = sortedConfirmed + pendingOptimistic
+        return cur.copy(
+            activeSessionId = resp.sessionId ?: cur.activeSessionId,
+            threadUrl = resp.threadUrl ?: cur.threadUrl,
+            conversationState = resp.state,
+            activity = resp.activity,
+            messages = mergedMessages,
+            outbox = resp.outbox,
+            error = null,
+        )
     }
 
     suspend fun readAgentConversation(
@@ -428,39 +612,13 @@ class UBrainRepository(context: Context) {
                 val el = outcome.result ?: return
                 val resp = runCatching { json.decodeFromJsonElement(AgentReadResponse.serializer(), el) }.getOrNull()
                     ?: return
+                var updatedAgent: AgentUiState? = null
                 _uiState.update { cur ->
-                    val sortedConfirmed = if (afterPos != null) {
-                        val confirmed = cur.agent.messages.filter { it.position < 1_000_000 }
-                        val byPos = LinkedHashMap<Int, AgentMessage>()
-                        for (m in confirmed) byPos[m.position] = m
-                        for (m in resp.messages) byPos[m.position] = m
-                        byPos.values.sortedBy { it.position }
-                    } else {
-                        resp.messages
-                    }
-                    val pendingOptimistic = if (resp.state == "running") {
-                        val confirmedUserTexts = sortedConfirmed
-                            .filter { it.role == "user" }
-                            .map { it.text }
-                            .toSet()
-                        cur.agent.messages.filter {
-                            it.position >= 1_000_000 && !confirmedUserTexts.contains(it.text)
-                        }
-                    } else {
-                        emptyList()
-                    }
-                    val mergedMessages = sortedConfirmed + pendingOptimistic
-                    cur.copy(
-                        agent = cur.agent.copy(
-                            activeSessionId = resp.sessionId ?: cur.agent.activeSessionId,
-                            threadUrl = resp.threadUrl,
-                            conversationState = resp.state,
-                            messages = mergedMessages,
-                            outbox = resp.outbox,
-                            error = null,
-                        ),
-                    )
+                    val next = mergeConversationResponse(cur.agent, resp, incremental = afterPos != null)
+                    updatedAgent = next
+                    cur.copy(agent = next)
                 }
+                updatedAgent?.let { persistAgentSnapshot(it) }
             }
         }
     }
@@ -510,10 +668,15 @@ class UBrainRepository(context: Context) {
                             activeSessionId = resp?.sessionId ?: it.agent.activeSessionId,
                             threadUrl = resp?.threadUrl?.ifBlank { it.agent.threadUrl } ?: it.agent.threadUrl,
                             conversationState = "running",
+                            activity = "已送达主控，正在思考与调度…",
                         ),
                     )
                 }
-                readAgentConversation(target, resp?.sessionId ?: _uiState.value.agent.activeSessionId)
+                readAgentConversation(
+                    target,
+                    resp?.sessionId ?: _uiState.value.agent.activeSessionId,
+                    incremental = true,
+                )
                 if (resp != null) Result.success(resp)
                 else Result.failure(IllegalStateException("返回格式无效"))
             }
@@ -633,21 +796,24 @@ class UBrainRepository(context: Context) {
         }
     }
 
-    suspend fun fetchImmutableT3Asset(deviceId: String, path: String): CachedAsset? =
-        runCatching { assetCache.getOrFetch(path, tunnelClient.session(deviceId)) }.getOrNull()
+    fun getOrCreateT3ProxyImmediate(deviceId: String): String =
+        getOrCreateT3ProxyServer(deviceId).baseUrl
 
-    suspend fun getOrStartT3ProxyUrl(deviceId: String): Result<String> {
+    suspend fun ensureT3Tunnel(deviceId: String): Result<Unit> {
         return try {
-            Result.success(getOrCreateT3Proxy(deviceId).baseUrl)
+            tunnelClient.session(deviceId)
+            _uiState.update { it.copy(pinnedPeers = pinStore.listPins()) }
+            Result.success(Unit)
         } catch (t: Throwable) {
             Result.failure(t)
         }
     }
 
-    private suspend fun getOrCreateT3Proxy(deviceId: String): LocalT3ProxyServer {
-        // 先确保建立端到端加密隧道（失败时携带明确原因，不默默返回假地址）
-        tunnelClient.session(deviceId)
-        _uiState.update { it.copy(pinnedPeers = pinStore.listPins()) }
+    suspend fun getOrStartT3ProxyUrl(deviceId: String): Result<String> {
+        return ensureT3Tunnel(deviceId).map { getOrCreateT3ProxyImmediate(deviceId) }
+    }
+
+    private fun getOrCreateT3ProxyServer(deviceId: String): LocalT3ProxyServer {
         t3Proxies[deviceId]?.let { return it }
 
         val digest = java.security.MessageDigest.getInstance("SHA-256")
@@ -687,6 +853,9 @@ class UBrainRepository(context: Context) {
                 }
             },
             assetCache = assetCache,
+            cookieReader = { proxyOrigin ->
+                runCatching { CookieManager.getInstance().getCookie(proxyOrigin) }.getOrNull()
+            },
         )
         val raced = t3Proxies.putIfAbsent(deviceId, proxy)
         return if (raced != null) {
@@ -741,9 +910,16 @@ class UBrainRepository(context: Context) {
                             "failed" -> "failed"
                             else -> "running"
                         }
-                        _uiState.update { it.copy(agent = it.agent.copy(conversationState = mapped)) }
+                        _uiState.update {
+                            it.copy(
+                                agent = it.agent.copy(
+                                    conversationState = mapped,
+                                    activity = if (mapped == "ready" || mapped == "failed") null else it.agent.activity,
+                                ),
+                            )
+                        }
                     }
-                    scope.launch { readAgentConversation(masterId, sid) }
+                    scope.launch { readAgentConversation(masterId, sid, incremental = true) }
                 }
             }
             "outbox.updated" -> {

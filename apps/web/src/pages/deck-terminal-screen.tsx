@@ -17,8 +17,14 @@ import { baseName, sessionTitle, useSessionRename, type Session, type useTty7Ses
 import { closeTab, cycleTab, hideScreen, openTab, terminalShortcut, type TerminalTabs } from "./deck-terminal-tabs.js";
 import { VIEWING_REPORT_MS, viewingTarget } from "./deck-terminal-viewing.js";
 
-// xterm（约 470 KB）只在第一次打开整屏终端时加载。
-const DeckTty7Terminal = lazy(() => loadChunk(() => import("./deck-tty7-terminal.js")).then((m) => ({ default: m.DeckTty7Terminal })));
+// xterm（约 470 KB）在指挥台空闲时后台预加载，首次点开终端零等待。
+const loadTerminalChunk = () => loadChunk(() => import("./deck-tty7-terminal.js"));
+
+export function preloadTerminalChunk(): void {
+  void loadTerminalChunk().catch(() => undefined);
+}
+
+const DeckTty7Terminal = lazy(() => loadTerminalChunk().then((m) => ({ default: m.DeckTty7Terminal })));
 
 /**
  * 整屏终端：盖住整个窗口，顶部一行是返回、本次打开过的会话标签、全部会话下拉。

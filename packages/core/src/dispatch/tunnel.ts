@@ -1,11 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { chmod, mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
 
 import {
   TUNNEL_CHUNK_BYTES,
   TUNNEL_RELAY_FRAME_MAX,
   TUNNEL_OPEN_KIND,
+  TUNNEL_WS_GZIP_CAP,
   decodeTunnelMessage,
   deriveTunnelCipher,
   encodeTunnelMessage,
@@ -33,6 +35,12 @@ export const TUNNEL_VIRTUAL_ORIGIN = "http://t3.tunnel";
 export const TUNNEL_TTY7_HEADER = "x-ubrain-tty7";
 /** 经隧道传输的实时终端二进制帧单块上限（小于 TUNNEL_CHUNK_BYTES，保证加密和 base64url 后远低于中转帧上限）。 */
 export const TUNNEL_TTY7_CHUNK_BYTES = 48 * 1024;
+/** 启用 ws-gzip 时单次尝试压缩的终端输出原始块大小（典型 ANSI/UTF-8 压缩率 8～15 倍，192 KB 压缩后约 15 KB）。 */
+const TTY7_GZIP_RAW_BLOCK_BYTES = 192 * 1024;
+/** 终端小碎帧聚合时间窗（毫秒）：合并高频细碎输出，碰到控制事件时同步立即刷出。 */
+const TERMINAL_COALESCE_MS = 4;
+const WS_GZIP_MIN_BYTES = 512;
+const MAX_WS_MESSAGE_BYTES = 32 * 1024 * 1024;
 const TTY7_TERMINAL_PATH = "/api/deck/tty7/terminal";
 
 const SID_RE = /^[A-Za-z0-9_-]{8,64}$/;
@@ -108,8 +116,76 @@ function* chunks(bytes: Uint8Array): Generator<Uint8Array> {
   for (let offset = 0; offset < bytes.length; offset += TUNNEL_CHUNK_BYTES) yield bytes.subarray(offset, offset + TUNNEL_CHUNK_BYTES);
 }
 
-/** 同时在途的帧数。每帧都要等中转应答，逐帧串行时吞吐 = 帧大小 / 往返延迟，几百 KB 的脚本要好几秒。 */
-const SEND_WINDOW = 8;
+/**
+ * 编码单条 WebSocket 消息：
+ * - 旧版对端（`!wsGzip`）原样发单帧；
+ * - 新版对端（`wsGzip`）对 >= 512B 的文本/二进制消息尝试 gzip（level 1），并对超大消息按 48 KB 自动分片（`more: true`），
+ *   避免 T3 大体积快照 JSON 超过中转单帧 160 KB 上限被丢弃。
+ */
+function encodeWsFrames(id: string, data: string | Uint8Array, wsGzip: boolean): Array<Extract<TunnelMessage, { k: "ws-msg" }>> {
+  const isText = typeof data === "string";
+  if (!wsGzip) {
+    return [isText ? { k: "ws-msg", id, text: data } : { k: "ws-msg", id, body: b64(data) }];
+  }
+  const raw = isText ? Buffer.from(data, "utf8") : Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+  if (raw.length < WS_GZIP_MIN_BYTES && raw.length <= TUNNEL_TTY7_CHUNK_BYTES) {
+    return [isText ? { k: "ws-msg", id, text: data } : { k: "ws-msg", id, body: b64(raw) }];
+  }
+  const gz = raw.length >= WS_GZIP_MIN_BYTES ? gzipSync(raw, { level: 1 }) : null;
+  const useGzip = gz !== null && (gz.length + 16 < raw.length || (isText && raw.length > TUNNEL_TTY7_CHUNK_BYTES));
+  if (!useGzip && raw.length <= TUNNEL_TTY7_CHUNK_BYTES) {
+    return [isText ? { k: "ws-msg", id, text: data } : { k: "ws-msg", id, body: b64(raw) }];
+  }
+  const payload = useGzip ? gz! : raw;
+  const out: Array<Extract<TunnelMessage, { k: "ws-msg" }>> = [];
+  const total = Math.max(1, Math.ceil(payload.length / TUNNEL_TTY7_CHUNK_BYTES));
+  for (let index = 0; index < total; index += 1) {
+    const part = payload.subarray(index * TUNNEL_TTY7_CHUNK_BYTES, Math.min(payload.length, (index + 1) * TUNNEL_TTY7_CHUNK_BYTES));
+    const encoded = b64(part);
+    const more = index < total - 1;
+    out.push({
+      k: "ws-msg",
+      id,
+      ...(isText ? { text: encoded } : { body: encoded }),
+      ...(useGzip ? { enc: "gzip" as const } : {}),
+      ...(more ? { more: true } : {}),
+    });
+  }
+  return out;
+}
+
+class WsReassembler {
+  #parts: Buffer[] = [];
+  #bytes = 0;
+
+  push(message: Extract<TunnelMessage, { k: "ws-msg" }>): { kind: "text"; text: string } | { kind: "binary"; bytes: Buffer } | null {
+    const isGzip = message.enc === "gzip";
+    const isMultipart = message.more !== undefined || this.#parts.length > 0;
+    if (!isGzip && !isMultipart) {
+      if (message.text !== undefined) return { kind: "text", text: message.text };
+      if (message.body !== undefined) return { kind: "binary", bytes: Buffer.from(message.body, "base64") };
+      return { kind: "text", text: "" };
+    }
+    const isText = message.text !== undefined;
+    const chunk = Buffer.from((isText ? message.text : message.body) ?? "", "base64");
+    this.#bytes += chunk.length;
+    if (this.#bytes > MAX_WS_MESSAGE_BYTES) {
+      this.#parts = [];
+      this.#bytes = 0;
+      throw new Error("WebSocket 消息过大");
+    }
+    this.#parts.push(chunk);
+    if (message.more === true) return null;
+    const joined = this.#parts.length === 1 ? this.#parts[0]! : Buffer.concat(this.#parts);
+    this.#parts = [];
+    this.#bytes = 0;
+    const decoded = isGzip ? gunzipSync(joined, { maxOutputLength: MAX_WS_MESSAGE_BYTES }) : joined;
+    return isText ? { kind: "text", text: decoded.toString("utf8") } : { kind: "binary", bytes: decoded };
+  }
+}
+
+/** 同时在途的帧数。每帧都要等中转应答，逐帧串行时吞吐 = 帧大小 / 往返延迟，提高窗口可充分利用带宽延迟积。 */
+const SEND_WINDOW = 16;
 
 /**
  * 滑动窗口发送：帧的计数器在 `post` 调用时就按顺序定下了，接收端本来就按计数器重排，
@@ -181,16 +257,27 @@ interface HostTerminal {
   connection?: TerminalConnection;
   inFlight: number;
   peerPaused: boolean;
-  sendChain: Promise<void>;
+  activeSends: number;
+  outQueue: Array<{ message: TunnelMessage; rawBytes: number }>;
+  pendingOut: Buffer[];
+  pendingOutBytes: number;
+  flushTimer: ReturnType<typeof setTimeout> | null;
+  inbound: WsReassembler;
   closed: boolean;
+}
+
+interface HostSocket {
+  socket: WebSocket;
+  inbound: WsReassembler;
 }
 
 interface HostSession {
   from: string;
   sid: string;
+  wsGzip: boolean;
   channel: TunnelChannel;
   requests: Map<string, { method: string; path: string; headers: Headers2; parts: Buffer[]; bytes: number; target: TunnelTarget }>;
-  sockets: Map<string, WebSocket>;
+  sockets: Map<string, HostSocket>;
   terminals: Map<string, HostTerminal>;
   closed: boolean;
 }
@@ -210,10 +297,12 @@ export class TunnelHost {
   async open(frame: CmdFrame): Promise<CommandOutcome> {
     const auth = await this.#options.authorize(frame);
     if (!auth.ok) return { ok: false, error: auth.error };
-    const args = frame.cmd.args as { sid?: unknown; epk?: unknown } | null;
+    const args = frame.cmd.args as { sid?: unknown; epk?: unknown; caps?: unknown } | null;
     const sid = typeof args?.sid === "string" ? args.sid : "";
     const epk = typeof args?.epk === "string" ? args.epk : "";
     if (!SID_RE.test(sid) || epk === "") return { ok: false, error: "参数不对：隧道握手" };
+    const peerCaps = Array.isArray(args?.caps) ? args.caps.filter((cap): cap is string => typeof cap === "string") : [];
+    const wsGzip = peerCaps.includes(TUNNEL_WS_GZIP_CAP);
     const key = `${frame.from}\0${sid}`;
     if (this.#sessions.has(key)) return { ok: false, error: "隧道会话已存在" };
     const mine = [...this.#sessions.values()].filter((session) => session.from === frame.from);
@@ -233,6 +322,7 @@ export class TunnelHost {
     const session: HostSession = {
       from: frame.from,
       sid,
+      wsGzip,
       channel: undefined as unknown as TunnelChannel,
       requests: new Map(),
       sockets: new Map(),
@@ -247,7 +337,10 @@ export class TunnelHost {
     );
     this.#sessions.set(key, session);
     this.#startSweeper();
-    return { ok: true, result: { epk: ephemeral.publicKey, sig } };
+    return {
+      ok: true,
+      result: { epk: ephemeral.publicKey, sig, ...(wsGzip ? { caps: [TUNNEL_WS_GZIP_CAP] } : {}) },
+    };
   }
 
   /** 中转转来的加密帧。找不到会话的丢弃（可能是已关闭的会话）。 */
@@ -272,9 +365,9 @@ export class TunnelHost {
     if (session.closed) return;
     session.closed = true;
     this.#sessions.delete(`${session.from}\0${session.sid}`);
-    for (const socket of session.sockets.values()) {
+    for (const entry of session.sockets.values()) {
       try {
-        socket.close();
+        entry.socket.close();
       } catch {
         // 已经关了。
       }
@@ -282,6 +375,12 @@ export class TunnelHost {
     session.sockets.clear();
     for (const terminal of session.terminals.values()) {
       terminal.closed = true;
+      if (terminal.flushTimer !== null) {
+        clearTimeout(terminal.flushTimer);
+        terminal.flushTimer = null;
+      }
+      terminal.outQueue.length = 0;
+      terminal.pendingOut.length = 0;
       try {
         terminal.connection?.close();
       } catch {
@@ -340,16 +439,24 @@ export class TunnelHost {
           this.#handleTerminalMessage(session, message.id, terminal, message);
           return;
         }
-        const socket = session.sockets.get(message.id);
-        if (!socket) return;
-        if (message.text !== undefined) socket.send(message.text);
-        else if (message.body !== undefined) socket.send(Buffer.from(message.body, "base64"));
+        const entry = session.sockets.get(message.id);
+        if (!entry) return;
+        const decoded = entry.inbound.push(message);
+        if (!decoded) return;
+        if (decoded.kind === "text") entry.socket.send(decoded.text);
+        else entry.socket.send(decoded.bytes);
         return;
       }
       case "ws-close": {
         const terminal = session.terminals.get(message.id);
         if (terminal) {
           terminal.closed = true;
+          if (terminal.flushTimer !== null) {
+            clearTimeout(terminal.flushTimer);
+            terminal.flushTimer = null;
+          }
+          terminal.outQueue.length = 0;
+          terminal.pendingOut.length = 0;
           session.terminals.delete(message.id);
           try {
             terminal.connection?.close();
@@ -358,7 +465,7 @@ export class TunnelHost {
           }
           return;
         }
-        session.sockets.get(message.id)?.close();
+        session.sockets.get(message.id)?.socket.close();
         session.sockets.delete(message.id);
         return;
       }
@@ -465,7 +572,17 @@ export class TunnelHost {
     try {
       if (message.path !== TTY7_TERMINAL_PATH) throw new Error("路径不合法");
       if (!this.#options.tty7) throw new Error("对端没有提供实时终端服务");
-      const terminal: HostTerminal = { inFlight: 0, peerPaused: false, sendChain: Promise.resolve(), closed: false };
+      const terminal: HostTerminal = {
+        inFlight: 0,
+        peerPaused: false,
+        activeSends: 0,
+        outQueue: [],
+        pendingOut: [],
+        pendingOutBytes: 0,
+        flushTimer: null,
+        inbound: new WsReassembler(),
+        closed: false,
+      };
       session.terminals.set(message.id, terminal);
       await session.channel.post({ k: "ws-ok", id: message.id });
     } catch (error) {
@@ -483,14 +600,75 @@ export class TunnelHost {
     message: Extract<TunnelMessage, { k: "ws-msg" }>,
   ): void {
     if (terminal.closed || session.closed) return;
-    const enqueue = (task: () => Promise<void>): void => {
-      terminal.sendChain = terminal.sendChain.then(task, task).catch(() => undefined);
+
+    // 滑动窗口保序发送：同步调用 channel.post 锁定严格递增的帧计数器，允许最多 SEND_WINDOW 帧并发在途。
+    const pump = (): void => {
+      while (!session.closed && terminal.activeSends < SEND_WINDOW && terminal.outQueue.length > 0) {
+        const item = terminal.outQueue.shift()!;
+        terminal.activeSends += 1;
+        void session.channel
+          .post(item.message)
+          .catch(() => undefined)
+          .finally(() => {
+            terminal.activeSends = Math.max(0, terminal.activeSends - 1);
+            if (item.rawBytes > 0) {
+              terminal.inFlight = Math.max(0, terminal.inFlight - item.rawBytes);
+              if (!terminal.closed && !terminal.peerPaused && terminal.inFlight < 128 * 1024) {
+                terminal.connection?.resume();
+              }
+            }
+            pump();
+          });
+      }
     };
+
+    const flushPendingOut = (): void => {
+      if (terminal.flushTimer !== null) {
+        clearTimeout(terminal.flushTimer);
+        terminal.flushTimer = null;
+      }
+      if (terminal.pendingOut.length === 0) return;
+      const combined = terminal.pendingOut.length === 1 ? terminal.pendingOut[0]! : Buffer.concat(terminal.pendingOut);
+      terminal.pendingOut = [];
+      terminal.pendingOutBytes = 0;
+      if (terminal.closed || session.closed) return;
+
+      if (session.wsGzip) {
+        for (let offset = 0; offset < combined.length; offset += TTY7_GZIP_RAW_BLOCK_BYTES) {
+          const block = combined.subarray(offset, Math.min(combined.length, offset + TTY7_GZIP_RAW_BLOCK_BYTES));
+          if (block.length >= WS_GZIP_MIN_BYTES) {
+            const gz = gzipSync(block, { level: 1 });
+            if (gz.length + 16 < block.length && gz.length <= TUNNEL_TTY7_CHUNK_BYTES) {
+              terminal.outQueue.push({ message: { k: "ws-msg", id, body: b64(gz), enc: "gzip" }, rawBytes: block.length });
+              continue;
+            }
+          }
+          for (let sub = 0; sub < block.length; sub += TUNNEL_TTY7_CHUNK_BYTES) {
+            const part = block.subarray(sub, Math.min(block.length, sub + TUNNEL_TTY7_CHUNK_BYTES));
+            terminal.outQueue.push({ message: { k: "ws-msg", id, body: b64(part) }, rawBytes: part.length });
+          }
+        }
+      } else {
+        for (let offset = 0; offset < combined.length; offset += TUNNEL_TTY7_CHUNK_BYTES) {
+          const part = combined.subarray(offset, Math.min(combined.length, offset + TUNNEL_TTY7_CHUNK_BYTES));
+          terminal.outQueue.push({ message: { k: "ws-msg", id, body: b64(part) }, rawBytes: part.length });
+        }
+      }
+      pump();
+    };
+
+    const sendFrame = (frame: TunnelMessage): void => {
+      if (session.closed) return;
+      flushPendingOut();
+      terminal.outQueue.push({ message: frame, rawBytes: 0 });
+      pump();
+    };
+
     const sendControl = (payload: unknown): void => {
       if (terminal.closed || session.closed) return;
-      const text = JSON.stringify(payload);
-      enqueue(() => (session.closed ? Promise.resolve() : session.channel.post({ k: "ws-msg", id, text })));
+      sendFrame({ k: "ws-msg", id, text: JSON.stringify(payload) });
     };
+
     const reject = (reason: string): void => {
       if (terminal.closed) return;
       sendControl({ type: "error", message: reason });
@@ -501,16 +679,19 @@ export class TunnelHost {
       } catch {
         // 已经关了。
       }
-      enqueue(() => (session.closed ? Promise.resolve() : session.channel.post({ k: "ws-close", id, code: 1008, reason: "Terminal request rejected" })));
+      sendFrame({ k: "ws-close", id, code: 1008, reason: "Terminal request rejected" });
     };
 
     try {
+      const decoded = terminal.inbound.push(message);
+      if (!decoded) return;
+
       if (!terminal.connection) {
-        if (message.text === undefined) {
+        if (decoded.kind !== "text") {
           reject("请先发送终端连接参数");
           return;
         }
-        const request = JSON.parse(message.text) as { type?: unknown; pane?: unknown; size?: unknown };
+        const request = JSON.parse(decoded.text) as { type?: unknown; pane?: unknown; size?: unknown };
         if (request.type !== "connect" || !Number.isSafeInteger(request.pane) || (request.pane as number) < 0 || !validTerminalSize(request.size)) {
           reject("终端会话或尺寸不正确");
           return;
@@ -525,21 +706,15 @@ export class TunnelHost {
           live: () => sendControl({ type: "live" }),
           output(bytes) {
             if (terminal.closed || session.closed || bytes.length === 0) return;
-            terminal.inFlight += bytes.length;
-            if (terminal.inFlight >= 256 * 1024) terminal.connection?.pause();
-            for (let offset = 0; offset < bytes.length; offset += TUNNEL_TTY7_CHUNK_BYTES) {
-              const part = bytes.subarray(offset, Math.min(bytes.length, offset + TUNNEL_TTY7_CHUNK_BYTES));
-              const chunkSize = part.length;
-              const encoded = b64(part);
-              enqueue(async () => {
-                if (!terminal.closed && !session.closed) {
-                  await session.channel.post({ k: "ws-msg", id, body: encoded });
-                }
-                terminal.inFlight = Math.max(0, terminal.inFlight - chunkSize);
-                if (!terminal.closed && !terminal.peerPaused && terminal.inFlight < 64 * 1024) {
-                  terminal.connection?.resume();
-                }
-              });
+            const copy = Buffer.from(bytes);
+            terminal.inFlight += copy.length;
+            if (terminal.inFlight >= 512 * 1024) terminal.connection?.pause();
+            terminal.pendingOut.push(copy);
+            terminal.pendingOutBytes += copy.length;
+            if (terminal.pendingOutBytes >= TTY7_GZIP_RAW_BLOCK_BYTES) {
+              flushPendingOut();
+            } else if (terminal.flushTimer === null) {
+              terminal.flushTimer = setTimeout(flushPendingOut, TERMINAL_COALESCE_MS);
             }
           },
           size: (size) => sendControl({ type: "size", size }),
@@ -549,31 +724,30 @@ export class TunnelHost {
           error: (text) => sendControl({ type: "error", message: text }),
           close: () => {
             if (terminal.closed) return;
+            flushPendingOut();
             terminal.closed = true;
             session.terminals.delete(id);
-            enqueue(() => (session.closed ? Promise.resolve() : session.channel.post({ k: "ws-close", id, code: 1000, reason: "Terminal stream closed" })));
+            sendFrame({ k: "ws-close", id, code: 1000, reason: "Terminal stream closed" });
           },
         });
         return;
       }
 
-      if (message.body !== undefined) {
-        terminal.connection.input(Buffer.from(message.body, "base64"));
+      if (decoded.kind === "binary") {
+        terminal.connection.input(decoded.bytes);
         return;
       }
-      if (message.text !== undefined) {
-        const request = JSON.parse(message.text) as { type?: unknown; size?: unknown };
-        if (request.type === "resize" && validTerminalSize(request.size)) {
-          terminal.connection.resize(request.size);
-        } else if (request.type === "pause") {
-          terminal.peerPaused = true;
-          terminal.connection.pause();
-        } else if (request.type === "resume") {
-          terminal.peerPaused = false;
-          if (terminal.inFlight < 64 * 1024) terminal.connection.resume();
-        } else {
-          reject("终端控制消息不正确");
-        }
+      const request = JSON.parse(decoded.text) as { type?: unknown; size?: unknown };
+      if (request.type === "resize" && validTerminalSize(request.size)) {
+        terminal.connection.resize(request.size);
+      } else if (request.type === "pause") {
+        terminal.peerPaused = true;
+        terminal.connection.pause();
+      } else if (request.type === "resume") {
+        terminal.peerPaused = false;
+        if (terminal.inFlight < 128 * 1024) terminal.connection.resume();
+      } else {
+        reject("终端控制消息不正确");
       }
     } catch (error) {
       reject(error instanceof Error ? error.message : "终端请求无效");
@@ -590,12 +764,12 @@ export class TunnelHost {
       });
       const socket = new WebSocket(`${local.ws}${message.path}`, { headers } as unknown as string[]);
       socket.binaryType = "arraybuffer";
-      session.sockets.set(message.id, socket);
+      session.sockets.set(message.id, { socket, inbound: new WsReassembler() });
       socket.addEventListener("open", () => void session.channel.post({ k: "ws-ok", id: message.id }).catch(() => undefined));
       socket.addEventListener("message", (event) => {
         const data = event.data as string | ArrayBuffer;
-        const frame: TunnelMessage = typeof data === "string" ? { k: "ws-msg", id: message.id, text: data } : { k: "ws-msg", id: message.id, body: b64(new Uint8Array(data)) };
-        void session.channel.post(frame).catch(() => undefined);
+        const frames = encodeWsFrames(message.id, typeof data === "string" ? data : new Uint8Array(data), session.wsGzip);
+        for (const frame of frames) void session.channel.post(frame).catch(() => undefined);
       });
       socket.addEventListener("close", (event) => {
         session.sockets.delete(message.id);
@@ -661,10 +835,13 @@ export class TunnelSocket {
   readonly #listeners = new Map<SocketEvent, Array<(event: never) => void>>();
   readonly #outbound: (message: TunnelMessage) => Promise<void>;
   readonly #id: string;
+  readonly #wsGzip: boolean;
+  readonly #inbound = new WsReassembler();
 
-  constructor(id: string, outbound: (message: TunnelMessage) => Promise<void>) {
+  constructor(id: string, outbound: (message: TunnelMessage) => Promise<void>, wsGzip = false) {
     this.#id = id;
     this.#outbound = outbound;
+    this.#wsGzip = wsGzip;
   }
 
   addEventListener(type: SocketEvent, listener: (event: never) => void): void {
@@ -674,8 +851,11 @@ export class TunnelSocket {
   }
 
   send(data: string | ArrayBuffer | Uint8Array): void {
-    const message: TunnelMessage = typeof data === "string" ? { k: "ws-msg", id: this.#id, text: data } : { k: "ws-msg", id: this.#id, body: b64(data instanceof ArrayBuffer ? new Uint8Array(data) : data) };
-    void this.#outbound(message).catch(() => this.#finish(1011, "隧道中断"));
+    const payload = typeof data === "string" ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : data;
+    const frames = encodeWsFrames(this.#id, payload, this.#wsGzip);
+    for (const frame of frames) {
+      void this.#outbound(frame).catch(() => this.#finish(1011, "隧道中断"));
+    }
   }
 
   close(code = 1000, reason = ""): void {
@@ -692,11 +872,17 @@ export class TunnelSocket {
   }
 
   _message(message: Extract<TunnelMessage, { k: "ws-msg" }>): void {
-    const data = message.text ?? (message.body === undefined ? "" : (() => {
-      const bytes = Buffer.from(message.body, "base64");
-      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-    })());
-    this.#emit("message", { data });
+    try {
+      const decoded = this.#inbound.push(message);
+      if (!decoded) return;
+      const data =
+        decoded.kind === "text"
+          ? decoded.text
+          : decoded.bytes.buffer.slice(decoded.bytes.byteOffset, decoded.bytes.byteOffset + decoded.bytes.byteLength);
+      this.#emit("message", { data });
+    } catch (error) {
+      this._failed(error instanceof Error ? error.message : "WebSocket 消息解压失败");
+    }
   }
 
   _failed(message?: string): void {
@@ -729,14 +915,16 @@ interface PendingStream {
 
 export class TunnelSession {
   readonly deviceId: string;
+  readonly wsGzip: boolean;
   closed = false;
   readonly #channel: TunnelChannel;
   readonly #streams = new Map<string, PendingStream>();
   readonly #onClosed: () => void;
   #nextId = 1;
 
-  constructor(deviceId: string, makeChannel: (session: TunnelSession) => TunnelChannel, onClosed: () => void) {
+  constructor(deviceId: string, makeChannel: (session: TunnelSession) => TunnelChannel, onClosed: () => void, wsGzip = false) {
     this.deviceId = deviceId;
+    this.wsGzip = wsGzip;
     this.#channel = makeChannel(this);
     this.#onClosed = onClosed;
   }
@@ -836,7 +1024,11 @@ export class TunnelSession {
   /** 经隧道打开对端 T3 或 tty7 的 WebSocket。 */
   socket(path: string, headers: Headers2, target?: TunnelTarget): TunnelSocket {
     const id = String(this.#nextId++);
-    const socket = new TunnelSocket(id, (message) => (this.closed ? Promise.reject(new Error("隧道已关闭")) : this.#channel.post(message)));
+    const socket = new TunnelSocket(
+      id,
+      (message) => (this.closed ? Promise.reject(new Error("隧道已关闭")) : this.#channel.post(message)),
+      this.wsGzip,
+    );
     this.#streams.set(id, { socket, onError: (message) => socket._failed(message) });
     void this.#channel
       .post({ k: "ws-open", id, path, headers, ...(target !== undefined ? { target } : {}) })
@@ -962,10 +1154,17 @@ export class TunnelClient {
   async #open(deviceId: string): Promise<TunnelSession> {
     const sid = randomBytes(12).toString("base64url");
     const ephemeral = newTunnelEphemeral();
-    const outcome = await this.#options.dispatch(deviceId, TUNNEL_OPEN_KIND, { sid, epk: ephemeral.publicKey }, { timeoutMs: OPEN_TIMEOUT_MS });
+    const outcome = await this.#options.dispatch(
+      deviceId,
+      TUNNEL_OPEN_KIND,
+      { sid, epk: ephemeral.publicKey, caps: [TUNNEL_WS_GZIP_CAP] },
+      { timeoutMs: OPEN_TIMEOUT_MS },
+    );
     if (!outcome.ok) throw new Error(outcome.error);
-    const result = outcome.result as { epk?: unknown; sig?: unknown } | null;
+    const result = outcome.result as { epk?: unknown; sig?: unknown; caps?: unknown } | null;
     if (typeof result?.epk !== "string" || typeof result.sig !== "string") throw new Error("对端的握手应答不合法");
+    const peerCaps = Array.isArray(result.caps) ? result.caps.filter((cap): cap is string => typeof cap === "string") : [];
+    const wsGzip = peerCaps.includes(TUNNEL_WS_GZIP_CAP);
     const publicKey = await this.#options.pins.resolve(deviceId, this.#options.peerKey(deviceId));
     const transcript = tunnelTranscript({
       sid,
@@ -990,6 +1189,7 @@ export class TunnelClient {
         if (this.#sessions.get(deviceId) === session) this.#sessions.delete(deviceId);
         this.#bySid.delete(key);
       },
+      wsGzip,
     );
     this.#sessions.set(deviceId, session);
     this.#bySid.set(key, session);

@@ -4398,6 +4398,21 @@ export class YouBrainDaemon {
               return hub.read(id);
             },
           },
+          devicesPort: async () => {
+            if (!hub) return [];
+            return hub
+              .devices()
+              .filter((device) => device.enrolled)
+              .map((device) => ({
+                id: device.id,
+                name: device.name,
+                online: device.online,
+                self: device.self,
+                acceptsDispatch: device.dispatch?.enabled === true,
+                maxMode: device.dispatch?.maxMode ?? null,
+                projects: device.dispatch?.projects ?? [],
+              }));
+          },
           replyPort: async (replyToken, text) => {
             if (!this.#deck?.telegram) return { ok: false, error: "移动端回复通道未就绪" };
             return this.#deck.telegram.deliverMobileReply(replyToken, text);

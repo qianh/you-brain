@@ -1,6 +1,8 @@
 package ai.youbrain.mobile.ui
 
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,19 +13,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Surface
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,12 +30,24 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import ai.youbrain.mobile.data.MobilePushItem
 import ai.youbrain.mobile.net.AppUiState
 import ai.youbrain.mobile.net.UBrainRepository
+import ai.youbrain.mobile.ui.components.IosHairline
+import ai.youbrain.mobile.ui.components.IosIconBadge
+import ai.youbrain.mobile.ui.components.IosIcons
+import ai.youbrain.mobile.ui.components.IosSegmentedControl
+import ai.youbrain.mobile.ui.theme.IosTheme
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -57,49 +67,63 @@ fun PushCenterScreen(
     repository: UBrainRepository,
     onOpenDeviceT3: (deviceId: String, threadUrl: String?) -> Unit,
 ) {
+    val c = IosTheme.colors
     var filter by remember { mutableStateOf("all") }
     val filtered = remember(state.pushes, filter) {
         if (filter == "all") state.pushes
         else state.pushes.filter { it.kind == filter }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        Surface(tonalElevation = 2.dp) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                KIND_FILTERS.forEach { (key, label) ->
-                    FilterChip(
-                        selected = filter == key,
-                        onClick = { filter = key },
-                        label = { Text(label) },
-                    )
-                }
-            }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(c.groupedBg),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().background(c.chromeBg)) {
+            IosSegmentedControl(
+                items = KIND_FILTERS,
+                selectedKey = filter,
+                onSelect = { filter = it },
+                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+            IosHairline()
         }
 
         if (filtered.isEmpty()) {
-            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                Text(
-                    text = "暂无推送消息\n各台设备上的终端待回复、T3 完成/等待、跨设备派活进展和 U-Brain 提醒都会实时汇总到这里。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(28.dp),
-                )
+            Box(
+                modifier = Modifier.fillMaxSize().padding(24.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(c.cardBg)
+                        .padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    IosIconBadge(icon = IosIcons.Bell, background = c.orange)
+                    Text("暂无通知", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = c.label)
+                    Text(
+                        text = "各台设备上的终端待回复、T3 完成/等待、跨设备派活进展和 U-Brain 提醒都会实时汇总到这里。",
+                        fontSize = 13.5.sp,
+                        lineHeight = 19.sp,
+                        color = c.secondaryLabel,
+                        textAlign = TextAlign.Center,
+                    )
+                }
             }
         } else {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(12.dp),
+                contentPadding = PaddingValues(14.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 items(filtered, key = { it.seq }) { item ->
                     PushCard(
                         item = item,
+                        deviceDisplayName = state.displayName(item.deviceId, item.deviceName),
                         canViewT3 = state.relayState.devices.any {
                             it.id == item.deviceId && it.dispatch?.viewT3 == true
                         },
@@ -115,10 +139,12 @@ fun PushCenterScreen(
 @Composable
 private fun PushCard(
     item: MobilePushItem,
+    deviceDisplayName: String,
     canViewT3: Boolean,
     repository: UBrainRepository,
     onOpenT3: () -> Unit,
 ) {
+    val c = IosTheme.colors
     val scope = rememberCoroutineScope()
     val timeText = remember(item.ts) {
         SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(item.ts))
@@ -128,86 +154,156 @@ private fun PushCard(
     var sending by remember { mutableStateOf(false) }
     var feedback by remember { mutableStateOf<String?>(null) }
 
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+    val badgeColor = kindColor(item.kind)
+    val badgeIcon = kindIcon(item.kind)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(c.cardBg)
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(22.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(badgeColor),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = badgeIcon,
+                    contentDescription = null,
+                    tint = Color.White,
+                    modifier = Modifier.size(13.dp),
+                )
+            }
+            Text(
+                text = "$deviceDisplayName · ${kindLabel(item.kind)}",
+                fontSize = 12.5.sp,
+                fontWeight = FontWeight.Medium,
+                color = c.secondaryLabel,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = timeText,
+                fontSize = 12.sp,
+                color = c.secondaryLabel,
+                softWrap = false,
+            )
+        }
+
+        Text(
+            text = item.title,
+            fontSize = 15.5.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = c.label,
+        )
+
+        if (item.body.isNotBlank()) {
+            SelectionContainer {
+                Text(
+                    text = item.body,
+                    fontSize = 14.sp,
+                    lineHeight = 19.sp,
+                    color = c.secondaryLabel,
+                )
+            }
+        }
+
+        if (feedback != null) {
+            Text(
+                text = feedback!!,
+                fontSize = 12.5.sp,
+                color = if (feedback!!.startsWith("✓")) c.green else c.red,
+                fontWeight = FontWeight.Medium,
+            )
+        }
+
+        val hasReply = !item.replyToken.isNullOrBlank()
+        if (hasReply || canViewT3) {
+            IosHairline()
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(
-                    text = "${item.deviceName} · ${kindLabel(item.kind)}",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    text = timeText,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    softWrap = false,
-                )
-            }
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = item.title,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-            )
-            if (item.body.isNotBlank()) {
-                Spacer(modifier = Modifier.height(6.dp))
-                SelectionContainer {
+                if (hasReply) {
                     Text(
-                        text = item.body,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        text = if (replyOpen) "收起回复" else "快捷回复",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = c.blue,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable { replyOpen = !replyOpen }
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
                     )
-                }
-            }
-
-            if (feedback != null) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = feedback!!,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.secondary,
-                )
-            }
-
-            Spacer(modifier = Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (!item.replyToken.isNullOrBlank()) {
-                    TextButton(onClick = { replyOpen = !replyOpen }) {
-                        Text(if (replyOpen) "收起回复" else "快捷回复")
-                    }
                 }
                 if (canViewT3) {
-                    TextButton(onClick = onOpenT3) {
-                        Text("查看设备 T3")
-                    }
+                    Text(
+                        text = "打开设备 T3",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = c.blue,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable(onClick = onOpenT3)
+                            .padding(horizontal = 4.dp, vertical = 2.dp),
+                    )
                 }
             }
+        }
 
-            if (replyOpen) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+        if (replyOpen) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(if (c.isDark) Color(0xFF2C2C2E) else Color(0xFFF2F2F7))
+                        .border(0.5.dp, c.separator.copy(alpha = 0.5f), RoundedCornerShape(18.dp))
+                        .padding(horizontal = 14.dp, vertical = 9.dp),
                 ) {
-                    OutlinedTextField(
+                    if (replyDraft.isEmpty()) {
+                        Text(
+                            text = "输入回复直达原会话…",
+                            fontSize = 14.sp,
+                            color = c.secondaryLabel,
+                            maxLines = 1,
+                        )
+                    }
+                    BasicTextField(
                         value = replyDraft,
                         onValueChange = { replyDraft = it },
-                        placeholder = { Text("回复内容将直接发往原会话…") },
                         singleLine = true,
-                        modifier = Modifier.weight(1f),
+                        textStyle = TextStyle(fontSize = 14.sp, color = c.label),
+                        cursorBrush = SolidColor(c.blue),
+                        modifier = Modifier.fillMaxWidth(),
                     )
-                    Button(
-                        onClick = {
+                }
+
+                val canSend = !sending && replyDraft.isNotBlank()
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(if (canSend) c.blue else c.tertiaryFill)
+                        .clickable(enabled = canSend) {
                             val text = replyDraft.trim()
-                            if (text.isEmpty()) return@Button
+                            if (text.isEmpty()) return@clickable
                             sending = true
                             scope.launch {
                                 val res = repository.replyToPush(item, text)
@@ -216,7 +312,7 @@ private fun PushCard(
                                     onSuccess = {
                                         replyDraft = ""
                                         replyOpen = false
-                                        feedback = "✓ 已发送到 ${it.targetName.ifBlank { item.deviceName }}"
+                                        feedback = "✓ 已发送到 ${it.targetName.ifBlank { deviceDisplayName }}"
                                     },
                                     onFailure = {
                                         feedback = "回复失败：${it.message}"
@@ -224,8 +320,14 @@ private fun PushCard(
                                 )
                             }
                         },
-                        enabled = !sending && replyDraft.isNotBlank(),
-                    ) { Text("发送") }
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = IosIcons.ArrowUp,
+                        contentDescription = "发送",
+                        tint = if (canSend) Color.White else c.secondaryLabel,
+                        modifier = Modifier.size(18.dp),
+                    )
                 }
             }
         }
@@ -238,4 +340,20 @@ private fun kindLabel(kind: String): String = when (kind) {
     "dispatch" -> "跨设备派活"
     "reminder" -> "记忆提醒"
     else -> "通知"
+}
+
+@Composable
+private fun kindColor(kind: String): Color = when (kind) {
+    "t3" -> IosTheme.colors.indigo
+    "tty7" -> Color(0xFF3A3A3C)
+    "dispatch" -> IosTheme.colors.blue
+    "reminder" -> IosTheme.colors.orange
+    else -> IosTheme.colors.teal
+}
+
+private fun kindIcon(kind: String): ImageVector = when (kind) {
+    "t3" -> IosIcons.TerminalWindow
+    "tty7" -> IosIcons.Laptop
+    "dispatch" -> IosIcons.Layers
+    else -> IosIcons.Bell
 }

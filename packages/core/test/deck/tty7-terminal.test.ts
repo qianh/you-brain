@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
 import {
-  openTty7Terminal, terminalFrame, TerminalFrames, tty7SocketPath,
+  compactTerminalReplay, openTty7Terminal, terminalFrame, TerminalFrames, tty7SocketPath,
   type TerminalSize, type Tty7TerminalEvents,
 } from "../../src/deck/tty7-terminal.js";
 
@@ -144,6 +144,58 @@ describe("tty7 real terminal transport", () => {
       await until(h.released);
       expect(h.openings).not.toContain(6);
     });
+  });
+
+  it("coalesces stale Observe size frames when LeaseTake updates the grid during replay", async () => {
+    await fixture(async (h) => {
+      const fullScreen: TerminalSize = { cols: 320, rows: 78, cell_w: 9, cell_h: 18 };
+      const heard: TerminalSize[] = [];
+      const connection = openTty7Terminal({
+        pane: 9,
+        size: fullScreen,
+        socketPath: h.path,
+        events: events({ size(size) { heard.push(size); } }),
+      });
+      try {
+        await until(() => heard.length > 0);
+        // fixture 在 Observe 阶段先发了旧半屏 SIZE (100x30)，紧接着 LeaseTake 发了 320x78；聚合后只应向下游暴露最新的 320x78。
+        expect(heard).toEqual([fullScreen]);
+      } finally {
+        connection.close();
+      }
+      await until(h.released);
+    });
+  });
+
+  it("compacts multi-MB alternate-screen TUI replays while keeping DEC modes and final screen", () => {
+    const staleRedraws = "\x1b[2J\x1b[H旧画面重绘内容\n".repeat(90_000);
+    const raw = Buffer.from(
+      `shell prompt % claude\r\n\x1b[?1049h\x1b[?2004h\x1b[?1004h\x1b[?25l${staleRedraws}\x1b[2J\x1b[H最终全屏 TUI 状态栏`,
+      "utf8",
+    );
+    expect(raw.byteLength).toBeGreaterThan(1_500_000);
+    const compacted = compactTerminalReplay(raw);
+    expect(compacted.byteLength).toBeLessThan(8_192);
+    const text = compacted.toString("utf8");
+    expect(text).toContain("shell prompt % claude");
+    expect(text).toContain("\x1b[?1049h");
+    expect(text).toContain("\x1b[?2004h");
+    expect(text).toContain("\x1b[?1004h");
+    expect(text).toContain("\x1b[?25l");
+    expect(text).toContain("最终全屏 TUI 状态栏");
+    expect(text).not.toContain("旧画面重绘内容");
+  });
+
+  it("truncates oversized normal scrollback cleanly on UTF-8 and line boundaries", () => {
+    const line = "这是一行包含多字节中文字符的终端输出日志 0123456789\r\n";
+    const raw = Buffer.from(`\x1b[?2004h${line.repeat(12_000)}最后一行完整输出\r\n`, "utf8");
+    expect(raw.byteLength).toBeGreaterThan(700_000);
+    const compacted = compactTerminalReplay(raw);
+    expect(compacted.byteLength).toBeLessThanOrEqual(512 * 1024 + 64);
+    const decoded = compacted.toString("utf8");
+    expect(decoded).not.toContain("\ufffd");
+    expect(decoded).toContain("\x1b[?2004h");
+    expect(decoded.endsWith("最后一行完整输出\r\n")).toBe(true);
   });
 
   it("refuses incompatible daemons before observing or sending any input", async () => {

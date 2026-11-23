@@ -11,36 +11,26 @@ import android.webkit.WebChromeClient
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalView
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import ai.youbrain.mobile.data.ConnectionState
 import ai.youbrain.mobile.net.AppTab
 import ai.youbrain.mobile.service.RelayForegroundService
@@ -49,6 +39,9 @@ import ai.youbrain.mobile.ui.OnboardingScreen
 import ai.youbrain.mobile.ui.PushCenterScreen
 import ai.youbrain.mobile.ui.SettingsScreen
 import ai.youbrain.mobile.ui.T3DeckScreen
+import ai.youbrain.mobile.ui.components.IosNavigationBar
+import ai.youbrain.mobile.ui.components.IosTabBar
+import ai.youbrain.mobile.ui.theme.IosTheme
 import ai.youbrain.mobile.ui.theme.UBrainTheme
 import kotlinx.coroutines.delay
 
@@ -75,7 +68,23 @@ class MainActivity : ComponentActivity() {
         handleIncomingIntent(intent, repo)
 
         setContent {
-            UBrainTheme {
+            val darkTheme = isSystemInDarkTheme()
+            UBrainTheme(darkTheme = darkTheme) {
+                val iosColors = IosTheme.colors
+                val view = LocalView.current
+                if (!view.isInEditMode) {
+                    SideEffect {
+                        val window = this@MainActivity.window
+                        @Suppress("DEPRECATION")
+                        window.statusBarColor = iosColors.chromeBg.toArgb()
+                        @Suppress("DEPRECATION")
+                        window.navigationBarColor = iosColors.chromeBg.toArgb()
+                        val controller = WindowCompat.getInsetsController(window, view)
+                        controller.isAppearanceLightStatusBars = !darkTheme
+                        controller.isAppearanceLightNavigationBars = !darkTheme
+                    }
+                }
+
                 val state by repo.uiState.collectAsState()
 
                 LaunchedEffect(state.enrolled, state.backgroundKeepAlive) {
@@ -192,94 +201,34 @@ private fun MainTabsShell(
         }
     }
 
+    val c = IosTheme.colors
+
     Scaffold(
+        containerColor = c.groupedBg,
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
-            Surface(tonalElevation = 1.dp, modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .statusBarsPadding()
-                        .height(40.dp)
-                        .padding(horizontal = 14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text(
-                        text = when (currentTab) {
-                            AppTab.AGENT -> "主控调度"
-                            AppTab.T3 -> "设备 T3"
-                            AppTab.PUSHES -> "推送中心"
-                            AppTab.SETTINGS -> "设置"
-                        },
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                    )
-                    val statusLabel = when (state.connectionState) {
-                        ConnectionState.OK -> "● 已连"
-                        ConnectionState.CONNECTING -> "◌ 连接中"
-                        else -> "✕ 重连"
-                    }
-                    val statusColor = when (state.connectionState) {
-                        ConnectionState.OK -> MaterialTheme.colorScheme.secondary
-                        ConnectionState.CONNECTING -> MaterialTheme.colorScheme.onSurfaceVariant
-                        else -> MaterialTheme.colorScheme.error
-                    }
-                    Surface(
-                        shape = RoundedCornerShape(999.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
-                        modifier = Modifier.clickable { repository.reconnectNow() },
-                    ) {
-                        Text(
-                            text = statusLabel,
-                            color = statusColor,
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                            softWrap = false,
-                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                        )
-                    }
-                }
-            }
+            IosNavigationBar(
+                title = when (currentTab) {
+                    AppTab.AGENT -> "主控"
+                    AppTab.T3 -> "设备 T3"
+                    AppTab.PUSHES -> "消息"
+                    AppTab.SETTINGS -> "设置"
+                },
+                connectionState = state.connectionState,
+                onReconnect = { repository.reconnectNow() },
+            )
         },
         bottomBar = {
-            NavigationBar {
-                NavigationBarItem(
-                    selected = currentTab == AppTab.AGENT,
-                    onClick = { currentTab = AppTab.AGENT },
-                    icon = { Text("⌘") },
-                    label = { Text("主控") },
-                )
-                NavigationBarItem(
-                    selected = currentTab == AppTab.T3,
-                    onClick = { currentTab = AppTab.T3 },
-                    icon = { Text("🛰") },
-                    label = { Text("T3") },
-                )
-                NavigationBarItem(
-                    selected = currentTab == AppTab.PUSHES,
-                    onClick = {
-                        currentTab = AppTab.PUSHES
+            IosTabBar(
+                currentTab = currentTab,
+                unreadCount = state.unreadPushCount,
+                onSelectTab = { nextTab ->
+                    currentTab = nextTab
+                    if (nextTab == AppTab.PUSHES) {
                         repository.markPushesRead()
-                    },
-                    icon = {
-                        if (state.unreadPushCount > 0) {
-                            BadgedBox(badge = { Badge { Text("${state.unreadPushCount}") } }) {
-                                Text("🔔")
-                            }
-                        } else {
-                            Text("🔔")
-                        }
-                    },
-                    label = { Text("消息") },
-                )
-                NavigationBarItem(
-                    selected = currentTab == AppTab.SETTINGS,
-                    onClick = { currentTab = AppTab.SETTINGS },
-                    icon = { Text("⚙") },
-                    label = { Text("设置") },
-                )
-            }
+                    }
+                },
+            )
         },
     ) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
@@ -296,7 +245,7 @@ private fun MainTabsShell(
             }
             if (currentTab != AppTab.T3) {
                 Surface(
-                    color = MaterialTheme.colorScheme.background,
+                    color = c.groupedBg,
                     modifier = Modifier.fillMaxSize(),
                 ) {
                     when (currentTab) {

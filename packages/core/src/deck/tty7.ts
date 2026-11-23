@@ -274,9 +274,18 @@ interface RawPort { pid: number }
 
 export type Tty7ActivityValue = Tty7AgentStatus | { status: Tty7AgentStatus; message?: string | null } | null;
 
+interface RawSessionsSnapshot {
+  workspaces: Tty7Workspace[];
+  panes: RawPane[];
+  agents: Map<number, RawAgent>;
+  tabs: Map<string, RawTab>;
+}
+
 export class Tty7 {
   readonly #options: Tty7Options;
   #runner: Tty7Runner | null;
+  #runnerInit: Promise<Tty7Runner> | null = null;
+  #inflightSessions: Promise<RawSessionsSnapshot> | null = null;
   /** 没有 hooks 状态的会话，状态改由终端活动判断（见 activity.ts）；daemon 启动监视时接上。 */
   #activity: ((pane: number) => Tty7ActivityValue) | null = null;
 
@@ -365,10 +374,17 @@ export class Tty7 {
 
   async #run(args: string[], options?: Tty7RunOptions): Promise<string> {
     if (!this.#runner) {
-      const env = this.#options.env ?? process.env;
-      const binary = await locateTty7(env);
-      if (!binary) throw new Tty7MissingError();
-      this.#runner = spawnRunner(binary, env);
+      this.#runnerInit ??= (async () => {
+        const env = this.#options.env ?? process.env;
+        const binary = await locateTty7(env);
+        if (!binary) throw new Tty7MissingError();
+        this.#runner = spawnRunner(binary, env);
+        return this.#runner;
+      })().finally(() => {
+        this.#runnerInit = null;
+      });
+      const runner = await this.#runnerInit;
+      return runner(args, options);
     }
     return this.#runner(args, options);
   }
@@ -380,6 +396,44 @@ export class Tty7 {
   async #workspaces(): Promise<Tty7Workspace[]> {
     const raw = parse<{ workspaces: RawWorkspace[] }>(await this.#run(["ws", "ls", "--json"]));
     return raw.workspaces.map((item) => ({ id: item.id, name: item.name ?? item.id.slice(0, 8), attached: item.attached !== null }));
+  }
+
+  #querySessionsSnapshot(): Promise<RawSessionsSnapshot> {
+    if (this.#inflightSessions) return this.#inflightSessions;
+    const task = (async (): Promise<RawSessionsSnapshot> => {
+      const [workspaces, panes, agentList] = await Promise.all([
+        this.#workspaces(),
+        this.#run(["pane", "ls", "--json"]).then((out) => parse<{ panes: RawPane[] }>(out).panes),
+        // 状态是锦上添花：拿不到不影响列会话。
+        this.#run(["agents", "--json"])
+          .then((out) => parse<{ agents: RawAgent[] }>(out).agents)
+          .catch(() => [] as RawAgent[]),
+      ]);
+      const liveWorkspaces = new Set<string>();
+      for (const pane of panes) {
+        if (pane.live) liveWorkspaces.add(pane.workspace);
+      }
+      const tabLists = await Promise.all(
+        workspaces
+          .filter((workspace) => liveWorkspaces.has(workspace.id))
+          .map((workspace) =>
+            this.#run(["tab", "ls", workspace.id, "--json"])
+              .then((out) => parse<{ tabs: RawTab[] }>(out).tabs)
+              .catch(() => [] as RawTab[]),
+          ),
+      );
+      const tabs = new Map<string, RawTab>();
+      for (const tab of tabLists.flat()) tabs.set(tab.id, tab);
+      const agents = new Map(agentList.map((agent) => [agent.pane_id, agent]));
+      return { workspaces, panes, agents, tabs };
+    })();
+    this.#inflightSessions = task;
+    void task
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.#inflightSessions === task) this.#inflightSessions = null;
+      });
+    return task;
   }
 
   setActivity(provider: ((pane: number) => Tty7ActivityValue) | null): void {
@@ -414,26 +468,12 @@ export class Tty7 {
   async sessions(options: { withActivity?: boolean } = {}): Promise<Tty7SessionsView> {
     const activity = options.withActivity === false ? null : this.#activity;
     const harnesses = TTY7_HARNESSES.map(({ id, label }) => ({ id, label }));
-    const appearance = await this.#appearance();
+    const appearanceTask = this.#appearance();
     try {
-      const workspaces = await this.#workspaces();
-      const [panes, agentList, tabLists] = await Promise.all([
-        this.#run(["pane", "ls", "--json"]).then((out) => parse<{ panes: RawPane[] }>(out).panes),
-        // 状态是锦上添花：拿不到不影响列会话。
-        this.#run(["agents", "--json"])
-          .then((out) => parse<{ agents: RawAgent[] }>(out).agents)
-          .catch(() => [] as RawAgent[]),
-        Promise.all(
-          workspaces.map((workspace) =>
-            this.#run(["tab", "ls", workspace.id, "--json"])
-              .then((out) => parse<{ tabs: RawTab[] }>(out).tabs)
-              .catch(() => [] as RawTab[]),
-          ),
-        ),
+      const [{ workspaces, panes, agents, tabs }, appearance] = await Promise.all([
+        this.#querySessionsSnapshot(),
+        appearanceTask,
       ]);
-      const tabs = new Map<string, RawTab>();
-      for (const tab of tabLists.flat()) tabs.set(tab.id, tab);
-      const agents = new Map(agentList.map((agent) => [agent.pane_id, agent]));
       const names = new Map(workspaces.map((workspace) => [workspace.id, workspace.name]));
       const sessions = panes
         .filter((pane) => pane.live)
@@ -462,6 +502,7 @@ export class Tty7 {
         });
       return { available: true, detail: "", workspaces, sessions, harnesses, appearance };
     } catch (error) {
+      const appearance = await appearanceTask;
       const detail =
         error instanceof Tty7MissingError ? "没有找到 tty7 命令" : error instanceof Error ? error.message : String(error);
       return { available: false, detail, workspaces: [], sessions: [], harnesses, appearance };

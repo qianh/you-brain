@@ -8,6 +8,7 @@ import java.io.File
 class AppStore(context: Context) {
     private val prefs = context.getSharedPreferences("ubrain_app", Context.MODE_PRIVATE)
     private val pushesFile = File(context.filesDir, "pushes_cache.json")
+    private val agentSnapshotsFile = File(context.filesDir, "agent_snapshots.json")
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     fun getLastPushSeq(): Long = prefs.getLong("last_push_seq", 0L)
@@ -33,6 +34,33 @@ class AppStore(context: Context) {
     }
 
     @Synchronized
+    fun getDeviceAliases(): Map<String, String> {
+        val raw = prefs.getString("device_aliases", null) ?: return emptyMap()
+        return try {
+            json.decodeFromString<Map<String, String>>(raw)
+        } catch (_: Throwable) {
+            emptyMap()
+        }
+    }
+
+    @Synchronized
+    fun setDeviceAlias(deviceId: String, alias: String?): Map<String, String> {
+        val next = LinkedHashMap(getDeviceAliases())
+        val clean = alias
+            ?.replace(Regex("[\\u0000-\\u001f]"), "")
+            ?.trim()
+            ?.take(40)
+            .orEmpty()
+        if (clean.isEmpty()) {
+            next.remove(deviceId)
+        } else {
+            next[deviceId] = clean
+        }
+        prefs.edit().putString("device_aliases", json.encodeToString(next)).apply()
+        return next.toMap()
+    }
+
+    @Synchronized
     fun loadCachedPushes(): List<MobilePushItem> {
         return try {
             if (!pushesFile.exists()) return emptyList()
@@ -51,8 +79,45 @@ class AppStore(context: Context) {
     }
 
     @Synchronized
+    fun loadAgentSnapshot(masterDeviceId: String?): CachedAgentSnapshot? {
+        if (masterDeviceId.isNullOrBlank()) return null
+        return loadAllAgentSnapshots()[masterDeviceId]
+    }
+
+    @Synchronized
+    fun saveAgentSnapshot(snapshot: CachedAgentSnapshot) {
+        if (snapshot.masterDeviceId.isBlank()) return
+        runCatching {
+            val existing = LinkedHashMap(loadAllAgentSnapshots())
+            val confirmedMessages = snapshot.messages
+                .filter { it.position < 1_000_000 }
+                .takeLast(80)
+            existing.remove(snapshot.masterDeviceId)
+            existing[snapshot.masterDeviceId] = snapshot.copy(
+                messages = confirmedMessages,
+                outbox = snapshot.outbox.take(30),
+            )
+            while (existing.size > 6) {
+                val oldestKey = existing.keys.firstOrNull() ?: break
+                existing.remove(oldestKey)
+            }
+            agentSnapshotsFile.writeText(json.encodeToString(existing))
+        }
+    }
+
+    private fun loadAllAgentSnapshots(): Map<String, CachedAgentSnapshot> {
+        return try {
+            if (!agentSnapshotsFile.exists()) return emptyMap()
+            json.decodeFromString<Map<String, CachedAgentSnapshot>>(agentSnapshotsFile.readText())
+        } catch (_: Throwable) {
+            emptyMap()
+        }
+    }
+
+    @Synchronized
     fun clearPushesAndSeq() {
         prefs.edit().remove("last_push_seq").remove("master_device_id").apply()
         runCatching { pushesFile.delete() }
+        runCatching { agentSnapshotsFile.delete() }
     }
 }

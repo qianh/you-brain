@@ -198,10 +198,11 @@ class RelayForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
+        val senderLabel = (application as UBrainApp).repository.resolveDisplayName(item.deviceId, item.deviceName)
         val bodyText = item.body.ifBlank { item.title }
         val builder = NotificationCompat.Builder(this, CHANNEL_PUSH)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("${item.deviceName} · ${item.title}")
+            .setContentTitle("$senderLabel · ${item.title}")
             .setContentText(bodyText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bodyText))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -210,7 +211,7 @@ class RelayForegroundService : Service() {
 
         if (!item.replyToken.isNullOrBlank()) {
             val remoteInput = RemoteInput.Builder(PushReplyReceiver.KEY_REPLY_TEXT)
-                .setLabel("回复到 ${item.deviceName}…")
+                .setLabel("回复到 $senderLabel…")
                 .build()
             val replyIntent = Intent(this, PushReplyReceiver::class.java).apply {
                 putExtra(PushReplyReceiver.EXTRA_PUSH_JSON, json.encodeToString(item))

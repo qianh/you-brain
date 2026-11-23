@@ -4,15 +4,21 @@ import ai.youbrain.mobile.crypto.Base64Url
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withTimeoutOrNull
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.InputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.zip.ZipInputStream
 
 data class AssetMime(
     val mimeType: String,
@@ -113,8 +119,65 @@ class T3AssetCache(
     private val prefetchingKeys = ConcurrentHashMap.newKeySet<String>()
     private val pruning = AtomicBoolean(false)
 
+    @Volatile
+    var seedIndexHtml: String? = null
+        private set
+
+    @Volatile
+    private var seedJob: Job? = null
+
     init {
         cacheDir.mkdirs()
+    }
+
+    fun loadSeedZipAsync(openStream: () -> InputStream?) {
+        if (seedJob != null) return
+        seedJob = scope.launch(Dispatchers.IO) {
+            runCatching {
+                openStream()?.use { stream ->
+                    ZipInputStream(stream).use { zis ->
+                        val buf = ByteArray(16 * 1024)
+                        while (true) {
+                            val entry = zis.nextEntry ?: break
+                            if (entry.isDirectory) {
+                                zis.closeEntry()
+                                continue
+                            }
+                            val name = entry.name.trimStart('/')
+                            val out = ByteArrayOutputStream(maxOf(1024, entry.size.toInt().coerceAtLeast(1024)))
+                            while (true) {
+                                val n = zis.read(buf)
+                                if (n <= 0) break
+                                out.write(buf, 0, n)
+                            }
+                            val bytes = out.toByteArray()
+                            zis.closeEntry()
+                            if (name == "index.html") {
+                                seedIndexHtml = String(bytes, Charsets.UTF_8)
+                            } else {
+                                val assetPath = "/$name"
+                                if (isImmutableAssetPath(assetPath) && bytes.isNotEmpty()) {
+                                    putMem(
+                                        CachedAsset(
+                                            path = assetPath,
+                                            bytes = bytes,
+                                            mime = inferMimeAndEncoding(assetPath),
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    suspend fun awaitSeed() {
+        val job = seedJob
+        if (job != null && job.isActive) {
+            withTimeoutOrNull(400L) { job.join() }
+        }
     }
 
     private fun diskFile(path: String): File {
@@ -142,6 +205,15 @@ class T3AssetCache(
         if (!isImmutableAssetPath(path)) return null
         synchronized(memLock) {
             memLru[path]?.let { return it }
+        }
+        val job = seedJob
+        if (job != null && job.isActive) {
+            runBlocking {
+                withTimeoutOrNull(250L) { job.join() }
+            }
+            synchronized(memLock) {
+                memLru[path]?.let { return it }
+            }
         }
         val file = diskFile(path)
         if (!file.isFile || file.length() <= 0L) return null

@@ -405,6 +405,7 @@
 .deck-tty7-terminal {
   position: relative;
   flex: 1;
+  width: 100%;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -424,13 +425,14 @@
 
 .deck-tty7-xterm {
   flex: 1;
+  width: 100%;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
   background: var(--term-bg);
   cursor: text;
 }
-.deck-tty7-xterm .xterm { height: 100%; padding: 4px 6px; }
+.deck-tty7-xterm .xterm { width: 100%; height: 100%; padding: 4px 6px; box-sizing: border-box; }
 .deck-tty7-xterm .xterm-viewport { overscroll-behavior: contain; }
 /* 历史回放期间先不显示，放完直接停在最新内容。 */
 .deck-tty7-xterm.is-replaying { visibility: hidden; }
@@ -620,6 +622,7 @@
 .deck-term-body {
   position: relative;
   flex: 1;
+  width: 100%;
   min-height: 0;
   min-width: 0;
   display: flex;

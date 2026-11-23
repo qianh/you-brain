@@ -25,18 +25,19 @@ import { PolicyStore, type DispatchPolicy, type DispatchSender } from "./policy.
 
 const TTL_MS = 60_000;
 const POLL_MS = 15_000;
+const ACTIVE_POLL_MS = 1_500;
+const ACTIVE_THREAD_STATUSES = new Set(["preparing", "queued", "starting", "running"]);
 const RETRY_MS = [60_000, 120_000, 300_000] as const;
 const SUMMARY_LIMIT = 32_000;
 const CLOSED = "本机没有开启接收派活";
 const REJECTED = "本机不接受这条指令";
 
-const MASTER_AGENT_PREAMBLE = [
-  MASTER_AGENT_PREAMBLE_START,
+const MASTER_AGENT_BASE_LINES = [
   "你当前是运行在 U-Brain 主控设备上的常驻编排 Agent，正通过移动端与用户持续会话。",
   "你可以使用已挂载的 you-brain MCP 工具（list_devices、dispatch_to_device、get_dispatch_result、send_to_dispatch）查看在线设备、向其他设备的 T3 派发开发任务、查询进展与追问。",
-  "派活时遵循：先查 list_devices；仅派白名单项目；结果如实汇报 dispatchId、生效权限和链接。",
-  MASTER_AGENT_PREAMBLE_END,
-].join("\n");
+  "回答设备状态、任务进展或编排咨询时直接简洁作答；除非用户明确要求查看本机代码仓库，否则不要扫描本机代码目录。",
+  "派活时遵循：先确认目标设备与白名单项目；仅派白名单项目；结果如实汇报 dispatchId、生效权限和链接。",
+];
 
 export interface ThreadStatusEvent {
   dispatchId: string;
@@ -94,6 +95,7 @@ export interface DispatchT3Port {
     prompt: string;
     requestId: string;
     runtimeMode: "auto-accept-edits" | "auto" | "full-access";
+    fastOrchestrator?: boolean;
   }): Promise<{ threadId: string; threadUrl: string }>;
   followup(threadId: string, prompt: string, commandId: string): Promise<void>;
   inspect(threadId: string): Promise<{ state: "planning" | "running" | "ready" | "failed"; summary: string; error?: string }>;
@@ -104,6 +106,16 @@ export interface DispatchT3Port {
   defaultDispatchProject?(): Promise<{ id: string; name: string } | null>;
 }
 
+export interface DispatchExecutorDeviceSnapshot {
+  id: string;
+  name: string;
+  online: boolean;
+  self: boolean;
+  acceptsDispatch: boolean;
+  maxMode: string | null;
+  projects: Array<{ id: string; name: string }>;
+}
+
 export interface DispatchExecutorOptions {
   dataDir: string;
   deviceId: string;
@@ -111,6 +123,7 @@ export interface DispatchExecutorOptions {
   t3: DispatchT3Port;
   role?: "desktop" | "server";
   outboxPort?: DispatchOutboxPort;
+  devicesPort?: () => Promise<DispatchExecutorDeviceSnapshot[]>;
   replyPort?: (replyToken: string, text: string) => Promise<{ ok: true; targetName: string } | { ok: false; error: string }>;
   emitEvent(to: string, frame: DispatchEmitEvent): void;
   notify?(info: { fromName: string; projectName: string; title: string }): void;
@@ -161,6 +174,7 @@ export class DispatchExecutor {
   readonly #t3: DispatchT3Port;
   readonly #role: "desktop" | "server" | undefined;
   readonly #outbox: DispatchOutboxPort | undefined;
+  readonly #devicesPort: DispatchExecutorOptions["devicesPort"];
   readonly #reply: DispatchExecutorOptions["replyPort"];
   readonly #emit: DispatchExecutorOptions["emitEvent"];
   readonly #notify: DispatchExecutorOptions["notify"];
@@ -183,6 +197,7 @@ export class DispatchExecutor {
     this.#t3 = options.t3;
     this.#role = options.role;
     this.#outbox = options.outboxPort;
+    this.#devicesPort = options.devicesPort;
     this.#reply = options.replyPort;
     this.#emit = options.emitEvent;
     this.#notify = options.notify;
@@ -381,6 +396,9 @@ export class DispatchExecutor {
       }
       this.#seen = new Map(threads.map((thread) => [thread.threadId, thread.status]));
       for (const thread of threads) this.#launched.delete(thread.threadId);
+      if (this.#launched.size > 0 || threads.some((thread) => ACTIVE_THREAD_STATUSES.has(thread.status))) {
+        next = ACTIVE_POLL_MS;
+      }
     } catch {
       next = RETRY_MS[Math.min(this.#failures, RETRY_MS.length - 1)] ?? POLL_MS;
       this.#failures += 1;
@@ -454,6 +472,7 @@ export class DispatchExecutor {
     };
     await this.#ledger.putDispatch(args.dispatchId, record);
     this.#launched.set(launched.threadId, "running");
+    this.#rescheduleSoon(800);
     await this.#notifyStart(policy, sender.name, args.projectId, args.title);
     return this.#startResult(record);
   }
@@ -529,6 +548,34 @@ export class DispatchExecutor {
     return visible[0]!;
   }
 
+  async #buildMasterPreamble(): Promise<string> {
+    const [devices, outboxAll] = await Promise.all([
+      this.#devicesPort ? this.#devicesPort().catch(() => [] as DispatchExecutorDeviceSnapshot[]) : Promise.resolve([] as DispatchExecutorDeviceSnapshot[]),
+      this.#outbox ? this.#outbox.list().catch(() => [] as OutboxEntry[]) : Promise.resolve([] as OutboxEntry[]),
+    ]);
+    const lines: string[] = [MASTER_AGENT_PREAMBLE_START, ...MASTER_AGENT_BASE_LINES];
+    if (devices.length > 0 || outboxAll.length > 0) {
+      const snapshot = {
+        devices,
+        recentOutbox: outboxAll.slice(0, 10).map((entry) => ({
+          dispatchId: entry.dispatchId,
+          to: entry.to,
+          deviceName: entry.deviceName,
+          projectId: entry.projectId,
+          title: entry.title,
+          status: entry.status,
+          mode: entry.mode,
+          updatedAt: entry.updatedAt,
+          ...(entry.lastSummary ? { lastSummary: entry.lastSummary.slice(0, 300) } : {}),
+        })),
+        note: "以上为会话启动时的实时快照；若需最新状态或后续变动可调用 list_devices / get_dispatch_result。",
+      };
+      lines.push(`当前跨设备实况快照（JSON）：${JSON.stringify(snapshot)}`);
+    }
+    lines.push(MASTER_AGENT_PREAMBLE_END);
+    return lines.join("\n");
+  }
+
   async #agentSession(
     args: Extract<DispatchCommand, { kind: "agent.session" }>["args"],
     frame: CmdFrame,
@@ -545,9 +592,10 @@ export class DispatchExecutor {
     } catch (error) {
       throw new DispatchFailure(error instanceof Error ? error.message : "无法获取主控会话");
     }
-    const [states, defaultProject] = await Promise.all([
+    const [states, defaultProject, conversation] = await Promise.all([
       this.#t3.threadStates().catch(() => [] as T3ThreadBrief[]),
       this.#resolveDefaultProject(policy).catch(() => null),
+      this.#agentRead({ sessionId: ensured.session.sessionId, limit: 60 }, frame).catch(() => null),
     ]);
     const sessions = ensured.state.sessions.map((item) => ({
       ...item,
@@ -557,6 +605,7 @@ export class DispatchExecutor {
       activeSessionId: ensured.session.sessionId,
       sessions,
       defaultProject,
+      ...(conversation ? { conversation } : {}),
     };
   }
 
@@ -598,12 +647,14 @@ export class DispatchExecutor {
       const title =
         args.title?.trim() ||
         (session.title !== "主控会话" ? session.title : args.text.trim().slice(0, 36) || "主控会话");
+      const preamble = await this.#buildMasterPreamble();
       const launched = await this.#t3.launchThread({
         projectId,
         title,
-        prompt: `${MASTER_AGENT_PREAMBLE}\n\n${args.text}`,
+        prompt: `${preamble}\n\n${args.text}`,
         requestId: args.requestId,
         runtimeMode: effective,
+        fastOrchestrator: true,
       });
       await this.#sessions.bindThread(session.sessionId, {
         threadId: launched.threadId,
@@ -622,6 +673,7 @@ export class DispatchExecutor {
         capped,
       });
       this.#launched.set(launched.threadId, "running");
+      this.#rescheduleSoon(800);
       return {
         sessionId: session.sessionId,
         threadId: launched.threadId,
@@ -638,6 +690,7 @@ export class DispatchExecutor {
     const delivery = await this.#t3.sendMessage(session.threadId, args.text, args.requestId);
     await this.#sessions.touch(session.sessionId);
     this.#launched.set(session.threadId, "running");
+    this.#rescheduleSoon(800);
     return {
       sessionId: session.sessionId,
       threadId: session.threadId,
@@ -657,6 +710,7 @@ export class DispatchExecutor {
     threadId: string | null;
     threadUrl: string | null;
     state: "idle" | "running" | "waiting" | "ready" | "failed";
+    activity: string | null;
     messages: Array<{ position: number; role: "user" | "assistant"; text: string; runId: string | null }>;
     outbox: OutboxEntry[];
   }> {
@@ -675,6 +729,7 @@ export class DispatchExecutor {
         threadId: null,
         threadUrl: null,
         state: "idle",
+        activity: null,
         messages: [],
         outbox,
       };
@@ -686,6 +741,7 @@ export class DispatchExecutor {
         threadId: null,
         threadUrl: null,
         state: "idle",
+        activity: null,
         messages: [],
         outbox,
       };
@@ -703,6 +759,7 @@ export class DispatchExecutor {
       threadId: session.threadId,
       threadUrl: conversation.threadUrl ?? session.threadUrl,
       state: conversation.state,
+      activity: conversation.activity ?? null,
       messages: conversation.messages,
       outbox,
     };
@@ -764,6 +821,13 @@ export class DispatchExecutor {
   async #reject(ts: number, from: string, kind: string, reason: string, error: string): Promise<CommandOutcome> {
     await this.#audit.write({ ts, from, kind, outcome: "rejected", reason });
     return { ok: false, error };
+  }
+
+  #rescheduleSoon(ms: number): void {
+    if (!this.#started) return;
+    if (this.#timer !== null) clearTimeout(this.#timer);
+    this.#timer = null;
+    this.#schedule(ms);
   }
 
   #schedule(ms: number): void {

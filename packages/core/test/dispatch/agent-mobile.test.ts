@@ -56,7 +56,14 @@ function makeSignedFrame(
 }
 
 class MockAgentT3 implements DispatchT3Port {
-  launches: Array<{ projectId: string; title: string; prompt: string; requestId: string; runtimeMode: string }> = [];
+  launches: Array<{
+    projectId: string;
+    title: string;
+    prompt: string;
+    requestId: string;
+    runtimeMode: string;
+    fastOrchestrator?: boolean;
+  }> = [];
   sent: Array<{ threadId: string; message: string; requestId: string }> = [];
   threadStatus = "running";
   messages: Array<{ position: number; role: "user" | "assistant"; text: string; runId: string | null }> = [];
@@ -75,6 +82,7 @@ class MockAgentT3 implements DispatchT3Port {
     prompt: string;
     requestId: string;
     runtimeMode: "auto-accept-edits" | "auto" | "full-access";
+    fastOrchestrator?: boolean;
   }) {
     this.launches.push(input);
     const threadId = `th-${this.launches.length}`;
@@ -187,6 +195,17 @@ describe("移动端主控会话、派活看板、快捷回复与全量推送", (
       t3,
       role: "server",
       outboxPort,
+      devicesPort: async () => [
+        {
+          id: "device-mac",
+          name: "Mac Pro",
+          online: true,
+          self: false,
+          acceptsDispatch: true,
+          maxMode: "full-access",
+          projects: [{ id: "p1", name: "you-brain" }],
+        },
+      ],
       emitEvent: (to, frame) => events.push({ to, frame }),
     });
     await executor.updatePolicy({
@@ -199,15 +218,27 @@ describe("移动端主控会话、派活看板、快捷回复与全量推送", (
     const hello = await executor.hello();
     expect(hello.role).toBe("server");
 
-    // 1. agent.session 建立并登记订阅者
+    // 1. agent.session 建立、登记订阅者并随包返回当前会话快照（1 RTT）
     const sessRes = await executor.handle(makeSignedFrame(phoneKeys, "device-phone", "device-vps", "agent.session", {}, now));
     expect(sessRes.ok).toBe(true);
-    const { activeSessionId, defaultProject } = (sessRes as { ok: true; result: { activeSessionId: string; defaultProject: { id: string } } }).result;
+    const { activeSessionId, defaultProject, conversation } = (
+      sessRes as {
+        ok: true;
+        result: {
+          activeSessionId: string;
+          defaultProject: { id: string };
+          conversation?: { sessionId: string | null; state: string; outbox: OutboxEntry[] };
+        };
+      }
+    ).result;
     expect(activeSessionId).toStartWith("ag-");
     expect(defaultProject.id).toBe("proj-1");
+    expect(conversation?.sessionId).toBe(activeSessionId);
+    expect(conversation?.state).toBe("idle");
+    expect(conversation?.outbox).toHaveLength(1);
     expect(await executor.agentSubscribers()).toEqual(["device-phone"]);
 
-    // 2. 首次 agent.send 创建主控 T3 会话并带引导前缀
+    // 2. 首次 agent.send 创建主控 T3 会话、注入实时设备快照，并启用低延迟 fastOrchestrator
     const firstSend = await executor.handle(
       makeSignedFrame(phoneKeys, "device-phone", "device-vps", "agent.send", {
         sessionId: activeSessionId,
@@ -217,7 +248,9 @@ describe("移动端主控会话、派活看板、快捷回复与全量推送", (
     );
     expect(firstSend.ok).toBe(true);
     expect(t3.launches).toHaveLength(1);
+    expect(t3.launches[0]!.fastOrchestrator).toBe(true);
     expect(t3.launches[0]!.prompt).toContain(MASTER_AGENT_PREAMBLE_START);
+    expect(t3.launches[0]!.prompt).toContain("Mac Pro");
     expect(t3.launches[0]!.prompt).toContain("帮我查看哪些设备在线");
 
     // 3. 再次 agent.send 同一 sessionId 走 sendMessage 排队续聊

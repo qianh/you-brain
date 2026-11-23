@@ -1,5 +1,6 @@
 import type { Server, ServerWebSocket } from "bun";
 
+import { isImmutableT3AssetPath, type T3AssetCache } from "./asset-cache.js";
 import { T3_INJECT_PATH, T3_INJECT_SCRIPT } from "./inject.js";
 
 /**
@@ -18,6 +19,8 @@ export interface T3Proxy {
   /** 转发服务根地址，形如 http://127.0.0.1:13773/。 */
   readonly url: string;
   readonly upstream: string;
+  /** 后台拉取首页并预热不可变构建产物缓存（仅对走隧道且配置了 assetCache 的远端转发有效）。 */
+  warm?(): void;
   stop(): void;
 }
 
@@ -209,6 +212,8 @@ export interface T3ProxyOptions {
   pairCredential?: () => Promise<string | null>;
   /** 走隧道的上游（另一台设备的 T3）。 */
   transport?: T3Transport;
+  /** 跨设备共享的不可变构建产物缓存（仅对走隧道的转发启用）。 */
+  assetCache?: T3AssetCache;
   /** Cookie 隔离前缀；走隧道时必须给（按设备区分），缺省按上游端口。 */
   cookiePrefix?: string;
   /** 转发服务端口；缺省取「上游端口 + 10000」。 */
@@ -232,8 +237,10 @@ export function startT3Proxy(upstreamUrl: string, options: T3ProxyOptions = {}):
   const wsOrigin = upstreamOrigin.replace(/^http/u, "ws");
   const cookiePrefix = options.cookiePrefix ?? t3CookiePrefix(upstreamUrl);
   const transport = options.transport;
+  const assetCache = transport ? options.assetCache : undefined;
   let proxyOrigin = "";
   let pairFailedAt = 0;
+  let warmed = false;
 
   /** 向上游发请求：本机 T3 直连，其他设备的 T3 走隧道。path 含查询串。 */
   async function upstreamFetch(path: string, init: { method: string; headers: Headers; body?: ArrayBuffer }): Promise<Response> {
@@ -251,6 +258,9 @@ export function startT3Proxy(upstreamUrl: string, options: T3ProxyOptions = {}):
       ...(init.body === undefined ? {} : { body: new Uint8Array(init.body) }),
     });
   }
+
+  const prefetchAsset = (assetPath: string): Promise<Response> =>
+    upstreamFetch(assetPath, { method: "GET", headers: new Headers() });
 
   /** 没登录时用一次性凭据换 T3 的登录 Cookie；返回要写回浏览器的 Set-Cookie（已加前缀），不需要或失败返回空数组。 */
   async function autoPair(request: Request): Promise<string[]> {
@@ -303,6 +313,42 @@ export function startT3Proxy(upstreamUrl: string, options: T3ProxyOptions = {}):
         if (server.upgrade(request, { data })) return undefined;
         return new Response("WebSocket 升级失败", { status: 400 });
       }
+      if (assetCache && request.method === "GET" && url.search === "" && isImmutableT3AssetPath(url.pathname)) {
+        try {
+          const result = await assetCache.getOrFetch(
+            url.pathname,
+            () =>
+              upstreamFetch(url.pathname, {
+                method: "GET",
+                headers: forwardHeaders(request.headers, proxyOrigin, upstreamOrigin, HOP_HEADERS, cookiePrefix),
+              }),
+            prefetchAsset,
+          );
+          if ("cached" in result) {
+            return new Response(new Uint8Array(result.cached.body), {
+              status: 200,
+              headers: {
+                "content-type": result.cached.contentType,
+                "cache-control": "public, max-age=31536000, immutable",
+              },
+            });
+          }
+          const passthroughHeaders = responseHeaders(result.passthrough.headers, proxyOrigin, upstreamOrigin, cookiePrefix);
+          return new Response(result.passthrough.body, {
+            status: result.passthrough.status,
+            statusText: result.passthrough.statusText,
+            headers: passthroughHeaders,
+          });
+        } catch (error) {
+          const reason = error instanceof Error ? `：${error.message}` : "";
+          return new Response(`对端设备的 T3 没有响应${reason}`, {
+            status: 502,
+            headers: { "content-type": "text/plain; charset=utf-8" },
+          });
+        }
+      }
+      // 浏览器导航打开首页时，把会话检查/自动配对与拉取 HTML 并行跑，省掉隧道上的串行往返。
+      const pairTask = options.pairCredential && isNavigation(request) ? autoPair(request) : null;
       let response: Response;
       try {
         response = await upstreamFetch(`${url.pathname}${url.search}`, {
@@ -319,11 +365,17 @@ export function startT3Proxy(upstreamUrl: string, options: T3ProxyOptions = {}):
       }
       if (transport && response.status >= 400) console.error(`[t3-proxy] 隧道 HTTP ${response.status} ${request.method} ${url.pathname}`);
       const headers = responseHeaders(response.headers, proxyOrigin, upstreamOrigin, cookiePrefix);
-      if (options.pairCredential && isNavigation(request) && response.headers.get("content-type")?.toLowerCase().includes("text/html")) {
-        for (const cookie of await autoPair(request)) headers.append("set-cookie", cookie);
+      const isHtml = response.headers.get("content-type")?.toLowerCase().includes("text/html") === true;
+      if (pairTask && isHtml) {
+        for (const cookie of await pairTask) headers.append("set-cookie", cookie);
       }
-      if (response.headers.get("content-type")?.toLowerCase().includes("text/html") && request.method === "GET") {
-        const html = injectT3Html(await response.text());
+      if (isHtml && request.method === "GET") {
+        const rawHtml = await response.text();
+        if (assetCache && response.status === 200) {
+          warmed = true;
+          assetCache.prefetchFromText(rawHtml, url.pathname, prefetchAsset);
+        }
+        const html = injectT3Html(rawHtml);
         return new Response(html, { status: response.status, statusText: response.statusText, headers });
       }
       if (transport && request.method === "GET" && response.status === 200) {
@@ -397,6 +449,19 @@ export function startT3Proxy(upstreamUrl: string, options: T3ProxyOptions = {}):
   return {
     url: `${proxyOrigin}/`,
     upstream: `${upstreamOrigin}/`,
+    warm: () => {
+      if (!assetCache || warmed) return;
+      warmed = true;
+      void upstreamFetch("/", { method: "GET", headers: new Headers({ accept: "text/html" }) })
+        .then(async (response) => {
+          if (response.status !== 200) return;
+          if (!response.headers.get("content-type")?.toLowerCase().includes("text/html")) return;
+          assetCache.prefetchFromText(await response.text(), "/", prefetchAsset);
+        })
+        .catch(() => {
+          warmed = false;
+        });
+    },
     stop: () => {
       server.stop(true);
     },

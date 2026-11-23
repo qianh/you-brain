@@ -129,6 +129,9 @@ export function deriveTunnelCipher(input: {
 /** 隧道内层请求的目标服务：缺省为本机 T3；"tty7" 路由到本机 daemon 的 tty7 终端会话桥。 */
 export type TunnelTarget = "t3" | "tty7";
 
+/** 握手时协商的能力标记：双方都带时启用 WebSocket / 实时终端消息的 gzip 压缩与分片重组。 */
+export const TUNNEL_WS_GZIP_CAP = "ws-gzip";
+
 /** 隧道里的内层消息（加密后才上线）。请求与响应用 `id` 配对；每个 HTTP/WebSocket 流各有一个 `id`。 */
 export type TunnelMessage =
   | { k: "req"; id: string; method: string; path: string; headers: Array<[string, string]>; body?: string; end: boolean; target?: TunnelTarget }
@@ -138,7 +141,7 @@ export type TunnelMessage =
   | { k: "err"; id: string; message: string }
   | { k: "ws-open"; id: string; path: string; headers: Array<[string, string]>; target?: TunnelTarget }
   | { k: "ws-ok"; id: string }
-  | { k: "ws-msg"; id: string; text?: string; body?: string }
+  | { k: "ws-msg"; id: string; text?: string; body?: string; enc?: "gzip"; more?: boolean }
   | { k: "ws-close"; id: string; code: number; reason: string }
   | { k: "pair"; id: string }
   | { k: "pair-res"; id: string; credential: string | null }

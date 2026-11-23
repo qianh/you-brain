@@ -20,7 +20,7 @@ import { t3FrameMessage } from "../lib/t3-frame.js";
 import { useTheme } from "../theme-context.js";
 import { isReferenceShortcut } from "./deck-reference-logic.js";
 import { DeckReferencePicker } from "./deck-reference-picker.js";
-import { DeckTerminalScreen } from "./deck-terminal-screen.js";
+import { DeckTerminalScreen, preloadTerminalChunk } from "./deck-terminal-screen.js";
 import { EMPTY_TABS, hideScreen, openTab, pruneTabs, type TerminalTabs } from "./deck-terminal-tabs.js";
 import { DeckTty7Panel } from "./deck-tty7.js";
 import { initialDeckView, useTty7Sessions, waitingCount, type DeckViewId } from "./deck-tty7-sessions.js";
@@ -48,22 +48,64 @@ export function DshDeckPage() {
     try { return initialDeckView(prefs.getItem(DECK_VIEW_KEY)); } catch { return initialDeckView(null); }
   });
   const [activeT3Device, setActiveT3Device] = useState<ActiveT3Device | null>(null);
+  const [knownDevices, setKnownDevices] = useState<ActiveT3Device[]>([]);
+  const [deviceNames, setDeviceNames] = useState<Record<string, string>>({});
+  const handleDevicesChange = useCallback((devices: ActiveT3Device[]) => {
+    setKnownDevices(devices);
+    if (devices.length === 0) return;
+    setDeviceNames((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const device of devices) {
+        if (next[device.id] !== device.name) {
+          next[device.id] = device.name;
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, []);
+  const handleActiveDeviceChange = useCallback((device: ActiveT3Device | null) => {
+    setActiveT3Device(device);
+    if (device !== null) {
+      setDeviceNames((current) => (current[device.id] === device.name ? current : { ...current, [device.id]: device.name }));
+    }
+  }, []);
+  const knownDeviceIds = useMemo(() => knownDevices.map((device) => device.id), [knownDevices]);
   const [t3ForceLocalVersion, setT3ForceLocalVersion] = useState(0);
   // 只有停留在 T3 且选了同账号远端设备时，右侧终端会话才切到该设备；切回 DSH/Muse 或本机/手动地址端点时回到本机。
   const activeTty7Device = activePage === "t3" ? activeT3Device : null;
   const activeDeviceKey = activeTty7Device?.id ?? "local";
-  const sessions = useTty7Sessions(activeTty7Device?.id ?? null);
+  const sessions = useTty7Sessions(activeTty7Device?.id ?? null, knownDeviceIds);
   const waiting = waitingCount(sessions.view?.sessions ?? []);
-  // 整屏终端的标签按设备隔离且只在本次运行内有效，不写偏好。
+  // 空闲时提前加载 xterm 代码块，第一次点开终端时无需再等异步拉包。
+  useEffect(() => {
+    if (!pageActive) return;
+    const win = window as Window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    if (typeof win.requestIdleCallback === "function") {
+      const id = win.requestIdleCallback(() => preloadTerminalChunk(), { timeout: 1_500 });
+      return () => win.cancelIdleCallback?.(id);
+    }
+    const timer = window.setTimeout(() => preloadTerminalChunk(), 500);
+    return () => window.clearTimeout(timer);
+  }, [pageActive]);
+  // 整屏终端的标签按设备隔离且保持挂载，切换设备时不断开已打开的终端 WebSocket 与租约。
   const [tabsByDevice, setTabsByDevice] = useState<Record<string, TerminalTabs>>({});
   const tabs = tabsByDevice[activeDeviceKey] ?? EMPTY_TABS;
-  const setTabs = useCallback((next: TerminalTabs | ((current: TerminalTabs) => TerminalTabs)) => {
+  const setTabsForDevice = useCallback((deviceKey: string, next: TerminalTabs | ((current: TerminalTabs) => TerminalTabs)) => {
     setTabsByDevice((all) => {
-      const current = all[activeDeviceKey] ?? EMPTY_TABS;
+      const current = all[deviceKey] ?? EMPTY_TABS;
       const resolved = typeof next === "function" ? next(current) : next;
-      return resolved === current ? all : { ...all, [activeDeviceKey]: resolved };
+      return resolved === current ? all : { ...all, [deviceKey]: resolved };
     });
-  }, [activeDeviceKey]);
+  }, []);
+  const setTabs = useCallback(
+    (next: TerminalTabs | ((current: TerminalTabs) => TerminalTabs)) => setTabsForDevice(activeDeviceKey, next),
+    [activeDeviceKey, setTabsForDevice],
+  );
   const openPane = useCallback((pane: number) => setTabs((current) => openTab(current, pane)), [setTabs]);
   const openLocalPane = useCallback((pane: number) => {
     if (activeTty7Device !== null) {
@@ -402,7 +444,8 @@ export function DshDeckPage() {
                 onSettingsChange={setT3SettingsOpen}
                 onReload={() => setT3ReloadVersion((value) => value + 1)}
                 onLocalReload={() => setT3Injected(false)}
-                onActiveDeviceChange={setActiveT3Device}
+                onActiveDeviceChange={handleActiveDeviceChange}
+                onDevicesChange={handleDevicesChange}
               />
             ) : null}
           </div>
@@ -429,17 +472,33 @@ export function DshDeckPage() {
           />
         ) : null}
       </div>
-      {tabs.open.length > 0 ? (
-        <DeckTerminalScreen
-          key={activeDeviceKey}
-          device={activeTty7Device}
-          tabs={tabs}
-          sessions={sessions}
-          shown={tabs.active !== null}
-          onTabsChange={setTabs}
-          onClose={() => setTabs(hideScreen)}
-        />
-      ) : null}
+      {Object.entries(tabsByDevice).map(([deviceKey, deviceTabs]) => {
+        if (deviceTabs.open.length === 0) return null;
+        const isCurrentDevice = deviceKey === activeDeviceKey;
+        const screenDevice =
+          deviceKey === "local"
+            ? null
+            : { id: deviceKey, name: deviceNames[deviceKey] ?? activeT3Device?.name ?? deviceKey };
+        const deviceSessions = isCurrentDevice
+          ? sessions
+          : {
+              ...sessions,
+              deviceKey,
+              view: sessions.viewFor?.(deviceKey) ?? null,
+              error: null,
+            };
+        return (
+          <DeckTerminalScreen
+            key={deviceKey}
+            device={screenDevice}
+            tabs={deviceTabs}
+            sessions={deviceSessions}
+            shown={isCurrentDevice && deviceTabs.active !== null}
+            onTabsChange={(next) => setTabsForDevice(deviceKey, next)}
+            onClose={() => setTabsForDevice(deviceKey, hideScreen)}
+          />
+        );
+      })}
       <DeckReferencePicker
         open={t3RefPickerOpen}
         mode={t3Injected ? "t3-insert" : "t3"}

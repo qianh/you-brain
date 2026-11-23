@@ -91,6 +91,7 @@ data class AgentSessionResponse(
     val activeSessionId: String,
     val sessions: List<AgentSessionSummary> = emptyList(),
     val defaultProject: DispatchProject? = null,
+    val conversation: AgentReadResponse? = null,
 )
 
 @Serializable
@@ -136,6 +137,17 @@ data class AgentReadResponse(
     val threadId: String? = null,
     val threadUrl: String? = null,
     val state: String = "idle",
+    val activity: String? = null,
+    val messages: List<AgentMessage> = emptyList(),
+    val outbox: List<OutboxEntry> = emptyList(),
+)
+
+@Serializable
+data class CachedAgentSnapshot(
+    val masterDeviceId: String,
+    val activeSessionId: String? = null,
+    val threadUrl: String? = null,
+    val sessions: List<AgentSessionSummary> = emptyList(),
     val messages: List<AgentMessage> = emptyList(),
     val outbox: List<OutboxEntry> = emptyList(),
 )

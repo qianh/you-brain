@@ -36,6 +36,165 @@ export interface TerminalConnection {
 const MAX_FRAME = 64 * 1024 * 1024;
 const MAX_INPUT = 1024 * 1024;
 const TIMEOUT_MS = 8_000;
+/** 小于此阈值的回放原样透传，不做任何裁剪。 */
+const REPLAY_PASSTHROUGH_BYTES = 64 * 1024;
+/** 单次历史回放的最大保留字节数（普通缓冲滚回或无清屏的大体积屏显）。 */
+const MAX_REPLAY_BYTES = 512 * 1024;
+/** 备用屏会话前最多保留的主屏尾部上下文（退出 TUI 时仍能看到之前的终端提示符）。 */
+const ALT_NORMAL_CONTEXT_BYTES = 64 * 1024;
+/** 本地 socket 连续回放帧（kind=2）的聚合静默窗口；收到 lease(63) 或 live(3) 时立即刷出。 */
+const REPLAY_COALESCE_MS = 12;
+
+const TRACKED_DEC_MODES = [1000, 1002, 1003, 1004, 1005, 1006, 1015, 2004, 25] as const;
+
+function alignSafeUtf8Start(buf: Buffer, start: number): number {
+  let idx = Math.max(0, Math.min(buf.length, start));
+  // 跳过 UTF-8 续字节（10xxxxxx）。
+  while (idx < buf.length && (buf[idx]! & 0xc0) === 0x80) idx += 1;
+  // 若正好落在 ESC 序列内部（前 32 字节内有未闭合的 ESC [），向前跳过当前参数串避免半截控制码乱码。
+  const lookback = Math.max(0, idx - 32);
+  for (let scan = idx - 1; scan >= lookback; scan -= 1) {
+    if (buf[scan] === 0x1b) {
+      if (scan + 1 < buf.length && buf[scan + 1] === 0x5b) {
+        let end = scan + 2;
+        while (end < buf.length && buf[end]! >= 0x20 && buf[end]! <= 0x3f) end += 1;
+        if (end < buf.length && buf[end]! >= 0x40 && buf[end]! <= 0x7e && end >= idx) {
+          idx = end + 1;
+        }
+      }
+      break;
+    }
+  }
+  return idx;
+}
+
+function sliceTailFromLine(buf: Buffer, maxBytes: number): Buffer {
+  if (buf.length <= maxBytes) return buf;
+  const target = buf.length - maxBytes;
+  const searchEnd = Math.min(buf.length, target + 4096);
+  for (let i = target; i < searchEnd; i += 1) {
+    if (buf[i] === 0x0a) return buf.subarray(i + 1);
+  }
+  return buf.subarray(alignSafeUtf8Start(buf, target));
+}
+
+interface ReplayScan {
+  inAltScreen: boolean;
+  altMode: number;
+  lastAltEnter: number;
+  lastEraseAll: number;
+  modesAtCut: Map<number, boolean>;
+}
+
+function scanReplayBuffer(buf: Buffer, cutLimit?: number): ReplayScan {
+  let inAltScreen = false;
+  let altMode = 1049;
+  let lastAltEnter = -1;
+  let lastEraseAll = -1;
+  const modes = new Map<number, boolean>();
+  const limit = cutLimit ?? buf.length;
+
+  for (let i = 0; i + 2 < limit; i += 1) {
+    if (buf[i] !== 0x1b || buf[i + 1] !== 0x5b) continue;
+    let p = i + 2;
+    while (p < limit && buf[p]! >= 0x30 && buf[p]! <= 0x3f) p += 1;
+    let q = p;
+    while (q < limit && buf[q]! >= 0x20 && buf[q]! <= 0x2f) q += 1;
+    if (q >= limit) break;
+    const finalByte = buf[q]!;
+    if (finalByte < 0x40 || finalByte > 0x7e) continue;
+
+    if (q === p) {
+      const prefix = buf[i + 2];
+      if (prefix === 0x3f && (finalByte === 0x68 || finalByte === 0x6c)) {
+        // CSI ? Pm h / l
+        const enabled = finalByte === 0x68;
+        const params = buf.toString("ascii", i + 3, p);
+        for (const part of params.split(";")) {
+          const code = Number(part);
+          if (code === 1049 || code === 1047 || code === 47) {
+            if (enabled) {
+              inAltScreen = true;
+              altMode = code;
+              lastAltEnter = i;
+              lastEraseAll = -1;
+            } else {
+              inAltScreen = false;
+            }
+          } else if ((TRACKED_DEC_MODES as readonly number[]).includes(code)) {
+            modes.set(code, enabled);
+          }
+        }
+      } else if (finalByte === 0x4a && inAltScreen) {
+        // CSI Ps J（备用屏整屏擦除 2J / 3J）
+        const param = buf.toString("ascii", i + 2, p);
+        if (param === "2" || param === "3") {
+          lastEraseAll = i;
+        }
+      }
+    }
+    i = q;
+  }
+
+  return { inAltScreen, altMode, lastAltEnter, lastEraseAll, modesAtCut: modes };
+}
+
+function buildActiveDecModes(modes: ReadonlyMap<number, boolean>, includeAltMode?: number): Buffer {
+  const parts: string[] = [];
+  if (includeAltMode !== undefined) parts.push(`\x1b[?${includeAltMode}h`);
+  for (const code of TRACKED_DEC_MODES) {
+    const state = modes.get(code);
+    if (code === 25) {
+      if (state === false) parts.push("\x1b[?25l");
+    } else if (state === true) {
+      parts.push(`\x1b[?${code}h`);
+    }
+  }
+  return Buffer.from(parts.join(""), "ascii");
+}
+
+/**
+ * 裁剪过长的连接初始回放（帧 2）：
+ * 1. <= 64 KB 的回放原样保留；
+ * 2. 若当前处于备用屏（TUI 会话如 Claude / Codex / Grok 无滚回缓冲），丢弃最后一次整屏清屏 `\x1b[2J` 之前已被擦除的数 MB 历史重绘，
+ *    仅保留必要的终端私有模式（备用屏、焦点上报、括号粘贴、鼠标、光标显隐）与最后一屏有效输出；
+ * 3. 普通滚回缓冲超出 512 KB 时按换行/UTF-8 安全边界保留尾部，避免 8 MB 历史阻塞隧道与阻塞浏览器主线程。
+ */
+export function compactTerminalReplay(raw: Buffer): Buffer {
+  if (raw.length <= REPLAY_PASSTHROUGH_BYTES) return raw;
+  const fullScan = scanReplayBuffer(raw);
+
+  if (fullScan.inAltScreen && fullScan.lastAltEnter >= 0) {
+    const normalPrefix =
+      fullScan.lastAltEnter > 0
+        ? sliceTailFromLine(raw.subarray(0, fullScan.lastAltEnter), ALT_NORMAL_CONTEXT_BYTES)
+        : Buffer.alloc(0);
+
+    if (fullScan.lastEraseAll > fullScan.lastAltEnter) {
+      const cut = fullScan.lastEraseAll;
+      const tailLen = raw.length - cut;
+      if (tailLen <= MAX_REPLAY_BYTES) {
+        const beforeCut = scanReplayBuffer(raw, cut);
+        const modeHeader = buildActiveDecModes(beforeCut.modesAtCut, fullScan.altMode);
+        return Buffer.concat([normalPrefix, modeHeader, Buffer.from("\x1b[0m", "ascii"), raw.subarray(cut)]);
+      }
+    }
+
+    // 备用屏没有出现 2J 或最后一屏仍超上限：对齐到尾部上限并补清屏与模式头。
+    const rawCut = Math.max(fullScan.lastAltEnter, raw.length - MAX_REPLAY_BYTES);
+    const safeCut = alignSafeUtf8Start(raw, rawCut);
+    const beforeCut = scanReplayBuffer(raw, safeCut);
+    const modeHeader = buildActiveDecModes(beforeCut.modesAtCut, fullScan.altMode);
+    return Buffer.concat([normalPrefix, modeHeader, Buffer.from("\x1b[0m\x1b[2J\x1b[H", "ascii"), raw.subarray(safeCut)]);
+  }
+
+  if (raw.length <= MAX_REPLAY_BYTES) return raw;
+  const tail = sliceTailFromLine(raw, MAX_REPLAY_BYTES);
+  const cutOffset = raw.length - tail.length;
+  const beforeCut = scanReplayBuffer(raw, cutOffset);
+  const modeHeader = buildActiveDecModes(beforeCut.modesAtCut);
+  return Buffer.concat([modeHeader, Buffer.from("\x1b[0m", "ascii"), tail]);
+}
 
 /** tty7 26.10 的协议 6：长度不含 kind，二进制终端数据绝不先转成字符串。 */
 export function terminalFrame(kind: number, payload: Uint8Array = new Uint8Array()): Buffer {
@@ -108,6 +267,10 @@ export function openTty7Terminal(options: {
   let ready = false;
   let warned = false;
   let live = false;
+  let replayDone = false;
+  let replayChunks: Buffer[] = [];
+  let pendingReplaySize: TerminalSize | null = null;
+  let replayTimer: ReturnType<typeof setTimeout> | undefined;
   let writing = false;
   let writer: Socket | undefined;
   let queue: Buffer[] = [];
@@ -118,10 +281,37 @@ export function openTty7Terminal(options: {
   let versionAccepted = false;
   const handshake = setTimeout(() => fail("连接 tty7 终端超时"), TIMEOUT_MS);
 
+  const flushReplay = (): void => {
+    if (replayDone || closed) return;
+    replayDone = true;
+    clearTimeout(replayTimer);
+    replayTimer = undefined;
+    if (pendingReplaySize !== null) {
+      const finalSize = pendingReplaySize;
+      pendingReplaySize = null;
+      events.size(finalSize);
+    }
+    if (replayChunks.length > 0) {
+      const combined = replayChunks.length === 1 ? replayChunks[0]! : Buffer.concat(replayChunks);
+      replayChunks = [];
+      const compacted = compactTerminalReplay(combined);
+      if (compacted.length > 0) events.output(compacted);
+    }
+  };
+
+  const armReplayFlush = (): void => {
+    clearTimeout(replayTimer);
+    replayTimer = setTimeout(flushReplay, REPLAY_COALESCE_MS);
+  };
+
   const close = (): void => {
     if (closed) return;
     closed = true;
     clearTimeout(handshake);
+    clearTimeout(replayTimer);
+    replayTimer = undefined;
+    replayChunks = [];
+    pendingReplaySize = null;
     queue = [];
     writer?.destroy();
     versionSocket.destroy();
@@ -192,27 +382,44 @@ export function openTty7Terminal(options: {
     observer.write(jsonFrame(57, { take: { size, by: "U-Brain" } }));
     ready = true;
     events.ready();
+    armReplayFlush();
     flush();
   });
   observer.on("data", (bytes: Buffer) => {
     try {
       frames.push(bytes, (kind, payload) => {
         if (closed) return;
-        if (kind === 2) events.output(payload);
-        else if (kind === 3) {
+        if (kind === 2) {
+          if (replayDone) {
+            events.output(payload);
+          } else {
+            replayChunks.push(Buffer.from(payload));
+            armReplayFlush();
+          }
+        } else if (kind === 3) {
+          flushReplay();
           if (!live) {
             live = true;
             events.live();
           }
           events.output(payload);
-        }
-        else if (kind === 9) {
+        } else if (kind === 9) {
           const next: unknown = JSON.parse(payload.toString());
-          if (validTerminalSize(next)) events.size(next);
+          if (validTerminalSize(next)) {
+            if (replayDone) {
+              events.size(next);
+            } else {
+              // Observe 回放里夹杂着多条历史尺寸帧，聚合阶段只保留最新一条，避免把客户端缩回旧半屏尺寸。
+              pendingReplaySize = next;
+              armReplayFlush();
+            }
+          }
         } else if (kind === 63) {
+          flushReplay();
           const by: unknown = JSON.parse(payload.toString());
           if (by === null || typeof by === "string") events.lease(by);
         } else if (kind === 6) {
+          flushReplay();
           const code: unknown = JSON.parse(payload.toString());
           events.exit(typeof code === "number" ? code : null);
           close();

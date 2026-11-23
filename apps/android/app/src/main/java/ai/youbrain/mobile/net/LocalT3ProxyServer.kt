@@ -38,6 +38,7 @@ class LocalT3ProxyServer(
     preferredPort: Int = 0,
     private val onSetCookies: (proxyOrigin: String, setCookies: List<String>) -> Unit = { _, _ -> },
     private val assetCache: T3AssetCache? = null,
+    private val cookieReader: ((proxyOrigin: String) -> String?)? = null,
 ) {
     private val serverSocket: ServerSocket
     val port: Int
@@ -49,7 +50,7 @@ class LocalT3ProxyServer(
     @Volatile
     private var cachedRootHtml: ByteArray? = null
     @Volatile
-    private var cachedRootAt: Long = 0L
+    private var lastRootSyncAt: Long = 0L
     private var acceptJob: Job? = null
     @Volatile
     private var pairFailedAt: Long = 0L
@@ -60,6 +61,8 @@ class LocalT3ProxyServer(
         private const val VIRTUAL_ORIGIN = "http://t3.tunnel"
         private const val PAIR_RETRY_MS = 30_000L
         private const val AUTH_CACHE_MS = 10 * 60_000L
+        private const val ROOT_SYNC_MS = 20_000L
+        private const val PERSISTENT_COOKIE_MAX_AGE_SEC = 2_592_000L
         private const val WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
         private val HOP_HEADERS = setOf(
@@ -81,7 +84,11 @@ class LocalT3ProxyServer(
             "sec-websocket-accept",
         )
 
-        fun prefixSetCookie(setCookie: String, prefix: String): String? {
+        fun prefixSetCookie(
+            setCookie: String,
+            prefix: String,
+            defaultMaxAgeSec: Long? = null,
+        ): String? {
             val parts = setCookie.split(';')
             val first = parts.firstOrNull() ?: return null
             val eq = first.indexOf('=')
@@ -93,13 +100,18 @@ class LocalT3ProxyServer(
             }
             val value = first.substring(eq + 1)
             val attrs = ArrayList<String>()
+            var hasAgeOrExpiry = false
             for (i in 1 until parts.size) {
                 val p = parts[i].trim()
                 if (p.isEmpty()) continue
                 val attrEq = p.indexOf('=')
                 val attrName = (if (attrEq == -1) p else p.substring(0, attrEq)).trim().lowercase()
                 if (attrName == "domain") continue
+                if (attrName == "max-age" || attrName == "expires") hasAgeOrExpiry = true
                 attrs.add(p)
+            }
+            if (defaultMaxAgeSec != null && !hasAgeOrExpiry) {
+                attrs.add("Max-Age=$defaultMaxAgeSec")
             }
             val head = "$prefix$name=$value"
             return if (attrs.isEmpty()) head else "$head; ${attrs.joinToString("; ")}"
@@ -191,32 +203,26 @@ class LocalT3ProxyServer(
         if (response.status in 200..299 && ct.contains("text/html", ignoreCase = true)) {
             val rawHtmlText = String(response.body, Charsets.UTF_8)
             val finalHtmlBytes = injectHtml(rawHtmlText).toByteArray(Charsets.UTF_8)
-            if (System.currentTimeMillis() < authVerifiedUntil.get()) {
-                cachedRootHtml = finalHtmlBytes
-                cachedRootAt = System.currentTimeMillis()
-            }
+            cachedRootHtml = finalHtmlBytes
+            lastRootSyncAt = System.currentTimeMillis()
             assetCache?.prefetchFromHtml(rawHtmlText, upstream)
         }
     }
 
-    private suspend fun refreshRootHtml() {
+    private suspend fun syncUpstreamRootHtml() {
+        val now = System.currentTimeMillis()
+        if (now - lastRootSyncAt < ROOT_SYNC_MS) return
+        lastRootSyncAt = now
         val response = upstream.fetch("/", "GET", listOf("Accept" to "text/html"), null)
         val ct = response.headers.firstOrNull { it.first.equals("content-type", ignoreCase = true) }?.second.orEmpty()
         if (response.status == 401 || response.status == 403) {
             authVerifiedUntil.set(0L)
-            cachedRootHtml = null
             return
         }
         if (response.status in 200..299 && ct.contains("text/html", ignoreCase = true)) {
             val rawHtmlText = String(response.body, Charsets.UTF_8)
-            val finalHtmlBytes = injectHtml(rawHtmlText).toByteArray(Charsets.UTF_8)
-            if (System.currentTimeMillis() < authVerifiedUntil.get()) {
-                cachedRootHtml = finalHtmlBytes
-                cachedRootAt = System.currentTimeMillis()
-            }
-            assetCache?.let { cache ->
-                scope.launch(Dispatchers.IO) { cache.prefetchFromHtml(rawHtmlText, upstream) }
-            }
+            cachedRootHtml = injectHtml(rawHtmlText).toByteArray(Charsets.UTF_8)
+            assetCache?.prefetchFromHtml(rawHtmlText, upstream)
         }
     }
 
@@ -283,9 +289,15 @@ class LocalT3ProxyServer(
                         (it.second.contains("no-cache", ignoreCase = true) || it.second.contains("max-age=0", ignoreCase = true))) ||
                         it.first.equals("pragma", ignoreCase = true)
                 }
-                if (method == "GET" && path == "/" && !isForceReload && System.currentTimeMillis() < authVerifiedUntil.get()) {
-                    val fastHtml = cachedRootHtml
-                    if (fastHtml != null) {
+                if (method == "GET" && path == "/" && !isForceReload) {
+                    if (cachedRootHtml == null && assetCache != null) {
+                        assetCache.awaitSeed()
+                        assetCache.seedIndexHtml?.let { seed ->
+                            cachedRootHtml = injectHtml(seed).toByteArray(Charsets.UTF_8)
+                        }
+                    }
+                    val instantHtml = cachedRootHtml
+                    if (instantHtml != null) {
                         writeHttpResponse(
                             output,
                             200,
@@ -294,22 +306,27 @@ class LocalT3ProxyServer(
                                 "Content-Type" to "text/html; charset=utf-8",
                                 "Cache-Control" to "no-cache",
                             ),
-                            fastHtml,
+                            instantHtml,
                             keepAlive = keepAlive,
                         )
-                        if (System.currentTimeMillis() - cachedRootAt > 15_000L) {
-                            scope.launch(Dispatchers.IO) { runCatching { refreshRootHtml() } }
-                        }
+                        scope.launch(Dispatchers.IO) { runCatching { syncUpstreamRootHtml() } }
                         if (!keepAlive) break
                         continue
                     }
                 }
 
                 val body = readRequestBody(input, rawHeaders)
-                val fwdHeaders = forwardHeaders(rawHeaders, HOP_HEADERS)
+                var fwdHeaders = forwardHeaders(rawHeaders, HOP_HEADERS)
+                val isSessionCheck = method.equals("GET", ignoreCase = true) && path == "/api/auth/session"
+                if (isSessionCheck && fwdHeaders.none { it.first.equals("cookie", ignoreCase = true) && it.second.isNotBlank() }) {
+                    val savedCookie = cookieReader?.invoke(origin)?.let { stripCookiePrefix(it, cookiePrefix) }.orEmpty()
+                    if (savedCookie.isNotEmpty()) {
+                        fwdHeaders = fwdHeaders + ("Cookie" to savedCookie)
+                    }
+                }
                 val isNavGet = method.equals("GET", ignoreCase = true) && isNavigation(rawHeaders)
                 var pairedCookies: List<String> = emptyList()
-                val response = try {
+                var response = try {
                     if (isNavGet && System.currentTimeMillis() >= authVerifiedUntil.get()) {
                         coroutineScope {
                             val respJob = async { upstream.fetch(path, method, fwdHeaders, body) }
@@ -342,9 +359,33 @@ class LocalT3ProxyServer(
                     break
                 }
 
+                if (isSessionCheck && response.status in 200..299) {
+                    val sessionJson = runCatching {
+                        Json.parseToJsonElement(String(response.body, Charsets.UTF_8)).jsonObject
+                    }.getOrNull()
+                    if (sessionJson?.get("authenticated")?.jsonPrimitive?.booleanOrNull == true) {
+                        authVerifiedUntil.set(System.currentTimeMillis() + AUTH_CACHE_MS)
+                    } else {
+                        val freshCookies = runCatching { forcePairNow() }.getOrDefault(emptyList())
+                        if (freshCookies.isNotEmpty()) {
+                            pairedCookies = pairedCookies + freshCookies
+                            val rawCookieHeader = stripCookiePrefix(
+                                freshCookies.joinToString("; ") { it.substringBefore(';') },
+                                cookiePrefix,
+                            )
+                            if (rawCookieHeader.isNotEmpty()) {
+                                val retriedHeaders = fwdHeaders.filterNot { it.first.equals("cookie", ignoreCase = true) } +
+                                    ("Cookie" to rawCookieHeader)
+                                runCatching { upstream.fetch("/api/auth/session", "GET", retriedHeaders, null) }
+                                    .getOrNull()
+                                    ?.let { response = it }
+                            }
+                        }
+                    }
+                }
+
                 if (response.status == 401 || response.status == 403) {
                     authVerifiedUntil.set(0L)
-                    cachedRootHtml = null
                 }
 
                 val outHeaders = responseHeaders(response.headers)
@@ -364,9 +405,9 @@ class LocalT3ProxyServer(
                         assetCache?.let { cache ->
                             scope.launch(Dispatchers.IO) { cache.prefetchFromHtml(rawHtmlText, upstream) }
                         }
-                        if (path == "/" && System.currentTimeMillis() < authVerifiedUntil.get()) {
+                        if (path == "/") {
                             cachedRootHtml = finalHtmlBytes
-                            cachedRootAt = System.currentTimeMillis()
+                            lastRootSyncAt = System.currentTimeMillis()
                         }
                     }
                     finalHtmlBytes
@@ -396,25 +437,10 @@ class LocalT3ProxyServer(
         return accept.contains("text/html", ignoreCase = true)
     }
 
-    private suspend fun autoPair(fwdHeaders: List<Pair<String, String>>): List<String> {
+    private suspend fun forcePairNow(): List<String> {
         val now = System.currentTimeMillis()
-        if (now < authVerifiedUntil.get()) return emptyList()
         if (now - pairFailedAt < PAIR_RETRY_MS) return emptyList()
         return try {
-            val hasExistingCookie = fwdHeaders.any {
-                it.first.equals("cookie", ignoreCase = true) && it.second.isNotBlank()
-            }
-            if (hasExistingCookie) {
-                val session = upstream.fetch("/api/auth/session", "GET", fwdHeaders, null)
-                if (session.status in 200..299) {
-                    val jsonObj = Json.parseToJsonElement(String(session.body, Charsets.UTF_8)).jsonObject
-                    if (jsonObj["authenticated"]?.jsonPrimitive?.booleanOrNull == true) {
-                        authVerifiedUntil.set(System.currentTimeMillis() + AUTH_CACHE_MS)
-                        return emptyList()
-                    }
-                }
-            }
-
             val credential = upstream.pairCredential() ?: error("没有拿到配对凭据")
             val payload = """{"credential":"${credential.replace("\"", "\\\"")}"}""".toByteArray(Charsets.UTF_8)
             val paired = upstream.fetch(
@@ -424,18 +450,47 @@ class LocalT3ProxyServer(
                 payload,
             )
             if (paired.status !in 200..299) error("换取登录失败 ${paired.status}")
+            pairFailedAt = 0L
             authVerifiedUntil.set(System.currentTimeMillis() + AUTH_CACHE_MS)
             val result = ArrayList<String>()
             for ((k, v) in paired.headers) {
                 if (k.equals("set-cookie", ignoreCase = true)) {
-                    prefixSetCookie(v, cookiePrefix)?.let { result.add(it) }
+                    prefixSetCookie(v, cookiePrefix, PERSISTENT_COOKIE_MAX_AGE_SEC)?.let { result.add(it) }
                 }
+            }
+            if (result.isNotEmpty()) {
+                onSetCookies(origin, result)
             }
             result
         } catch (_: Throwable) {
             pairFailedAt = System.currentTimeMillis()
             emptyList()
         }
+    }
+
+    private suspend fun autoPair(fwdHeaders: List<Pair<String, String>>): List<String> {
+        val now = System.currentTimeMillis()
+        if (now < authVerifiedUntil.get()) return emptyList()
+        if (now - pairFailedAt < PAIR_RETRY_MS) return emptyList()
+        val hasExistingCookie = fwdHeaders.any {
+            it.first.equals("cookie", ignoreCase = true) && it.second.isNotBlank()
+        }
+        if (hasExistingCookie) {
+            val ok = runCatching {
+                val session = upstream.fetch("/api/auth/session", "GET", fwdHeaders, null)
+                if (session.status in 200..299) {
+                    val jsonObj = Json.parseToJsonElement(String(session.body, Charsets.UTF_8)).jsonObject
+                    jsonObj["authenticated"]?.jsonPrimitive?.booleanOrNull == true
+                } else {
+                    false
+                }
+            }.getOrDefault(false)
+            if (ok) {
+                authVerifiedUntil.set(System.currentTimeMillis() + AUTH_CACHE_MS)
+                return emptyList()
+            }
+        }
+        return forcePairNow()
     }
 
     private fun forwardHeaders(
@@ -470,7 +525,7 @@ class LocalT3ProxyServer(
             val lower = key.lowercase()
             if (HOP_HEADERS.contains(lower) || lower == "content-encoding" || lower == "x-frame-options") continue
             if (lower == "set-cookie") {
-                prefixSetCookie(value, cookiePrefix)?.let { out.add("Set-Cookie" to it) }
+                prefixSetCookie(value, cookiePrefix, PERSISTENT_COOKIE_MAX_AGE_SEC)?.let { out.add("Set-Cookie" to it) }
                 continue
             }
             if (lower == "content-security-policy") {

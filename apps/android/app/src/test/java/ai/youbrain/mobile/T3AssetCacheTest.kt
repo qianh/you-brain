@@ -19,9 +19,13 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.nio.file.Files
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 class T3AssetCacheTest {
     private class StubAssetUpstream(
@@ -178,6 +182,47 @@ class T3AssetCacheTest {
             assertEquals(1, upstream.hits["/assets/main-BN8wt5wy.js"]?.get())
             assertEquals(1, upstream.hits["/assets/main-bddhXQeo.css"]?.get())
             assertEquals(1, upstream.hits["/assets/inter-latin-Dx4kXJAl.woff2"]?.get())
+        } finally {
+            scope.cancel()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun loadSeedZipLoadsIndexHtmlAndImmutableAssetsIntoMemory() {
+        val dir = Files.createTempDirectory("t3-seed-test-").toFile()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val zipBytes = ByteArrayOutputStream().use { bos ->
+                ZipOutputStream(bos).use { zos ->
+                    zos.putNextEntry(ZipEntry("index.html"))
+                    zos.write("<html><head></head><body>seed</body></html>".toByteArray())
+                    zos.closeEntry()
+
+                    zos.putNextEntry(ZipEntry("assets/index-Bf8EyXcJ.js"))
+                    zos.write("console.log('seed-js');".toByteArray())
+                    zos.closeEntry()
+
+                    zos.putNextEntry(ZipEntry("assets/main-bddhXQeo.css"))
+                    zos.write("body{color:red}".toByteArray())
+                    zos.closeEntry()
+                }
+                bos.toByteArray()
+            }
+
+            val cache = T3AssetCache(dir, scope)
+            cache.loadSeedZipAsync { ByteArrayInputStream(zipBytes) }
+
+            val jsAsset = cache.getCached("/assets/index-Bf8EyXcJ.js")
+            assertNotNull(jsAsset)
+            assertEquals("console.log('seed-js');", String(jsAsset!!.bytes))
+            assertEquals("text/javascript", jsAsset.mime.mimeType)
+
+            val cssAsset = cache.getCached("/assets/main-bddhXQeo.css")
+            assertNotNull(cssAsset)
+            assertEquals("text/css", cssAsset!!.mime.mimeType)
+
+            assertTrue(cache.seedIndexHtml?.contains("<body>seed</body>") == true)
         } finally {
             scope.cancel()
             dir.deleteRecursively()

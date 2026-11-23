@@ -419,7 +419,7 @@ class RelayClient(
         }
     }
 
-    suspend fun sendHello(appVersion: String = "0.1.2") {
+    suspend fun sendHello(appVersion: String = "0.1.4") {
         val dispatch = buildJsonObject {
             put("enabled", false)
             put("t3", buildJsonObject { put("ready", false) })

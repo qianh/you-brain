@@ -18,6 +18,7 @@ const REDIRECT_URI = "http://127.0.0.1/u-brain-todo";
 /** 任务会话的权限沿用用户在 T3 的选择（可能是 full-access），凭据上限必须不低于它。 */
 const CLIENT_ACCESS = "full-access";
 const REFRESH_BEFORE_MS = 24 * 60 * 60 * 1000;
+const PROJECTS_CACHE_TTL_MS = 15_000;
 /** 读尾部消息时覆盖的条目数；一轮里助手消息之间夹着工具调用等条目。 */
 const TAIL_ITEMS = 60;
 export const MASTER_AGENT_PREAMBLE_START = "<!-- u-brain-master-agent -->";
@@ -40,6 +41,7 @@ export interface T3ThreadConversation {
   rawStatus: string;
   threadUrl: string | null;
   itemCount: number;
+  activity?: string | null;
   messages: T3ThreadMessage[];
 }
 
@@ -92,6 +94,25 @@ function text(value: unknown): value is string {
 
 function model(value: unknown): value is ModelSelection {
   return object(value) && text(value.instanceId) && text(value.model);
+}
+
+/** 为主控轻量化编排构造低推理耗时选项；保留原实例与模型，只覆盖 effort / reasoningEffort 为 low。 */
+function withLowEffortSelection(selection: ModelSelection): ModelSelection {
+  const existing = Array.isArray(selection.options)
+    ? selection.options.filter(
+        (item): item is { id: string; value: unknown } =>
+          object(item) && typeof item.id === "string" && item.id !== "effort" && item.id !== "reasoningEffort",
+      )
+    : [];
+  return {
+    instanceId: selection.instanceId,
+    model: selection.model,
+    options: [
+      ...existing,
+      { id: "effort", value: "low" },
+      { id: "reasoningEffort", value: "low" },
+    ],
+  };
 }
 
 function runtimeMode(value: unknown): RuntimeMode | undefined {
@@ -158,12 +179,14 @@ export class T3Automation implements TaskAutomationPort {
   #session: { url: string; token: string; id: string | null } | null = null;
   #opening: Promise<string | null> | null = null;
   #environments = new Map<string, string>();
+  #projectsCache: { expiresAt: number; projects: T3Project[] } | null = null;
+  #threadItemCounts = new Map<string, number>();
   #rpcId = 0;
 
   constructor(options: T3AutomationOptions) { this.#options = options; }
 
   async projects(): Promise<Array<{ id: string; name: string; cwd: string }>> {
-    return (await this.#projects()).map((project) => ({ id: project.id, name: project.title, cwd: project.workspaceRoot }));
+    return (await this.#projects(true)).map((project) => ({ id: project.id, name: project.title, cwd: project.workspaceRoot }));
   }
 
   /** 有 cwd 时登记本机已有文件夹（不新建目录）；没有时由 T3 按名称新建一个带首次提交的 Git 仓库。 */
@@ -177,6 +200,7 @@ export class T3Automation implements TaskAutomationPort {
       ...(input.cwd !== undefined ? { workspaceRoot: input.cwd, createWorkspaceRootIfMissing: false } : {}),
     }, 60_000);
     if (!isProject(created)) invalidResponse();
+    this.#projectsCache = null;
     return { id: created.id, name: created.title, cwd: created.workspaceRoot };
   }
 
@@ -185,10 +209,14 @@ export class T3Automation implements TaskAutomationPort {
       throw new T3AutomationError("INVALID_INPUT", "任务必须有工作目录、派发编号和任务说明。");
     }
     const url = await this.#url();
-    const projects = await this.#projects();
-    const project = input.projectId === null
+    let projects = await this.#projects();
+    let project = input.projectId === null
       ? await this.#directoryProject(input.cwd, projects)
       : projects.find((item) => item.id === input.projectId);
+    if (!project && input.projectId !== null) {
+      projects = await this.#projects(true);
+      project = projects.find((item) => item.id === input.projectId);
+    }
     if (!project) throw new T3AutomationError("INVALID_INPUT", "T3 中已找不到这个项目，请重新选择项目。");
 
     const launchReference = input.branch === null ? `U-Brain TODO 派发编号：${input.requestId}\n\n` : null;
@@ -225,21 +253,36 @@ export class T3Automation implements TaskAutomationPort {
     prompt: string;
     requestId: string;
     runtimeMode: "auto-accept-edits" | "auto" | "full-access";
+    fastOrchestrator?: boolean;
   }): Promise<{ threadId: string; threadUrl: string }> {
     const url = await this.#url();
-    const project = (await this.#projects()).find((item) => item.id === input.projectId);
+    let project = (await this.#projects()).find((item) => item.id === input.projectId);
+    if (!project) {
+      project = (await this.#projects(true)).find((item) => item.id === input.projectId);
+    }
     if (!project) throw new T3AutomationError("INVALID_INPUT", "T3 中已找不到这个项目，请重新选择项目。");
     const history = await this.#threads(project.id);
     const latest = history.find((thread) => text(thread.providerInstanceId) && text(thread.model));
     const selection = model(project.defaultModelSelection) ? project.defaultModelSelection
       : latest ? { instanceId: latest.providerInstanceId, model: latest.model } : undefined;
     if (!selection) throw new T3AutomationError("INVALID_INPUT", "请先在 T3 中为这个项目选择模型或创建一次会话");
-    const launched = await this.#call("t3_thread_launch", {
-      projectId: project.id, title: input.title, message: input.prompt, modelSelection: selection,
+    const launchArgs = (selectedModel: ModelSelection, keySuffix = "") => ({
+      projectId: project.id, title: input.title, message: input.prompt, modelSelection: selectedModel,
       runtimeMode: input.runtimeMode, interactionMode: "default",
       workspaceStrategy: { type: "root" },
-      clientRequestId: `u-brain-dispatch-${input.requestId}`,
-    }, 60_000);
+      clientRequestId: `u-brain-dispatch-${input.requestId}${keySuffix}`,
+    });
+    let launched: unknown;
+    if (input.fastOrchestrator) {
+      try {
+        launched = await this.#call("t3_thread_launch", launchArgs(withLowEffortSelection(selection)), 60_000);
+      } catch (error) {
+        if (!(error instanceof T3AutomationError) || error.code === "AUTH_REQUIRED" || error.code === "INVALID_RESPONSE") throw error;
+        launched = await this.#call("t3_thread_launch", launchArgs(selection, "-fallback"), 60_000);
+      }
+    } else {
+      launched = await this.#call("t3_thread_launch", launchArgs(selection), 60_000);
+    }
     if (!object(launched) || !text(launched.threadId)) invalidResponse();
     return { threadId: launched.threadId, threadUrl: await this.#threadUrl(url, launched.threadId) };
   }
@@ -339,13 +382,23 @@ export class T3Automation implements TaskAutomationPort {
         ...(options.afterPosition > 0 ? { afterPosition: options.afterPosition } : {}),
       });
     } else {
-      const head = await this.#read(threadId, { limit: 1, runLimit: 1 });
-      const after = Math.max(0, head.thread.itemCount - limit);
-      initial = await this.#read(threadId, {
-        limit,
-        runLimit: 20,
-        ...(after > 0 ? { afterPosition: after } : {}),
-      });
+      const knownCount = this.#threadItemCounts.get(threadId);
+      if (knownCount !== undefined && knownCount > limit) {
+        initial = await this.#read(threadId, {
+          limit,
+          runLimit: 20,
+          afterPosition: knownCount - limit,
+        });
+      } else {
+        initial = await this.#read(threadId, { limit, runLimit: 20 });
+        if (initial.thread.itemCount > limit) {
+          initial = await this.#read(threadId, {
+            limit,
+            runLimit: 20,
+            afterPosition: initial.thread.itemCount - limit,
+          });
+        }
+      }
     }
     const { thread, items } = initial;
     const state: T3ThreadConversation["state"] =
@@ -356,11 +409,11 @@ export class T3Automation implements TaskAutomationPort {
           : thread.activeRunId || (LIVE_STATUSES.has(thread.status) && thread.status !== "idle") || thread.pendingRequestCount > 0
             ? "running"
             : "ready";
-    const messages = [...items]
+    const sortedItems = [...items].sort((a, b) => a.position - b.position);
+    const messages = sortedItems
       .filter((item): item is T3Item & { text: string } =>
         (item.type === "user_message" || item.type === "assistant_message") && typeof item.text === "string",
       )
-      .sort((a, b) => a.position - b.position)
       .flatMap((item): T3ThreadMessage[] => {
         const cleaned = item.type === "user_message" ? stripMasterAgentPreamble(item.text) : item.text;
         if (cleaned.trim() === "") return [];
@@ -371,6 +424,17 @@ export class T3Automation implements TaskAutomationPort {
           runId: item.runId,
         }];
       });
+    let activity: string | null = null;
+    if (thread.status === "preparing" || thread.status === "queued" || thread.status === "starting") {
+      activity = "正在唤醒主控会话…";
+    } else if (state === "waiting") {
+      activity = "等待确认或补充信息…";
+    } else if (state === "running") {
+      const activeTail = thread.activeRunId
+        ? sortedItems.filter((item) => item.runId === thread.activeRunId).at(-1)
+        : sortedItems.at(-1);
+      activity = activeTail?.type === "assistant_message" ? "正在整理回复…" : "正在思考与调度…";
+    }
     const url = await this.#url().catch(() => null);
     const threadUrl = url ? await this.#threadUrl(url, threadId).catch(() => null) : null;
     return {
@@ -379,6 +443,7 @@ export class T3Automation implements TaskAutomationPort {
       rawStatus: thread.status,
       threadUrl,
       itemCount: thread.itemCount,
+      activity,
       messages,
     };
   }
@@ -418,7 +483,10 @@ export class T3Automation implements TaskAutomationPort {
     return url;
   }
 
-  async #projects(): Promise<T3Project[]> {
+  async #projects(forceRefresh = false): Promise<T3Project[]> {
+    if (!forceRefresh && this.#projectsCache && Date.now() < this.#projectsCache.expiresAt) {
+      return this.#projectsCache.projects;
+    }
     const projects: T3Project[] = [];
     let cursor = 0;
     for (let page = 0; page < 50; page++) {
@@ -426,10 +494,14 @@ export class T3Automation implements TaskAutomationPort {
       if (!object(value) || !Array.isArray(value.projects) || !value.projects.every(isProject) ||
         !(value.nextCursor === null || value.nextCursor === undefined || typeof value.nextCursor === "number")) invalidResponse();
       projects.push(...value.projects.filter((project) => !project.deletedAt));
-      if (typeof value.nextCursor !== "number") return projects;
+      if (typeof value.nextCursor !== "number") {
+        this.#projectsCache = { expiresAt: Date.now() + PROJECTS_CACHE_TTL_MS, projects };
+        return projects;
+      }
       if (value.nextCursor <= cursor) invalidResponse();
       cursor = value.nextCursor;
     }
+    this.#projectsCache = { expiresAt: Date.now() + PROJECTS_CACHE_TTL_MS, projects };
     return projects;
   }
 
@@ -460,6 +532,7 @@ export class T3Automation implements TaskAutomationPort {
     const value = await this.#call("t3_thread_read", { threadId, view: "messages", maxCharsPerItem: 32_000, ...extra });
     if (!object(value) || !isThreadState(value.thread) || value.thread.threadId !== threadId ||
       !Array.isArray(value.items) || !value.items.every(isItem)) invalidResponse();
+    this.#threadItemCounts.set(threadId, value.thread.itemCount);
     return value as unknown as T3ThreadRead;
   }
 

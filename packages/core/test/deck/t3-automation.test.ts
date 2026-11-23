@@ -266,4 +266,36 @@ describe("T3 adapter for phone notices", () => {
     expect(await client.sendMessage("a", "继续", "c-1")).toBe("started");
     expect(sends().at(-1)?.args).toEqual({ threadId: "a", message: "继续", mode: "queue", clientRequestId: "u-brain-telegram-c-1" });
   });
+
+  test("reads conversation in one t3_thread_read when item count fits limit, caches projects, and sets low effort for fastOrchestrator", async () => {
+    const { client, t3, launches } = harness({
+      projects: [{ ...project, defaultModelSelection: selection }],
+      threads: [fakeThread({ threadId: "ag-t", status: "running", activeRunId: "run-1" })],
+    });
+    const conv = await client.readMessages("ag-t");
+    expect(conv.state).toBe("running");
+    expect(conv.activity).toBe("正在整理回复…");
+    expect(conv.messages).toHaveLength(2);
+    expect(t3.calls.filter((c) => c.name === "t3_thread_read")).toHaveLength(1);
+
+    await client.projects();
+    await client.launchThread({
+      projectId: project.id,
+      title: "主控",
+      prompt: "查在线设备",
+      requestId: "req-fast-1",
+      runtimeMode: "auto",
+      fastOrchestrator: true,
+    });
+    expect(t3.calls.filter((c) => c.name === "t3_project_list")).toHaveLength(1);
+    expect(launches()).toHaveLength(1);
+    expect(launches()[0]?.args.modelSelection).toEqual({
+      instanceId: "codex",
+      model: "configured-model",
+      options: [
+        { id: "effort", value: "low" },
+        { id: "reasoningEffort", value: "low" },
+      ],
+    });
+  });
 });

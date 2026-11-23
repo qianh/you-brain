@@ -14,27 +14,26 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.FrameLayout
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.material3.Button
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -46,15 +45,23 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import ai.youbrain.mobile.data.RelayDevice
 import ai.youbrain.mobile.net.AppUiState
 import ai.youbrain.mobile.net.T3AssetCache
 import ai.youbrain.mobile.net.UBrainRepository
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
+import ai.youbrain.mobile.ui.components.IosHairline
+import ai.youbrain.mobile.ui.components.IosIconBadge
+import ai.youbrain.mobile.ui.components.IosIcons
+import ai.youbrain.mobile.ui.theme.IosTheme
 import java.io.ByteArrayInputStream
 import java.net.URI
 
@@ -72,12 +79,15 @@ fun T3DeckScreen(
     onJumpSettings: () -> Unit,
 ) {
     val context = LocalContext.current
+    val c = IosTheme.colors
     val devices = remember(state.relayState.devices, state.deviceId) {
         repository.viewT3Devices()
     }
 
     var selectedId by remember { mutableStateOf<String?>(null) }
     var reloadNonce by remember { mutableIntStateOf(0) }
+    var lastHandledReloadNonce by remember { mutableIntStateOf(0) }
+    var renameDevice by remember { mutableStateOf<RelayDevice?>(null) }
     val proxyUrls = remember { mutableStateMapOf<String, String>() }
     val loadingIds = remember { mutableStateMapOf<String, Boolean>() }
     val errorByDevice = remember { mutableStateMapOf<String, String?>() }
@@ -85,11 +95,14 @@ fun T3DeckScreen(
     val webViews = remember { LinkedHashMap<String, WebView>(8, 0.75f, true) }
     var containerRef by remember { mutableStateOf<FrameLayout?>(null) }
 
-    LaunchedEffect(preferredDeviceId, devices) {
+    LaunchedEffect(preferredDeviceId, state.agent.masterDeviceId, devices) {
         if (!preferredDeviceId.isNullOrBlank() && devices.any { it.id == preferredDeviceId }) {
             selectedId = preferredDeviceId
         } else if (selectedId == null || devices.none { it.id == selectedId }) {
-            selectedId = devices.firstOrNull { it.online }?.id ?: devices.firstOrNull()?.id
+            val masterOnline = state.agent.masterDeviceId?.takeIf { id ->
+                devices.any { it.id == id && it.online }
+            }
+            selectedId = masterOnline ?: devices.firstOrNull { it.online }?.id ?: devices.firstOrNull()?.id
         }
     }
 
@@ -100,19 +113,28 @@ fun T3DeckScreen(
         val devId = activeId ?: return@LaunchedEffect
         if (activeDevice?.online != true) {
             errorByDevice[devId] = "该设备当前离线"
+            loadingIds[devId] = false
             return@LaunchedEffect
         }
-        loadingIds[devId] = true
-        errorByDevice[devId] = null
-        val res = repository.getOrStartT3ProxyUrl(devId)
+        val wasInError = errorByDevice[devId] != null
+        val reloadRequested = reloadNonce != lastHandledReloadNonce
+        lastHandledReloadNonce = reloadNonce
+        proxyUrls[devId] = repository.getOrCreateT3ProxyImmediate(devId)
         loadingIds[devId] = false
+        errorByDevice[devId] = null
+
+        val res = repository.ensureT3Tunnel(devId)
         res.fold(
-            onSuccess = { url -> proxyUrls[devId] = url },
+            onSuccess = {
+                errorByDevice[devId] = null
+                if (wasInError || reloadRequested) {
+                    webViews[devId]?.reload()
+                }
+            },
             onFailure = { t -> errorByDevice[devId] = t.message ?: "无法建立 T3 隧道" },
         )
     }
 
-    // 如果来自消息或派活看板带具体 threadUrl，定位至对应路径
     LaunchedEffect(activeId, preferredThreadUrl, proxyUrls[activeId]) {
         val devId = activeId ?: return@LaunchedEffect
         val base = proxyUrls[devId] ?: return@LaunchedEffect
@@ -138,66 +160,114 @@ fun T3DeckScreen(
         activeId?.let { webViews[it]?.goBack() }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        // 顶部设备切换栏（固定右侧重载按钮，避免长设备名挤压）
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(c.groupedBg),
+    ) {
+        // 纤薄 iOS 设备切换胶囊栏（右侧固定刷新按钮，绝不被长名称挤压）
         if (isVisibleTab) {
-            Surface(tonalElevation = 2.dp) {
+            Column(modifier = Modifier.fillMaxWidth().background(c.chromeBg)) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                        .height(42.dp)
+                        .padding(horizontal = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     if (devices.isEmpty()) {
                         Text(
                             text = "暂无开放 T3 的设备",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(vertical = 8.dp, horizontal = 4.dp),
+                            fontSize = 13.sp,
+                            color = c.secondaryLabel,
+                            modifier = Modifier.weight(1f),
                         )
                     } else {
                         Row(
                             modifier = Modifier
                                 .weight(1f)
                                 .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             devices.forEach { dev ->
-                                val dot = if (dev.online) "● " else "○ "
-                                FilterChip(
-                                    selected = dev.id == activeId,
-                                    onClick = { selectedId = dev.id },
-                                    label = {
-                                        Text(
-                                            text = "$dot${dev.name}",
-                                            maxLines = 1,
-                                            softWrap = false,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.widthIn(max = 160.dp),
+                                val isSelected = dev.id == activeId
+                                val pillBg = if (isSelected) c.blue else c.tertiaryFill
+                                val textColor = if (isSelected) Color.White else c.label
+                                val dotColor = when {
+                                    isSelected && dev.online -> Color(0xFF9DF7B2)
+                                    isSelected -> Color.White.copy(alpha = 0.65f)
+                                    dev.online -> c.green
+                                    else -> c.secondaryLabel
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .height(28.dp)
+                                        .widthIn(max = 172.dp)
+                                        .clip(CircleShape)
+                                        .background(pillBg)
+                                        .clickable {
+                                            if (isSelected) renameDevice = dev else selectedId = dev.id
+                                        }
+                                        .padding(horizontal = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .clip(CircleShape)
+                                            .background(dotColor),
+                                    )
+                                    Text(
+                                        text = state.displayName(dev),
+                                        fontSize = 12.5.sp,
+                                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                                        color = textColor,
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false),
+                                    )
+                                    if (isSelected) {
+                                        Icon(
+                                            imageVector = IosIcons.Pencil,
+                                            contentDescription = "改名",
+                                            tint = Color.White.copy(alpha = 0.85f),
+                                            modifier = Modifier.size(11.dp),
                                         )
-                                    },
-                                )
+                                    }
+                                }
                             }
                         }
+
                         if (activeId != null) {
-                            TextButton(
-                                onClick = {
-                                    webViews[activeId]?.reload() ?: run { reloadNonce += 1 }
-                                },
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .background(c.tertiaryFill)
+                                    .clickable {
+                                        webViews[activeId]?.reload() ?: run { reloadNonce += 1 }
+                                    },
+                                contentAlignment = Alignment.Center,
                             ) {
-                                Text("↻ 重载", maxLines = 1, softWrap = false)
+                                Icon(
+                                    imageVector = IosIcons.Refresh,
+                                    contentDescription = "重载",
+                                    tint = c.blue,
+                                    modifier = Modifier.size(15.dp),
+                                )
                             }
                         }
                     }
                 }
+                IosHairline()
             }
         }
 
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            // 始终保留多设备 WebView 容器，切换设备只改可见性，不丢输入框和滚动进度
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
@@ -218,7 +288,6 @@ fun T3DeckScreen(
                                 }
                             }
                         }
-                        val targetDeviceId = currentId
                         val wv = WebView(container.context).apply {
                             setLayerType(View.LAYER_TYPE_HARDWARE, null)
                             settings.javaScriptEnabled = true
@@ -252,11 +321,7 @@ fun T3DeckScreen(
                                         )
                                     }
                                     if (T3AssetCache.isImmutableAssetPath(path)) {
-                                        val hit = repository.assetCache.getCached(path)
-                                            ?: runBlocking(Dispatchers.IO) {
-                                                repository.fetchImmutableT3Asset(targetDeviceId, path)
-                                            }
-                                            ?: return null
+                                        val hit = repository.assetCache.getCached(path) ?: return null
                                         return WebResourceResponse(
                                             hit.mime.mimeType,
                                             hit.mime.encoding,
@@ -319,21 +384,31 @@ fun T3DeckScreen(
                 },
             )
 
-            // 加载 / 错误 / 空态覆盖层
             if (isVisibleTab) when {
                 devices.isEmpty() -> {
-                    Column(
-                        modifier = Modifier.fillMaxSize().padding(28.dp),
-                        verticalArrangement = Arrangement.Center,
-                        horizontalAlignment = Alignment.CenterHorizontally,
+                    Box(
+                        modifier = Modifier.fillMaxSize().padding(24.dp),
+                        contentAlignment = Alignment.Center,
                     ) {
-                        Text("还没有发现开放 T3 的设备", style = MaterialTheme.typography.titleMedium)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "请在电脑端 U-Brain「设置 → 接入 → 跨设备派活」开启「允许查看本机 T3」，并点击该手机的「信任此设备」。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(c.cardBg)
+                                .padding(22.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            IosIconBadge(icon = IosIcons.TerminalWindow, background = c.indigo)
+                            Text("暂无开放 T3 的设备", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = c.label)
+                            Text(
+                                text = "请在电脑端 U-Brain「设置 → 接入 → 跨设备派活」开启「允许查看本机 T3」，并点击该手机的「信任此设备」。",
+                                fontSize = 13.5.sp,
+                                lineHeight = 19.sp,
+                                color = c.secondaryLabel,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
                     }
                 }
                 activeId != null && loadingIds[activeId] == true -> {
@@ -342,39 +417,94 @@ fun T3DeckScreen(
                         verticalArrangement = Arrangement.Center,
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        CircularProgressIndicator()
+                        CircularProgressIndicator(color = c.blue, modifier = Modifier.size(26.dp), strokeWidth = 2.5.dp)
                         Spacer(modifier = Modifier.height(10.dp))
-                        Text("正在建立端到端加密 T3 隧道…", style = MaterialTheme.typography.bodySmall)
+                        Text("正在建立端到端加密 T3 隧道…", fontSize = 13.sp, color = c.secondaryLabel)
                     }
                 }
                 activeId != null && errorByDevice[activeId] != null -> {
                     val err = errorByDevice[activeId]!!
-                    Column(
-                        modifier = Modifier.fillMaxSize().padding(28.dp),
-                        verticalArrangement = Arrangement.Center,
-                        horizontalAlignment = Alignment.CenterHorizontally,
+                    Box(
+                        modifier = Modifier.fillMaxSize().padding(24.dp),
+                        contentAlignment = Alignment.Center,
                     ) {
-                        Text(
-                            text = err,
-                            color = MaterialTheme.colorScheme.error,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        if (err.contains("不接受") || err.contains("允许") || err.contains("密钥")) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(c.cardBg)
+                                .padding(20.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            IosIconBadge(icon = IosIcons.Shield, background = c.red)
                             Text(
-                                text = "如果刚用邀请码入网，请到电脑端 U-Brain「设置 → 接入 → 跨设备派活」中对本手机点击「信任此设备」；若对端重装过，可在「设置」里重置其公钥固定。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                text = err,
+                                color = c.red,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium,
+                                textAlign = TextAlign.Center,
                             )
-                            Spacer(modifier = Modifier.height(10.dp))
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Button(onClick = { reloadNonce += 1 }) { Text("重试连接") }
-                            OutlinedButton(onClick = onJumpSettings) { Text("查看设置") }
+                            if (err.contains("不接受") || err.contains("允许") || err.contains("密钥")) {
+                                Text(
+                                    text = "若刚用邀请码入网，请在电脑端对本手机点击「信任此设备」；若对端重装过，可在「设置」重置公钥固定。",
+                                    fontSize = 13.sp,
+                                    lineHeight = 18.sp,
+                                    color = c.secondaryLabel,
+                                    textAlign = TextAlign.Center,
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(40.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(c.blue)
+                                        .clickable { reloadNonce += 1 },
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text("重试连接", color = Color.White, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(40.dp)
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .background(c.tertiaryFill)
+                                        .clickable(onClick = onJumpSettings),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text("查看设置", color = c.label, fontSize = 14.5.sp, fontWeight = FontWeight.Medium)
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
+    }
+
+    if (isVisibleTab) {
+        renameDevice?.let { dev ->
+            RenameDeviceDialog(
+                rawName = dev.name,
+                currentDisplayName = state.displayName(dev),
+                isSelf = false,
+                hasAlias = state.hasCustomAlias(dev.id),
+                onConfirm = { draft ->
+                    repository.renameDevice(dev.id, draft)
+                    renameDevice = null
+                },
+                onReset = {
+                    repository.renameDevice(dev.id, "")
+                    renameDevice = null
+                },
+                onDismiss = { renameDevice = null },
+            )
         }
     }
 }

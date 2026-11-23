@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import type { Server } from "bun";
 
-import { generateKeyPair, signTunnelTranscript, type CmdFrame } from "@you-brain/protocol";
+import { TUNNEL_RELAY_FRAME_MAX, generateKeyPair, signTunnelTranscript, type CmdFrame } from "@you-brain/protocol";
 
 import { PeerPins, TUNNEL_VIRTUAL_ORIGIN, TunnelClient, TunnelHost } from "../../src/dispatch/tunnel.js";
 
@@ -154,6 +154,31 @@ describe("T3 隧道（内存里的假中转 + 假的本机 T3）", () => {
     const session = await tampered.client.session(B);
     await expect(session.fetch("/x", { method: "GET", headers: [] })).rejects.toThrow();
     expect(session.closed).toBe(true);
+  });
+
+  it("WebSocket 大消息自动经 ws-gzip 压缩与分片重组，不触发中转帧长上限", async () => {
+    const { client, frames } = await setup();
+    const session = await client.session(B);
+    const socket = session.socket("/ws", []);
+    // 构造一段超过单帧 160 KB 上限且低压缩率的随机 Base64 文本（约 220 KB），同时验证 ws-gzip 与分片 more 重组。
+    const randomPart = Buffer.from(crypto.getRandomValues(new Uint8Array(135_000))).toString("base64");
+    const bigSnapshot = JSON.stringify({ method: "orchestration.snapshot", threads: [randomPart, "重复文本".repeat(8_000)] });
+    let reply = "";
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("ws big message timeout")), 3_000);
+      socket.addEventListener("open", () => {
+        socket.send(bigSnapshot);
+      });
+      socket.addEventListener("message", ((event: { data: unknown }) => {
+        reply = String(event.data);
+        clearTimeout(timeout);
+        socket.close(1000, "done");
+        resolve();
+      }) as (event: never) => void);
+    });
+    expect(reply).toBe(`ws:${bigSnapshot}`);
+    expect(frames.length).toBeGreaterThan(2);
+    expect(frames.every((frame) => frame.length <= TUNNEL_RELAY_FRAME_MAX)).toBe(true);
   });
 
   it("peers.json 损坏当作没记录", async () => {

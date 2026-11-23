@@ -27,7 +27,7 @@ function webglDisabledForDebug(): boolean {
 /** 当前已创建的终端上要重新排版时用：字体变化、GPU 渲染回退都会改变单元格尺寸。 */
 interface LiveTerminal {
   terminal: Terminal;
-  relayout(): void;
+  relayout(claimLease?: boolean): void;
 }
 
 /**
@@ -89,9 +89,12 @@ export function DeckTty7Terminal({
     let connected = false;
     let failed = false;
     let exited = false;
+    let hasLease = true;
+    let lastServerSize: { cols: number; rows: number } | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
-    let resizeFrame = 0;
+    let sizeSyncTimer: ReturnType<typeof setTimeout> | undefined;
     let layoutFrame = 0;
+    let pendingClaimLease = false;
     let webglFrame = 0;
     let quietTimer: ReturnType<typeof setTimeout> | undefined;
     let maxTimer: ReturnType<typeof setTimeout> | undefined;
@@ -128,30 +131,51 @@ export function DeckTty7Terminal({
     terminal.open(host);
     host.addEventListener("keydown", preserveTerminalImeInput, true);
     let webgl: WebglAddon | undefined;
-    fit.fit();
+    const canMeasure = (): boolean => host.clientWidth > 0 && host.clientHeight > 0;
+    if (canMeasure()) fit.fit();
     const measure = (): DeckTerminalSize => {
-      const grid = fit.proposeDimensions();
+      const grid = canMeasure() ? fit.proposeDimensions() : undefined;
       const screen = host.querySelector<HTMLElement>(".xterm-screen");
+      const cols = Math.max(2, Math.min(1000, grid?.cols ?? terminal.cols));
+      const rows = Math.max(1, Math.min(1000, grid?.rows ?? terminal.rows));
       return {
-        cols: Math.max(2, Math.min(1000, grid?.cols ?? terminal.cols)),
-        rows: Math.max(1, Math.min(1000, grid?.rows ?? terminal.rows)),
-        cell_w: Math.round((screen?.clientWidth ?? 0) / terminal.cols),
-        cell_h: Math.round((screen?.clientHeight ?? 0) / terminal.rows),
+        cols,
+        rows,
+        cell_w: Math.round((screen?.clientWidth ?? 0) / Math.max(1, terminal.cols)),
+        cell_h: Math.round((screen?.clientHeight ?? 0) / Math.max(1, terminal.rows)),
       };
     };
     const socket = client.deckTty7Terminal(pane, measure(), deviceId);
     const control = (body: unknown): void => {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(body));
     };
-    // 字体或渲染方式变化后单元格尺寸会变：重新适配并把新尺寸告诉 tty7（只发 resize，不重连）。
-    const relayout = (): void => {
-      if (disposed) return;
-      fit.fit();
-      if (connected) control({ type: "resize", size: measure() });
+    // 字体、容器或渲染方式变化后单元格尺寸会变：先 fit 更新本地网格，持有（或主动收回）租约时同步给对端 tty7。
+    const relayout = (claimLease = false): void => {
+      if (disposed || !canMeasure()) return;
+      if (claimLease && !hasLease) {
+        hasLease = true;
+        setLeaseLost(false);
+      }
+      if (hasLease) {
+        fit.fit();
+        if (connected && activeRef.current) {
+          const nextSize = measure();
+          lastServerSize = { cols: nextSize.cols, rows: nextSize.rows };
+          control({ type: "resize", size: nextSize });
+        }
+      }
     };
-    const scheduleRelayout = (): void => {
+    const scheduleRelayout = (claimLease = false): void => {
+      if (claimLease) pendingClaimLease = true;
       cancelAnimationFrame(layoutFrame);
-      layoutFrame = requestAnimationFrame(relayout);
+      layoutFrame = requestAnimationFrame(() => {
+        const shouldClaim = pendingClaimLease;
+        pendingClaimLease = false;
+        relayout(shouldClaim);
+      });
+    };
+    const reclaimLeaseOnInteract = (): void => {
+      if (!hasLease && connected && activeRef.current) relayout(true);
     };
     liveRef.current = { terminal, relayout: scheduleRelayout };
     // GPU 渲染延后到连接建立后，避免首帧与回放争抢主线程。
@@ -183,6 +207,7 @@ export function DeckTty7Terminal({
       : null;
     const send = (bytes: Uint8Array): void => {
       if (!connected || socket.readyState !== WebSocket.OPEN) return;
+      reclaimLeaseOnInteract();
       if (socket.bufferedAmount + bytes.length > 1024 * 1024) {
         failed = true;
         setError("终端输入积压，连接已断开；未自动重发");
@@ -216,7 +241,7 @@ export function DeckTty7Terminal({
       },
       () => disposed,
     );
-    // 回放写完后再显示：先一次写完攒下的历史，滚到底，再显示并加载 GPU 渲染。
+    // 回放写完后再显示：先一次写完攒下的历史，重新铺满当前屏幕并滚到底，再显示并加载 GPU 渲染。
     const reveal = (reason: string): void => {
       if (shown || disposed) return;
       shown = true;
@@ -225,6 +250,7 @@ export function DeckTty7Terminal({
       output.setHolding(false);
       void output.whenIdle().then(() => {
         if (disposed) return;
+        if (hasLease && canMeasure()) fit.fit();
         terminal.scrollToBottom();
         setRevealed(true);
         if (import.meta.env.DEV && replayStart !== 0) {
@@ -239,6 +265,16 @@ export function DeckTty7Terminal({
     const armQuiet = (): void => {
       clearTimeout(quietTimer);
       quietTimer = setTimeout(() => reveal("静默"), REPLAY_QUIET_MS);
+    };
+    const scheduleServerSizeCheck = (): void => {
+      clearTimeout(sizeSyncTimer);
+      sizeSyncTimer = setTimeout(() => {
+        if (disposed || !connected || !hasLease || !activeRef.current || !canMeasure()) return;
+        const target = measure();
+        if (!lastServerSize || lastServerSize.cols !== target.cols || lastServerSize.rows !== target.rows) {
+          relayout(false);
+        }
+      }, 60);
     };
     output.setHolding(true);
     socket.onmessage = (event: MessageEvent<string | ArrayBuffer>) => {
@@ -267,18 +303,40 @@ export function DeckTty7Terminal({
           connected = true;
           terminal.options.disableStdin = false;
           setStatus("ready");
-          control({ type: "resize", size: measure() });
+          relayout(true);
           replayStart = performance.now();
           armQuiet();
           maxTimer = setTimeout(() => reveal("上限"), REPLAY_MAX_MS);
         } else if (message.type === "live") {
           replaying = false;
-          reveal("live");
-        }
-        else if (message.type === "size" && message.size) terminal.resize(message.size.cols, message.size.rows);
-        else if (message.type === "warning" && typeof message.message === "string") setWarning(message.message);
-        else if (message.type === "lease") setLeaseLost(message.by !== "U-Brain");
-        else if (message.type === "exit") {
+          if (shown) {
+            if (hasLease) scheduleRelayout(false);
+            terminal.scrollToBottom();
+          } else {
+            reveal("live");
+          }
+          scheduleServerSizeCheck();
+        } else if (message.type === "size" && message.size) {
+          lastServerSize = { cols: message.size.cols, rows: message.size.rows };
+          if (!hasLease) {
+            terminal.resize(message.size.cols, message.size.rows);
+          } else if (!replaying) {
+            // 若对端回显的仍是旧半屏尺寸（而没有紧跟着的 lease 被抢通知），60ms 后以当前全屏尺寸重新对齐。
+            scheduleServerSizeCheck();
+          }
+        } else if (message.type === "warning" && typeof message.message === "string") {
+          setWarning(message.message);
+        } else if (message.type === "lease") {
+          const ours = message.by === "U-Brain" || message.by === null;
+          hasLease = ours;
+          setLeaseLost(!ours);
+          clearTimeout(sizeSyncTimer);
+          if (!ours && lastServerSize) {
+            terminal.resize(lastServerSize.cols, lastServerSize.rows);
+          } else if (ours) {
+            scheduleRelayout(false);
+          }
+        } else if (message.type === "exit") {
           exited = true;
           connected = false;
           terminal.options.disableStdin = true;
@@ -304,17 +362,23 @@ export function DeckTty7Terminal({
     };
     socket.onerror = () => { /* close 负责重连和显示连接状态。 */ };
     const observer = new ResizeObserver(() => {
-      cancelAnimationFrame(resizeFrame);
-      resizeFrame = requestAnimationFrame(() => {
-        if (connected && activeRef.current) control({ type: "resize", size: measure() });
-      });
+      if (activeRef.current) scheduleRelayout(false);
+      else if (hasLease && canMeasure()) fit.fit();
     });
     observer.observe(host);
+    void document.fonts?.ready.then(() => {
+      if (!disposed) scheduleRelayout(false);
+    });
+    const onPointerDown = (): void => {
+      reclaimLeaseOnInteract();
+    };
     const onFocus = (): void => setFocused(true);
     const onBlur = (): void => setFocused(false);
+    host.addEventListener("pointerdown", onPointerDown);
     host.addEventListener("focusin", onFocus);
     host.addEventListener("focusout", onBlur);
     const onPaste = (event: ClipboardEvent): void => {
+      reclaimLeaseOnInteract();
       const images = [...(event.clipboardData?.files ?? [])].filter((file) => file.type.startsWith("image/"));
       if (images.length === 0) return; // 文本由 xterm 根据真实 bracketed-paste 模式处理。
       event.preventDefault();
@@ -337,6 +401,7 @@ export function DeckTty7Terminal({
     host.addEventListener("paste", onPaste, true);
     const onFileDrop = (event: Event): void => {
       if (deviceId !== null || !connected || !activeRef.current) return;
+      reclaimLeaseOnInteract();
       const text = terminalDroppedPaths((event as CustomEvent<unknown>).detail);
       if (text === null) {
         setError(translateRef.current("deckTty7DropInvalid"));
@@ -352,14 +417,15 @@ export function DeckTty7Terminal({
       disposed = true;
       connected = false;
       clearTimeout(retry);
+      clearTimeout(sizeSyncTimer);
       clearTimeout(quietTimer);
       clearTimeout(maxTimer);
       if (focusFrame !== 0) cancelAnimationFrame(focusFrame);
-      cancelAnimationFrame(resizeFrame);
       cancelAnimationFrame(layoutFrame);
       cancelAnimationFrame(webglFrame);
       if (liveRef.current?.terminal === terminal) liveRef.current = null;
       observer.disconnect();
+      host.removeEventListener("pointerdown", onPointerDown);
       host.removeEventListener("focusin", onFocus);
       host.removeEventListener("focusout", onBlur);
       host.removeEventListener("keydown", preserveTerminalImeInput, true);
@@ -377,7 +443,7 @@ export function DeckTty7Terminal({
     if (!active) return;
     const live = liveRef.current;
     if (live === null) return;
-    live.relayout();
+    live.relayout(true);
     live.terminal.focus();
   }, [active]);
 
