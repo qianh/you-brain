@@ -12,6 +12,8 @@ import {
   parseEventsJsonl,
   parseProtocolFile,
   parseRelayInvite,
+  parseRelayMember,
+  relayMemberPath,
   parseRoles,
   parseSharedConfig,
   serializeEventsJsonl,
@@ -21,6 +23,7 @@ import {
   type EventType,
   type ProtocolFile,
   type RelayInviteFile,
+  type RelayMemberFile,
   type Roles,
   type SharedConfig,
 } from "@you-brain/protocol";
@@ -342,6 +345,22 @@ export class ProtocolSync {
 
   async writeRelayInvite(invite: RelayInviteFile): Promise<void> {
     await updateJsonWithMerge<RelayInviteFile>(this.#drive, DRIVE_PATHS.relayInvite, () => invite);
+  }
+
+  /** 云盘里登记的入网设备派活身份；坏文件跳过。 */
+  async listRelayMembers(): Promise<RelayMemberFile[]> {
+    const entries = await this.#drive.list({ prefix: `${DRIVE_PATHS.relayMembersDir}/` });
+    const members = new Map<string, RelayMemberFile>();
+    for (const entry of entries) {
+      if (!entry.path.endsWith(".json")) continue;
+      const member = parseRelayMember(await readJson(this.#drive, entry.path).catch(() => null));
+      if (member) members.set(member.deviceId, member);
+    }
+    return [...members.values()];
+  }
+
+  async writeRelayMember(member: RelayMemberFile): Promise<void> {
+    await updateJsonWithMerge<RelayMemberFile>(this.#drive, relayMemberPath(member.deviceId), () => member);
   }
 
   async readRoles(): Promise<Roles> {

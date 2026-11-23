@@ -257,6 +257,7 @@ import {
   DispatchExecutor,
   DispatchHub,
   type DispatchReadResult,
+  type DispatchSender,
   type OutboxEntry,
 } from "../dispatch/index.js";
 import { writeFileAtomic } from "../domain/atomic.js";
@@ -957,6 +958,11 @@ export class YouBrainDaemon {
   #dispatchRelayToken: SecretStore | null = null;
   #dispatchIdentity: DispatchDeviceIdentity | null = null;
   #dispatchExecutor: DispatchExecutor | null = null;
+  /** 云盘里登记的入网设备（不含本机），信任入网设备时用来验签；一分钟内复用。 */
+  #dispatchMembers: { list: DispatchSender[]; at: number } | null = null;
+  /** 本机派活身份已登记进云盘（本次进程内）。 */
+  #dispatchMemberPublished: string | null = null;
+  #dispatchTrustRunning: Promise<void> | null = null;
   #dispatchHub: DispatchHub | null = null;
   #dispatchPort: DispatchHttpPort | null = null;
   #dispatchEvents: ReturnType<typeof createDispatchEventHandler> | null = null;
@@ -3203,7 +3209,79 @@ export class YouBrainDaemon {
       now: () => this.#clock.now().getTime(),
       log: (message) => console.error(`[relay] ${message}`),
     });
-    void this.#relayAutoJoin.run().catch(() => undefined);
+    void this.#relayAutoJoin
+      .run()
+      .then((result) => {
+        // 刚入网就登记身份并按「互相信任」配置，不用等下一次心跳。
+        if (result === "joined") this.#runDispatchTrust();
+      })
+      .catch(() => undefined);
+  }
+
+  /** 云盘里的入网设备（不含本机），一分钟内复用；读不到时沿用上一次的。 */
+  async #relayMembers(): Promise<DispatchSender[]> {
+    const cached = this.#dispatchMembers;
+    if (cached && this.#clock.nowMs() - cached.at < 60_000) return cached.list;
+    const sync = this.#sync;
+    if (!sync) return cached?.list ?? [];
+    try {
+      const self = this.#dispatchDeviceId;
+      const list = (await sync.listRelayMembers())
+        .filter((member) => member.deviceId !== self)
+        .map((member) => ({ deviceId: member.deviceId, name: member.name, publicKey: member.publicKey }));
+      this.#dispatchMembers = { list, at: this.#clock.nowMs() };
+      return list;
+    } catch {
+      return cached?.list ?? [];
+    }
+  }
+
+  /**
+   * 同账号入网设备互相信任：已入网就把本机派活身份（设备 ID、公钥）登记进云盘；
+   * 第一次发现入网时把接收策略统一设成「接收派活、信任所有入网设备、全部项目、上限完全访问、开放 T3 查看」。
+   * 之后用户手动改的不再覆盖。失败一律吞掉，下次心跳再试。
+   */
+  #runDispatchTrust(): void {
+    if (this.#dispatchTrustRunning) return;
+    this.#dispatchTrustRunning = this.#dispatchTrust()
+      .catch((error: unknown) => {
+        console.error(`[dispatch] 登记入网身份失败：${error instanceof Error ? error.message : "未知错误"}`);
+      })
+      .finally(() => {
+        this.#dispatchTrustRunning = null;
+      });
+  }
+
+  async #dispatchTrust(): Promise<void> {
+    const sync = this.#sync;
+    const telegram = this.#deck?.telegram;
+    const identity = this.#dispatchIdentity;
+    const deviceId = this.#dispatchDeviceId;
+    const executor = this.#dispatchExecutor;
+    if (!sync || !telegram || !identity || !deviceId || this.#stopped) return;
+    if (!(await telegram.enrolledRelay())) return;
+    const publicKey = (await identity.ensure()).publicKey;
+    const name = telegram.status().relay?.name || this.#local.displayName;
+    const signature = `${deviceId}\n${name}\n${publicKey}`;
+    if (this.#dispatchMemberPublished !== signature) {
+      await sync.writeRelayMember({ deviceId, name, publicKey, updatedAt: this.#clock.now().toISOString() });
+      this.#dispatchMemberPublished = signature;
+    }
+    this.#dispatchMembers = null;
+    await this.#relayMembers();
+    if (!executor) return;
+    const policy = await executor.policy();
+    if (policy.autoConfigured) return;
+    await executor.updatePolicy({
+      enabled: true,
+      viewT3: true,
+      trustEnrolled: true,
+      allProjects: true,
+      maxMode: "full-access",
+      autoConfigured: true,
+    });
+    await this.#dispatchHub?.refreshHello();
+    this.changes.publish("deck", this.#clock.now().toISOString());
   }
 
   async #heartbeat(): Promise<void> {
@@ -3216,6 +3294,7 @@ export class YouBrainDaemon {
       }
       this.#retryConfigPush();
       this.#runRelayAutoJoin();
+      this.#runDispatchTrust();
     }
     this.#rememberDevice();
     // Open pages only learn the new lastSeenAt from this event. Without it they show this device offline.
@@ -4290,6 +4369,7 @@ export class YouBrainDaemon {
           notify: ({ fromName, projectName, title }) => {
             console.info(`[dispatch] ${fromName} 在项目 ${projectName} 里派了任务：${title}`);
           },
+          members: () => this.#relayMembers(),
         })
       : null;
 

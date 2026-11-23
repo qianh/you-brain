@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { MemorySecretStore } from "../../src/auth/secret-store.js";
-import { DeviceIdentity, DispatchExecutor, DispatchHub, type DispatchT3Port } from "../../src/dispatch/index.js";
+import { DeviceIdentity, DispatchExecutor, DispatchHub, defaultDispatchPolicy, type DispatchT3Port } from "../../src/dispatch/index.js";
 import { createDaemonClient, DaemonClientError } from "../../src/http/client.js";
 import type { DeckHttpPort, DispatchHttpPort, HttpDeps } from "../../src/http/deps.js";
 import { createDispatchHttpPort } from "../../src/http/handlers.js";
@@ -127,7 +127,7 @@ describe("HTTP /api/dispatch/* routes and validation", () => {
       },
       async policy() {
         return {
-          policy: { enabled: false, viewT3: false, notify: true, maxMode: "auto", allowedSenders: [], allowedProjects: [] },
+          policy: { ...defaultDispatchPolicy(), enabled: false },
           projects: [{ id: "p1", name: "you-brain" }],
           knownSenders: [],
         };
@@ -135,7 +135,7 @@ describe("HTTP /api/dispatch/* routes and validation", () => {
       async updatePolicy(body) {
         calls.push({ name: "updatePolicy", args: body });
         return {
-          policy: { enabled: body.enabled ?? false, viewT3: false, notify: true, maxMode: body.maxMode ?? "auto", allowedSenders: [], allowedProjects: body.allowedProjects ?? [] },
+          policy: { ...defaultDispatchPolicy(), enabled: body.enabled ?? false, maxMode: body.maxMode ?? "auto", allowedProjects: body.allowedProjects ?? [] },
           projects: [{ id: "p1", name: "you-brain" }],
           knownSenders: [],
         };

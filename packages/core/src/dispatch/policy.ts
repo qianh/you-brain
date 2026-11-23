@@ -16,6 +16,12 @@ export interface DispatchPolicy {
   enabled: boolean;
   /** 允许「允许的发起设备」在它们的指挥台里查看并操作本机 T3（经加密隧道）。与 enabled（接收派活）各自独立。 */
   viewT3: boolean;
+  /** 信任所有入网设备：云盘 you-brain/relay/members 里登记的设备都算允许的发起设备（公钥取自云盘）。 */
+  trustEnrolled: boolean;
+  /** 全部项目可派（含以后新加的），不看 allowedProjects。 */
+  allProjects: boolean;
+  /** 入网后已按「互相信任」自动配置过一次；之后用户手动改的设置不再被覆盖。 */
+  autoConfigured: boolean;
   notify: boolean;
   maxMode: RuntimeModeName;
   allowedSenders: DispatchSender[];
@@ -23,7 +29,17 @@ export interface DispatchPolicy {
 }
 
 export function defaultDispatchPolicy(): DispatchPolicy {
-  return { enabled: false, viewT3: false, notify: true, maxMode: "auto", allowedSenders: [], allowedProjects: [] };
+  return {
+    enabled: false,
+    viewT3: false,
+    trustEnrolled: false,
+    allProjects: false,
+    autoConfigured: false,
+    notify: true,
+    maxMode: "auto",
+    allowedSenders: [],
+    allowedProjects: [],
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -63,6 +79,9 @@ export function normalizeDispatchPolicy(value: unknown): DispatchPolicy {
   return {
     enabled: value.enabled === true,
     viewT3: value.viewT3 === true,
+    trustEnrolled: value.trustEnrolled === true,
+    allProjects: value.allProjects === true,
+    autoConfigured: value.autoConfigured === true,
     notify: value.notify !== false,
     maxMode: isRuntimeMode(value.maxMode) ? value.maxMode : "auto",
     allowedSenders: dedupeSenders(value.allowedSenders),
@@ -93,6 +112,9 @@ export class PolicyStore {
       const next = normalizeDispatchPolicy({
         enabled: patch.enabled ?? current.enabled,
         viewT3: patch.viewT3 ?? current.viewT3,
+        trustEnrolled: patch.trustEnrolled ?? current.trustEnrolled,
+        allProjects: patch.allProjects ?? current.allProjects,
+        autoConfigured: patch.autoConfigured ?? current.autoConfigured,
         notify: patch.notify ?? current.notify,
         maxMode: patch.maxMode !== undefined ? patch.maxMode : current.maxMode,
         allowedSenders: patch.allowedSenders ?? current.allowedSenders,

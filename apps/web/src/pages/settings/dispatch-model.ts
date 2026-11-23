@@ -258,6 +258,8 @@ export function applyOptimisticPolicyPatch(
       ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
       ...(patch.notify !== undefined ? { notify: patch.notify } : {}),
       ...(patch.viewT3 !== undefined ? { viewT3: patch.viewT3 } : {}),
+      ...(patch.trustEnrolled !== undefined ? { trustEnrolled: patch.trustEnrolled } : {}),
+      ...(patch.allProjects !== undefined ? { allProjects: patch.allProjects } : {}),
       ...(patch.maxMode !== undefined ? { maxMode: patch.maxMode } : {}),
       ...(patch.allowedProjects !== undefined
         ? { allowedProjects: [...patch.allowedProjects] }

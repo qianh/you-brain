@@ -122,6 +122,30 @@ describe("protocol sync", () => {
     }
   });
 
+  it("入网设备把派活身份登记进云盘，同账号设备都能列出；坏文件跳过，同一台重写覆盖", async () => {
+    const drive = new MemoryDrive();
+    const a = openStore();
+    const b = openStore();
+    try {
+      const syncA = new ProtocolSync({ drive, store: a.store, device: identity(DEVICE_A, "VPS") });
+      const syncB = new ProtocolSync({ drive, store: b.store, device: identity(DEVICE_B, "MacBook Air") });
+      expect(await syncB.listRelayMembers()).toEqual([]);
+      const member = { deviceId: "dispatch-aaa-0001", name: "VPS 主控", publicKey: "pk-a", updatedAt: "2026-11-23T01:00:00.000Z" };
+      await syncA.writeRelayMember(member);
+      await syncB.writeRelayMember({ deviceId: "dispatch-bbb-0002", name: "Air", publicKey: "pk-b", updatedAt: "2026-11-23T01:00:00.000Z" });
+      await syncA.writeRelayMember({ ...member, publicKey: "pk-a2" });
+      await drive.upsert({ path: "you-brain/relay/members/broken.json", bytes: Buffer.from("{nope"), mimeType: "application/json" });
+      const listed = (await syncB.listRelayMembers()).sort((x, y) => x.deviceId.localeCompare(y.deviceId));
+      expect(listed.map((item) => [item.deviceId, item.publicKey])).toEqual([
+        ["dispatch-aaa-0001", "pk-a2"],
+        ["dispatch-bbb-0002", "pk-b"],
+      ]);
+    } finally {
+      a.close();
+      b.close();
+    }
+  });
+
   it("applies local events immediately and replicates them on pull", async () => {
     const drive = new MemoryDrive();
     const local = openStore();

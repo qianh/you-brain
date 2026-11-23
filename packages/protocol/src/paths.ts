@@ -14,6 +14,8 @@ export const DRIVE_PATHS = {
   eventsDir: "you-brain/events",
   consolidateLease: "you-brain/leases/consolidate.json",
   relayInvite: "you-brain/relay/invite.json",
+  /** 已入网设备的派活身份（设备 ID、名字、公钥），一台一个文件。同账号设备据此互相信任。 */
+  relayMembersDir: "you-brain/relay/members",
 } as const;
 
 function assertSegment(value: string, label: string): string {
@@ -54,6 +56,10 @@ function assertDay(day: string): void {
   ) {
     throw new Error(`Invalid event day: ${day}`);
   }
+}
+
+export function relayMemberPath(deviceId: string): string {
+  return `${DRIVE_PATHS.relayMembersDir}/${assertSegment(deviceId, "deviceId")}.json`;
 }
 
 export function deviceRecordPath(deviceId: string): string {

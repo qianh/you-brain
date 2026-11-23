@@ -40,7 +40,7 @@ function makeStubClient(overrides: Partial<BrowserDaemon> = {}): BrowserDaemon {
       policy: {
         enabled: false,
         notify: true,
-        viewT3: false,
+        viewT3: false, trustEnrolled: false, allProjects: false, autoConfigured: false,
         maxMode: "auto",
         allowedProjects: [],
         allowedSenders: [],
@@ -126,7 +126,7 @@ describe("DispatchSection 渲染与交互", () => {
       policy: {
         enabled: true,
         notify: true,
-        viewT3: false,
+        viewT3: false, trustEnrolled: false, allProjects: false, autoConfigured: false,
         maxMode: "auto",
         allowedProjects: ["p1"],
         allowedSenders: [{ deviceId: "dev-vps", name: "VPS 主控", publicKey: "pk-vps" }],
@@ -194,6 +194,31 @@ describe("DispatchSection 渲染与交互", () => {
     expect(html).toContain("刷新");
   });
 
+  test("信任所有入网设备、全部项目打开时只显示这两个开关，不再列手动勾选项", () => {
+    const html = renderSection({
+      client: makeStubClient(),
+      initialPolicy: {
+        policy: {
+          enabled: true,
+          notify: true,
+          viewT3: true,
+          trustEnrolled: true,
+          allProjects: true,
+          autoConfigured: true,
+          maxMode: "auto",
+          allowedProjects: [],
+          allowedSenders: [],
+        },
+        projects: [{ id: "p2", name: "ashare-ledger" }],
+        knownSenders: [{ deviceId: "dev-legacy", name: "旧 Mac", enrolled: false }],
+      },
+    });
+    expect(html).toContain("信任所有入网设备");
+    expect(html).toContain("全部项目（含以后新加的）");
+    expect(html).not.toContain("ashare-ledger");
+    expect(html).not.toContain("旧 Mac");
+  });
+
   test("切换策略开关调用 updateDispatchPolicy 且失败时回滚", async () => {
     const calls: DispatchPolicyPutBody[] = [];
     const client = makeStubClient({
@@ -207,7 +232,7 @@ describe("DispatchSection 渲染与交互", () => {
       policy: {
         enabled: false,
         notify: true,
-        viewT3: false,
+        viewT3: false, trustEnrolled: false, allProjects: false, autoConfigured: false,
         maxMode: "auto",
         allowedProjects: [],
         allowedSenders: [],
@@ -261,7 +286,7 @@ describe("DispatchSection 渲染与交互", () => {
         policy: {
           enabled: true,
           notify: true,
-          viewT3: false,
+          viewT3: false, trustEnrolled: false, allProjects: false, autoConfigured: false,
           maxMode: "auto",
           allowedProjects: [],
           allowedSenders: [],

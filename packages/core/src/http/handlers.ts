@@ -1902,6 +1902,8 @@ export function createDispatchHttpPort(options: DispatchHttpPortOptions): Dispat
       const patch: Partial<DispatchPolicy> = {};
       if (body.enabled !== undefined) patch.enabled = body.enabled;
       if (body.viewT3 !== undefined) patch.viewT3 = body.viewT3;
+      if (body.trustEnrolled !== undefined) patch.trustEnrolled = body.trustEnrolled;
+      if (body.allProjects !== undefined) patch.allProjects = body.allProjects;
       if (body.notify !== undefined) patch.notify = body.notify;
       if (body.maxMode !== undefined) patch.maxMode = body.maxMode;
       if (body.allowedProjects !== undefined) patch.allowedProjects = body.allowedProjects;

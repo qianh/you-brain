@@ -454,7 +454,16 @@ export function DispatchSection(props: DispatchSectionProps = {}) {
             <div className={controlsDisabled ? "dispatch-block is-disabled" : "dispatch-block"}>
               <span className="settings-kicker">{t("dispatchPolicyProjects")}</span>
               <span className="notion-label">{t("dispatchPolicyProjectsHint")}</span>
-              {t3Unavailable ? (
+              <label className={controlsDisabled ? "dispatch-option is-disabled" : "dispatch-option"}>
+                <input
+                  type="checkbox"
+                  checked={policy.allProjects}
+                  disabled={controlsDisabled}
+                  onChange={(event) => void savePolicy({ allProjects: event.target.checked })}
+                />
+                <span>{t("dispatchPolicyAllProjects")}</span>
+              </label>
+              {policy.allProjects ? null : t3Unavailable ? (
                 <span className="settings-quiet">{t("dispatchT3Unavailable")}</span>
               ) : (
                 <div className="dispatch-options">
@@ -489,7 +498,16 @@ export function DispatchSection(props: DispatchSectionProps = {}) {
             <div className={sendersDisabled ? "dispatch-block is-disabled" : "dispatch-block"}>
               <span className="settings-kicker">{t("dispatchPolicySenders")}</span>
               <span className="notion-label">{t("dispatchPolicySendersHint")}</span>
-              {senderOptions.length === 0 ? (
+              <label className={sendersDisabled ? "dispatch-option is-disabled" : "dispatch-option"}>
+                <input
+                  type="checkbox"
+                  checked={policy.trustEnrolled}
+                  disabled={sendersDisabled}
+                  onChange={(event) => void savePolicy({ trustEnrolled: event.target.checked })}
+                />
+                <span>{t("dispatchPolicyTrustEnrolled")}</span>
+              </label>
+              {policy.trustEnrolled ? null : senderOptions.length === 0 ? (
                 <span className="settings-quiet">{t("dispatchSendersEmpty")}</span>
               ) : (
                 <div className="dispatch-options">

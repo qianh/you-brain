@@ -1548,6 +1548,8 @@ export const DispatchPolicyPutBodySchema = z
   .object({
     enabled: z.boolean().optional(),
     viewT3: z.boolean().optional(),
+    trustEnrolled: z.boolean().optional(),
+    allProjects: z.boolean().optional(),
     notify: z.boolean().optional(),
     maxMode: LaunchModeSchema.optional(),
     allowedProjects: z.array(z.string().trim().min(1).max(200)).max(200).optional(),

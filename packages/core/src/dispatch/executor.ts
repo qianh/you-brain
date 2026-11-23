@@ -56,6 +56,8 @@ export interface DispatchExecutorOptions {
   t3: DispatchT3Port;
   emitEvent(to: string, frame: ThreadStatusEvent): void;
   notify?(info: { fromName: string; projectName: string; title: string }): void;
+  /** 云盘里登记的入网设备（不含本机）；策略开了 trustEnrolled 时都算允许的发起设备。 */
+  members?(): Promise<DispatchSender[]>;
 }
 
 class DispatchFailure extends Error {
@@ -101,6 +103,7 @@ export class DispatchExecutor {
   readonly #t3: DispatchT3Port;
   readonly #emit: DispatchExecutorOptions["emitEvent"];
   readonly #notify: DispatchExecutorOptions["notify"];
+  readonly #members: DispatchExecutorOptions["members"];
   readonly #policy: PolicyStore;
   readonly #ledger: Ledger;
   readonly #audit: AuditLog;
@@ -118,6 +121,7 @@ export class DispatchExecutor {
     this.#t3 = options.t3;
     this.#emit = options.emitEvent;
     this.#notify = options.notify;
+    this.#members = options.members;
     this.#policy = new PolicyStore(options.dataDir);
     this.#ledger = new Ledger(options.dataDir, this.#now);
     this.#audit = new AuditLog(options.dataDir);
@@ -139,7 +143,7 @@ export class DispatchExecutor {
     const policy = await this.#policy.read();
     if (!policy.enabled) return this.#reject(now, from, kind, "未开启", CLOSED);
 
-    const sender = policy.allowedSenders.find((item) => item.deviceId === from);
+    const sender = await this.#sender(policy, from);
     if (!sender) return this.#reject(now, from, kind, "发送方未允许", REJECTED);
     if (!verifyCommand(sender.publicKey, frame)) return this.#reject(now, from, kind, "验签失败", REJECTED);
     if (frame.to !== this.#deviceId) return this.#reject(now, from, kind, "目标不是本机", REJECTED);
@@ -166,7 +170,7 @@ export class DispatchExecutor {
       await this.#audit.write({ ts: now, from, kind, outcome: "rejected", reason: "参数不对" });
       return { ok: false, error: `参数不对：${formatIssues(parsed.error)}`.slice(0, 300) };
     }
-    if (parsed.data.kind === "t3.start" && !policy.allowedProjects.includes(parsed.data.args.projectId)) {
+    if (parsed.data.kind === "t3.start" && !policy.allProjects && !policy.allowedProjects.includes(parsed.data.args.projectId)) {
       return this.#reject(now, from, kind, "项目未允许", REJECTED);
     }
 
@@ -197,7 +201,7 @@ export class DispatchExecutor {
       return { ok: false, error };
     };
     if (!policy.viewT3) return fail("未开放 T3 查看", "本机没有开放 T3 查看");
-    const sender = policy.allowedSenders.find((item) => item.deviceId === from);
+    const sender = await this.#sender(policy, from);
     if (!sender) return fail("发送方未允许");
     if (!verifyCommand(sender.publicKey, frame)) return fail("验签失败");
     if (frame.to !== this.#deviceId) return fail("目标不是本机");
@@ -214,7 +218,7 @@ export class DispatchExecutor {
       return {
         enabled: policy.enabled,
         t3: { ready: true },
-        projects: await this.#visibleProjects(policy.allowedProjects),
+        projects: await this.#visibleProjects(policy),
         maxMode: policy.maxMode,
         viewT3: policy.viewT3,
       };
@@ -282,7 +286,7 @@ export class DispatchExecutor {
   async #run(command: DispatchCommand, frame: CmdFrame, policy: DispatchPolicy, sender: DispatchSender, now: number): Promise<unknown> {
     switch (command.kind) {
       case "t3.projects":
-        return { projects: await this.#visibleProjects(policy.allowedProjects) };
+        return { projects: await this.#visibleProjects(policy) };
       case "t3.start":
         return this.#start(command.args, frame, policy, sender, now);
       case "t3.followup":
@@ -389,10 +393,20 @@ export class DispatchExecutor {
     });
   }
 
-  async #visibleProjects(allowed: readonly string[]): Promise<Array<{ id: string; name: string }>> {
-    const allow = new Set(allowed);
+  async #visibleProjects(policy: DispatchPolicy): Promise<Array<{ id: string; name: string }>> {
+    const allow = new Set(policy.allowedProjects);
     const projects = await this.#t3.projects();
-    return projects.filter((project) => allow.has(project.id)).map((project) => ({ id: project.id, name: project.name }));
+    return projects
+      .filter((project) => policy.allProjects || allow.has(project.id))
+      .map((project) => ({ id: project.id, name: project.name }));
+  }
+
+  /** 手动名单优先；开了 trustEnrolled 再查云盘成员（公钥来自云盘，不来自中转）。 */
+  async #sender(policy: DispatchPolicy, from: string): Promise<DispatchSender | undefined> {
+    const listed = policy.allowedSenders.find((item) => item.deviceId === from);
+    if (listed || !policy.trustEnrolled || !this.#members || from === this.#deviceId) return listed;
+    const members = await this.#members().catch(() => []);
+    return members.find((item) => item.deviceId === from);
   }
 
   async #watchEnabled(): Promise<boolean> {
