@@ -102,6 +102,7 @@ export function DispatchSection(props: DispatchSectionProps = {}) {
   const [outboxError, setOutboxError] = useState<string | null>(props.initialOutboxError ?? null);
   const [expandedId, setExpandedId] = useState<string | null>(props.initialExpandedId ?? null);
   const [refreshingIds, setRefreshingIds] = useState<Record<string, boolean>>({});
+  const [trustingIds, setTrustingIds] = useState<Record<string, boolean>>({});
 
   const loadDevices = useCallback(async () => {
     if (typeof client.dispatchDevices !== "function") {
@@ -260,6 +261,23 @@ export function DispatchSection(props: DispatchSectionProps = {}) {
     [client, push, t],
   );
 
+  const handleTrustDevice = useCallback(
+    async (deviceId: string, name: string) => {
+      if (typeof client.dispatchTrustDevice !== "function") return;
+      setTrustingIds((current) => ({ ...current, [deviceId]: true }));
+      try {
+        const saved = await client.dispatchTrustDevice({ deviceId });
+        setPolicyData(saved);
+        push({ message: t("dispatchTrustDeviceOk", { name }), tone: "success" });
+      } catch (error) {
+        push({ message: errorMessage(error, t("dispatchPolicySaveFailed")), tone: "danger" });
+      } finally {
+        setTrustingIds((current) => ({ ...current, [deviceId]: false }));
+      }
+    },
+    [client, push, t],
+  );
+
   if (!hasApi || unsupported) return null;
 
   const sortedDevices = devicesState ? sortDispatchDevices(devicesState.devices) : [];
@@ -309,6 +327,14 @@ export function DispatchSection(props: DispatchSectionProps = {}) {
         ) : null}
         {sortedDevices.map((device) => {
           const row = describeDispatchDevice(device);
+          const trustedIds = policyData?.trustedDeviceIds;
+          const isTrusted = trustedIds ? trustedIds.includes(row.id) : false;
+          const canTrust =
+            !row.isSelf &&
+            row.enrolled &&
+            trustedIds !== undefined &&
+            !isTrusted &&
+            typeof client.dispatchTrustDevice === "function";
           const subtitleParts = [
             row.enrolled ? t("dispatchDeviceEnrolled") : t("dispatchDeviceNotEnrolled"),
             row.acceptsDispatch ? t("dispatchDeviceAccepting") : t("dispatchDeviceNotAccepting"),
@@ -322,14 +348,27 @@ export function DispatchSection(props: DispatchSectionProps = {}) {
                 <span className="dispatch-chips">
                   <span>{row.name}</span>
                   {row.isSelf ? <Chip tone="accent">{t("dispatchDeviceSelf")}</Chip> : null}
+                  {!row.isSelf && isTrusted ? <Chip tone="success">{t("dispatchDeviceTrusted")}</Chip> : null}
                 </span>
               }
               titleText={row.name}
               subtitle={subtitleParts.join(" · ")}
               trailing={
-                <Chip tone={row.onlineTone} dot>
-                  {row.online ? t("dispatchDeviceOnline") : t("dispatchDeviceOffline")}
-                </Chip>
+                <span className="dispatch-chips">
+                  {canTrust ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      loading={trustingIds[row.id] === true}
+                      onClick={() => void handleTrustDevice(row.id, row.name)}
+                    >
+                      {t("dispatchTrustDeviceBtn")}
+                    </Button>
+                  ) : null}
+                  <Chip tone={row.onlineTone} dot>
+                    {row.online ? t("dispatchDeviceOnline") : t("dispatchDeviceOffline")}
+                  </Chip>
+                </span>
               }
             />
           );

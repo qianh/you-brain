@@ -550,5 +550,72 @@ describe("Bun relay server", () => {
       await world.stop();
     }
   });
+
+  it("已入网设备经 WebSocket 发 notify、收 t:push 与 pushes 增量补拉，并在 state 下发 routerDeviceId", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ub-relay-"));
+    const telegram = startTelegram(TOKEN);
+    const relay = await startRelayServer({
+      port: 0,
+      host: "127.0.0.1",
+      botToken: "",
+      relayKey: KEY,
+      dataDir: dir,
+      telegramApi: `http://127.0.0.1:${telegram.port}`,
+      routerDeviceId: DEVICE_A,
+    });
+    const clients: Client[] = [];
+    try {
+      const base = `http://127.0.0.1:${relay.port}`;
+      const enroll = async (deviceId: string, name: string) => {
+        const inv = (await (await fetch(`${base}/admin/invite`, { method: "POST", headers: { Authorization: `Bearer ${KEY}` } })).json()) as { code: string };
+        const { publicKey } = generateKeyPairSync("ed25519");
+        const res = await fetch(`${base}/enroll`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            code: inv.code,
+            deviceId,
+            name,
+            publicKey: Buffer.from(publicKey.export({ type: "spki", format: "der" })).toString("base64url"),
+          }),
+        });
+        return ((await res.json()) as { token: string }).token;
+      };
+      const tokA = await enroll(DEVICE_A, "VPS");
+      const tokB = await enroll(DEVICE_B, "Android");
+      const cA = await openClient(relay.port, tokA, DEVICE_A, "VPS");
+      const cB = await openClient(relay.port, tokB, DEVICE_B, "Android");
+      clients.push(cA, cB);
+
+      await waitFor(() => stateFrames(cB).some((s) => s.routerDeviceId === DEVICE_A), "routerDeviceId in state");
+
+      const notifyRes = await request(cA, {
+        op: "notify",
+        kind: "tty7",
+        status: "waiting",
+        title: "终端等你回复",
+        body: "Continue? [y/N]",
+        replyToken: "rt-1",
+        telegramText: "⏳ Continue?",
+      });
+      expect(notifyRes.ok).toBe(true);
+      expect(notifyRes.result).toEqual({ seq: 1, messageId: null });
+
+      await waitFor(() => cB.frames.some((f) => f.t === "push"), "push broadcast");
+      const pushFrame = cB.frames.find((f) => f.t === "push")!;
+      expect((pushFrame.item as { title: string; replyToken: string }).title).toBe("终端等你回复");
+      expect((pushFrame.item as { replyToken: string }).replyToken).toBe("rt-1");
+
+      const pull = await request(cB, { op: "pushes", sinceSeq: 0, limit: 10 });
+      expect(pull.ok).toBe(true);
+      expect((pull.result as { latestSeq: number; items: unknown[] }).latestSeq).toBe(1);
+      expect((pull.result as { items: unknown[] }).items).toHaveLength(1);
+    } finally {
+      for (const client of clients) client.ws.close();
+      await relay.stop();
+      telegram.server.stop(true);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 

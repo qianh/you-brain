@@ -89,6 +89,7 @@ import {
   type ReferenceMaterializeBody,
   type ReferenceMaterializeResponse,
   type DeckTelegramActionBody,
+  type DeckTelegramEnrollInviteResponse,
   type DeckTelegramStatusResponse,
   type DispatchDevicesResponse,
   type DispatchFollowupBody,
@@ -101,6 +102,7 @@ import {
   type DispatchSendResponse,
   type DispatchStartThreadBody,
   type DispatchStartThreadResponse,
+  type DispatchTrustDeviceBody,
 } from "./types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 import type { UiPrefs, UiPrefsPatch } from "../ui-prefs/store.js";
@@ -219,6 +221,7 @@ export interface DaemonClient {
   materializeReference(body: ReferenceMaterializeBody): Promise<ReferenceMaterializeResponse>;
   deckTelegramStatus?(): Promise<DeckTelegramStatusResponse>;
   deckTelegramAction?(body: DeckTelegramActionBody): Promise<DeckTelegramStatusResponse>;
+  deckTelegramEnrollInvite?(): Promise<DeckTelegramEnrollInviteResponse>;
   dispatchDevices?(): Promise<DispatchDevicesResponse>;
   dispatchStartThread?(body: DispatchStartThreadBody): Promise<DispatchStartThreadResponse>;
   dispatchFollowup?(dispatchId: string, body: DispatchFollowupBody): Promise<DispatchFollowupResponse>;
@@ -227,6 +230,7 @@ export interface DaemonClient {
   dispatchSend?(body: DispatchSendBody): Promise<DispatchSendResponse>;
   dispatchPolicy?(): Promise<DispatchPolicyResponse>;
   updateDispatchPolicy?(body: DispatchPolicyPutBody): Promise<DispatchPolicyResponse>;
+  dispatchTrustDevice?(body: DispatchTrustDeviceBody): Promise<DispatchPolicyResponse>;
   events(
     listener: (event: DaemonEvent) => void,
     options?: { signal?: AbortSignal },
@@ -388,6 +392,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     materializeReference: (body) => request("POST", "/api/references/materialize", body),
     deckTelegramStatus: () => request("GET", "/api/deck/telegram"),
     deckTelegramAction: (body) => request("POST", "/api/deck/telegram", body),
+    deckTelegramEnrollInvite: () => request("POST", "/api/deck/telegram/enroll-invite"),
     dispatchDevices: () => request("GET", "/api/dispatch/devices"),
     dispatchStartThread: (body) => request("POST", "/api/dispatch/threads", body),
     dispatchFollowup: (dispatchId, body) =>
@@ -401,6 +406,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     dispatchSend: (body) => request("POST", "/api/dispatch/send", body),
     dispatchPolicy: () => request("GET", "/api/dispatch/policy"),
     updateDispatchPolicy: (body) => request("PUT", "/api/dispatch/policy", body),
+    dispatchTrustDevice: (body) => request("POST", "/api/dispatch/trust-device", body),
     events: (listener, eventOptions) =>
       readEvents(fetchImpl, baseUrl, options.token, listener, eventOptions?.signal),
   };

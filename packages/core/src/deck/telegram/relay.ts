@@ -15,9 +15,24 @@ export interface TelegramRelayDevice {
   dispatch?: unknown;
 }
 
+export type MobilePushKind = "tty7" | "t3" | "dispatch" | "reminder" | "notice";
+export type MobilePushStatus = "done" | "waiting" | "failed" | "info";
+
+export interface NotifyRelayInput {
+  kind: MobilePushKind;
+  status?: MobilePushStatus;
+  title: string;
+  body: string;
+  link?: string | null;
+  threadId?: string | null;
+  replyToken?: string | null;
+  telegramText?: string;
+}
+
 export interface TelegramRelayState {
   bot: { username: string; name: string } | null;
   bound: { name: string } | null;
+  routerDeviceId?: string | null;
   devices: TelegramRelayDevice[];
 }
 
@@ -387,6 +402,9 @@ export class TelegramRelayClient {
       this.#options.onState({
         bot: (frame.bot as TelegramRelayState["bot"]) ?? null,
         bound: (frame.bound as TelegramRelayState["bound"]) ?? null,
+        ...(typeof frame.routerDeviceId === "string" || frame.routerDeviceId === null
+          ? { routerDeviceId: frame.routerDeviceId }
+          : {}),
         devices,
       });
     } else if (frame.t === "message" && frame.message && typeof frame.message === "object") {
@@ -454,6 +472,20 @@ export class TelegramRelayClient {
       ...(options.push ? { push: true } : {}),
     });
     return result.messageId;
+  }
+
+  /** 发送结构化移动端推送；若附带 telegramText 且中转已绑定 Telegram，则同时投递到 Telegram。 */
+  async notify(input: NotifyRelayInput): Promise<{ seq: number; messageId: number | null }> {
+    return this.request<{ seq: number; messageId: number | null }>("notify", {
+      kind: input.kind,
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      title: input.title,
+      body: input.body,
+      ...(input.link !== undefined ? { link: input.link } : {}),
+      ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
+      ...(input.replyToken !== undefined ? { replyToken: input.replyToken } : {}),
+      ...(input.telegramText !== undefined ? { telegramText: input.telegramText } : {}),
+    });
   }
 
   /** 路由设备判断完：把这条消息当作「回复了 target 那条推送」转给那条推送所属的设备。 */

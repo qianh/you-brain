@@ -9,9 +9,9 @@ import { T3AutomationError, type T3ThreadBrief } from "../../src/deck/t3/automat
 import {
   DispatchExecutor,
   defaultDispatchPolicy,
+  type DispatchEmitEvent,
   type DispatchSender,
   type DispatchT3Port,
-  type ThreadStatusEvent,
 } from "../../src/dispatch/index.js";
 
 const DEVICE_ID = "device-self";
@@ -107,7 +107,7 @@ interface Harness {
   dir: string;
   t3: FakeT3;
   executor: DispatchExecutor;
-  events: Array<{ to: string; frame: ThreadStatusEvent }>;
+  events: Array<{ to: string; frame: DispatchEmitEvent }>;
   notifies: Array<{ fromName: string; projectName: string; title: string }>;
   keys: { publicKey: string; privateKey: string };
   other: { publicKey: string; privateKey: string };

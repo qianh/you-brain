@@ -2815,6 +2815,7 @@ export class YouBrainDaemon {
     if (this.#sync) {
       await this.#sync.append(type, data);
       this.#scheduleWebhook();
+      if (type === "reminder.issued") this.#notifyMobileReminder(data as EventOf<"reminder.issued">["data"]);
       return;
     }
     if (!this.#log || !this.#store) return;
@@ -2823,6 +2824,7 @@ export class YouBrainDaemon {
     persistTopicBook(this.#store, applyEvents(foldEventsCached(this.#store.listEvents()), [event]));
     this.#onTopicsChanged();
     this.#scheduleWebhook();
+    if (type === "reminder.issued") this.#notifyMobileReminder(data as EventOf<"reminder.issued">["data"]);
   }
 
   /** Same as `#emitUser` for many events, written and applied together. */
@@ -2840,6 +2842,21 @@ export class YouBrainDaemon {
     persistTopicBook(this.#store, applyEvents(foldEventsCached(this.#store.listEvents()), events));
     this.#onTopicsChanged();
     this.#scheduleWebhook();
+  }
+
+  #notifyMobileReminder(data: EventOf<"reminder.issued">["data"]): void {
+    const telegram = this.#deck?.telegram;
+    if (!telegram) return;
+    const topicName =
+      data.topicId && this.#store
+        ? (foldEventsCached(this.#store.listEvents()).memory.topics.get(data.topicId)?.name ?? null)
+        : null;
+    telegram.pushReminder({
+      reminderId: data.reminderId,
+      kind: data.kind,
+      topicName,
+      text: data.text,
+    });
   }
 
   /** Drive may still be closed. Queue the event so the first flush replicates it. */
@@ -4311,7 +4328,7 @@ export class YouBrainDaemon {
     if (!telegram || this.#t3Watch) return;
     const watch = new T3ThreadWatcher({
       list: () => automation.threadStates(),
-      enabled: () => telegram.bound(),
+      enabled: () => telegram.bound() || telegram.mobileConnected(),
       onNotice: (notice) => telegram.pushT3(notice),
     });
     telegram.attachT3({
@@ -4364,6 +4381,27 @@ export class YouBrainDaemon {
           deviceId,
           now: () => this.#clock.nowMs(),
           t3: automation,
+          role: this.#local.role === "server" ? "server" : "desktop",
+          outboxPort: {
+            list: () => (hub ? hub.outbox() : Promise.resolve([])),
+            followup: async (id, prompt) => {
+              if (!hub) return { ok: false, dispatchId: id, error: "派活中枢未就绪" };
+              const result = await hub.followup(id, prompt);
+              if (result.ok) {
+                this.#dispatchEvents?.reset(id);
+                this.changes.publish("deck", this.#clock.now().toISOString());
+              }
+              return result;
+            },
+            refresh: async (id) => {
+              if (!hub) return { ok: false, dispatchId: id, error: "派活中枢未就绪" };
+              return hub.read(id);
+            },
+          },
+          replyPort: async (replyToken, text) => {
+            if (!this.#deck?.telegram) return { ok: false, error: "移动端回复通道未就绪" };
+            return this.#deck.telegram.deliverMobileReply(replyToken, text);
+          },
           emitEvent: (to, frame) => {
             hub?.emitEvent(to, frame);
           },
@@ -4383,7 +4421,29 @@ export class YouBrainDaemon {
       version: this.#appVersion,
       now: () => this.#clock.nowMs(),
       onEvent: (entry, event) => {
-        void events.onEvent(entry, event);
+        void (async () => {
+          await events.onEvent(entry, event);
+          const subscribers = await this.#dispatchExecutor?.agentSubscribers().catch(() => []);
+          if (!subscribers || subscribers.length === 0 || !hub) return;
+          const latest = (await hub.getOutbox(entry.dispatchId).catch(() => null)) ?? entry;
+          for (const subscriber of subscribers) {
+            if (subscriber === this.#dispatchDeviceId) continue;
+            hub.emitEvent(subscriber, {
+              dispatchId: latest.dispatchId,
+              kind: "outbox.updated",
+              data: {
+                dispatchId: latest.dispatchId,
+                status: latest.status,
+                title: latest.title,
+                deviceName: latest.deviceName,
+                updatedAt: latest.updatedAt,
+                ...(latest.lastSummary !== undefined ? { lastSummary: latest.lastSummary } : {}),
+                ...(latest.error !== undefined ? { error: latest.error } : {}),
+                ...(latest.threadUrl !== undefined ? { threadUrl: latest.threadUrl } : {}),
+              },
+            });
+          }
+        })();
       },
       t3Tunnel: {
         localUrl: async () => normalizeT3Url((await this.#uiPrefsStore().read())["you-brain.deck.t3-url"] ?? "") ?? DEFAULT_T3_URL,
@@ -4459,6 +4519,41 @@ export class YouBrainDaemon {
         if (!this.#taskAutomation) return [];
         const list = await this.#taskAutomation.projects();
         return list.map(({ id, name }) => ({ id, name }));
+      },
+      trustedIds: async () => {
+        const ids = new Set<string>();
+        const policy = await this.#dispatchExecutor?.policy();
+        for (const sender of policy?.allowedSenders ?? []) ids.add(sender.deviceId);
+        if (policy?.trustEnrolled) {
+          for (const member of await this.#relayMembers()) ids.add(member.deviceId);
+        }
+        return [...ids];
+      },
+      trustDevice: async (targetDeviceId: string) => {
+        const target = hub.devices().find((item) => item.id === targetDeviceId);
+        if (!target || target.self || !target.enrolled || typeof target.publicKey !== "string" || target.publicKey === "") {
+          throw new HttpError(400, "INVALID_INPUT", "该设备尚未入网，无法信任");
+        }
+        if (this.#dispatchExecutor) {
+          const current = await this.#dispatchExecutor.policy();
+          const nextSenders = [
+            ...current.allowedSenders.filter((sender) => sender.deviceId !== target.id),
+            { deviceId: target.id, name: target.name, publicKey: target.publicKey },
+          ];
+          await this.#dispatchExecutor.updatePolicy({ allowedSenders: nextSenders });
+        }
+        if (this.#sync) {
+          await this.#sync.writeRelayMember({
+            deviceId: target.id,
+            name: target.name,
+            publicKey: target.publicKey,
+            updatedAt: this.#clock.now().toISOString(),
+          });
+          this.#dispatchMembers = null;
+          await this.#relayMembers();
+        }
+        await hub.refreshHello();
+        this.changes.publish("deck", this.#clock.now().toISOString());
       },
       onFollowup: (dispatchId) => {
         this.#dispatchEvents?.reset(dispatchId);
@@ -4558,6 +4653,14 @@ export class YouBrainDaemon {
             telegramStatus: async () => deck.telegram!.status(),
             telegramAction: (body) => deck.telegram!.action(body),
             telegramInvite: async () => ({ invite: await deck.telegram!.relayInvite() }),
+            telegramEnrollInvite: async () => {
+              const invite = await deck.telegram!.requestInvite();
+              if (!invite) throw new HttpError(409, "NOT_ENROLLED", "本机还没有入网中转，无法生成配对码");
+              return {
+                ...invite,
+                pairingUri: `ubrain://enroll?url=${encodeURIComponent(invite.url)}&code=${encodeURIComponent(invite.code)}`,
+              };
+            },
           }),
     };
   }

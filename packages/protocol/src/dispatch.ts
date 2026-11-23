@@ -27,7 +27,20 @@ export function minMode(a: RuntimeModeName, b: RuntimeModeName): RuntimeModeName
   return MODE_ORDER[Math.min(left, right)] ?? "auto";
 }
 
-export const DISPATCH_KINDS = ["t3.projects", "t3.start", "t3.followup", "t3.read", "t3.threads"] as const;
+export const DISPATCH_KINDS = [
+  "t3.projects",
+  "t3.start",
+  "t3.followup",
+  "t3.read",
+  "t3.threads",
+  "agent.session",
+  "agent.send",
+  "agent.read",
+  "dispatch.list",
+  "dispatch.followup",
+  "dispatch.refresh",
+  "notice.reply",
+] as const;
 
 export type DispatchKind = (typeof DISPATCH_KINDS)[number];
 
@@ -83,12 +96,65 @@ export const T3ThreadsResultSchema = z.strictObject({
   })),
 });
 
+export const AgentSessionArgsSchema = z.strictObject({
+  sessionId: z.string().min(1).max(128).optional(),
+  create: z.boolean().optional(),
+  title: z.string().trim().min(1).max(200).optional(),
+});
+
+export const AgentSendArgsSchema = z.strictObject({
+  text: z
+    .string()
+    .max(60_000)
+    .refine((value) => value.trim().length > 0, { message: "消息不能为空" }),
+  sessionId: z.string().min(1).max(128).optional(),
+  title: z.string().trim().min(1).max(200).optional(),
+  projectId: z.string().min(1).max(200).optional(),
+  mode: LaunchModeSchema.optional(),
+  requestId: z.string().min(1).max(128),
+});
+
+export const AgentReadArgsSchema = z.strictObject({
+  sessionId: z.string().min(1).max(128).optional(),
+  afterPosition: z.number().int().nonnegative().optional(),
+  limit: z.number().int().min(1).max(200).optional(),
+});
+
+export const DispatchListArgsSchema = z.strictObject({});
+
+export const DispatchFollowupArgsSchema = z.strictObject({
+  dispatchId: z.string().min(1).max(128),
+  prompt: z
+    .string()
+    .max(60_000)
+    .refine((value) => value.trim().length > 0, { message: "消息不能为空" }),
+});
+
+export const DispatchRefreshArgsSchema = z.strictObject({
+  dispatchId: z.string().min(1).max(128),
+});
+
+export const NoticeReplyArgsSchema = z.strictObject({
+  replyToken: z.string().min(1).max(128),
+  text: z
+    .string()
+    .max(10_000)
+    .refine((value) => value.trim().length > 0, { message: "回复不能为空" }),
+});
+
 export const DispatchCommandSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("t3.projects"), args: T3ProjectsArgsSchema }),
   z.strictObject({ kind: z.literal("t3.start"), args: T3StartArgsSchema }),
   z.strictObject({ kind: z.literal("t3.followup"), args: T3FollowupArgsSchema }),
   z.strictObject({ kind: z.literal("t3.read"), args: T3ReadArgsSchema }),
   z.strictObject({ kind: z.literal("t3.threads"), args: T3ThreadsArgsSchema }),
+  z.strictObject({ kind: z.literal("agent.session"), args: AgentSessionArgsSchema }),
+  z.strictObject({ kind: z.literal("agent.send"), args: AgentSendArgsSchema }),
+  z.strictObject({ kind: z.literal("agent.read"), args: AgentReadArgsSchema }),
+  z.strictObject({ kind: z.literal("dispatch.list"), args: DispatchListArgsSchema }),
+  z.strictObject({ kind: z.literal("dispatch.followup"), args: DispatchFollowupArgsSchema }),
+  z.strictObject({ kind: z.literal("dispatch.refresh"), args: DispatchRefreshArgsSchema }),
+  z.strictObject({ kind: z.literal("notice.reply"), args: NoticeReplyArgsSchema }),
 ]);
 
 export type DispatchCommand = z.infer<typeof DispatchCommandSchema>;
@@ -146,15 +212,73 @@ export const ThreadStatusDataSchema = z.strictObject({
   link: z.string().nullable(),
 });
 
-export const EventFrameSchema = z.strictObject({
-  t: z.literal("event"),
-  from: z.string().min(1),
-  dispatchId: z.string().min(1),
-  kind: z.literal("thread.status"),
-  data: ThreadStatusDataSchema,
+export const AgentStatusDataSchema = z.strictObject({
+  sessionId: z.string().min(1),
+  threadId: z.string().nullable(),
+  status: z.string(),
+  previous: z.string().nullable(),
+  title: z.string(),
+  link: z.string().nullable(),
 });
 
+export const OutboxUpdatedDataSchema = z.strictObject({
+  dispatchId: z.string().min(1),
+  status: z.string(),
+  title: z.string(),
+  deviceName: z.string(),
+  updatedAt: z.number(),
+  lastSummary: z.string().optional(),
+  error: z.string().optional(),
+  threadUrl: z.string().optional(),
+});
+
+export const EventFrameSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    t: z.literal("event"),
+    from: z.string().min(1),
+    dispatchId: z.string().min(1),
+    kind: z.literal("thread.status"),
+    data: ThreadStatusDataSchema,
+  }),
+  z.strictObject({
+    t: z.literal("event"),
+    from: z.string().min(1),
+    dispatchId: z.string().min(1),
+    kind: z.literal("agent.status"),
+    data: AgentStatusDataSchema,
+  }),
+  z.strictObject({
+    t: z.literal("event"),
+    from: z.string().min(1),
+    dispatchId: z.string().min(1),
+    kind: z.literal("outbox.updated"),
+    data: OutboxUpdatedDataSchema,
+  }),
+]);
+
 export type EventFrame = z.infer<typeof EventFrameSchema>;
+
+export const MobilePushKindSchema = z.enum(["tty7", "t3", "dispatch", "reminder", "notice"]);
+export type MobilePushKind = z.infer<typeof MobilePushKindSchema>;
+
+export const MobilePushStatusSchema = z.enum(["done", "waiting", "failed", "info"]);
+export type MobilePushStatus = z.infer<typeof MobilePushStatusSchema>;
+
+export const MobilePushItemSchema = z.strictObject({
+  seq: z.number().int().nonnegative(),
+  ts: z.number(),
+  deviceId: z.string().min(1),
+  deviceName: z.string().min(1),
+  kind: MobilePushKindSchema,
+  status: MobilePushStatusSchema.optional(),
+  title: z.string().max(200),
+  body: z.string().max(8000),
+  link: z.string().nullable().optional(),
+  threadId: z.string().nullable().optional(),
+  replyToken: z.string().nullable().optional(),
+});
+
+export type MobilePushItem = z.infer<typeof MobilePushItemSchema>;
 
 export const HelloDispatchSchema = z.strictObject({
   enabled: z.boolean(),
@@ -166,6 +290,8 @@ export const HelloDispatchSchema = z.strictObject({
   maxMode: RuntimeModeSchema,
   /** 本机允许被同账号的已授权设备在指挥台里查看 T3（隧道）。旧版本不带这个字段，按 false 处理。 */
   viewT3: z.boolean().optional(),
+  /** 设备运行角色（server 通常是 VPS 主控节点）。 */
+  role: z.enum(["desktop", "server"]).optional(),
 });
 
 export type HelloDispatch = z.infer<typeof HelloDispatchSchema>;

@@ -26,6 +26,7 @@ export interface RelayStorage {
 export interface RelaySocket {
   deviceId: string;
   name: string;
+  auth?: "enrolled" | "legacy";
   send(frame: string): void;
 }
 
@@ -103,13 +104,38 @@ export interface RelayStateDevice {
   dispatch?: unknown;
 }
 
+export type MobilePushKind = "tty7" | "t3" | "dispatch" | "reminder" | "notice";
+export type MobilePushStatus = "done" | "waiting" | "failed" | "info";
+
+export interface MobilePushItem {
+  seq: number;
+  ts: number;
+  deviceId: string;
+  deviceName: string;
+  kind: MobilePushKind;
+  status?: MobilePushStatus;
+  title: string;
+  body: string;
+  link?: string | null;
+  threadId?: string | null;
+  replyToken?: string | null;
+}
+
 export interface RelayState {
   bot: { username: string; name: string } | null;
   bound: { name: string } | null;
+  routerDeviceId?: string | null;
   devices: RelayStateDevice[];
 }
 
 const ROUTES_KEPT = 1_000;
+const PUSHES_KEPT = 500;
+const PUSH_TITLE_MAX = 200;
+const PUSH_BODY_MAX = 8_000;
+const PUSH_LIST_DEFAULT = 100;
+const PUSH_LIST_MAX = 200;
+const MOBILE_PUSH_KINDS = new Set<MobilePushKind>(["tty7", "t3", "dispatch", "reminder", "notice"]);
+const MOBILE_PUSH_STATUSES = new Set<MobilePushStatus>(["done", "waiting", "failed", "info"]);
 /** 交给路由设备判断时带上多少条最近的推送，以及多久以前的不再算。 */
 const CANDIDATES_MAX = 8;
 export const CANDIDATE_TTL_MS = 6 * 60 * 60_000;
@@ -145,6 +171,16 @@ interface RelayRequest {
   push?: unknown;
   message?: unknown;
   target?: unknown;
+  kind?: unknown;
+  status?: unknown;
+  title?: unknown;
+  body?: unknown;
+  link?: unknown;
+  threadId?: unknown;
+  replyToken?: unknown;
+  telegramText?: unknown;
+  sinceSeq?: unknown;
+  limit?: unknown;
 }
 
 function previewOf(text: string): string {
@@ -196,6 +232,7 @@ export class RelayCore {
     return {
       bot: bot ? { username: bot.username, name: bot.name } : null,
       bound: chat ? { name: chat.name } : null,
+      ...(this.#ports.routerDeviceId ? { routerDeviceId: this.#ports.routerDeviceId } : {}),
       devices: list,
     };
   }
@@ -265,6 +302,10 @@ export class RelayCore {
     switch (request.op) {
       case "forward":
         return this.#forward(socket, request);
+      case "notify":
+        return this.#notify(socket, request);
+      case "pushes":
+        return this.#pushes(socket, request);
       case "send": {
         const chat = await this.#get<Chat>("chat");
         if (!chat) throw new Error("还没有绑定 Telegram");
@@ -278,6 +319,15 @@ export class RelayCore {
         if (push) {
           await this.#route(sent, socket.deviceId, previewOf(request.text));
           await this.#ports.storage.put("recent", { deviceId: socket.deviceId, at: this.#ports.now() } satisfies Recent);
+          if (socket.auth === "enrolled") {
+            const text = request.text.trim();
+            await this.#appendPush(socket, {
+              kind: "notice",
+              status: "info",
+              title: socket.name,
+              body: text.slice(0, PUSH_BODY_MAX),
+            });
+          }
         }
         return { messageId: sent };
       }
@@ -300,6 +350,133 @@ export class RelayCore {
       default:
         throw new Error("不支持的操作");
     }
+  }
+
+  async #notify(socket: RelaySocket, request: RelayRequest): Promise<{ seq: number; messageId: number | null }> {
+    if (socket.auth !== "enrolled") throw new Error("请先入网");
+    const kind =
+      typeof request.kind === "string" && MOBILE_PUSH_KINDS.has(request.kind as MobilePushKind)
+        ? (request.kind as MobilePushKind)
+        : null;
+    if (!kind) throw new Error("推送类型不合法");
+    let status: MobilePushStatus | undefined;
+    if (request.status !== undefined) {
+      if (typeof request.status !== "string" || !MOBILE_PUSH_STATUSES.has(request.status as MobilePushStatus)) {
+        throw new Error("推送状态不合法");
+      }
+      status = request.status as MobilePushStatus;
+    }
+    const title = typeof request.title === "string" ? request.title.trim().slice(0, PUSH_TITLE_MAX) : "";
+    if (!title) throw new Error("推送标题为空");
+    const body = typeof request.body === "string" ? request.body.trim().slice(0, PUSH_BODY_MAX) : "";
+    const link =
+      typeof request.link === "string" && request.link.trim() !== ""
+        ? request.link.trim().slice(0, 2_000)
+        : request.link === null
+          ? null
+          : undefined;
+    const threadId =
+      typeof request.threadId === "string" && request.threadId.trim() !== ""
+        ? request.threadId.trim().slice(0, 200)
+        : request.threadId === null
+          ? null
+          : undefined;
+    const replyToken =
+      typeof request.replyToken === "string" && request.replyToken.trim() !== ""
+        ? request.replyToken.trim().slice(0, 200)
+        : request.replyToken === null
+          ? null
+          : undefined;
+
+    const item = await this.#appendPush(socket, {
+      kind,
+      ...(status !== undefined ? { status } : {}),
+      title,
+      body,
+      ...(link !== undefined ? { link } : {}),
+      ...(threadId !== undefined ? { threadId } : {}),
+      ...(replyToken !== undefined ? { replyToken } : {}),
+    });
+
+    let messageId: number | null = null;
+    const telegramText = typeof request.telegramText === "string" ? request.telegramText.trim() : "";
+    if (telegramText !== "") {
+      const chat = await this.#get<Chat>("chat");
+      if (chat) {
+        const devices = (await this.#get<Devices>("devices")) ?? {};
+        const prefix = Object.keys(devices).length > 1 ? `💻 ${socket.name}\n` : "";
+        try {
+          const sent = await this.#send(chat.id, `${prefix}${telegramText}`);
+          await this.#route(sent, socket.deviceId, previewOf(telegramText));
+          await this.#ports.storage.put("recent", { deviceId: socket.deviceId, at: this.#ports.now() } satisfies Recent);
+          messageId = sent;
+        } catch {
+          // Telegram 未绑定或发送失败时不阻断移动端推送。
+        }
+      }
+    }
+    return { seq: item.seq, messageId };
+  }
+
+  async #pushes(socket: RelaySocket, request: RelayRequest): Promise<{ items: MobilePushItem[]; latestSeq: number }> {
+    if (socket.auth !== "enrolled") throw new Error("请先入网");
+    const sinceSeq =
+      typeof request.sinceSeq === "number" && Number.isFinite(request.sinceSeq) && request.sinceSeq >= 0
+        ? Math.floor(request.sinceSeq)
+        : 0;
+    const rawLimit =
+      typeof request.limit === "number" && Number.isFinite(request.limit)
+        ? Math.floor(request.limit)
+        : PUSH_LIST_DEFAULT;
+    const limit = Math.max(1, Math.min(PUSH_LIST_MAX, rawLimit));
+    const [pushes, latestSeq] = await Promise.all([
+      this.#get<MobilePushItem[]>("pushes"),
+      this.#get<number>("pushSeq"),
+    ]);
+    const list = (pushes ?? []).filter((item) => item.seq > sinceSeq).slice(-limit);
+    return { items: list, latestSeq: latestSeq ?? 0 };
+  }
+
+  async #appendPush(
+    socket: RelaySocket,
+    input: {
+      kind: MobilePushKind;
+      status?: MobilePushStatus;
+      title: string;
+      body: string;
+      link?: string | null;
+      threadId?: string | null;
+      replyToken?: string | null;
+    },
+  ): Promise<MobilePushItem> {
+    const seq = ((await this.#get<number>("pushSeq")) ?? 0) + 1;
+    const item: MobilePushItem = {
+      seq,
+      ts: this.#ports.now(),
+      deviceId: socket.deviceId,
+      deviceName: socket.name,
+      kind: input.kind,
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      title: input.title,
+      body: input.body,
+      ...(input.link !== undefined ? { link: input.link } : {}),
+      ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
+      ...(input.replyToken !== undefined ? { replyToken: input.replyToken } : {}),
+    };
+    const pushes = (await this.#get<MobilePushItem[]>("pushes")) ?? [];
+    pushes.push(item);
+    await this.#ports.storage.put("pushSeq", seq);
+    await this.#ports.storage.put("pushes", pushes.slice(-PUSHES_KEPT));
+    const frame = JSON.stringify({ t: "push", item });
+    for (const target of this.#ports.sockets()) {
+      if (target.auth !== "enrolled") continue;
+      try {
+        target.send(frame);
+      } catch {
+        // 断开中的连接，重连后会用 pushes 补拉。
+      }
+    }
+    return item;
   }
 
   async #send(chatId: number, text: string, replyTo?: number): Promise<number> {

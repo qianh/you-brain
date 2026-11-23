@@ -30,8 +30,14 @@ class World {
   };
   core = new RelayCore(this.ports);
 
-  async connect(deviceId: string, name: string) {
-    const socket = { deviceId, name, frames: [] as Array<Record<string, unknown>>, send: (frame: string) => socket.frames.push(JSON.parse(frame)) };
+  async connect(deviceId: string, name: string, auth?: "enrolled" | "legacy") {
+    const socket = {
+      deviceId,
+      name,
+      ...(auth !== undefined ? { auth } : {}),
+      frames: [] as Array<Record<string, unknown>>,
+      send: (frame: string) => socket.frames.push(JSON.parse(frame)),
+    };
     this.sockets.push(socket);
     await this.core.connected(deviceId, name);
     return socket;
@@ -314,5 +320,72 @@ describe("RelayCore", () => {
     });
     await expect(core.ensureWebhook("https://r.example/telegram", "s")).rejects.toThrow("暂时不可用");
     expect(calls).not.toContain("setWebhook");
+  });
+
+  it("notify 与 pushes：未绑定 Telegram 也可入队广播并支持游标补拉，未入网连接被拒绝", async () => {
+    const world = new World();
+    const mac = await world.connect("device-mac-0001", "MacBook", "enrolled");
+    const phone = await world.connect("device-phone-001", "Android", "enrolled");
+    const legacy = await world.connect("device-legacy-01", "Legacy", "legacy");
+
+    // 未入网设备不能发 notify 或拉 pushes
+    const deniedNotify = await world.request(legacy, { op: "notify", kind: "t3", title: "x", body: "y" });
+    expect(deniedNotify.ok).toBe(false);
+    const deniedPushes = await world.request(legacy, { op: "pushes", sinceSeq: 0 });
+    expect(deniedPushes.ok).toBe(false);
+
+    // 未绑定 Telegram 时发 notify，依然分配递增 seq 并广播给所有已入网连接（不广播给 legacy）
+    const first = await world.request(mac, {
+      op: "notify",
+      kind: "t3",
+      status: "done",
+      title: "T3 完成",
+      body: "已修好编译错误",
+      threadId: "th-1",
+      replyToken: "tok-1",
+      telegramText: "✅ T3「T3 完成」做完了",
+    });
+    expect(first.ok).toBe(true);
+    expect(first.result).toEqual({ seq: 1, messageId: null });
+    expect(phone.frames.filter((f) => f.t === "push")).toHaveLength(1);
+    expect(legacy.frames.filter((f) => f.t === "push")).toHaveLength(0);
+
+    // 绑定 Telegram 后再发 notify，双通道同时送达并登记 routes
+    await world.bind(mac);
+    const second = await world.request(mac, {
+      op: "notify",
+      kind: "reminder",
+      status: "info",
+      title: "💡 聊到时提醒",
+      body: "记得检查备份",
+      telegramText: "💡 记得检查备份",
+    });
+    expect(second.ok).toBe(true);
+    expect((second.result as { seq: number; messageId: number | null }).seq).toBe(2);
+    expect((second.result as { seq: number; messageId: number | null }).messageId).toBeGreaterThan(0);
+
+    // 断线后用 sinceSeq=1 增量补拉，只返回 seq=2
+    const pulled = await world.request(phone, { op: "pushes", sinceSeq: 1, limit: 50 });
+    expect(pulled.ok).toBe(true);
+    const pullRes = pulled.result as { items: Array<{ seq: number; kind: string }>; latestSeq: number };
+    expect(pullRes.latestSeq).toBe(2);
+    expect(pullRes.items.map((item) => [item.seq, item.kind])).toEqual([[2, "reminder"]]);
+  });
+
+  it("配了 routerDeviceId 时在 state 中下发", async () => {
+    const core = new RelayCore({
+      storage: {
+        get: async () => undefined,
+        put: async () => undefined,
+        delete: async () => undefined,
+      },
+      sockets: () => [],
+      telegram: async <T>() => ({}) as T,
+      now: () => 1_000,
+      randomInt: () => 0,
+      routerDeviceId: "device-vps-0001",
+    });
+    const st = await core.state();
+    expect(st.routerDeviceId).toBe("device-vps-0001");
   });
 });

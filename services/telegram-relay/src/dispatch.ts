@@ -23,6 +23,7 @@ export interface HelloDispatch {
   projects: Array<{ id: string; name: string }>;
   maxMode: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
   viewT3?: boolean;
+  role?: "desktop" | "server";
 }
 
 export type DispatchTimer = ReturnType<typeof globalThis.setTimeout>;
@@ -110,6 +111,9 @@ function validateHelloDispatch(value: unknown): { ok: true; dispatch: HelloDispa
   if (value.viewT3 !== undefined && typeof value.viewT3 !== "boolean") {
     return { ok: false, error: "hello.dispatch.viewT3 必须是布尔值" };
   }
+  if (value.role !== undefined && value.role !== "desktop" && value.role !== "server") {
+    return { ok: false, error: "hello.dispatch.role 不合法" };
+  }
   const normalized: HelloDispatch = {
     enabled: value.enabled,
     t3: {
@@ -119,6 +123,7 @@ function validateHelloDispatch(value: unknown): { ok: true; dispatch: HelloDispa
     projects,
     maxMode: value.maxMode as HelloDispatch["maxMode"],
     ...(value.viewT3 !== undefined ? { viewT3: value.viewT3 } : {}),
+    ...(value.role !== undefined ? { role: value.role } : {}),
   };
   if (Buffer.byteLength(JSON.stringify(normalized), "utf8") > HELLO_DISPATCH_MAX_BYTES) {
     return { ok: false, error: "hello.dispatch 内容过大" };

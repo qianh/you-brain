@@ -264,6 +264,7 @@ export class TelegramBridge {
   #started = false;
   #cursor: { epoch: string; seq: number } | null = null;
   readonly #sent = new Map<number, SentNotice>();
+  readonly #mobileReplies = new Map<string, SentNotice>();
   /** 直接发的消息（没回复某条提醒）发给它：最近推送过、或最近回复过的会话。 */
   #recent: { target: SentNotice; at: number } | null = null;
   /** 路由设备问过用户「是哪一条」之后，等用户回序号。 */
@@ -271,6 +272,7 @@ export class TelegramBridge {
   #t3: TelegramT3Port | null = null;
   #pushChain: Promise<void> = Promise.resolve();
   #relay: TelegramRelayClient | null = null;
+  #hasRelayToken = false;
   #relayState: TelegramRelayState | null = null;
   #relayPair: { code: string; link: string; expiresAt: string } | null = null;
 
@@ -318,6 +320,7 @@ export class TelegramBridge {
     this.#api = null;
     this.#relay?.stop();
     this.#relay = null;
+    this.#hasRelayToken = false;
     this.#options.dispatch?.attach(null);
     this.#connection = "off";
   }
@@ -556,6 +559,7 @@ export class TelegramBridge {
   async #clearRelay(): Promise<void> {
     this.#relay?.stop();
     this.#relay = null;
+    this.#hasRelayToken = false;
     this.#options.dispatch?.attach(null);
     this.#relayState = null;
     this.#relayPair = null;
@@ -576,6 +580,7 @@ export class TelegramBridge {
       this.#relay.stop();
       this.#options.dispatch?.attach(null);
     }
+    this.#hasRelayToken = Boolean(auth.token);
     this.#connection = "connecting";
     this.#error = null;
     const client = new TelegramRelayClient({
@@ -845,93 +850,94 @@ export class TelegramBridge {
   }
 
   async #deliver(message: TelegramMessage, target: SentNotice, text: string): Promise<void> {
+    const result = await this.#deliverTarget(target, text, `${message.chat.id}-${message.message_id}`);
+    await this.#reply(message, result.ok ? result.message : result.error);
+  }
+
+  /** 手机端通过签名指令 notice.reply 回复带 replyToken 的推送。 */
+  async deliverMobileReply(replyToken: string, text: string): Promise<{ ok: true; targetName: string } | { ok: false; error: string }> {
+    const target = this.#mobileReplies.get(replyToken);
+    if (!target) {
+      return { ok: false, error: "这条提醒已过期或设备已重启，请前往对应会话处理" };
+    }
+    const result = await this.#deliverTarget(target, text, `mobile-${replyToken}-${this.#now()}`);
+    return result.ok ? { ok: true, targetName: result.targetName } : { ok: false, error: result.error };
+  }
+
+  async #deliverTarget(
+    target: SentNotice,
+    text: string,
+    requestId: string,
+  ): Promise<{ ok: true; targetName: string; message: string } | { ok: false; error: string }> {
     if (target.kind === "t3") {
-      await this.#deliverT3(message, target, text);
-      return;
+      const t3 = this.#t3;
+      if (!t3) return { ok: false, error: "T3 暂时连不上，没有发送。" };
+      if (t3.status(target.threadId) === "waiting") {
+        return { ok: false, error: `T3「${target.name}」在等你处理授权或提问，这一步要到 T3 里操作；这条没有发送。` };
+      }
+      let delivery: string;
+      try {
+        delivery = await t3.send(target.threadId, text, requestId);
+      } catch (error) {
+        return { ok: false, error: `发送失败：${error instanceof Error ? error.message : String(error)}` };
+      }
+      this.#recent = { target, at: this.#now() };
+      return {
+        ok: true,
+        targetName: `T3「${target.name}」`,
+        message: delivery === "queued" ? `✓ 已排队到 T3「${target.name}」：它还在执行，做完这一轮就处理` : `✓ 已发送到 T3「${target.name}」`,
+      };
     }
     if (target.kind === "dispatch") {
-      await this.#deliverDispatch(message, target, text);
-      return;
+      const port = this.#options.dispatch;
+      if (!port?.followup) return { ok: false, error: "跨设备派活暂时不可用，没有发送。" };
+      let result: { ok: true } | { ok: false; error: string };
+      try {
+        result = await port.followup(target.dispatchId, text);
+      } catch (error) {
+        return { ok: false, error: `发送失败：${error instanceof Error ? error.message : String(error)}` };
+      }
+      if (!result.ok) return { ok: false, error: `发送失败：${result.error}` };
+      this.#recent = { target, at: this.#now() };
+      return { ok: true, targetName: target.name, message: `✓ 已发送到派出的会话「${target.name}」` };
     }
     let view: Tty7SessionsView;
     try {
       view = await this.#options.sessions();
     } catch (error) {
-      await this.#reply(message, `读取终端会话失败：${error instanceof Error ? error.message : String(error)}`);
-      return;
+      return { ok: false, error: `读取终端会话失败：${error instanceof Error ? error.message : String(error)}` };
     }
     // pane 编号会被新会话复用，用目录一并核对，避免打进别的会话。
     const session = view.sessions.find((item) => item.pane === target.pane && item.cwd === target.cwd);
     if (!view.available || !session) {
-      await this.#reply(message, `会话「${target.name}」已经关闭，没有发送。`);
-      return;
+      return { ok: false, error: `会话「${target.name}」已经关闭，没有发送。` };
     }
     if (session.status === "working") {
-      await this.#reply(message, `「${target.name}」正在执行，没有在等输入；为免打断它，这条没有发送。`);
-      return;
+      return { ok: false, error: `「${target.name}」正在执行，没有在等输入；为免打断它，这条没有发送。` };
     }
     try {
       await this.#options.send({ pane: target.pane, text, enter: true });
     } catch (error) {
-      await this.#reply(message, `发送失败：${error instanceof Error ? error.message : String(error)}`);
-      return;
+      return { ok: false, error: `发送失败：${error instanceof Error ? error.message : String(error)}` };
     }
     this.#options.dismiss({ pane: target.pane });
     this.#recent = { target, at: this.#now() };
-    await this.#reply(message, `✓ 已发送到「${target.name}」`);
+    return { ok: true, targetName: target.name, message: `✓ 已发送到「${target.name}」` };
   }
 
-  async #deliverDispatch(
-    message: TelegramMessage,
-    target: Extract<SentNotice, { kind: "dispatch" }>,
-    text: string,
-  ): Promise<void> {
-    const port = this.#options.dispatch;
-    if (!port?.followup) {
-      await this.#reply(message, "跨设备派活暂时不可用，没有发送。");
-      return;
+  #registerMobileReply(target: SentNotice): string {
+    const token = randomUUID();
+    this.#mobileReplies.set(token, target);
+    if (this.#mobileReplies.size > SENT_KEPT) {
+      this.#mobileReplies.delete(this.#mobileReplies.keys().next().value!);
     }
-    let result: { ok: true } | { ok: false; error: string };
-    try {
-      result = await port.followup(target.dispatchId, text);
-    } catch (error) {
-      await this.#reply(message, `发送失败：${error instanceof Error ? error.message : String(error)}`);
-      return;
-    }
-    if (!result.ok) {
-      await this.#reply(message, `发送失败：${result.error}`);
-      return;
-    }
-    this.#recent = { target, at: this.#now() };
-    await this.#reply(message, `✓ 已发送到派出的会话「${target.name}」`);
+    return token;
   }
 
-  async #deliverT3(
-    message: TelegramMessage,
-    target: Extract<SentNotice, { kind: "t3" }>,
-    text: string,
-  ): Promise<void> {
-    const t3 = this.#t3;
-    if (!t3) {
-      await this.#reply(message, "T3 暂时连不上，没有发送。");
-      return;
-    }
-    if (t3.status(target.threadId) === "waiting") {
-      await this.#reply(message, `T3「${target.name}」在等你处理授权或提问，这一步要到 T3 里操作；这条没有发送。`);
-      return;
-    }
-    let delivery: string;
-    try {
-      delivery = await t3.send(target.threadId, text, `${message.chat.id}-${message.message_id}`);
-    } catch (error) {
-      await this.#reply(message, `发送失败：${error instanceof Error ? error.message : String(error)}`);
-      return;
-    }
+  #rememberSent(messageId: number, target: SentNotice): void {
+    this.#sent.set(messageId, target);
     this.#recent = { target, at: this.#now() };
-    await this.#reply(
-      message,
-      delivery === "queued" ? `✓ 已排队到 T3「${target.name}」：它还在执行，做完这一轮就处理` : `✓ 已发送到 T3「${target.name}」`,
-    );
+    if (this.#sent.size > SENT_KEPT) this.#sent.delete(this.#sent.keys().next().value!);
   }
 
   /** 中转连接信息（地址 + 密钥），给另一台电脑粘贴用；没用中转时报错。 */
@@ -981,53 +987,101 @@ export class TelegramBridge {
     return this.#canPush();
   }
 
+  /** 是否已用入网令牌连上中转（即使未绑定 Telegram 也可向手机端推全量消息）。 */
+  mobileConnected(): boolean {
+    return this.#started && this.#relay !== null && this.#connection === "ok" && this.#hasRelayToken;
+  }
+
   #canNotify(revision: number): boolean {
     return revision === this.#notificationRevision && this.#stored.notificationsEnabled && this.#canPush();
   }
 
-  /** T3 会话做完一轮、等你处理或失败时调用：推到绑定的私聊，做完时带上最后一条回答。 */
+  /** T3 会话做完一轮、等你处理或失败时调用：推到绑定的私聊与移动端，做完时带上最后一条回答。 */
   pushT3(notice: TelegramT3Notice): void {
     const revision = this.#notificationRevision;
-    if (!this.#canNotify(revision)) return;
+    if (!this.#canNotify(revision) && !this.mobileConnected()) return;
     const t3 = this.#t3;
     this.#pushChain = this.#pushChain.then(async () => {
-      if (!this.#canNotify(revision)) return;
+      const sendTg = this.#canNotify(revision);
+      const sendMobile = this.mobileConnected();
+      if (!sendTg && !sendMobile) return;
       try {
         const body = notice.kind === "done" && t3 ? await t3.answer(notice.threadId).catch(() => "") : "";
-        if (!this.#canNotify(revision)) return;
-        const sent = await this.#push(t3NoticeText(notice, body));
+        const againTg = this.#canNotify(revision);
+        const againMobile = this.mobileConnected();
+        if (!againTg && !againMobile) return;
         const target: SentNotice = { kind: "t3", threadId: notice.threadId, name: notice.title };
-        this.#sent.set(sent, target);
-        this.#recent = { target, at: this.#now() };
-        if (this.#sent.size > SENT_KEPT) this.#sent.delete(this.#sent.keys().next().value!);
+        if (againMobile && this.#relay) {
+          const replyToken = notice.kind === "waiting" ? null : this.#registerMobileReply(target);
+          const title =
+            notice.kind === "done"
+              ? `✅ T3「${notice.title}」做完了`
+              : notice.kind === "waiting"
+                ? `⏳ T3「${notice.title}」在等你处理授权或提问`
+                : `❌ T3「${notice.title}」执行失败`;
+          const res = await this.#relay.notify({
+            kind: "t3",
+            status: notice.kind,
+            title,
+            body: body.trim().slice(0, BODY_MAX),
+            link: notice.link,
+            threadId: notice.threadId,
+            replyToken,
+            ...(againTg ? { telegramText: t3NoticeText(notice, body) } : {}),
+          });
+          if (res.messageId !== null) this.#rememberSent(res.messageId, target);
+        } else if (againTg) {
+          const sent = await this.#push(t3NoticeText(notice, body));
+          this.#rememberSent(sent, target);
+        }
       } catch {
         // 推送失败只丢这一条。
       }
     });
   }
 
-  /** 跨设备派活结果到达时推送到绑定的私聊；带 dispatchId 时登记为「最近的会话」，直接回复就进被派的会话。 */
+  /** 跨设备派活结果到达时推送到绑定的私聊与移动端；带 dispatchId 时登记为「最近的会话」，直接回复就进被派的会话。 */
   pushDispatch(notice: TelegramDispatchNotice): void {
     const revision = this.#notificationRevision;
-    if (!this.#canNotify(revision)) return;
+    if (!this.#canNotify(revision) && !this.mobileConnected()) return;
     this.#pushChain = this.#pushChain.then(async () => {
-      if (!this.#canNotify(revision)) return;
+      const sendTg = this.#canNotify(revision);
+      const sendMobile = this.mobileConnected();
+      if (!sendTg && !sendMobile) return;
       try {
-        const text = dispatchNoticeText(notice);
-        let sent: number;
-        if (this.#relay) {
-          sent = await this.#relay.send(text, { push: true });
-        } else {
-          const api = this.#api;
-          const chatId = this.#stored.chatId;
-          if (!api || chatId === null) return;
-          sent = (await api.sendMessage(chatId, text)).message_id;
-        }
-        if (notice.dispatchId) {
-          const target: SentNotice = { kind: "dispatch", dispatchId: notice.dispatchId, name: notice.title };
-          this.#sent.set(sent, target);
-          this.#recent = { target, at: this.#now() };
-          if (this.#sent.size > SENT_KEPT) this.#sent.delete(this.#sent.keys().next().value!);
+        const target: SentNotice | null = notice.dispatchId
+          ? { kind: "dispatch", dispatchId: notice.dispatchId, name: notice.title }
+          : null;
+        if (sendMobile && this.#relay) {
+          const replyToken = target && notice.kind !== "waiting" ? this.#registerMobileReply(target) : null;
+          const title =
+            notice.kind === "done"
+              ? `✅ 🛰 ${notice.deviceName}「${notice.title}」做完了`
+              : notice.kind === "waiting"
+                ? `⏳ 🛰 ${notice.deviceName}「${notice.title}」在等你处理授权或提问`
+                : `❌ 🛰 ${notice.deviceName}「${notice.title}」执行失败`;
+          const res = await this.#relay.notify({
+            kind: "dispatch",
+            status: notice.kind,
+            title,
+            body: (notice.body ?? "").trim().slice(0, BODY_MAX),
+            link: notice.link ?? null,
+            replyToken,
+            ...(sendTg ? { telegramText: dispatchNoticeText(notice) } : {}),
+          });
+          if (res.messageId !== null && target) this.#rememberSent(res.messageId, target);
+        } else if (sendTg) {
+          const text = dispatchNoticeText(notice);
+          let sent: number;
+          if (this.#relay) {
+            sent = await this.#relay.send(text, { push: true });
+          } else {
+            const api = this.#api;
+            const chatId = this.#stored.chatId;
+            if (!api || chatId === null) return;
+            sent = (await api.sendMessage(chatId, text)).message_id;
+          }
+          if (target) this.#rememberSent(sent, target);
         }
       } catch {
         // 推送失败只丢这一条。
@@ -1035,7 +1089,33 @@ export class TelegramBridge {
     });
   }
 
-  /** 会话提醒有变化时调用：把新出现的「等你回复」和 AI 会话「已完成」推到绑定的私聊（不论电脑上是否正在看）。 */
+  /** U-Brain 记忆/早报/周回顾提醒推送到移动端队列。 */
+  pushReminder(input: { reminderId: string; kind: string; topicName?: string | null; text: string }): void {
+    if (!this.mobileConnected()) return;
+    const title =
+      input.kind === "morning"
+        ? "☀️ 今日早报"
+        : input.kind === "weekly"
+          ? "📋 周回顾"
+          : input.topicName
+            ? `💡 提醒 · ${input.topicName}`
+            : "💡 聊到时提醒";
+    this.#pushChain = this.#pushChain.then(async () => {
+      if (!this.mobileConnected() || !this.#relay) return;
+      try {
+        await this.#relay.notify({
+          kind: "reminder",
+          status: "info",
+          title,
+          body: input.text.trim().slice(0, BODY_MAX),
+        });
+      } catch {
+        // 推送失败只丢这一条。
+      }
+    });
+  }
+
+  /** 会话提醒有变化时调用：把新出现的「等你回复」和 AI 会话「已完成」推到绑定的私聊与移动端（不论电脑上是否正在看）。 */
   noticesChanged(): void {
     if (!this.#started || this.#cursor === null) return;
     const list = this.#options.notices();
@@ -1044,16 +1124,30 @@ export class TelegramBridge {
     // 不看 status：用户正在电脑上看的会话，提醒一出生就是已关闭（桌面不弹），Telegram 仍要推送。
     const fresh = list.notices.filter((notice) => notice.seq > from && pushable(notice));
     const revision = this.#notificationRevision;
-    if (fresh.length === 0 || !this.#canNotify(revision)) return;
+    if (fresh.length === 0 || (!this.#canNotify(revision) && !this.mobileConnected())) return;
     this.#pushChain = this.#pushChain.then(async () => {
       for (const notice of fresh) {
-        if (!this.#canNotify(revision)) return;
+        const sendTg = this.#canNotify(revision);
+        const sendMobile = this.mobileConnected();
+        if (!sendTg && !sendMobile) return;
         try {
-          const sent = await this.#push(noticeText(notice.kind, notice.title, notice.body));
           const target: SentNotice = { kind: "tty7", pane: notice.pane, cwd: notice.cwd, name: notice.task ?? notice.sessionName };
-          this.#sent.set(sent, target);
-          this.#recent = { target, at: this.#now() };
-          if (this.#sent.size > SENT_KEPT) this.#sent.delete(this.#sent.keys().next().value!);
+          if (sendMobile && this.#relay) {
+            const replyToken = this.#registerMobileReply(target);
+            const title = notice.kind === "waiting" ? `⏳ ${notice.title}` : `✅ ${notice.title}`;
+            const res = await this.#relay.notify({
+              kind: "tty7",
+              status: notice.kind,
+              title,
+              body: notice.body.trim().slice(0, BODY_MAX),
+              replyToken,
+              ...(sendTg ? { telegramText: noticeText(notice.kind, notice.title, notice.body) } : {}),
+            });
+            if (res.messageId !== null) this.#rememberSent(res.messageId, target);
+          } else if (sendTg) {
+            const sent = await this.#push(noticeText(notice.kind, notice.title, notice.body));
+            this.#rememberSent(sent, target);
+          }
         } catch {
           // 推送失败只丢这一条；连接状态由收消息循环反映。
         }

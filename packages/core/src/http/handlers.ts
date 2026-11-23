@@ -106,6 +106,7 @@ import {
   DispatchPolicyPutBodySchema,
   DispatchSendBodySchema,
   DispatchStartThreadBodySchema,
+  DispatchTrustDeviceBodySchema,
   ReferenceKindSchema,
   ReferenceMaterializeBodySchema,
   type ActionResponse,
@@ -642,6 +643,13 @@ export async function handleApi(
       return json(await port.telegramInvite());
     });
   }
+  if (path === "/api/deck/telegram/enroll-invite") {
+    return method(request, "POST", async () => {
+      const port = deck(context);
+      if (!port.telegramEnrollInvite) notSupported();
+      return json(await port.telegramEnrollInvite());
+    });
+  }
   if (path === "/api/deck/telegram") {
     if (request.method === "GET") {
       return method(request, "GET", async () => {
@@ -716,6 +724,14 @@ export async function handleApi(
       return json(await port.updatePolicy(body));
     }
     return methodNotAllowed("GET, PUT");
+  }
+  if (path === "/api/dispatch/trust-device") {
+    return method(request, "POST", async () => {
+      const port = dispatchPort(context);
+      if (!port.trustDevice) notSupported();
+      const body = DispatchTrustDeviceBodySchema.parse(await readJson(request));
+      return json(await port.trustDevice(body));
+    });
   }
   if (path === "/api/deck/muse/stream") {
     return method(request, "GET", async () => {
@@ -1823,6 +1839,8 @@ export interface DispatchHttpPortOptions {
   isConnected(): boolean;
   isEnrolled(): boolean | Promise<boolean>;
   projects(): Promise<Array<{ id: string; name: string }>>;
+  trustedIds?(): Promise<string[]>;
+  trustDevice?(deviceId: string): Promise<void>;
   onFollowup?(dispatchId: string): void;
   onPolicyChanged?(): void;
 }
@@ -1841,7 +1859,13 @@ export function createDispatchHttpPort(options: DispatchHttpPortOptions): Dispat
         enrolled: device.enrolled,
         ...(device.publicKey ? { publicKey: device.publicKey } : {}),
       }));
-    return { policy, projects, knownSenders };
+    const trustedDeviceIds = options.trustedIds ? await options.trustedIds() : undefined;
+    return {
+      policy,
+      projects,
+      knownSenders,
+      ...(trustedDeviceIds !== undefined ? { trustedDeviceIds } : {}),
+    };
   }
 
   return {
@@ -1953,5 +1977,13 @@ export function createDispatchHttpPort(options: DispatchHttpPortOptions): Dispat
       options.onPolicyChanged?.();
       return readPolicyView();
     },
+    ...(options.trustDevice
+      ? {
+          async trustDevice(body) {
+            await options.trustDevice!(body.deviceId);
+            return readPolicyView();
+          },
+        }
+      : {}),
   };
 }

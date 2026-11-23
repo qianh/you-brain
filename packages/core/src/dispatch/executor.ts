@@ -10,8 +10,16 @@ import {
   type RuntimeModeName,
 } from "@you-brain/protocol";
 
-import { T3AutomationError, type T3ThreadBrief } from "../deck/t3/automation.js";
+import {
+  MASTER_AGENT_PREAMBLE_END,
+  MASTER_AGENT_PREAMBLE_START,
+  T3AutomationError,
+  type T3ThreadBrief,
+  type T3ThreadConversation,
+} from "../deck/t3/automation.js";
+import { AgentSessionStore } from "./agent-sessions.js";
 import { AuditLog } from "./audit.js";
+import type { DispatchFollowupResult, DispatchReadResult, OutboxEntry } from "./hub.js";
 import { Ledger, type CommandOutcome, type DispatchRecord } from "./ledger.js";
 import { PolicyStore, type DispatchPolicy, type DispatchSender } from "./policy.js";
 
@@ -21,6 +29,14 @@ const RETRY_MS = [60_000, 120_000, 300_000] as const;
 const SUMMARY_LIMIT = 32_000;
 const CLOSED = "本机没有开启接收派活";
 const REJECTED = "本机不接受这条指令";
+
+const MASTER_AGENT_PREAMBLE = [
+  MASTER_AGENT_PREAMBLE_START,
+  "你当前是运行在 U-Brain 主控设备上的常驻编排 Agent，正通过移动端与用户持续会话。",
+  "你可以使用已挂载的 you-brain MCP 工具（list_devices、dispatch_to_device、get_dispatch_result、send_to_dispatch）查看在线设备、向其他设备的 T3 派发开发任务、查询进展与追问。",
+  "派活时遵循：先查 list_devices；仅派白名单项目；结果如实汇报 dispatchId、生效权限和链接。",
+  MASTER_AGENT_PREAMBLE_END,
+].join("\n");
 
 export interface ThreadStatusEvent {
   dispatchId: string;
@@ -32,6 +48,42 @@ export interface ThreadStatusEvent {
     title: string;
     link: string | null;
   };
+}
+
+export interface AgentStatusEvent {
+  dispatchId: string;
+  kind: "agent.status";
+  data: {
+    sessionId: string;
+    threadId: string | null;
+    status: string;
+    previous: string | null;
+    title: string;
+    link: string | null;
+  };
+}
+
+export interface OutboxUpdatedEvent {
+  dispatchId: string;
+  kind: "outbox.updated";
+  data: {
+    dispatchId: string;
+    status: string;
+    title: string;
+    deviceName: string;
+    updatedAt: number;
+    lastSummary?: string;
+    error?: string;
+    threadUrl?: string;
+  };
+}
+
+export type DispatchEmitEvent = ThreadStatusEvent | AgentStatusEvent | OutboxUpdatedEvent;
+
+export interface DispatchOutboxPort {
+  list(): Promise<OutboxEntry[]>;
+  followup(dispatchId: string, prompt: string): Promise<DispatchFollowupResult>;
+  refresh(dispatchId: string): Promise<DispatchReadResult>;
 }
 
 export interface DispatchT3Port {
@@ -47,6 +99,9 @@ export interface DispatchT3Port {
   inspect(threadId: string): Promise<{ state: "planning" | "running" | "ready" | "failed"; summary: string; error?: string }>;
   threadStates(): Promise<T3ThreadBrief[]>;
   latestAnswer(threadId: string): Promise<string>;
+  sendMessage?(threadId: string, message: string, requestId: string): Promise<string>;
+  readMessages?(threadId: string, options?: { afterPosition?: number; limit?: number }): Promise<T3ThreadConversation>;
+  defaultDispatchProject?(): Promise<{ id: string; name: string } | null>;
 }
 
 export interface DispatchExecutorOptions {
@@ -54,7 +109,10 @@ export interface DispatchExecutorOptions {
   deviceId: string;
   now?: () => number;
   t3: DispatchT3Port;
-  emitEvent(to: string, frame: ThreadStatusEvent): void;
+  role?: "desktop" | "server";
+  outboxPort?: DispatchOutboxPort;
+  replyPort?: (replyToken: string, text: string) => Promise<{ ok: true; targetName: string } | { ok: false; error: string }>;
+  emitEvent(to: string, frame: DispatchEmitEvent): void;
   notify?(info: { fromName: string; projectName: string; title: string }): void;
   /** 云盘里登记的入网设备（不含本机）；策略开了 trustEnrolled 时都算允许的发起设备。 */
   members?(): Promise<DispatchSender[]>;
@@ -101,11 +159,15 @@ export class DispatchExecutor {
   readonly #deviceId: string;
   readonly #now: () => number;
   readonly #t3: DispatchT3Port;
+  readonly #role: "desktop" | "server" | undefined;
+  readonly #outbox: DispatchOutboxPort | undefined;
+  readonly #reply: DispatchExecutorOptions["replyPort"];
   readonly #emit: DispatchExecutorOptions["emitEvent"];
   readonly #notify: DispatchExecutorOptions["notify"];
   readonly #members: DispatchExecutorOptions["members"];
   readonly #policy: PolicyStore;
   readonly #ledger: Ledger;
+  readonly #sessions: AgentSessionStore;
   readonly #audit: AuditLog;
   readonly #nonces = new Map<string, number>();
   #seen: Map<string, string> | null = null;
@@ -119,12 +181,20 @@ export class DispatchExecutor {
     this.#deviceId = options.deviceId;
     this.#now = options.now ?? Date.now;
     this.#t3 = options.t3;
+    this.#role = options.role;
+    this.#outbox = options.outboxPort;
+    this.#reply = options.replyPort;
     this.#emit = options.emitEvent;
     this.#notify = options.notify;
     this.#members = options.members;
     this.#policy = new PolicyStore(options.dataDir);
     this.#ledger = new Ledger(options.dataDir, this.#now);
+    this.#sessions = new AgentSessionStore(options.dataDir, this.#now);
     this.#audit = new AuditLog(options.dataDir);
+  }
+
+  agentSubscribers(): Promise<string[]> {
+    return this.#sessions.subscribers();
   }
 
   policy(): Promise<DispatchPolicy> {
@@ -141,7 +211,7 @@ export class DispatchExecutor {
     const from = frameFrom(frame);
     const kind = frameKind(frame);
     const policy = await this.#policy.read();
-    if (!policy.enabled) return this.#reject(now, from, kind, "未开启", CLOSED);
+    if (!policy.enabled && kind !== "notice.reply") return this.#reject(now, from, kind, "未开启", CLOSED);
 
     const sender = await this.#sender(policy, from);
     if (!sender) return this.#reject(now, from, kind, "发送方未允许", REJECTED);
@@ -214,6 +284,7 @@ export class DispatchExecutor {
 
   async hello(): Promise<HelloDispatch> {
     const policy = await this.#policy.read();
+    const rolePart = this.#role ? { role: this.#role } : {};
     try {
       return {
         enabled: policy.enabled,
@@ -221,9 +292,17 @@ export class DispatchExecutor {
         projects: await this.#visibleProjects(policy),
         maxMode: policy.maxMode,
         viewT3: policy.viewT3,
+        ...rolePart,
       };
     } catch {
-      return { enabled: policy.enabled, t3: { ready: false }, projects: [], maxMode: policy.maxMode, viewT3: policy.viewT3 };
+      return {
+        enabled: policy.enabled,
+        t3: { ready: false },
+        projects: [],
+        maxMode: policy.maxMode,
+        viewT3: policy.viewT3,
+        ...rolePart,
+      };
     }
   }
 
@@ -239,7 +318,7 @@ export class DispatchExecutor {
     this.#timer = null;
   }
 
-  /** 读一次账本内会话的状态。第一次只建立基线；之后 status 变化才发 thread.status。 */
+  /** 读一次账本内会话的状态。第一次只建立基线；之后 status 变化才发 thread.status 或 agent.status。 */
   async tick(): Promise<void> {
     this.#timer = null;
     let next: number = POLL_MS;
@@ -254,7 +333,34 @@ export class DispatchExecutor {
         for (const thread of threads) {
           const previous = this.#seen?.get(thread.threadId) ?? this.#launched.get(thread.threadId);
           if (previous === undefined || previous === thread.status) continue;
-          const hit = await this.#ledger.findByThread(thread.threadId);
+          const [hit, agentSession] = await Promise.all([
+            this.#ledger.findByThread(thread.threadId),
+            this.#sessions.findByThread(thread.threadId),
+          ]);
+          if (agentSession) {
+            const subscribers = await this.#sessions.subscribers();
+            const targets = new Set(subscribers);
+            if (hit?.from) targets.add(hit.from);
+            for (const target of targets) {
+              try {
+                this.#emit(target, {
+                  dispatchId: agentSession.sessionId,
+                  kind: "agent.status",
+                  data: {
+                    sessionId: agentSession.sessionId,
+                    threadId: thread.threadId,
+                    status: thread.status,
+                    previous,
+                    title: thread.title,
+                    link: thread.link,
+                  },
+                });
+              } catch {
+                // 推送失败不影响监视。
+              }
+            }
+            continue;
+          }
           if (!hit) continue;
           try {
             this.#emit(hit.from, {
@@ -295,6 +401,20 @@ export class DispatchExecutor {
         return this.#read(command.args.threadId);
       case "t3.threads":
         return { threads: await this.#threads() };
+      case "agent.session":
+        return this.#agentSession(command.args, frame, policy);
+      case "agent.send":
+        return this.#agentSend(command.args, frame, policy, now);
+      case "agent.read":
+        return this.#agentRead(command.args, frame);
+      case "dispatch.list":
+        return { entries: this.#outbox ? await this.#outbox.list() : [] };
+      case "dispatch.followup":
+        return this.#dispatchFollowup(command.args.dispatchId, command.args.prompt);
+      case "dispatch.refresh":
+        return this.#dispatchRefresh(command.args.dispatchId);
+      case "notice.reply":
+        return this.#noticeReply(command.args.replyToken, command.args.text);
       default: {
         const unreachable: never = command;
         return unreachable;
@@ -401,6 +521,210 @@ export class DispatchExecutor {
       .map((project) => ({ id: project.id, name: project.name }));
   }
 
+  async #resolveDefaultProject(policy: DispatchPolicy): Promise<{ id: string; name: string } | null> {
+    const visible = await this.#visibleProjects(policy);
+    if (visible.length === 0) return null;
+    const preferred = await this.#t3.defaultDispatchProject?.().catch(() => null);
+    if (preferred && visible.some((item) => item.id === preferred.id)) return preferred;
+    return visible[0]!;
+  }
+
+  async #agentSession(
+    args: Extract<DispatchCommand, { kind: "agent.session" }>["args"],
+    frame: CmdFrame,
+    policy: DispatchPolicy,
+  ): Promise<unknown> {
+    await this.#sessions.addSubscriber(frame.from);
+    let ensured;
+    try {
+      ensured = await this.#sessions.ensureSession({
+        ...(args.sessionId !== undefined ? { sessionId: args.sessionId } : {}),
+        ...(args.create !== undefined ? { create: args.create } : {}),
+        ...(args.title !== undefined ? { title: args.title } : {}),
+      });
+    } catch (error) {
+      throw new DispatchFailure(error instanceof Error ? error.message : "无法获取主控会话");
+    }
+    const [states, defaultProject] = await Promise.all([
+      this.#t3.threadStates().catch(() => [] as T3ThreadBrief[]),
+      this.#resolveDefaultProject(policy).catch(() => null),
+    ]);
+    const sessions = ensured.state.sessions.map((item) => ({
+      ...item,
+      status: item.threadId ? (states.find((t) => t.threadId === item.threadId)?.status ?? "idle") : "draft",
+    }));
+    return {
+      activeSessionId: ensured.session.sessionId,
+      sessions,
+      defaultProject,
+    };
+  }
+
+  async #agentSend(
+    args: Extract<DispatchCommand, { kind: "agent.send" }>["args"],
+    frame: CmdFrame,
+    policy: DispatchPolicy,
+    now: number,
+  ): Promise<unknown> {
+    await this.#sessions.addSubscriber(frame.from);
+    const requested = args.mode ?? "auto";
+    const effective = asLaunchMode(minMode(requested, policy.maxMode));
+    if (!effective) throw new DispatchFailure("参数不对：权限模式不可用");
+    const capped = effective !== requested;
+
+    let ensured;
+    try {
+      ensured = await this.#sessions.ensureSession({
+        ...(args.sessionId !== undefined ? { sessionId: args.sessionId } : {}),
+        ...(args.title !== undefined ? { title: args.title } : {}),
+      });
+    } catch (error) {
+      throw new DispatchFailure(error instanceof Error ? error.message : "找不到这个主控会话");
+    }
+    const session = ensured.session;
+
+    if (!session.threadId) {
+      let projectId = args.projectId;
+      if (projectId !== undefined) {
+        if (!policy.allProjects && !policy.allowedProjects.includes(projectId)) {
+          throw new DispatchFailure("项目未允许");
+        }
+      } else {
+        projectId = (await this.#resolveDefaultProject(policy))?.id;
+      }
+      if (!projectId) {
+        throw new DispatchFailure("本机 T3 还没有可用项目，请先在 T3 打开或创建一个项目");
+      }
+      const title =
+        args.title?.trim() ||
+        (session.title !== "主控会话" ? session.title : args.text.trim().slice(0, 36) || "主控会话");
+      const launched = await this.#t3.launchThread({
+        projectId,
+        title,
+        prompt: `${MASTER_AGENT_PREAMBLE}\n\n${args.text}`,
+        requestId: args.requestId,
+        runtimeMode: effective,
+      });
+      await this.#sessions.bindThread(session.sessionId, {
+        threadId: launched.threadId,
+        threadUrl: launched.threadUrl,
+        projectId,
+        title,
+      });
+      await this.#ledger.putDispatch(session.sessionId, {
+        threadId: launched.threadId,
+        from: frame.from,
+        projectId,
+        title,
+        createdAt: now,
+        threadUrl: launched.threadUrl,
+        mode: effective,
+        capped,
+      });
+      this.#launched.set(launched.threadId, "running");
+      return {
+        sessionId: session.sessionId,
+        threadId: launched.threadId,
+        threadUrl: launched.threadUrl,
+        delivery: "started",
+        mode: effective,
+        capped,
+      };
+    }
+
+    if (!this.#t3.sendMessage) {
+      throw new DispatchFailure("当前 T3 适配器不支持追加消息");
+    }
+    const delivery = await this.#t3.sendMessage(session.threadId, args.text, args.requestId);
+    await this.#sessions.touch(session.sessionId);
+    this.#launched.set(session.threadId, "running");
+    return {
+      sessionId: session.sessionId,
+      threadId: session.threadId,
+      threadUrl: session.threadUrl ?? "",
+      delivery,
+      mode: effective,
+      capped,
+    };
+  }
+
+  async #agentRead(
+    args: Extract<DispatchCommand, { kind: "agent.read" }>["args"],
+    frame: CmdFrame,
+  ): Promise<{
+    sessionId: string | null;
+    title: string;
+    threadId: string | null;
+    threadUrl: string | null;
+    state: "idle" | "running" | "waiting" | "ready" | "failed";
+    messages: Array<{ position: number; role: "user" | "assistant"; text: string; runId: string | null }>;
+    outbox: OutboxEntry[];
+  }> {
+    await this.#sessions.addSubscriber(frame.from);
+    const [state, outboxAll] = await Promise.all([
+      this.#sessions.read(),
+      this.#outbox ? this.#outbox.list() : Promise.resolve([] as OutboxEntry[]),
+    ]);
+    const outbox = outboxAll.slice(0, 30);
+    const targetId = args.sessionId ?? state.activeSessionId;
+    const session = targetId ? (state.sessions.find((item) => item.sessionId === targetId) ?? null) : null;
+    if (!session) {
+      return {
+        sessionId: null,
+        title: "主控会话",
+        threadId: null,
+        threadUrl: null,
+        state: "idle",
+        messages: [],
+        outbox,
+      };
+    }
+    if (!session.threadId) {
+      return {
+        sessionId: session.sessionId,
+        title: session.title,
+        threadId: null,
+        threadUrl: null,
+        state: "idle",
+        messages: [],
+        outbox,
+      };
+    }
+    if (!this.#t3.readMessages) {
+      throw new DispatchFailure("当前 T3 适配器不支持读取对话内容");
+    }
+    const conversation = await this.#t3.readMessages(session.threadId, {
+      ...(args.afterPosition !== undefined ? { afterPosition: args.afterPosition } : {}),
+      ...(args.limit !== undefined ? { limit: args.limit } : {}),
+    });
+    return {
+      sessionId: session.sessionId,
+      title: session.title,
+      threadId: session.threadId,
+      threadUrl: conversation.threadUrl ?? session.threadUrl,
+      state: conversation.state,
+      messages: conversation.messages,
+      outbox,
+    };
+  }
+
+  async #dispatchFollowup(dispatchId: string, prompt: string): Promise<DispatchFollowupResult> {
+    if (!this.#outbox) throw new DispatchFailure("本机未启用派活中枢");
+    return this.#outbox.followup(dispatchId, prompt);
+  }
+
+  async #dispatchRefresh(dispatchId: string): Promise<DispatchReadResult> {
+    if (!this.#outbox) throw new DispatchFailure("本机未启用派活中枢");
+    return this.#outbox.refresh(dispatchId);
+  }
+
+  async #noticeReply(replyToken: string, text: string): Promise<{ ok: true; targetName: string }> {
+    if (!this.#reply) throw new DispatchFailure("本机不支持移动端快捷回复");
+    const result = await this.#reply(replyToken, text);
+    if (!result.ok) throw new DispatchFailure(result.error);
+    return result;
+  }
+
   /** 手动名单优先；开了 trustEnrolled 再查云盘成员（公钥来自云盘，不来自中转）。 */
   async #sender(policy: DispatchPolicy, from: string): Promise<DispatchSender | undefined> {
     const listed = policy.allowedSenders.find((item) => item.deviceId === from);
@@ -411,11 +735,18 @@ export class DispatchExecutor {
 
   async #watchEnabled(): Promise<boolean> {
     const policy = await this.#policy.read();
-    return policy.enabled && (await this.#ledger.threadIds()).length > 0;
+    if (!policy.enabled) return false;
+    if ((await this.#ledger.threadIds()).length > 0) return true;
+    const state = await this.#sessions.read();
+    return state.sessions.some((item) => item.threadId !== null);
   }
 
   async #relevantThreads(): Promise<T3ThreadBrief[]> {
     const ids = new Set(await this.#ledger.threadIds());
+    const state = await this.#sessions.read();
+    for (const item of state.sessions) {
+      if (item.threadId !== null) ids.add(item.threadId);
+    }
     return (await this.#t3.threadStates()).filter((thread) => ids.has(thread.threadId));
   }
 

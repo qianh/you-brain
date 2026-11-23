@@ -91,6 +91,7 @@ import type {
   DeckT3DeviceResponse,
   DeckT3WebResponse,
   DeckTelegramActionBody,
+  DeckTelegramEnrollInviteResponse,
   DeckTelegramStatusResponse,
   DispatchDevicesResponse,
   DispatchFollowupBody,
@@ -103,6 +104,7 @@ import type {
   DispatchSendResponse,
   DispatchStartThreadBody,
   DispatchStartThreadResponse,
+  DispatchTrustDeviceBody,
   DeckTty7PasteImageResponse,
   DeckTty7ScreenResponse,
   DeckTty7SendBody,
@@ -256,6 +258,8 @@ export interface BrowserDaemon
   deckTelegram(): Promise<DeckTelegramStatusResponse>;
   deckTelegramAction(body: DeckTelegramActionBody): Promise<DeckTelegramStatusResponse>;
   deckTelegramInvite(): Promise<{ invite: string }>;
+  deckTelegramEnrollInvite?(): Promise<DeckTelegramEnrollInviteResponse>;
+  dispatchTrustDevice?(body: DispatchTrustDeviceBody): Promise<DispatchPolicyResponse>;
   deckNoticeDismiss(body: DeckNoticeDismissBody): Promise<{ ok: true }>;
   deckTty7Screen(pane: number, lines?: number, deviceId?: string | null): Promise<DeckTty7ScreenResponse>;
   deckTty7Send(body: DeckTty7SendBody, deviceId?: string | null): Promise<{ ok: true }>;
@@ -471,6 +475,7 @@ export function createBrowserDaemon(options?: {
     deckTelegram: () => request<DeckTelegramStatusResponse>("GET", "/api/deck/telegram"),
     deckTelegramAction: (body) => request<DeckTelegramStatusResponse>("POST", "/api/deck/telegram", body),
     deckTelegramInvite: () => request<{ invite: string }>("POST", "/api/deck/telegram/invite"),
+    deckTelegramEnrollInvite: () => request<DeckTelegramEnrollInviteResponse>("POST", "/api/deck/telegram/enroll-invite"),
     dispatchDevices: () => request<DispatchDevicesResponse>("GET", "/api/dispatch/devices"),
     dispatchStartThread: (body: DispatchStartThreadBody) =>
       request<DispatchStartThreadResponse>("POST", "/api/dispatch/threads", body),
@@ -486,6 +491,8 @@ export function createBrowserDaemon(options?: {
     dispatchPolicy: () => request<DispatchPolicyResponse>("GET", "/api/dispatch/policy"),
     updateDispatchPolicy: (body: DispatchPolicyPutBody) =>
       request<DispatchPolicyResponse>("PUT", "/api/dispatch/policy", body),
+    dispatchTrustDevice: (body: DispatchTrustDeviceBody) =>
+      request<DispatchPolicyResponse>("POST", "/api/dispatch/trust-device", body),
     deckNoticeDismiss: (body: DeckNoticeDismissBody) =>
       request<{ ok: true }>("POST", "/api/deck/notices/dismiss", body),
     deckTty7Screen: (pane: number, lines?: number, deviceId?: string | null) =>

@@ -98,6 +98,7 @@ import type {
   DeckNoticeDismissBody,
   DeckNoticesResponse,
   DeckTelegramActionBody,
+  DeckTelegramEnrollInviteResponse,
   DeckTelegramStatusResponse,
   DeckTty7RenameBody,
   DeckTty7ViewingBody,
@@ -118,6 +119,7 @@ import type {
   DispatchSendResponse,
   DispatchStartThreadBody,
   DispatchStartThreadResponse,
+  DispatchTrustDeviceBody,
   TopicReorganizeApplyBody,
   TopicReorganizeResult,
   TopicReorganizeStatus,
@@ -282,6 +284,8 @@ export interface DeckHttpPort {
   telegramAction?(body: DeckTelegramActionBody): Promise<DeckTelegramStatusResponse>;
   /** 中转连接信息（含密钥），给另一台电脑粘贴用。 */
   telegramInvite?(): Promise<{ invite: string }>;
+  /** 一次性设备入网邀请码 + 配对链接，给手机端扫码/粘贴入网。 */
+  telegramEnrollInvite?(): Promise<DeckTelegramEnrollInviteResponse>;
 }
 
 /** 跨设备派活的 HTTP 端口。实现由 daemon 装配 DispatchHub 与 DispatchExecutor。 */
@@ -294,4 +298,5 @@ export interface DispatchHttpPort {
   send(body: DispatchSendBody): Promise<DispatchSendResponse>;
   policy(): Promise<DispatchPolicyResponse>;
   updatePolicy(body: DispatchPolicyPutBody): Promise<DispatchPolicyResponse>;
+  trustDevice?(body: DispatchTrustDeviceBody): Promise<DispatchPolicyResponse>;
 }

@@ -20,6 +20,28 @@ const CLIENT_ACCESS = "full-access";
 const REFRESH_BEFORE_MS = 24 * 60 * 60 * 1000;
 /** 读尾部消息时覆盖的条目数；一轮里助手消息之间夹着工具调用等条目。 */
 const TAIL_ITEMS = 60;
+export const MASTER_AGENT_PREAMBLE_START = "<!-- u-brain-master-agent -->";
+export const MASTER_AGENT_PREAMBLE_END = "<!-- /u-brain-master-agent -->";
+
+export function stripMasterAgentPreamble(text: string): string {
+  return text.replace(/^<!-- u-brain-master-agent -->[\s\S]*?<!-- \/u-brain-master-agent -->\s*/u, "");
+}
+
+export interface T3ThreadMessage {
+  position: number;
+  role: "user" | "assistant";
+  text: string;
+  runId: string | null;
+}
+
+export interface T3ThreadConversation {
+  threadId: string;
+  state: "running" | "waiting" | "ready" | "failed";
+  rawStatus: string;
+  threadUrl: string | null;
+  itemCount: number;
+  messages: T3ThreadMessage[];
+}
 
 type RuntimeMode = "approval-required" | "auto-accept-edits" | "auto" | "full-access";
 const LIVE_STATUSES = new Set(["idle", "preparing", "queued", "starting", "running", "waiting"]);
@@ -304,6 +326,82 @@ export class T3Automation implements TaskAutomationPort {
     const sent = await this.#call("t3_thread_send", { threadId, message, mode: "queue", clientRequestId: `u-brain-telegram-${requestId}` });
     if (!object(sent) || !text(sent.delivery)) invalidResponse();
     return sent.delivery;
+  }
+
+  /** 读取指定会话的最近消息列表，供移动端主控持续对话流展示。 */
+  async readMessages(threadId: string, options?: { afterPosition?: number; limit?: number }): Promise<T3ThreadConversation> {
+    const limit = Math.min(200, Math.max(1, options?.limit ?? 80));
+    let initial: T3ThreadRead;
+    if (options?.afterPosition !== undefined) {
+      initial = await this.#read(threadId, {
+        limit,
+        runLimit: 20,
+        ...(options.afterPosition > 0 ? { afterPosition: options.afterPosition } : {}),
+      });
+    } else {
+      const head = await this.#read(threadId, { limit: 1, runLimit: 1 });
+      const after = Math.max(0, head.thread.itemCount - limit);
+      initial = await this.#read(threadId, {
+        limit,
+        runLimit: 20,
+        ...(after > 0 ? { afterPosition: after } : {}),
+      });
+    }
+    const { thread, items } = initial;
+    const state: T3ThreadConversation["state"] =
+      thread.archived || thread.status === "failed" || STOPPED_STATUSES.has(thread.status)
+        ? "failed"
+        : thread.status === "waiting"
+          ? "waiting"
+          : thread.activeRunId || (LIVE_STATUSES.has(thread.status) && thread.status !== "idle") || thread.pendingRequestCount > 0
+            ? "running"
+            : "ready";
+    const messages = [...items]
+      .filter((item): item is T3Item & { text: string } =>
+        (item.type === "user_message" || item.type === "assistant_message") && typeof item.text === "string",
+      )
+      .sort((a, b) => a.position - b.position)
+      .flatMap((item): T3ThreadMessage[] => {
+        const cleaned = item.type === "user_message" ? stripMasterAgentPreamble(item.text) : item.text;
+        if (cleaned.trim() === "") return [];
+        return [{
+          position: item.position,
+          role: item.type === "user_message" ? "user" : "assistant",
+          text: cleaned,
+          runId: item.runId,
+        }];
+      });
+    const url = await this.#url().catch(() => null);
+    const threadUrl = url ? await this.#threadUrl(url, threadId).catch(() => null) : null;
+    return {
+      threadId,
+      state,
+      rawStatus: thread.status,
+      threadUrl,
+      itemCount: thread.itemCount,
+      messages,
+    };
+  }
+
+  /** 选一个可用的默认项目启动主控会话：优先带默认模型配置的项目，其次有历史会话模型的项目。 */
+  async defaultDispatchProject(): Promise<{ id: string; name: string } | null> {
+    const projects = await this.#projects();
+    if (projects.length === 0) return null;
+    for (const project of projects) {
+      if (model(project.defaultModelSelection)) return { id: project.id, name: project.title };
+    }
+    for (const project of projects) {
+      try {
+        const history = await this.#threads(project.id);
+        if (history.some((thread) => text(thread.providerInstanceId) && text(thread.model))) {
+          return { id: project.id, name: project.title };
+        }
+      } catch {
+        // 单个项目读历史失败继续看下一个。
+      }
+    }
+    const first = projects[0]!;
+    return { id: first.id, name: first.title };
   }
 
   /** daemon 退出时撤销由此适配器签发的凭据；外部注入凭据不动。 */

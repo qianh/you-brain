@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { decodeRelayInvite } from "@you-brain/core/deck/telegram/invite.js";
-import type { DeckTelegramActionBody, DeckTelegramStatusResponse } from "@you-brain/core/http/types.js";
+import type {
+  DeckTelegramActionBody,
+  DeckTelegramEnrollInviteResponse,
+  DeckTelegramStatusResponse,
+} from "@you-brain/core/http/types.js";
 
 import type { BrowserDaemon } from "../../api/client.js";
 import { Banner } from "../../components/banner.js";
@@ -80,6 +84,7 @@ export function TelegramSection(props: TelegramSectionProps = {}) {
   const [relayKey, setRelayKey] = useState("");
   const [relayName, setRelayName] = useState("");
   const [invite, setInvite] = useState("");
+  const [mobileInvite, setMobileInvite] = useState<DeckTelegramEnrollInviteResponse | null>(null);
   const [status, setStatus] = useState<DeckTelegramStatusResponse | null>(props.initialStatus ?? null);
   const [enrolled, setEnrolled] = useState(props.initialEnrolled ?? false);
   const [unsupported, setUnsupported] = useState(false);
@@ -194,6 +199,29 @@ export function TelegramSection(props: TelegramSectionProps = {}) {
     }
   };
 
+  const generateMobileInvite = async () => {
+    if (typeof client.deckTelegramEnrollInvite !== "function") return;
+    setBusy(true);
+    try {
+      const next = await client.deckTelegramEnrollInvite();
+      setMobileInvite(next);
+    } catch (error) {
+      push({ message: error instanceof Error ? error.message : String(error), tone: "danger" });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyMobilePairing = async () => {
+    if (!mobileInvite) return;
+    try {
+      await navigator.clipboard.writeText(mobileInvite.pairingUri);
+      push({ message: t("telegramRelayMobilePairCopied"), tone: "success" });
+    } catch (error) {
+      push({ message: error instanceof Error ? error.message : String(error), tone: "danger" });
+    }
+  };
+
   return (
     <Section title={t("telegramTitle")}>
       <Card>
@@ -303,16 +331,44 @@ export function TelegramSection(props: TelegramSectionProps = {}) {
         <div className="notion-form">
           <span className="notion-label">{t("telegramRelayTitle")}</span>
           {enrolled ? (
-            <div className="notion-token-row">
-              <Chip tone="success" dot>
-                {t("telegramRelayEnrolled")}
-              </Chip>
-              {relay ? (
-                <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run({ action: "clear-relay" })}>
-                  {t("telegramRelayClear")}
-                </Button>
+            <>
+              <div className="notion-token-row">
+                <Chip tone="success" dot>
+                  {t("telegramRelayEnrolled")}
+                </Chip>
+                {typeof client.deckTelegramEnrollInvite === "function" ? (
+                  <Button size="sm" disabled={busy} onClick={() => void generateMobileInvite()}>
+                    {t("telegramRelayMobilePairBtn")}
+                  </Button>
+                ) : null}
+                {relay ? (
+                  <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run({ action: "clear-relay" })}>
+                    {t("telegramRelayClear")}
+                  </Button>
+                ) : null}
+              </div>
+              {mobileInvite ? (
+                <div className="dispatch-divider">
+                  <span className="notion-label">{t("telegramRelayMobilePairHint")}</span>
+                  <div className="notion-status">
+                    <code>{mobileInvite.code}</code>
+                    <span>{mobileInvite.url}</span>
+                  </div>
+                  <div className="notion-token-row">
+                    <input
+                      className="notion-input"
+                      type="text"
+                      readOnly
+                      value={mobileInvite.pairingUri}
+                      onFocus={(event) => event.currentTarget.select()}
+                    />
+                    <Button size="sm" onClick={() => void copyMobilePairing()}>
+                      {t("telegramRelayMobilePairCopy")}
+                    </Button>
+                  </div>
+                </div>
               ) : null}
-            </div>
+            </>
           ) : (
             <>
               <span className="settings-kicker">{t("telegramRelayEnrollTitle")}</span>

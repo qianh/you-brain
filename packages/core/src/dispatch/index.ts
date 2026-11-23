@@ -1,8 +1,17 @@
+export {
+  AgentSessionStore,
+  type AgentSessionRecord,
+  type AgentSessionsState,
+} from "./agent-sessions.js";
 export { AuditLog, type AuditEntry } from "./audit.js";
 export {
   DispatchExecutor,
+  type AgentStatusEvent,
+  type DispatchEmitEvent,
   type DispatchExecutorOptions,
+  type DispatchOutboxPort,
   type DispatchT3Port,
+  type OutboxUpdatedEvent,
   type ThreadStatusEvent,
 } from "./executor.js";
 export {

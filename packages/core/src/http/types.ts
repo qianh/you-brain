@@ -1388,6 +1388,13 @@ export type DeckTelegramActionBody = z.infer<typeof DeckTelegramActionBodySchema
 
 export type DeckTelegramStatusResponse = import("../deck/telegram/bridge.js").TelegramStatus;
 
+export interface DeckTelegramEnrollInviteResponse {
+  url: string;
+  code: string;
+  expiresAt: string;
+  pairingUri: string;
+}
+
 
 /** PUT /api/ui-prefs 的请求体。长度限制由存储层判断，超限返回 413 而不是 400。 */
 export const UiPrefsPatchBodySchema = z
@@ -1542,7 +1549,16 @@ export interface DispatchPolicyResponse {
   policy: DispatchPolicyView;
   projects: Array<{ id: string; name: string }>;
   knownSenders: DispatchKnownSenderView[];
+  trustedDeviceIds?: string[];
 }
+
+export const DispatchTrustDeviceBodySchema = z
+  .object({
+    deviceId: z.string().trim().min(1).max(128),
+  })
+  .strict();
+
+export type DispatchTrustDeviceBody = z.infer<typeof DispatchTrustDeviceBodySchema>;
 
 export const DispatchPolicyPutBodySchema = z
   .object({
