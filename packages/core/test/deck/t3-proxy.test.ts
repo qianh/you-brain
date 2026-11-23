@@ -154,6 +154,39 @@ describe("startT3Proxy（假的 T3 上游）", () => {
     expect(code).not.toBe(-1);
   });
 
+  it("走隧道传输：/assets 加长缓存；脚本中途断开返回 502，不把半截脚本交给浏览器", async () => {
+    const transport = {
+      fetch: async (path: string): Promise<Response> => {
+        if (path === "/assets/ok-abc123.js") return new Response("export const a = 1;\n", { headers: { "content-type": "text/javascript", "cache-control": "no-cache" } });
+        if (path === "/assets/cut-abc123.js") {
+          const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode("export const b = "));
+              setTimeout(() => controller.error(new Error("隧道已关闭")), 20);
+            },
+          });
+          return new Response(body, { headers: { "content-type": "text/javascript" } });
+        }
+        if (path === "/api/x") return new Response("{}", { headers: { "content-type": "application/json", "cache-control": "no-cache" } });
+        return new Response("nope", { status: 404 });
+      },
+      openSocket: async (): Promise<never> => {
+        throw new Error("不测 WebSocket");
+      },
+    };
+    proxy = startT3Proxy("http://t3.tunnel/", { transport, cookiePrefix: "ubt3-test-", port: 0 });
+    const ok = await fetch(`${proxy.url}assets/ok-abc123.js`);
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("cache-control")).toBe("public, max-age=31536000, immutable");
+    expect(await ok.text()).toBe("export const a = 1;\n");
+
+    const cut = await fetch(`${proxy.url}assets/cut-abc123.js`);
+    expect(cut.status).toBe(502);
+
+    const api = await fetch(`${proxy.url}api/x`);
+    expect(api.headers.get("cache-control")).toBe("no-cache");
+  });
+
   it("走隧道传输：请求经 transport 发出，自动配对、Cookie 前缀按设备、WebSocket 经 transport 打开", async () => {
     const seen: string[] = [];
     let paired = 0;

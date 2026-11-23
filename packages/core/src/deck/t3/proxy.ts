@@ -326,6 +326,21 @@ export function startT3Proxy(upstreamUrl: string, options: T3ProxyOptions = {}):
         const html = injectT3Html(await response.text());
         return new Response(html, { status: response.status, statusText: response.statusText, headers });
       }
+      if (transport && request.method === "GET" && response.status === 200) {
+        // T3 的构建产物文件名带内容哈希，却回 Cache-Control: no-cache，每次打开都要为几百个文件各经隧道问一次（约 1 秒一个）。
+        if (url.pathname.startsWith("/assets/")) headers.set("cache-control", "public, max-age=31536000, immutable");
+        // 脚本和样式整份收完再回：隧道中途断开时返回明确的 502，而不是让 WebKit 把半截脚本当成完整的去执行（Unexpected end of script）。
+        const type = response.headers.get("content-type")?.toLowerCase() ?? "";
+        if (/^(?:text\/javascript|application\/javascript|text\/css)/u.test(type)) {
+          try {
+            const body = await response.arrayBuffer();
+            return new Response(body, { status: response.status, statusText: response.statusText, headers });
+          } catch (error) {
+            console.error(`[t3-proxy] 隧道取 ${url.pathname} 中途失败：${error instanceof Error ? error.message : "未知错误"}`);
+            return new Response("对端设备的 T3 没有响应", { status: 502, headers: { "content-type": "text/plain; charset=utf-8" } });
+          }
+        }
+      }
       return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
     },
     websocket: {
