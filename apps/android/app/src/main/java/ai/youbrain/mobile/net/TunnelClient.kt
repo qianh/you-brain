@@ -82,6 +82,7 @@ class TunnelChannel(
     private val onBroken: () -> Unit,
 ) {
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    private val postMutex = Mutex()
     private var expected = 0L
     private val ahead = HashMap<Long, ByteArray>()
 
@@ -127,8 +128,10 @@ class TunnelChannel(
         if (estimatedEncoded > TunnelCrypto.RELAY_FRAME_MAX) {
             throw IllegalStateException("隧道帧超过中转上限")
         }
-        val sealed = cipher.seal(plain)
-        sendCiphertext(sealed)
+        postMutex.withLock {
+            val sealed = cipher.seal(plain)
+            sendCiphertext(sealed)
+        }
     }
 }
 

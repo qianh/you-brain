@@ -15,6 +15,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.encodeToString
@@ -91,6 +92,7 @@ class RelayClient(
     private val pendingReqs = ConcurrentHashMap<String, CompletableDeferred<JsonElement?>>()
     private val pendingCmds = ConcurrentHashMap<String, CompletableDeferred<CommandOutcome>>()
     private val frameChannel = Channel<String>(Channel.UNLIMITED)
+    private val tunSemaphore = Semaphore(32)
 
     init {
         scope.launch(Dispatchers.Default) {
@@ -417,7 +419,7 @@ class RelayClient(
         }
     }
 
-    suspend fun sendHello(appVersion: String = "0.1.1") {
+    suspend fun sendHello(appVersion: String = "0.1.2") {
         val dispatch = buildJsonObject {
             put("enabled", false)
             put("t3", buildJsonObject { put("ready", false) })
@@ -505,13 +507,34 @@ class RelayClient(
     }
 
     suspend fun sendTun(to: String, sid: String, data: String) {
-        request(
-            "tun",
-            mapOf(
-                "to" to JsonPrimitive(to),
-                "sid" to JsonPrimitive(sid),
-                "d" to JsonPrimitive(data),
-            ),
-        )
+        val ws = socket ?: throw IllegalStateException("还没连上中转")
+        if (!opened) throw IllegalStateException("中转正在连接中")
+        tunSemaphore.acquire()
+        val id = nextReqId.getAndIncrement().toString()
+        val deferred = CompletableDeferred<JsonElement?>()
+        pendingReqs[id] = deferred
+        val frame = buildJsonObject {
+            put("t", "req")
+            put("id", id)
+            put("op", "tun")
+            put("to", to)
+            put("sid", sid)
+            put("d", data)
+        }
+        val sent = runCatching { ws.send(json.encodeToString(JsonObject.serializer(), frame)) }.getOrDefault(false)
+        if (!sent) {
+            pendingReqs.remove(id, deferred)
+            tunSemaphore.release()
+            throw IllegalStateException("发送隧道帧失败")
+        }
+        scope.launch {
+            try {
+                withTimeout(20_000L) { deferred.await() }
+            } catch (_: Throwable) {
+                pendingReqs.remove(id, deferred)
+            } finally {
+                tunSemaphore.release()
+            }
+        }
     }
 }

@@ -37,6 +37,7 @@ class LocalT3ProxyServer(
     private val cookiePrefix: String,
     preferredPort: Int = 0,
     private val onSetCookies: (proxyOrigin: String, setCookies: List<String>) -> Unit = { _, _ -> },
+    private val assetCache: T3AssetCache? = null,
 ) {
     private val serverSocket: ServerSocket
     val port: Int
@@ -45,6 +46,10 @@ class LocalT3ProxyServer(
 
     private val stopped = AtomicBoolean(false)
     private val authVerifiedUntil = AtomicLong(0L)
+    @Volatile
+    private var cachedRootHtml: ByteArray? = null
+    @Volatile
+    private var cachedRootAt: Long = 0L
     private var acceptJob: Job? = null
     @Volatile
     private var pairFailedAt: Long = 0L
@@ -161,6 +166,60 @@ class LocalT3ProxyServer(
         runCatching { serverSocket.close() }
     }
 
+    suspend fun warmup() {
+        val now = System.currentTimeMillis()
+        var pairedCookies: List<String> = emptyList()
+        val response = coroutineScope {
+            val respJob = async { upstream.fetch("/", "GET", listOf("Accept" to "text/html"), null) }
+            val pairJob = async { if (now >= authVerifiedUntil.get()) autoPair(emptyList()) else emptyList() }
+            val fetched = respJob.await()
+            val ct = fetched.headers
+                .firstOrNull { it.first.equals("content-type", ignoreCase = true) }
+                ?.second.orEmpty()
+            pairedCookies = if (ct.contains("text/html", ignoreCase = true)) {
+                pairJob.await()
+            } else {
+                pairJob.cancel()
+                emptyList()
+            }
+            fetched
+        }
+        if (pairedCookies.isNotEmpty()) {
+            onSetCookies(origin, pairedCookies)
+        }
+        val ct = response.headers.firstOrNull { it.first.equals("content-type", ignoreCase = true) }?.second.orEmpty()
+        if (response.status in 200..299 && ct.contains("text/html", ignoreCase = true)) {
+            val rawHtmlText = String(response.body, Charsets.UTF_8)
+            val finalHtmlBytes = injectHtml(rawHtmlText).toByteArray(Charsets.UTF_8)
+            if (System.currentTimeMillis() < authVerifiedUntil.get()) {
+                cachedRootHtml = finalHtmlBytes
+                cachedRootAt = System.currentTimeMillis()
+            }
+            assetCache?.prefetchFromHtml(rawHtmlText, upstream)
+        }
+    }
+
+    private suspend fun refreshRootHtml() {
+        val response = upstream.fetch("/", "GET", listOf("Accept" to "text/html"), null)
+        val ct = response.headers.firstOrNull { it.first.equals("content-type", ignoreCase = true) }?.second.orEmpty()
+        if (response.status == 401 || response.status == 403) {
+            authVerifiedUntil.set(0L)
+            cachedRootHtml = null
+            return
+        }
+        if (response.status in 200..299 && ct.contains("text/html", ignoreCase = true)) {
+            val rawHtmlText = String(response.body, Charsets.UTF_8)
+            val finalHtmlBytes = injectHtml(rawHtmlText).toByteArray(Charsets.UTF_8)
+            if (System.currentTimeMillis() < authVerifiedUntil.get()) {
+                cachedRootHtml = finalHtmlBytes
+                cachedRootAt = System.currentTimeMillis()
+            }
+            assetCache?.let { cache ->
+                scope.launch(Dispatchers.IO) { cache.prefetchFromHtml(rawHtmlText, upstream) }
+            }
+        }
+    }
+
     private suspend fun handleConnection(socket: Socket) {
         try {
             socket.tcpNoDelay = true
@@ -197,6 +256,53 @@ class LocalT3ProxyServer(
                     )
                     if (!keepAlive) break
                     continue
+                }
+
+                if (method == "GET" && assetCache != null && T3AssetCache.isImmutableAssetPath(path)) {
+                    val cached = assetCache.getOrFetch(path, upstream)
+                    if (cached != null) {
+                        writeHttpResponse(
+                            output,
+                            200,
+                            "OK",
+                            listOf(
+                                "Content-Type" to cached.mime.contentTypeHeader,
+                                "Cache-Control" to "public, max-age=31536000, immutable",
+                                "Access-Control-Allow-Origin" to "*",
+                            ),
+                            cached.bytes,
+                            keepAlive = keepAlive,
+                        )
+                        if (!keepAlive) break
+                        continue
+                    }
+                }
+
+                val isForceReload = rawHeaders.any {
+                    (it.first.equals("cache-control", ignoreCase = true) &&
+                        (it.second.contains("no-cache", ignoreCase = true) || it.second.contains("max-age=0", ignoreCase = true))) ||
+                        it.first.equals("pragma", ignoreCase = true)
+                }
+                if (method == "GET" && path == "/" && !isForceReload && System.currentTimeMillis() < authVerifiedUntil.get()) {
+                    val fastHtml = cachedRootHtml
+                    if (fastHtml != null) {
+                        writeHttpResponse(
+                            output,
+                            200,
+                            "OK",
+                            listOf(
+                                "Content-Type" to "text/html; charset=utf-8",
+                                "Cache-Control" to "no-cache",
+                            ),
+                            fastHtml,
+                            keepAlive = keepAlive,
+                        )
+                        if (System.currentTimeMillis() - cachedRootAt > 15_000L) {
+                            scope.launch(Dispatchers.IO) { runCatching { refreshRootHtml() } }
+                        }
+                        if (!keepAlive) break
+                        continue
+                    }
                 }
 
                 val body = readRequestBody(input, rawHeaders)
@@ -238,6 +344,7 @@ class LocalT3ProxyServer(
 
                 if (response.status == 401 || response.status == 403) {
                     authVerifiedUntil.set(0L)
+                    cachedRootHtml = null
                 }
 
                 val outHeaders = responseHeaders(response.headers)
@@ -251,7 +358,18 @@ class LocalT3ProxyServer(
                     onSetCookies(origin, setCookies)
                 }
                 val finalBody = if (method.equals("GET", ignoreCase = true) && isHtml) {
-                    injectHtml(String(response.body, Charsets.UTF_8)).toByteArray(Charsets.UTF_8)
+                    val rawHtmlText = String(response.body, Charsets.UTF_8)
+                    val finalHtmlBytes = injectHtml(rawHtmlText).toByteArray(Charsets.UTF_8)
+                    if (response.status in 200..299) {
+                        assetCache?.let { cache ->
+                            scope.launch(Dispatchers.IO) { cache.prefetchFromHtml(rawHtmlText, upstream) }
+                        }
+                        if (path == "/" && System.currentTimeMillis() < authVerifiedUntil.get()) {
+                            cachedRootHtml = finalHtmlBytes
+                            cachedRootAt = System.currentTimeMillis()
+                        }
+                    }
+                    finalHtmlBytes
                 } else {
                     response.body
                 }

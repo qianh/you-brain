@@ -100,6 +100,7 @@ class UBrainRepository(context: Context) {
     val appStore = AppStore(appContext)
     val identityStore = DeviceIdentityStore(appContext)
     val pinStore = PeerPinStore(File(appContext.filesDir, "dispatch_peers.json"))
+    val assetCache = T3AssetCache(File(appContext.cacheDir, "t3_immutable_assets_v1"), scope)
 
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
@@ -126,6 +127,7 @@ class UBrainRepository(context: Context) {
                 }
             } else if (state == ConnectionState.ERROR || state == ConnectionState.OFF) {
                 loadedMasterKey = null
+                prewarmedT3.clear()
             }
         },
         onState = { state ->
@@ -146,15 +148,23 @@ class UBrainRepository(context: Context) {
                 }
             }
             val selfId = _uiState.value.deviceId
-            val warmId = state.devices.firstOrNull {
-                it.id == masterId && it.online && it.dispatch?.viewT3 == true
-            }?.id ?: state.devices.firstOrNull {
+            val onlineViewPeers = state.devices.filter {
                 it.id != selfId && it.online && it.enrolled == true && it.dispatch?.viewT3 == true
-            }?.id
-            if (warmId != null && prewarmedT3.add(warmId)) {
-                scope.launch {
-                    val res = getOrStartT3ProxyUrl(warmId)
-                    if (res.isFailure) prewarmedT3.remove(warmId)
+            }
+            prewarmedT3.retainAll(onlineViewPeers.map { it.id }.toSet())
+            val warmCandidates = onlineViewPeers
+                .sortedByDescending { it.id == masterId }
+                .take(4)
+            for (dev in warmCandidates) {
+                if (prewarmedT3.add(dev.id)) {
+                    scope.launch {
+                        runCatching {
+                            val proxy = getOrCreateT3Proxy(dev.id)
+                            proxy.warmup()
+                        }.onFailure {
+                            prewarmedT3.remove(dev.id)
+                        }
+                    }
                 }
             }
         },
@@ -623,60 +633,67 @@ class UBrainRepository(context: Context) {
         }
     }
 
+    suspend fun fetchImmutableT3Asset(deviceId: String, path: String): CachedAsset? =
+        runCatching { assetCache.getOrFetch(path, tunnelClient.session(deviceId)) }.getOrNull()
+
     suspend fun getOrStartT3ProxyUrl(deviceId: String): Result<String> {
         return try {
-            // 先确保建立端到端加密隧道（失败时携带明确原因，不默默返回假地址）
-            tunnelClient.session(deviceId)
-            _uiState.update { it.copy(pinnedPeers = pinStore.listPins()) }
-            val existing = t3Proxies[deviceId]
-            if (existing != null) return Result.success(existing.baseUrl)
-
-            val digest = java.security.MessageDigest.getInstance("SHA-256")
-                .digest(deviceId.toByteArray(Charsets.UTF_8))
-            val u16 = ((digest[0].toInt() and 0xff) shl 8) or (digest[1].toInt() and 0xff)
-            val stablePort = 20_000 + (u16 % 20_000)
-            val hexPrefix = digest.take(4).joinToString("") { "%02x".format(it) }
-            val cookiePrefix = "ubd${hexPrefix}_"
-
-            val proxy = LocalT3ProxyServer(
-                scope = scope,
-                upstream = object : T3Upstream {
-                    override suspend fun fetch(
-                        path: String,
-                        method: String,
-                        headers: List<Pair<String, String>>,
-                        body: ByteArray?,
-                    ): TunnelHttpResponse = tunnelClient.session(deviceId).fetch(path, method, headers, body)
-
-                    override suspend fun openSocket(
-                        path: String,
-                        headers: List<Pair<String, String>>,
-                        listener: UpstreamWsListener,
-                    ): UpstreamWs = tunnelClient.session(deviceId).openSocket(path, headers, listener)
-
-                    override suspend fun pairCredential(): String? =
-                        tunnelClient.session(deviceId).pairCredential()
-                },
-                cookiePrefix = cookiePrefix,
-                preferredPort = stablePort,
-                onSetCookies = { proxyOrigin, cookies ->
-                    runCatching {
-                        val cm = CookieManager.getInstance()
-                        cm.setAcceptCookie(true)
-                        for (c in cookies) cm.setCookie(proxyOrigin, c)
-                        cm.flush()
-                    }
-                },
-            )
-            val raced = t3Proxies.putIfAbsent(deviceId, proxy)
-            if (raced != null) {
-                proxy.stop()
-                Result.success(raced.baseUrl)
-            } else {
-                Result.success(proxy.baseUrl)
-            }
+            Result.success(getOrCreateT3Proxy(deviceId).baseUrl)
         } catch (t: Throwable) {
             Result.failure(t)
+        }
+    }
+
+    private suspend fun getOrCreateT3Proxy(deviceId: String): LocalT3ProxyServer {
+        // 先确保建立端到端加密隧道（失败时携带明确原因，不默默返回假地址）
+        tunnelClient.session(deviceId)
+        _uiState.update { it.copy(pinnedPeers = pinStore.listPins()) }
+        t3Proxies[deviceId]?.let { return it }
+
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(deviceId.toByteArray(Charsets.UTF_8))
+        val u16 = ((digest[0].toInt() and 0xff) shl 8) or (digest[1].toInt() and 0xff)
+        val stablePort = 20_000 + (u16 % 20_000)
+        val hexPrefix = digest.take(4).joinToString("") { "%02x".format(it) }
+        val cookiePrefix = "ubd${hexPrefix}_"
+
+        val proxy = LocalT3ProxyServer(
+            scope = scope,
+            upstream = object : T3Upstream {
+                override suspend fun fetch(
+                    path: String,
+                    method: String,
+                    headers: List<Pair<String, String>>,
+                    body: ByteArray?,
+                ): TunnelHttpResponse = tunnelClient.session(deviceId).fetch(path, method, headers, body)
+
+                override suspend fun openSocket(
+                    path: String,
+                    headers: List<Pair<String, String>>,
+                    listener: UpstreamWsListener,
+                ): UpstreamWs = tunnelClient.session(deviceId).openSocket(path, headers, listener)
+
+                override suspend fun pairCredential(): String? =
+                    tunnelClient.session(deviceId).pairCredential()
+            },
+            cookiePrefix = cookiePrefix,
+            preferredPort = stablePort,
+            onSetCookies = { proxyOrigin, cookies ->
+                runCatching {
+                    val cm = CookieManager.getInstance()
+                    cm.setAcceptCookie(true)
+                    for (c in cookies) cm.setCookie(proxyOrigin, c)
+                    cm.flush()
+                }
+            },
+            assetCache = assetCache,
+        )
+        val raced = t3Proxies.putIfAbsent(deviceId, proxy)
+        return if (raced != null) {
+            proxy.stop()
+            raced
+        } else {
+            proxy
         }
     }
 

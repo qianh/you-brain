@@ -8,6 +8,7 @@ import android.webkit.CookieManager
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -50,7 +51,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import ai.youbrain.mobile.net.AppUiState
+import ai.youbrain.mobile.net.T3AssetCache
 import ai.youbrain.mobile.net.UBrainRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import java.io.ByteArrayInputStream
 import java.net.URI
 
 private const val MAX_WEBVIEW_POOL = 4
@@ -213,6 +218,7 @@ fun T3DeckScreen(
                                 }
                             }
                         }
+                        val targetDeviceId = currentId
                         val wv = WebView(container.context).apply {
                             setLayerType(View.LAYER_TYPE_HARDWARE, null)
                             settings.javaScriptEnabled = true
@@ -227,6 +233,45 @@ fun T3DeckScreen(
                             cm.setAcceptCookie(true)
                             cm.setAcceptThirdPartyCookies(this, true)
                             webViewClient = object : WebViewClient() {
+                                override fun shouldInterceptRequest(
+                                    view: WebView,
+                                    request: WebResourceRequest,
+                                ): WebResourceResponse? {
+                                    if (!request.method.equals("GET", ignoreCase = true)) return null
+                                    val u = request.url
+                                    if (u.host != "127.0.0.1" && u.host != "localhost") return null
+                                    val path = u.encodedPath ?: return null
+                                    if (path == "/__ubrain_t3_inject.js") {
+                                        return WebResourceResponse(
+                                            "text/javascript",
+                                            "utf-8",
+                                            200,
+                                            "OK",
+                                            mapOf("Cache-Control" to "no-store"),
+                                            ByteArrayInputStream("/* u-brain mobile proxy */\n".toByteArray(Charsets.UTF_8)),
+                                        )
+                                    }
+                                    if (T3AssetCache.isImmutableAssetPath(path)) {
+                                        val hit = repository.assetCache.getCached(path)
+                                            ?: runBlocking(Dispatchers.IO) {
+                                                repository.fetchImmutableT3Asset(targetDeviceId, path)
+                                            }
+                                            ?: return null
+                                        return WebResourceResponse(
+                                            hit.mime.mimeType,
+                                            hit.mime.encoding,
+                                            200,
+                                            "OK",
+                                            mapOf(
+                                                "Cache-Control" to "public, max-age=31536000, immutable",
+                                                "Access-Control-Allow-Origin" to "*",
+                                            ),
+                                            ByteArrayInputStream(hit.bytes),
+                                        )
+                                    }
+                                    return null
+                                }
+
                                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                                     val u = request.url
                                     if (u.host == "127.0.0.1" || u.host == "localhost") return false
