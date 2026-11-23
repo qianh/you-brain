@@ -268,6 +268,7 @@ import { T3ThreadWatcher } from "../deck/t3/watch.js";
 import { TaskGit } from "../tasks/git.js";
 import { TaskService } from "../tasks/service.js";
 import { TERMINAL_NOTIFY_PREF_KEY } from "../deck/session-notices.js";
+import { createTty7TunnelHostHandler } from "../deck/tty7-tunnel.js";
 import { SEARCH_CONFIG_FILE } from "../deck/dsh/runtime.js";
 import { readSearchActive, writeSearchActive } from "../deck/dsh/search-config.js";
 import { fetchMagpieModels } from "../deck/dsh/magpie.js";
@@ -4394,6 +4395,35 @@ export class YouBrainDaemon {
             return null;
           }
         },
+        tty7: createTty7TunnelHostHandler(() => {
+          const deck = this.#deck;
+          if (!deck) return null;
+          return {
+            tty7Sessions: () => deck.tty7Sessions(),
+            tty7Delete: async (pane) => {
+              await deck.tty7.delete(pane);
+              return { ok: true };
+            },
+            tty7Rename: async (body) => {
+              await deck.tty7.rename(body.pane, body.name);
+              return { ok: true };
+            },
+            tty7Viewing: async (body) => {
+              deck.setViewing(body.pane);
+              return { ok: true };
+            },
+            tty7Screen: (pane, lines) => deck.tty7.screen(pane, lines),
+            tty7Send: async (body) => {
+              await deck.tty7.send(body);
+              return { ok: true };
+            },
+            tty7Start: (body) => deck.tty7.start(body),
+            tty7PasteImage: async (data, contentType) => ({
+              path: await deck.tty7.saveImagePaste(data, contentType),
+            }),
+            tty7Terminal: (pane, size, events) => deck.tty7.openTerminal(pane, size, events),
+          };
+        }),
       },
     });
     this.#dispatchExecutor = executor;
@@ -4491,17 +4521,17 @@ export class YouBrainDaemon {
       bridgeApps: async () => ({ apps: await deck.bridgeApps() }),
       bridgeSend: (body) => deck.bridgeSend(body.app, body.prompt),
       bridgeReplies: async (body) => ({ replies: await deck.bridgeReplies(body.app, body.sinceMs) }),
-      tty7Sessions: () => deck.tty7Sessions(),
-      tty7Delete: async (pane) => {
-        await deck.tty7.delete(pane);
+      tty7Sessions: (deviceId) => deck.tty7Sessions(deviceId),
+      tty7Delete: async (pane, deviceId) => {
+        await deck.tty7Delete(pane, deviceId);
         return { ok: true };
       },
-      tty7Rename: async (body) => {
-        await deck.tty7.rename(body.pane, body.name);
+      tty7Rename: async (body, deviceId) => {
+        await deck.tty7Rename(body.pane, body.name, deviceId);
         return { ok: true };
       },
-      tty7Viewing: async (body) => {
-        deck.setViewing(body.pane);
+      tty7Viewing: async (body, deviceId) => {
+        await deck.tty7Viewing(body.pane, deviceId);
         return { ok: true };
       },
       notices: async () => deck.noticeList(),
@@ -4509,16 +4539,14 @@ export class YouBrainDaemon {
         deck.dismissNotice(body);
         return { ok: true };
       },
-      tty7Terminal: (pane, size, events) => deck.tty7.openTerminal(pane, size, events),
-      tty7Screen: (pane, lines) => deck.tty7.screen(pane, lines),
-      tty7Send: async (body) => {
-        await deck.tty7.send(body);
+      tty7Terminal: (pane, size, events, deviceId) => deck.tty7Terminal(pane, size, events, deviceId),
+      tty7Screen: (pane, lines, deviceId) => deck.tty7Screen(pane, lines, deviceId),
+      tty7Send: async (body, deviceId) => {
+        await deck.tty7Send(body, deviceId);
         return { ok: true };
       },
-      tty7Start: (body) => deck.tty7.start(body),
-      tty7PasteImage: async (data, contentType) => ({
-        path: await deck.tty7.saveImagePaste(data, contentType),
-      }),
+      tty7Start: (body, deviceId) => deck.tty7Start(body, deviceId),
+      tty7PasteImage: (data, contentType, deviceId) => deck.tty7PasteImage(data, contentType, deviceId),
       museOverview: () => deck.muse.overview(),
       museSession: (id) => deck.muse.session(id),
       museAction: (body) => deck.muse.action(body),

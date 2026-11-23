@@ -24,7 +24,7 @@ import { DeckTerminalScreen } from "./deck-terminal-screen.js";
 import { EMPTY_TABS, hideScreen, openTab, pruneTabs, type TerminalTabs } from "./deck-terminal-tabs.js";
 import { DeckTty7Panel } from "./deck-tty7.js";
 import { initialDeckView, useTty7Sessions, waitingCount, type DeckViewId } from "./deck-tty7-sessions.js";
-import { DeckT3Panel } from "./deck-t3.js";
+import { DeckT3Panel, type ActiveT3Device } from "./deck-t3.js";
 import { DeckMusePanel } from "./deck-muse.js";
 
 type DshWebView =
@@ -47,25 +47,53 @@ export function DshDeckPage() {
   const [activePage, setActivePage] = useState<DeckViewId>(() => {
     try { return initialDeckView(prefs.getItem(DECK_VIEW_KEY)); } catch { return initialDeckView(null); }
   });
-  const sessions = useTty7Sessions();
+  const [activeT3Device, setActiveT3Device] = useState<ActiveT3Device | null>(null);
+  const [t3ForceLocalVersion, setT3ForceLocalVersion] = useState(0);
+  // 只有停留在 T3 且选了同账号远端设备时，右侧终端会话才切到该设备；切回 DSH/Muse 或本机/手动地址端点时回到本机。
+  const activeTty7Device = activePage === "t3" ? activeT3Device : null;
+  const activeDeviceKey = activeTty7Device?.id ?? "local";
+  const sessions = useTty7Sessions(activeTty7Device?.id ?? null);
   const waiting = waitingCount(sessions.view?.sessions ?? []);
-  // 整屏终端的标签只在本次运行内有效，不写偏好。
-  const [tabs, setTabs] = useState<TerminalTabs>(EMPTY_TABS);
-  const openPane = useCallback((pane: number) => setTabs((current) => openTab(current, pane)), []);
+  // 整屏终端的标签按设备隔离且只在本次运行内有效，不写偏好。
+  const [tabsByDevice, setTabsByDevice] = useState<Record<string, TerminalTabs>>({});
+  const tabs = tabsByDevice[activeDeviceKey] ?? EMPTY_TABS;
+  const setTabs = useCallback((next: TerminalTabs | ((current: TerminalTabs) => TerminalTabs)) => {
+    setTabsByDevice((all) => {
+      const current = all[activeDeviceKey] ?? EMPTY_TABS;
+      const resolved = typeof next === "function" ? next(current) : next;
+      return resolved === current ? all : { ...all, [activeDeviceKey]: resolved };
+    });
+  }, [activeDeviceKey]);
+  const openPane = useCallback((pane: number) => setTabs((current) => openTab(current, pane)), [setTabs]);
+  const openLocalPane = useCallback((pane: number) => {
+    if (activeTty7Device !== null) {
+      setActiveT3Device(null);
+      setT3ForceLocalVersion((value) => value + 1);
+    }
+    setTabsByDevice((all) => ({ ...all, local: openTab(all.local ?? EMPTY_TABS, pane) }));
+  }, [activeTty7Device]);
   const requestedPane = parseDeckPane(href);
   const reloadSessions = sessions.reload;
   useEffect(() => {
     if (requestedPane === null || !pageActive) return;
     navigate("/deck", "replace");
-    void reloadSessions().then((fresh) => {
+    const switchingToLocal = activeTty7Device !== null;
+    if (switchingToLocal) {
+      setActiveT3Device(null);
+      setT3ForceLocalVersion((value) => value + 1);
+    }
+    const fetchLocal = switchingToLocal
+      ? client.deckTty7Sessions(null).catch(() => null)
+      : reloadSessions();
+    void fetchLocal.then((fresh) => {
       if (fresh === null) return;
       if (!fresh.available || !fresh.sessions.some((item) => item.pane === requestedPane)) {
         push({ message: t("deckTty7ReferenceMissing"), tone: "danger" });
         return;
       }
-      openPane(requestedPane);
+      setTabsByDevice((all) => ({ ...all, local: openTab(all.local ?? EMPTY_TABS, requestedPane) }));
     });
-  }, [requestedPane, pageActive, navigate, reloadSessions, openPane, push, t]);
+  }, [requestedPane, pageActive, activeTty7Device, client, navigate, reloadSessions, push, t]);
   const [t3Visited, setT3Visited] = useState(activePage === "t3");
   const [t3Thread, setT3Thread] = useState<string | null>(null);
   const requestedT3Thread = readQuery(href, "t3Thread");
@@ -135,11 +163,17 @@ export function DshDeckPage() {
   // 每次拿到新的会话列表，就去掉 tty7 里已经不存在的会话标签。
   // 列表不可用（tty7 没起、读取失败）时不动标签，免得一次故障把标签全清掉。
   const sessionView = sessions.view;
+  const sessionDeviceKey = sessions.deviceKey;
   useEffect(() => {
     if (sessionView === null || !sessionView.available) return;
     const live = new Set(sessionView.sessions.map((session) => session.pane));
-    setTabs((current) => pruneTabs(current, live));
-  }, [sessionView]);
+    setTabsByDevice((all) => {
+      const current = all[sessionDeviceKey];
+      if (current === undefined) return all;
+      const next = pruneTabs(current, live);
+      return next === current ? all : { ...all, [sessionDeviceKey]: next };
+    });
+  }, [sessionView, sessionDeviceKey]);
   const [terminalRequest, setTerminalRequest] = useState<TerminalReference | null>(null);
   const terminalRequestHandled = useCallback((request: TerminalReference) => {
     setTerminalRequest((current) => current === request ? null : current);
@@ -329,7 +363,13 @@ export function DshDeckPage() {
                     {t("deckRefButton")}
                   </Button>
                   <Button size="sm" variant="ghost" icon={<Icon name="settings" />} onClick={() => setT3SettingsOpen(true)}>{t("dshDeckT3Settings")}</Button>
-                  <IconButton label={t("dshDeckT3Refresh")} onClick={() => setT3ReloadVersion((value) => value + 1)}><Icon name="refresh" /></IconButton>
+                  <IconButton
+                    label={t("dshDeckT3Refresh")}
+                    onClick={() => {
+                      setT3ReloadVersion((value) => value + 1);
+                      void reloadSessions();
+                    }}
+                  ><Icon name="refresh" /></IconButton>
                 </>
               ) : activePage === "muse" ? (
                 <>
@@ -357,10 +397,12 @@ export function DshDeckPage() {
                 frameRef={t3Frame}
                 threadUrl={t3Thread}
                 reloadVersion={t3ReloadVersion}
+                forceLocalVersion={t3ForceLocalVersion}
                 settingsOpen={t3SettingsOpen}
                 onSettingsChange={setT3SettingsOpen}
                 onReload={() => setT3ReloadVersion((value) => value + 1)}
                 onLocalReload={() => setT3Injected(false)}
+                onActiveDeviceChange={setActiveT3Device}
               />
             ) : null}
           </div>
@@ -376,11 +418,21 @@ export function DshDeckPage() {
           </div>
         </div>
         {tty7Open ? (
-          <DeckTty7Panel sessions={sessions} onClose={() => toggleTty7(false)} onOpen={openPane} activePane={tabs.active} openRequest={terminalRequest} onOpenRequestHandled={terminalRequestHandled} />
+          <DeckTty7Panel
+            sessions={sessions}
+            device={activeTty7Device}
+            onClose={() => toggleTty7(false)}
+            onOpen={openPane}
+            activePane={tabs.active}
+            openRequest={terminalRequest}
+            onOpenRequestHandled={terminalRequestHandled}
+          />
         ) : null}
       </div>
       {tabs.open.length > 0 ? (
         <DeckTerminalScreen
+          key={activeDeviceKey}
+          device={activeTty7Device}
           tabs={tabs}
           sessions={sessions}
           shown={tabs.active !== null}
@@ -403,7 +455,7 @@ export function DshDeckPage() {
           requestAnimationFrame(() => t3Frame.current?.focus());
         }}
         {...(t3RefFromAt.current ? { onPassthrough: closeT3Picker } : {})}
-        onOpenTerminal={openPane}
+        onOpenTerminal={openLocalPane}
       />
     </Page>
   );

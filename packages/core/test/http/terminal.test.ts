@@ -12,6 +12,7 @@ async function withServer(run: (h: {
   inputs: Buffer[];
   sizes: TerminalSize[];
   opens: number[];
+  deviceIds: Array<string | undefined>;
   closes: () => number;
   events: () => Tty7TerminalEvents;
   flow: { pauses: number; resumes: number };
@@ -20,28 +21,30 @@ async function withServer(run: (h: {
   const inputs: Buffer[] = [];
   const sizes: TerminalSize[] = [];
   const opens: number[] = [];
+  const deviceIds: Array<string | undefined> = [];
   const flow = { pauses: 0, resumes: 0 };
   let closes = 0;
   let events: Tty7TerminalEvents;
-  const deck = { tty7Terminal(pane, size, sink) {
+  const deck = { tty7Terminal(pane, size, sink, deviceId) {
     opens.push(pane);
+    deviceIds.push(deviceId);
     sizes.push(size);
     events = sink;
     queueMicrotask(() => { sink.ready(); sink.output(Buffer.from("\x1b[?1049h原终端")); });
     return { input(bytes) { inputs.push(Buffer.from(bytes)); sink.output(bytes); }, resize(next) { sizes.push(next); }, close() { closes++; }, pause() { flow.pauses++; }, resume() { flow.resumes++; } };
   } } as Pick<DeckHttpPort, "tty7Terminal"> as DeckHttpPort;
   const server = await startDaemonHttp({ dataDir: dir, deps: { deck } as HttpDeps });
-  try { await run({ server, inputs, sizes, opens, closes: () => closes, events: () => events!, flow }); }
+  try { await run({ server, inputs, sizes, opens, deviceIds, closes: () => closes, events: () => events!, flow }); }
   finally { await server.stop(); rmSync(dir, { recursive: true, force: true }); }
 }
 
-async function connect(server: DaemonHttpServer, token = server.token) {
+async function connect(server: DaemonHttpServer, token = server.token, extra: Record<string, unknown> = {}) {
   const socket = new WebSocket(server.baseUrl.replace("http:", "ws:") + "/api/deck/tty7/terminal", { headers: { origin: server.baseUrl } });
   socket.binaryType = "arraybuffer";
   const messages: Array<string | ArrayBuffer> = [];
   socket.onmessage = (event) => messages.push(event.data);
   await new Promise<void>((resolve, reject) => { socket.onopen = () => resolve(); socket.onerror = () => reject(new Error("test WebSocket failed")); });
-  socket.send(JSON.stringify({ type: "connect", token, pane: 7, size: SIZE }));
+  socket.send(JSON.stringify({ type: "connect", token, pane: 7, size: SIZE, ...extra }));
   return { socket, messages };
 }
 async function until(predicate: () => boolean) {
@@ -109,5 +112,21 @@ it("pauses fast output until the browser acknowledges rendering it", async () =>
     socket.send(JSON.stringify({ type: "ack", bytes: 300 * 1024 }));
     await until(() => h.flow.resumes === 2);
     socket.close();
+  });
+});
+
+it("forwards optional deviceId from connect handshake and rejects invalid deviceId values", async () => {
+  await withServer(async (h) => {
+    const { socket, messages } = await connect(h.server, h.server.token, { deviceId: "remote-mac" });
+    await until(() => messages.some((message) => message instanceof ArrayBuffer));
+    expect(h.opens).toEqual([7]);
+    expect(h.deviceIds).toEqual(["remote-mac"]);
+    socket.close();
+    await until(() => h.closes() === 1);
+
+    const bad = await connect(h.server, h.server.token, { deviceId: 123 });
+    await until(() => bad.socket.readyState === WebSocket.CLOSED);
+    expect(bad.messages.some((message) => typeof message === "string" && JSON.parse(message).type === "error")).toBe(true);
+    expect(h.opens).toEqual([7]);
   });
 });

@@ -257,20 +257,20 @@ export interface DeckHttpPort {
   bridgeApps(): Promise<DeckBridgeAppsResponse>;
   bridgeSend(body: DeckBridgeSendBody): Promise<DeckBridgeSendResponse>;
   bridgeReplies(body: DeckBridgeRepliesBody): Promise<DeckBridgeRepliesResponse>;
-  /** tty7 会话桥：列会话、看屏幕、发指令、新开会话；粘贴图片落盘换路径。 */
-  tty7Sessions(): Promise<DeckTty7SessionsResponse>;
-  tty7Delete(pane: number): Promise<{ ok: true }>;
-  tty7Rename(body: DeckTty7RenameBody): Promise<{ ok: true }>;
+  /** tty7 会话桥：列会话、看屏幕、发指令、新开会话；粘贴图片落盘换路径。传 deviceId 时经加密隧道操作对端设备。 */
+  tty7Sessions(deviceId?: string): Promise<DeckTty7SessionsResponse>;
+  tty7Delete(pane: number, deviceId?: string): Promise<{ ok: true }>;
+  tty7Rename(body: DeckTty7RenameBody, deviceId?: string): Promise<{ ok: true }>;
   /** 网页上报正在整屏看的会话，这个会话的完成/等待提醒会被跳过。 */
-  tty7Viewing(body: DeckTty7ViewingBody): Promise<{ ok: true }>;
+  tty7Viewing(body: DeckTty7ViewingBody, deviceId?: string): Promise<{ ok: true }>;
   /** 终端会话提醒（工作中 → 等你回复/已完成）。 */
   notices(): Promise<DeckNoticesResponse>;
   noticeDismiss?(body: DeckNoticeDismissBody): Promise<{ ok: true }>;
-  tty7Screen(pane: number, lines?: number): Promise<DeckTty7ScreenResponse>;
-  tty7Send(body: DeckTty7SendBody): Promise<{ ok: true }>;
-  tty7Start(body: DeckTty7StartBody): Promise<DeckTty7StartResponse>;
-  tty7PasteImage(data: Uint8Array, contentType: string): Promise<DeckTty7PasteImageResponse>;
-  tty7Terminal?(pane: number, size: TerminalSize, events: Tty7TerminalEvents): TerminalConnection;
+  tty7Screen(pane: number, lines?: number, deviceId?: string): Promise<DeckTty7ScreenResponse>;
+  tty7Send(body: DeckTty7SendBody, deviceId?: string): Promise<{ ok: true }>;
+  tty7Start(body: DeckTty7StartBody, deviceId?: string): Promise<DeckTty7StartResponse>;
+  tty7PasteImage(data: Uint8Array, contentType: string, deviceId?: string): Promise<DeckTty7PasteImageResponse>;
+  tty7Terminal?(pane: number, size: TerminalSize, events: Tty7TerminalEvents, deviceId?: string): TerminalConnection;
   /** Muse SDK 会话桥：可选，旧测试替身可不提供。 */
   museOverview?(): Promise<DeckMuseOverviewResponse>;
   museSession?(id?: string): Promise<DeckMuseSessionResponse | null>;

@@ -21,7 +21,9 @@ import type { DeviceIdentity } from "../dispatch/identity.js";
 import type { TunnelSession } from "../dispatch/tunnel.js";
 import { startT3Proxy, type T3Proxy } from "./t3/proxy.js";
 import { TelegramBridge, createLlmRouteJudge, type TelegramDispatchPort, type TelegramFetch } from "./telegram/index.js";
-import { Tty7, type Tty7SessionsView } from "./tty7.js";
+import { Tty7, type Tty7ScreenView, type Tty7SendInput, type Tty7SessionsView, type Tty7StartInput, type Tty7StartResult } from "./tty7.js";
+import type { TerminalConnection, TerminalSize, Tty7TerminalEvents } from "./tty7-terminal.js";
+import { openRemoteTty7Terminal, remoteTty7Json, remoteTty7PasteImage } from "./tty7-tunnel.js";
 import {
   GUI_APPS,
   accessibilityGranted,
@@ -321,10 +323,72 @@ export class DeckService {
     void this.telegram?.start().catch(() => undefined);
   }
 
-  /** 终端会话列表：在 tty7 的会话上补上最近一轮的任务名。 */
-  async tty7Sessions(): Promise<Tty7SessionsView> {
+  #deviceTunnel(deviceId: string): () => Promise<TunnelSession> {
+    const tunnel = this.#options.t3Tunnel;
+    if (this.#stopped || !tunnel) throw new Error("本机不支持查看其他设备的终端会话");
+    return () => tunnel(deviceId);
+  }
+
+  /** 终端会话列表：本机在 tty7 的会话上补上最近一轮的任务名；指定 deviceId 时经加密隧道读取对端。 */
+  async tty7Sessions(deviceId?: string): Promise<Tty7SessionsView> {
+    if (deviceId) return remoteTty7Json<Tty7SessionsView>(this.#deviceTunnel(deviceId), "GET", "/api/deck/tty7/sessions");
     const view = await this.tty7.sessions();
     return { ...view, sessions: view.sessions.map((session) => ({ ...session, task: this.notices.taskOf(session.pane) })) };
+  }
+
+  async tty7Delete(pane: number, deviceId?: string): Promise<void> {
+    if (deviceId) {
+      await remoteTty7Json<{ ok: true }>(this.#deviceTunnel(deviceId), "POST", "/api/deck/tty7/delete", { pane });
+      return;
+    }
+    await this.tty7.delete(pane);
+  }
+
+  async tty7Rename(pane: number, name: string, deviceId?: string): Promise<void> {
+    if (deviceId) {
+      await remoteTty7Json<{ ok: true }>(this.#deviceTunnel(deviceId), "POST", "/api/deck/tty7/rename", { pane, name });
+      return;
+    }
+    await this.tty7.rename(pane, name);
+  }
+
+  async tty7Viewing(pane: number | null, deviceId?: string): Promise<void> {
+    if (deviceId) {
+      await remoteTty7Json<{ ok: true }>(this.#deviceTunnel(deviceId), "POST", "/api/deck/tty7/viewing", { pane });
+      return;
+    }
+    this.setViewing(pane);
+  }
+
+  async tty7Screen(pane: number, lines?: number, deviceId?: string): Promise<Tty7ScreenView> {
+    if (deviceId) {
+      const path = `/api/deck/tty7/screen?pane=${pane}${lines === undefined ? "" : `&lines=${lines}`}`;
+      return remoteTty7Json<Tty7ScreenView>(this.#deviceTunnel(deviceId), "GET", path);
+    }
+    return this.tty7.screen(pane, lines);
+  }
+
+  async tty7Send(body: Tty7SendInput, deviceId?: string): Promise<void> {
+    if (deviceId) {
+      await remoteTty7Json<{ ok: true }>(this.#deviceTunnel(deviceId), "POST", "/api/deck/tty7/send", body);
+      return;
+    }
+    await this.tty7.send(body);
+  }
+
+  async tty7Start(body: Tty7StartInput, deviceId?: string): Promise<Tty7StartResult> {
+    if (deviceId) return remoteTty7Json<Tty7StartResult>(this.#deviceTunnel(deviceId), "POST", "/api/deck/tty7/start", body);
+    return this.tty7.start(body);
+  }
+
+  async tty7PasteImage(data: Uint8Array, contentType: string, deviceId?: string): Promise<{ path: string }> {
+    if (deviceId) return remoteTty7PasteImage(this.#deviceTunnel(deviceId), data, contentType);
+    return { path: await this.tty7.saveImagePaste(data, contentType) };
+  }
+
+  tty7Terminal(pane: number, size: TerminalSize, events: Tty7TerminalEvents, deviceId?: string): TerminalConnection {
+    if (deviceId) return openRemoteTty7Terminal(this.#deviceTunnel(deviceId), pane, size, events);
+    return this.tty7.openTerminal(pane, size, events);
   }
 
   noticeList(): SessionNoticeList {

@@ -36,6 +36,7 @@ interface LiveTerminal {
  */
 export function DeckTty7Terminal({
   pane,
+  deviceId = null,
   appearance,
   active = true,
   pendingPaste,
@@ -43,6 +44,7 @@ export function DeckTty7Terminal({
   onReferenceKey,
 }: {
   pane: number;
+  deviceId?: string | null;
   appearance: TerminalAppearance;
   /** 非当前标签时保持连接，只隐藏不卸载。 */
   active?: boolean;
@@ -137,7 +139,7 @@ export function DeckTty7Terminal({
         cell_h: Math.round((screen?.clientHeight ?? 0) / terminal.rows),
       };
     };
-    const socket = client.deckTty7Terminal(pane, measure());
+    const socket = client.deckTty7Terminal(pane, measure(), deviceId);
     const control = (body: unknown): void => {
       if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(body));
     };
@@ -322,7 +324,7 @@ export function DeckTty7Terminal({
       void (async () => {
         try {
           const paths: string[] = [];
-          for (const image of images) paths.push((await client.deckTty7PasteImage(image)).path);
+          for (const image of images) paths.push((await client.deckTty7PasteImage(image, deviceId)).path);
           if (!disposed && connected) {
             terminal.paste(paths.join(" "));
             terminal.focus();
@@ -334,7 +336,7 @@ export function DeckTty7Terminal({
     };
     host.addEventListener("paste", onPaste, true);
     const onFileDrop = (event: Event): void => {
-      if (!connected || !activeRef.current) return;
+      if (deviceId !== null || !connected || !activeRef.current) return;
       const text = terminalDroppedPaths((event as CustomEvent<unknown>).detail);
       if (text === null) {
         setError(translateRef.current("deckTty7DropInvalid"));
@@ -369,7 +371,7 @@ export function DeckTty7Terminal({
       replies.dispose();
       terminal.dispose();
     };
-  }, [client, pane, revision]);
+  }, [client, pane, deviceId, revision]);
 
   useEffect(() => {
     if (!active) return;
@@ -430,7 +432,7 @@ export function DeckTty7Terminal({
         onDragOver={(event) => {
           if (!event.dataTransfer.types.includes("Files")) return;
           event.preventDefault();
-          event.dataTransfer.dropEffect = active && status === "ready" && window.__TAURI__ && navigator.platform.startsWith("Mac") ? "copy" : "none";
+          event.dataTransfer.dropEffect = deviceId === null && active && status === "ready" && window.__TAURI__ && navigator.platform.startsWith("Mac") ? "copy" : "none";
         }}
         onDrop={(event) => {
           if (event.dataTransfer.types.includes("Files")) event.preventDefault();

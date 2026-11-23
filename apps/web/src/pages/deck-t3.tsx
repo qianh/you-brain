@@ -159,21 +159,32 @@ function DeckT3EndpointPane({
   );
 }
 
+export interface ActiveT3Device {
+  id: string;
+  name: string;
+}
+
 /** 首次切到 T3 时挂载，各端点按首次选中懒挂载并仅隐藏不卸载，保留各自会话与输入状态。 */
 export function DeckT3Panel({
   reloadVersion,
+  forceLocalVersion = 0,
   settingsOpen,
   onSettingsChange,
   onReload,
   onLocalReload,
+  onActiveDeviceChange,
   frameRef,
   threadUrl,
 }: {
   reloadVersion: number;
+  /** 递增时强制切回本机端点（例如打开本机终端通知时）。 */
+  forceLocalVersion?: number;
   settingsOpen: boolean;
   onSettingsChange: (open: boolean) => void;
   onReload: () => void;
   onLocalReload?: () => void;
+  /** 当前激活端点是否为同账号下的远端设备；切到本机或手动地址端点时回调 null。 */
+  onActiveDeviceChange?: (device: ActiveT3Device | null) => void;
   frameRef?: RefObject<HTMLIFrameElement | null>;
   threadUrl: string | null;
 }) {
@@ -193,6 +204,8 @@ export function DeckT3Panel({
 
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
+  const onActiveDeviceChangeRef = useRef(onActiveDeviceChange);
+  onActiveDeviceChangeRef.current = onActiveDeviceChange;
 
   // 同账号下已入网、在线、并向本机开放了 T3 的设备，自动列进标签栏。
   useEffect(() => {
@@ -244,6 +257,16 @@ export function DeckT3Panel({
     prevReloadProp.current = reloadVersion;
     bumpReload(activeIdRef.current);
   }, [reloadVersion]);
+
+  // 外部要求回到本机（例如点击本机终端通知）。
+  const prevForceLocal = useRef(forceLocalVersion);
+  useEffect(() => {
+    if (forceLocalVersion === prevForceLocal.current) return;
+    prevForceLocal.current = forceLocalVersion;
+    setActiveId(LOCAL_T3_ID);
+    setVisited((current) => (current.has(LOCAL_T3_ID) ? current : new Set([...current, LOCAL_T3_ID])));
+    try { prefs.setItem(T3_ACTIVE_KEY, LOCAL_T3_ID); } catch { /* 本次切换仍可用。 */ }
+  }, [forceLocalVersion]);
 
   // 会话深链来自本机 T3，切回本机端点。
   useEffect(() => {
@@ -325,6 +348,17 @@ export function DeckT3Panel({
   ];
   // 当前设备标签随设备下线消失时，退回本机。
   const shownActiveId = allEndpoints.some((item) => item.id === activeId) ? activeId : LOCAL_T3_ID;
+  const activeEntry = allEndpoints.find((item) => item.id === shownActiveId);
+  const activeDeviceId = activeEntry?.deviceId ?? null;
+  const activeDeviceName = activeEntry?.deviceId !== undefined ? activeEntry.name : null;
+
+  useEffect(() => {
+    onActiveDeviceChangeRef.current?.(
+      activeDeviceId !== null && activeDeviceName !== null
+        ? { id: activeDeviceId, name: activeDeviceName }
+        : null,
+    );
+  }, [activeDeviceId, activeDeviceName]);
 
   return (
     <div className="deck-t3-root">

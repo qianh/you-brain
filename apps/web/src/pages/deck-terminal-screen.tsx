@@ -24,10 +24,12 @@ const DeckTty7Terminal = lazy(() => loadChunk(() => import("./deck-tty7-terminal
  * 整屏终端：盖住整个窗口，顶部一行是返回、本次打开过的会话标签、全部会话下拉。
  * 关标签和返回都只改变显示，不会结束 tty7 里的会话。
  */
-export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClose, shown }: {
+export function DeckTerminalScreen({ tabs, sessions: shared, device = null, onTabsChange, onClose, shown }: {
   tabs: TerminalTabs;
   /** 指挥台共享的会话数据。 */
   sessions: ReturnType<typeof useTty7Sessions>;
+  /** 非空表示当前整屏终端连接的是远端设备。 */
+  device?: { id: string; name: string } | null;
   onTabsChange: (next: TerminalTabs) => void;
   /** 返回：收起整屏终端，标签保留。 */
   onClose: () => void;
@@ -36,8 +38,9 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
 }) {
   const { t, client } = useDaemon();
   const pageActive = usePageActive();
+  const deviceId = device?.id ?? null;
   const { view, reload } = shared;
-  const { rename, reportError } = useSessionRename(reload);
+  const { rename, reportError } = useSessionRename(reload, deviceId);
   const [menuOpen, setMenuOpen] = useState(false);
   const [filter, setFilter] = useState("");
   /** 下拉里的新建表单：null 为收起；label 为 null 表示不限项目。 */
@@ -109,7 +112,7 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
       event.preventDefault();
       event.stopPropagation();
       if (action === "back") onTabsChange(hideScreen(tabs));
-      else if (action === "reference") openRefPicker(false);
+      else if (action === "reference") { if (deviceId === null) openRefPicker(false); }
       else if (action === "fontUp") setFontSize(stepFontSize(fontSize, 1));
       else if (action === "fontDown") setFontSize(stepFontSize(fontSize, -1));
       else if (action === "fontReset") resetFontSize();
@@ -117,14 +120,14 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [shown, mod, tabs, onTabsChange, fontSize]);
+  }, [shown, mod, tabs, onTabsChange, fontSize, deviceId]);
 
   // 告诉 daemon 正在看哪个会话，这个会话完成时不弹通知。窗口失焦、页面隐藏、切到别的菜单或离开时报 null。
   // 失败一律静默：上报不能影响终端使用。
   useEffect(() => {
     let last: number | null = null;
     const send = (pane: number | null): void => {
-      void client.deckTty7Viewing(pane).catch(() => undefined);
+      void client.deckTty7Viewing(pane, deviceId).catch(() => undefined);
     };
     const sync = (): void => {
       const target = viewingTarget(
@@ -152,7 +155,7 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
       document.removeEventListener("visibilitychange", sync);
       if (last !== null) send(null);
     };
-  }, [client, tabs.active, shown, pageActive]);
+  }, [client, deviceId, tabs.active, shown, pageActive]);
 
   useEffect(() => {
     activeTabRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -227,11 +230,12 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
             {t("deckTty7Cancel")}
           </button>
           <DeckTty7NewForm
-            key={creating.label ?? ""}
+            key={`${deviceId ?? "local"}:${creating.label ?? ""}`}
             view={view}
             sessions={sessions}
             projectLabel={creating.label}
             reload={reload}
+            deviceId={deviceId}
             onStarted={(pane) => {
               closeMenu();
               setFilter("");
@@ -282,6 +286,12 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
           <Icon name="chevron-left" />
           <span>{t("deckTerminalBack")}</span>
         </button>
+        {device !== null && (
+          <span className="deck-term-device-badge" title={device.name}>
+            <Icon name="monitor" size={12} />
+            <span>{device.name}</span>
+          </span>
+        )}
         <div
           className="deck-term-tabs"
           role="tablist"
@@ -309,15 +319,17 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
         </Popover>
         {/* 按下时不抢焦点（preventDefault），点完仍可直接在终端里打字。 */}
         <div className="deck-term-bar-right">
-          <button
-            type="button"
-            className="deck-term-ref-btn"
-            title={t("deckRefButtonTitle", { shortcut: `${modLabel(mod)}⇧2` })}
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={() => openRefPicker(false)}
-          >
-            {t("deckRefButton")}
-          </button>
+          {deviceId === null && (
+            <button
+              type="button"
+              className="deck-term-ref-btn"
+              title={t("deckRefButtonTitle", { shortcut: `${modLabel(mod)}⇧2` })}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => openRefPicker(false)}
+            >
+              {t("deckRefButton")}
+            </button>
+          )}
           <div className="deck-term-font-slot" role="group" aria-label={t("deckTerminalFontSize")}>
             <button
               type="button"
@@ -354,27 +366,30 @@ export function DeckTerminalScreen({ tabs, sessions: shared, onTabsChange, onClo
             <DeckTty7Terminal
               key={pane}
               pane={pane}
+              deviceId={deviceId}
               appearance={appearance}
               active={shown && pane === tabs.active}
               pendingPaste={pendingPaste?.pane === pane ? pendingPaste : null}
               onPasteHandled={handlePasteHandled}
-              onReferenceKey={byPane.get(pane)?.agent ? () => openRefPicker(true) : undefined}
+              onReferenceKey={deviceId === null && byPane.get(pane)?.agent ? () => openRefPicker(true) : undefined}
             />
           ))}
         </Suspense>
       </div>
-      <DeckReferencePicker
-        open={refPickerOpen}
-        mode="terminal"
-        onClose={closeRefPicker}
-        onInsert={(mentionText) => {
-          if (tabs.active === null) return;
-          refInsertedRef.current = true;
-          queueInput(tabs.active, mentionText, false);
-        }}
-        {...(refFromAtRef.current ? { onPassthrough: closeRefPicker } : {})}
-        onOpenTerminal={(pane) => onTabsChange(openTab(tabs, pane))}
-      />
+      {deviceId === null && (
+        <DeckReferencePicker
+          open={refPickerOpen}
+          mode="terminal"
+          onClose={closeRefPicker}
+          onInsert={(mentionText) => {
+            if (tabs.active === null) return;
+            refInsertedRef.current = true;
+            queueInput(tabs.active, mentionText, false);
+          }}
+          {...(refFromAtRef.current ? { onPassthrough: closeRefPicker } : {})}
+          onOpenTerminal={(pane) => onTabsChange(openTab(tabs, pane))}
+        />
+      )}
     </div>
   );
 }

@@ -15,10 +15,10 @@ import {
 
 import type { DispatchRelayFrame, TelegramRelayState } from "../deck/telegram/relay.js";
 import { writeFileAtomic } from "../domain/atomic.js";
-import type { DispatchExecutor, ThreadStatusEvent } from "./executor.js";
+import type { DispatchEmitEvent, DispatchExecutor } from "./executor.js";
 import type { DeviceIdentity } from "./identity.js";
 import type { CommandOutcome } from "./ledger.js";
-import { PeerPins, TunnelClient, TunnelHost, type TunnelSession } from "./tunnel.js";
+import { PeerPins, TunnelClient, TunnelHost, type TunnelSession, type TunnelTty7Handler } from "./tunnel.js";
 
 const DEFAULT_TIMEOUT_MS = 45_000;
 const MAX_RESULT_BYTES = 256 * 1024;
@@ -113,10 +113,11 @@ export interface DispatchHubOptions {
   timeoutMs?: number;
   onEvent?(entry: OutboxEntry, event: { kind: string; data: unknown }): void;
   newId?: () => string;
-  /** T3 隧道：本机 T3 的地址与浏览器配对凭据来源。缺省则本机既不开放也不发起 T3 隧道。 */
+  /** T3 / tty7 隧道：本机 T3 的地址、配对凭据与 tty7 处理器。缺省则本机既不开放也不发起隧道。 */
   t3Tunnel?: {
     localUrl(): Promise<string>;
     pairCredential(): Promise<string | null>;
+    tty7?: TunnelTty7Handler;
   };
 }
 
@@ -283,6 +284,7 @@ export class DispatchHub {
             signTranscript: (transcript) => this.#identity.signTranscript(transcript),
             localUrl: tunnel.localUrl,
             pairCredential: tunnel.pairCredential,
+            ...(tunnel.tty7 ? { tty7: tunnel.tty7 } : {}),
             send: sendTun,
           })
         : null;
@@ -341,7 +343,7 @@ export class DispatchHub {
   }
 
   /** 供 DispatchExecutor 的 `emitEvent` 回调接入，把目标端会话状态变化发往发起端。 */
-  emitEvent(to: string, frame: ThreadStatusEvent): void {
+  emitEvent(to: string, frame: DispatchEmitEvent): void {
     const link = this.#link;
     if (!link) return;
     try {

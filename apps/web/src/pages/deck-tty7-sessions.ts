@@ -138,6 +138,10 @@ export async function resolveOpenRequest(
   return target ? { pane: target.pane, missing: false } : { pane: null, missing: true };
 }
 
+export function tty7OrderKey(deviceId?: string | null): string {
+  return deviceId ? `${ORDER_KEY}.${deviceId}` : ORDER_KEY;
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -146,8 +150,10 @@ function errorText(error: unknown): string {
  * 会话列表的共享数据源：每 5 秒轮询一次，页面不可见时暂停。
  * 整个指挥台只调用一次，面板、工具栏角标和全屏终端都读同一份结果。
  * 后发出的请求总是覆盖先发出的，旧响应不会把新数据冲掉。
+ * 传 deviceId 时轮询对应远端设备的 tty7，排序偏好和缓存按设备隔离。
  */
-export function useTty7Sessions(): {
+export function useTty7Sessions(deviceId: string | null = null): {
+  deviceKey: string;
   view: DeckTty7SessionsResponse | null;
   error: string | null;
   order: Tty7Order;
@@ -157,47 +163,70 @@ export function useTty7Sessions(): {
 } {
   const { client } = useDaemon();
   const pageActive = usePageActive();
-  const [{ view, order }, setList] = useState<{ view: DeckTty7SessionsResponse | null; order: Tty7Order }>(() => ({
+  const targetKey = deviceId ?? "local";
+  const orderKey = tty7OrderKey(deviceId);
+  const cacheRef = useRef(new Map<string, DeckTty7SessionsResponse>());
+  const [list, setList] = useState<{ deviceKey: string; view: DeckTty7SessionsResponse | null; order: Tty7Order }>(() => ({
+    deviceKey: targetKey,
     view: null,
-    order: readTty7Order(prefs.getItem(ORDER_KEY)),
+    order: readTty7Order(prefs.getItem(orderKey)),
   }));
-  const [error, setError] = useState<string | null>(null);
+  const [errorState, setErrorState] = useState<{ deviceKey: string; message: string | null }>({
+    deviceKey: targetKey,
+    message: null,
+  });
   const sequence = useRef(0);
 
+  // 切换设备时立即切到该设备的缓存和排序，并作废上一个设备仍在途的轮询。
   useEffect(() => {
-    if (order.groups.length === 0) return;
-    const stored = JSON.stringify(order);
-    if (stored !== prefs.getItem(ORDER_KEY)) prefs.setItem(ORDER_KEY, stored);
-  }, [order]);
+    sequence.current += 1;
+    setList({
+      deviceKey: targetKey,
+      view: cacheRef.current.get(targetKey) ?? null,
+      order: readTty7Order(prefs.getItem(orderKey)),
+    });
+    setErrorState({ deviceKey: targetKey, message: null });
+  }, [targetKey, orderKey]);
+
+  useEffect(() => {
+    if (list.deviceKey !== targetKey || list.order.groups.length === 0) return;
+    const stored = JSON.stringify(list.order);
+    if (stored !== prefs.getItem(orderKey)) prefs.setItem(orderKey, stored);
+  }, [list.deviceKey, list.order, targetKey, orderKey]);
 
   const move = useCallback<MoveTty7Item>((source, target, placement) => {
     setList((current) => {
-      if (!current.view?.available) return current;
+      if (current.deviceKey !== targetKey || !current.view?.available) return current;
       const next = moveTty7Item(current.order, current.view.sessions, source, target, placement);
       return next === current.order ? current : { ...current, order: next };
     });
-  }, []);
+  }, [targetKey]);
 
   const reload = useCallback(async (): Promise<DeckTty7SessionsResponse | null> => {
     const mine = ++sequence.current;
     try {
-      const next = await client.deckTty7Sessions();
+      const next = await client.deckTty7Sessions(deviceId);
+      cacheRef.current.set(targetKey, next);
       // 即使被更新的请求取代，这份数据仍是请求之后加载的，可以返回给调用方。
       if (mine === sequence.current) {
-        setList((current) => ({
-          view: next,
-          order: next.available ? reconcileTty7Order(current.order, next.sessions) : current.order,
-        }));
-        setError(null);
+        setList((current) => {
+          const baseOrder = current.deviceKey === targetKey ? current.order : readTty7Order(prefs.getItem(orderKey));
+          return {
+            deviceKey: targetKey,
+            view: next,
+            order: next.available ? reconcileTty7Order(baseOrder, next.sessions) : baseOrder,
+          };
+        });
+        setErrorState({ deviceKey: targetKey, message: null });
       }
       return next;
     } catch (failure) {
-      if (mine === sequence.current) setError(errorText(failure));
+      if (mine === sequence.current) setErrorState({ deviceKey: targetKey, message: errorText(failure) });
       return null;
     }
-  }, [client]);
+  }, [client, deviceId, targetKey, orderKey]);
 
-  // 指挥台切走（常驻但隐藏）时不轮询；切回时立即拉一次。
+  // 指挥台切走（常驻但隐藏）时不轮询；切回或切换设备时立即拉一次。
   useEffect(() => {
     if (!pageActive) return;
     void reload();
@@ -207,7 +236,11 @@ export function useTty7Sessions(): {
     return () => clearInterval(timer);
   }, [reload, pageActive]);
 
-  return { view, error, order, move, reload };
+  const view = list.deviceKey === targetKey ? list.view : (cacheRef.current.get(targetKey) ?? null);
+  const order = list.deviceKey === targetKey ? list.order : readTty7Order(prefs.getItem(orderKey));
+  const error = errorState.deviceKey === targetKey ? errorState.message : null;
+
+  return { deviceKey: targetKey, view, error, order, move, reload };
 }
 
 /**
@@ -215,16 +248,19 @@ export function useTty7Sessions(): {
  * tty7 改的是整个 tab 的名字，同 tab 的其他会话也会变，所以成功后整体重新加载。
  * 失败时 rename 抛错，由 InlineRename 恢复原值，再用 reportError 弹提示。
  */
-export function useSessionRename(reload: () => Promise<DeckTty7SessionsResponse | null>): {
+export function useSessionRename(
+  reload: () => Promise<DeckTty7SessionsResponse | null>,
+  deviceId: string | null = null,
+): {
   rename: (pane: number, name: string) => Promise<void>;
   reportError: (error: unknown) => void;
 } {
   const { client, t } = useDaemon();
   const { push } = useToast();
   const rename = useCallback(async (pane: number, name: string): Promise<void> => {
-    await client.deckTty7Rename(pane, name);
+    await client.deckTty7Rename(pane, name, deviceId);
     await reload();
-  }, [client, reload]);
+  }, [client, reload, deviceId]);
   const reportError = useCallback((error: unknown): void => {
     push({ message: t("deckTty7RenameFailed", { detail: errorText(error) }), tone: "danger" });
   }, [push, t]);

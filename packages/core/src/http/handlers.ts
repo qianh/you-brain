@@ -496,24 +496,30 @@ export async function handleApi(
     });
   }
   if (path === "/api/deck/tty7/sessions") {
-    return method(request, "GET", async () => json(await deck(context).tty7Sessions()));
+    return method(request, "GET", async () => {
+      const deviceId = url.searchParams.get("deviceId")?.trim() || undefined;
+      return json(await deck(context).tty7Sessions(deviceId));
+    });
   }
   if (path === "/api/deck/tty7/delete") {
     return method(request, "POST", async () => {
+      const deviceId = url.searchParams.get("deviceId")?.trim() || undefined;
       const body = DeckTty7DeleteBodySchema.parse(await readJson(request));
-      return json(await deck(context).tty7Delete(body.pane));
+      return json(await deck(context).tty7Delete(body.pane, deviceId));
     });
   }
   if (path === "/api/deck/tty7/rename") {
     return method(request, "POST", async () => {
+      const deviceId = url.searchParams.get("deviceId")?.trim() || undefined;
       const body = DeckTty7RenameBodySchema.parse(await readJson(request));
-      return json(await deck(context).tty7Rename(body));
+      return json(await deck(context).tty7Rename(body, deviceId));
     });
   }
   if (path === "/api/deck/tty7/viewing") {
     return method(request, "POST", async () => {
+      const deviceId = url.searchParams.get("deviceId")?.trim() || undefined;
       const body = DeckTty7ViewingBodySchema.parse(await readJson(request));
-      return json(await deck(context).tty7Viewing(body));
+      return json(await deck(context).tty7Viewing(body, deviceId));
     });
   }
   if (path === "/api/deck/notices") {
@@ -529,33 +535,37 @@ export async function handleApi(
   }
   if (path === "/api/deck/tty7/screen") {
     return method(request, "GET", async () => {
+      const deviceId = url.searchParams.get("deviceId")?.trim() || undefined;
       const pane = z.coerce.number().int().nonnegative().parse(url.searchParams.get("pane") ?? "");
       const lines = url.searchParams.get("lines");
       return json(
-        await deck(context).tty7Screen(pane, lines === null ? undefined : z.coerce.number().int().min(1).max(400).parse(lines)),
+        await deck(context).tty7Screen(pane, lines === null ? undefined : z.coerce.number().int().min(1).max(400).parse(lines), deviceId),
       );
     });
   }
   if (path === "/api/deck/tty7/send") {
     return method(request, "POST", async () => {
+      const deviceId = url.searchParams.get("deviceId")?.trim() || undefined;
       const body = DeckTty7SendBodySchema.parse(await readJson(request));
-      return json(await deck(context).tty7Send(body));
+      return json(await deck(context).tty7Send(body, deviceId));
     });
   }
   if (path === "/api/deck/tty7/start") {
     return method(request, "POST", async () => {
+      const deviceId = url.searchParams.get("deviceId")?.trim() || undefined;
       const body = DeckTty7StartBodySchema.parse(await readJson(request));
-      return json(await deck(context).tty7Start(body));
+      return json(await deck(context).tty7Start(body, deviceId));
     });
   }
   if (path === "/api/deck/tty7/paste-image") {
     return method(request, "POST", async () => {
+      const deviceId = url.searchParams.get("deviceId")?.trim() || undefined;
       const contentType = (request.headers.get("content-type") ?? "").split(";")[0]?.trim().toLowerCase() ?? "";
       if (contentType === "") throw new HttpError(400, "INVALID_INPUT", "缺少图片类型");
       const buffer = await request.arrayBuffer();
       if (buffer.byteLength === 0) throw new HttpError(400, "INVALID_INPUT", "没有图片内容");
       if (buffer.byteLength > PASTE_IMAGE_LIMIT) throw new HttpError(413, "INVALID_INPUT", "图片超过 10 MB");
-      return json(await deck(context).tty7PasteImage(new Uint8Array(buffer), contentType));
+      return json(await deck(context).tty7PasteImage(new Uint8Array(buffer), contentType, deviceId));
     });
   }
   if (path === "/api/deck/dsh/login") {

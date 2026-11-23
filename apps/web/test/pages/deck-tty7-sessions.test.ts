@@ -1,10 +1,17 @@
 import { describe, expect, it } from "bun:test";
 
-import { initialDeckView, resolveOpenRequest, sessionTitle, waitingCount, type Session } from "../../src/pages/deck-tty7-sessions.js";
+import { initialDeckView, resolveOpenRequest, sessionTitle, tty7OrderKey, waitingCount, type Session } from "../../src/pages/deck-tty7-sessions.js";
 
 const make = (patch: Partial<Session>): Session => ({ pane: 1, cwd: "", tabLabel: null, status: null, ...patch }) as Session;
 
 describe("deck-tty7-sessions", () => {
+  it("tty7OrderKey 按设备隔离排序偏好键，本机保持原有键名", () => {
+    expect(tty7OrderKey()).toBe("you-brain.deck.tty7-order");
+    expect(tty7OrderKey(null)).toBe("you-brain.deck.tty7-order");
+    expect(tty7OrderKey("vps-1")).toBe("you-brain.deck.tty7-order.vps-1");
+    expect(tty7OrderKey("mac-2")).not.toBe(tty7OrderKey("vps-1"));
+  });
+
   it("waitingCount 只数等待中的会话", () => {
     const list = [make({ status: "waiting" }), make({ status: "done" }), make({ status: null }), make({ status: "waiting" })];
     expect(waitingCount(list)).toBe(2);

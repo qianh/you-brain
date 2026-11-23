@@ -88,4 +88,55 @@ describe("DeckT3Panel 多端点渲染", () => {
     );
     expect(deepLinkHtml).toMatch(/aria-selected="true"[^>]*title="http:\/\/127\.0\.0\.1:3773\/"/);
   });
+
+  test("DeckTty7Panel 在远端设备模式展示设备标签，DeckTty7NewForm 隐藏本机目录选择按钮", async () => {
+    const { ToastProvider } = await import("../../src/components/toast.js");
+    const { DeckTty7Panel } = await import("../../src/pages/deck-tty7.js");
+    const { DeckTty7NewForm } = await import("../../src/pages/deck-tty7-list.js");
+    const view = {
+      available: true as const,
+      detail: "",
+      sessions: [],
+      workspaces: [],
+      harnesses: [{ id: "claude", label: "Claude Code" }],
+      appearance: null,
+    };
+    const shared = {
+      deviceKey: "vps-1",
+      view,
+      error: null,
+      order: { groups: [], sessions: [] },
+      move: () => {},
+      reload: async () => view,
+    };
+    const remotePanel = renderToStaticMarkup(
+      <DaemonProvider>
+        <ToastProvider>
+          <DeckTty7Panel
+            sessions={shared}
+            device={{ id: "vps-1", name: "VPS 主控" }}
+            onClose={() => {}}
+            onOpen={() => {}}
+            activePane={null}
+          />
+        </ToastProvider>
+      </DaemonProvider>,
+    );
+    expect(remotePanel).toContain("deck-tty7-device-badge");
+    expect(remotePanel).toContain("VPS 主控");
+
+    const localForm = renderToStaticMarkup(
+      <DaemonProvider>
+        <DeckTty7NewForm view={view} sessions={[]} projectLabel={null} reload={async () => view} onStarted={() => {}} />
+      </DaemonProvider>,
+    );
+    expect(localForm).toContain("选择…");
+
+    const remoteForm = renderToStaticMarkup(
+      <DaemonProvider>
+        <DeckTty7NewForm view={view} sessions={[]} projectLabel={null} reload={async () => view} onStarted={() => {}} deviceId="vps-1" />
+      </DaemonProvider>,
+    );
+    expect(remoteForm).not.toContain("选择…");
+  });
 });

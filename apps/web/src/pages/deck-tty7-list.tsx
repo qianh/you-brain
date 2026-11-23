@@ -382,18 +382,22 @@ export function DeckTty7SessionList({ sessions, order, onMove, filter, onFilterC
  * 新建会话的表单：面板和下拉共用。projectLabel 不为空时只在该项目的目录里选。
  * 成功后重新加载会话列表，再把新会话的 pane 交给 onStarted。
  */
-export function DeckTty7NewForm({ view, sessions, projectLabel, reload, onStarted }: {
+export function DeckTty7NewForm({ view, sessions, projectLabel, reload, onStarted, deviceId = null }: {
   view: DeckTty7SessionsResponse;
   sessions: readonly Session[];
   projectLabel: string | null;
   reload: () => Promise<DeckTty7SessionsResponse | null>;
   onStarted: (pane: number) => void;
+  deviceId?: string | null;
 }) {
   const { client, t } = useDaemon();
   const formRef = useRef<HTMLFormElement>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [harness, setHarness] = useState(() => readStored(HARNESS_KEY) ?? "claude");
+  const effectiveHarness = view.harnesses.some((item) => item.id === harness)
+    ? harness
+    : (view.harnesses[0]?.id ?? harness);
   // 用完整会话列表定位项目目录，搜索不能替同名项目选定目标路径。
   const dirs = useMemo(() => projectLabel === null ? [] : [...new Set(sessions
     .filter((session) => session.cwd !== "" && baseName(session.cwd) === projectLabel)
@@ -440,10 +444,10 @@ export function DeckTty7NewForm({ view, sessions, projectLabel, reload, onStarte
     try {
       const created = await client.deckTty7Start({
         cwd: cwd.trim(),
-        harness,
+        harness: effectiveHarness,
         ...(workspace === "" ? {} : { workspace }),
-      });
-      writeStored(HARNESS_KEY, harness);
+      }, deviceId);
+      writeStored(HARNESS_KEY, effectiveHarness);
       onStarted(created.pane);
       void reload();
     } catch (caught) {
@@ -478,12 +482,14 @@ export function DeckTty7NewForm({ view, sessions, projectLabel, reload, onStarte
             list="deck-tty7-dirs"
             value={cwd}
             onChange={(event) => setCwd(event.target.value)}
-            placeholder="/Users/…/project"
+            placeholder={deviceId ? "/path/to/project" : "/Users/…/project"}
             spellCheck={false}
           />
-          <Button variant="secondary" size="sm" onClick={() => void chooseCwd()}>
-            {t("deckTty7Browse")}
-          </Button>
+          {deviceId === null && (
+            <Button variant="secondary" size="sm" onClick={() => void chooseCwd()}>
+              {t("deckTty7Browse")}
+            </Button>
+          )}
         </div>}
         <datalist id="deck-tty7-dirs">
           {knownDirs.map((dir) => (
@@ -493,7 +499,7 @@ export function DeckTty7NewForm({ view, sessions, projectLabel, reload, onStarte
       </div>
       <label className="field">
         <span className="field-label">{t("deckTty7Harness")}</span>
-        <select name="harness" className="field-control" value={harness} onChange={(event) => setHarness(event.target.value)}>
+        <select name="harness" className="field-control" value={effectiveHarness} onChange={(event) => setHarness(event.target.value)}>
           {view.harnesses.map((item) => (
             <option key={item.id} value={item.id}>
               {item.label}

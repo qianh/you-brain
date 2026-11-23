@@ -51,6 +51,10 @@ export function terminalWebSocket(token: string, deps: HttpDeps) {
             if (!Number.isSafeInteger(request.pane) || request.pane < 0 || !validTerminalSize(request.size)) {
               return reject(ws, "终端会话或尺寸不正确");
             }
+            if (request.deviceId !== undefined && (typeof request.deviceId !== "string" || request.deviceId.trim() === "")) {
+              return reject(ws, "目标设备编号不正确");
+            }
+            const deviceId = typeof request.deviceId === "string" ? request.deviceId.trim() : undefined;
             const open = deps.deck?.tty7Terminal;
             if (!open) return reject(ws, "后台没有提供实时终端服务");
             clearTimeout(ws.data.timer);
@@ -70,7 +74,7 @@ export function terminalWebSocket(token: string, deps: HttpDeps) {
               exit: (code) => control(ws, { type: "exit", code }),
               error: (message) => control(ws, { type: "error", message }),
               close: () => ws.close(1000, "Terminal stream closed"),
-            });
+            }, deviceId);
           } else if (typeof message !== "string") {
             ws.data.connection?.input(message);
           } else {

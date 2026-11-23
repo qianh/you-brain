@@ -126,14 +126,17 @@ export function deriveTunnelCipher(input: {
   return input.role === "initiator" ? new TunnelCipher(forward, backward) : new TunnelCipher(backward, forward);
 }
 
+/** 隧道内层请求的目标服务：缺省为本机 T3；"tty7" 路由到本机 daemon 的 tty7 终端会话桥。 */
+export type TunnelTarget = "t3" | "tty7";
+
 /** 隧道里的内层消息（加密后才上线）。请求与响应用 `id` 配对；每个 HTTP/WebSocket 流各有一个 `id`。 */
 export type TunnelMessage =
-  | { k: "req"; id: string; method: string; path: string; headers: Array<[string, string]>; body?: string; end: boolean }
+  | { k: "req"; id: string; method: string; path: string; headers: Array<[string, string]>; body?: string; end: boolean; target?: TunnelTarget }
   | { k: "body"; id: string; body: string; end: boolean }
   | { k: "head"; id: string; status: number; statusText: string; headers: Array<[string, string]>; enc?: "gzip" }
   | { k: "chunk"; id: string; body: string; end: boolean }
   | { k: "err"; id: string; message: string }
-  | { k: "ws-open"; id: string; path: string; headers: Array<[string, string]> }
+  | { k: "ws-open"; id: string; path: string; headers: Array<[string, string]>; target?: TunnelTarget }
   | { k: "ws-ok"; id: string }
   | { k: "ws-msg"; id: string; text?: string; body?: string }
   | { k: "ws-close"; id: string; code: number; reason: string }

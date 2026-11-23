@@ -246,22 +246,22 @@ export interface BrowserDaemon
     listener: (event: DeckMuseStreamEvent) => void,
     options?: { signal?: AbortSignal },
   ): Promise<void>;
-  /** tty7 会话桥：列会话、看屏幕、发指令、新开会话；粘贴图片落盘换路径。 */
-  deckTty7Sessions(): Promise<DeckTty7SessionsResponse>;
-  deckTty7Delete(pane: number): Promise<{ ok: true }>;
-  deckTty7Rename(pane: number, name: string): Promise<{ ok: true }>;
+  /** tty7 会话桥：列会话、看屏幕、发指令、新开会话；粘贴图片落盘换路径。传 deviceId 时经隧道操作对端设备。 */
+  deckTty7Sessions(deviceId?: string | null): Promise<DeckTty7SessionsResponse>;
+  deckTty7Delete(pane: number, deviceId?: string | null): Promise<{ ok: true }>;
+  deckTty7Rename(pane: number, name: string, deviceId?: string | null): Promise<{ ok: true }>;
   /** 告诉 daemon 正在整屏看哪个会话（null 表示没在看），这个会话的完成提醒会被跳过。 */
-  deckTty7Viewing(pane: number | null): Promise<{ ok: true }>;
+  deckTty7Viewing(pane: number | null, deviceId?: string | null): Promise<{ ok: true }>;
   deckNotices(): Promise<DeckNoticesResponse>;
   deckTelegram(): Promise<DeckTelegramStatusResponse>;
   deckTelegramAction(body: DeckTelegramActionBody): Promise<DeckTelegramStatusResponse>;
   deckTelegramInvite(): Promise<{ invite: string }>;
   deckNoticeDismiss(body: DeckNoticeDismissBody): Promise<{ ok: true }>;
-  deckTty7Screen(pane: number, lines?: number): Promise<DeckTty7ScreenResponse>;
-  deckTty7Send(body: DeckTty7SendBody): Promise<{ ok: true }>;
-  deckTty7Start(body: DeckTty7StartBody): Promise<DeckTty7StartResponse>;
-  deckTty7PasteImage(data: Blob): Promise<DeckTty7PasteImageResponse>;
-  deckTty7Terminal(pane: number, size: DeckTerminalSize): WebSocket;
+  deckTty7Screen(pane: number, lines?: number, deviceId?: string | null): Promise<DeckTty7ScreenResponse>;
+  deckTty7Send(body: DeckTty7SendBody, deviceId?: string | null): Promise<{ ok: true }>;
+  deckTty7Start(body: DeckTty7StartBody, deviceId?: string | null): Promise<DeckTty7StartResponse>;
+  deckTty7PasteImage(data: Blob, deviceId?: string | null): Promise<DeckTty7PasteImageResponse>;
+  deckTty7Terminal(pane: number, size: DeckTerminalSize, deviceId?: string | null): WebSocket;
   taskBoard(): Promise<TaskBoard>;
   createTask(body: TaskCreateInput, images?: readonly File[]): Promise<TaskBoard>;
   updateTask(body: TaskUpdateInput, images?: readonly File[]): Promise<TaskBoard>;
@@ -459,10 +459,14 @@ export function createBrowserDaemon(options?: {
       request<DeckMuseSendResponse>("POST", "/api/deck/muse/send", body),
     deckMuseStream: (listener, streamOptions) =>
       readMuseEvents(fetchImpl, token, listener, streamOptions?.signal),
-    deckTty7Sessions: () => request<DeckTty7SessionsResponse>("GET", "/api/deck/tty7/sessions"),
-    deckTty7Delete: (pane: number) => request<{ ok: true }>("POST", "/api/deck/tty7/delete", { pane }),
-    deckTty7Rename: (pane: number, name: string) => request<{ ok: true }>("POST", "/api/deck/tty7/rename", { pane, name }),
-    deckTty7Viewing: (pane: number | null) => request<{ ok: true }>("POST", "/api/deck/tty7/viewing", { pane }),
+    deckTty7Sessions: (deviceId) =>
+      request<DeckTty7SessionsResponse>("GET", withDeviceId("/api/deck/tty7/sessions", deviceId)),
+    deckTty7Delete: (pane: number, deviceId) =>
+      request<{ ok: true }>("POST", withDeviceId("/api/deck/tty7/delete", deviceId), { pane }),
+    deckTty7Rename: (pane: number, name: string, deviceId) =>
+      request<{ ok: true }>("POST", withDeviceId("/api/deck/tty7/rename", deviceId), { pane, name }),
+    deckTty7Viewing: (pane: number | null, deviceId) =>
+      request<{ ok: true }>("POST", withDeviceId("/api/deck/tty7/viewing", deviceId), { pane }),
     deckNotices: () => request<DeckNoticesResponse>("GET", "/api/deck/notices"),
     deckTelegram: () => request<DeckTelegramStatusResponse>("GET", "/api/deck/telegram"),
     deckTelegramAction: (body) => request<DeckTelegramStatusResponse>("POST", "/api/deck/telegram", body),
@@ -484,20 +488,24 @@ export function createBrowserDaemon(options?: {
       request<DispatchPolicyResponse>("PUT", "/api/dispatch/policy", body),
     deckNoticeDismiss: (body: DeckNoticeDismissBody) =>
       request<{ ok: true }>("POST", "/api/deck/notices/dismiss", body),
-    deckTty7Screen: (pane: number, lines?: number) =>
+    deckTty7Screen: (pane: number, lines?: number, deviceId?: string | null) =>
       request<DeckTty7ScreenResponse>(
         "GET",
-        `/api/deck/tty7/screen?pane=${pane}${lines === undefined ? "" : `&lines=${lines}`}`,
+        withDeviceId(`/api/deck/tty7/screen?pane=${pane}${lines === undefined ? "" : `&lines=${lines}`}`, deviceId),
       ),
-    deckTty7Send: (body: DeckTty7SendBody) => request<{ ok: true }>("POST", "/api/deck/tty7/send", body),
-    deckTty7Start: (body: DeckTty7StartBody) => request<DeckTty7StartResponse>("POST", "/api/deck/tty7/start", body),
-    deckTty7PasteImage: (data: Blob) => request<DeckTty7PasteImageResponse>("POST", "/api/deck/tty7/paste-image", data),
-    deckTty7Terminal(pane, size) {
+    deckTty7Send: (body: DeckTty7SendBody, deviceId) =>
+      request<{ ok: true }>("POST", withDeviceId("/api/deck/tty7/send", deviceId), body),
+    deckTty7Start: (body: DeckTty7StartBody, deviceId) =>
+      request<DeckTty7StartResponse>("POST", withDeviceId("/api/deck/tty7/start", deviceId), body),
+    deckTty7PasteImage: (data: Blob, deviceId) =>
+      request<DeckTty7PasteImageResponse>("POST", withDeviceId("/api/deck/tty7/paste-image", deviceId), data),
+    deckTty7Terminal(pane, size, deviceId) {
       const url = new URL("/api/deck/tty7/terminal", baseUrl);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       const socket = new WebSocket(url);
       socket.binaryType = "arraybuffer";
-      socket.addEventListener("open", () => socket.send(JSON.stringify({ type: "connect", token, pane, size })), { once: true });
+      const payload = deviceId ? { type: "connect", token, pane, size, deviceId } : { type: "connect", token, pane, size };
+      socket.addEventListener("open", () => socket.send(JSON.stringify(payload)), { once: true });
       return socket;
     },
     putNotionKey: async (body: NotionKeyPutBody) => {
@@ -580,6 +588,12 @@ export function createBrowserDaemon(options?: {
     materializeReference: (body: ReferenceMaterializeBody) =>
       request<ReferenceMaterializeResponse>("POST", "/api/references/materialize", body),
   };
+}
+
+function withDeviceId(path: string, deviceId: string | null | undefined): string {
+  if (!deviceId) return path;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}deviceId=${encodeURIComponent(deviceId)}`;
 }
 
 function queryString(query: TopicsQuery | undefined): string {
