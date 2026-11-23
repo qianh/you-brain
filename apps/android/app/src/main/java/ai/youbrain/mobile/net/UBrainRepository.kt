@@ -25,6 +25,8 @@ import ai.youbrain.mobile.data.PeerPinStore
 import ai.youbrain.mobile.data.RelayDevice
 import ai.youbrain.mobile.data.RelayState
 import ai.youbrain.mobile.data.T3StartResponse
+import ai.youbrain.mobile.data.TaskBoard
+import ai.youbrain.mobile.data.TaskReview
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -37,6 +39,7 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
@@ -65,9 +68,18 @@ data class AgentUiState(
     val error: String? = null,
 )
 
+data class DeviceTodoState(
+    val board: TaskBoard? = null,
+    val loading: Boolean = false,
+    val mutating: Boolean = false,
+    val error: String? = null,
+    val lastLoadedAt: Long = 0L,
+)
+
 enum class AppTab {
     AGENT,
     T3,
+    TODOS,
     PUSHES,
     SETTINGS,
 }
@@ -95,6 +107,8 @@ data class AppUiState(
     val backgroundKeepAlive: Boolean = true,
     val pinnedPeers: Map<String, String> = emptyMap(),
     val agent: AgentUiState = AgentUiState(),
+    val selectedTodoDeviceId: String? = null,
+    val todoBoards: Map<String, DeviceTodoState> = emptyMap(),
     val navTarget: NavigationTarget? = null,
 ) {
     fun displayName(id: String, rawName: String): String {
@@ -236,6 +250,10 @@ class UBrainRepository(context: Context) {
         val cachedPushes = appStore.loadCachedPushes()
         val savedEnrollment = identityStore.getEnrollment()
         val initialMasterId = appStore.getSelectedMasterDeviceId()
+        val initialTodoDeviceId = appStore.getSelectedTodoDeviceId()
+        val cachedTodoBoards = appStore.loadCachedTodoBoards().mapValues { (_, board) ->
+            DeviceTodoState(board = board)
+        }
         _uiState.value = AppUiState(
             enrolled = savedEnrollment != null,
             deviceId = savedEnrollment?.first?.deviceId ?: deviceId,
@@ -248,6 +266,8 @@ class UBrainRepository(context: Context) {
             backgroundKeepAlive = appStore.isBackgroundKeepAliveEnabled(),
             pinnedPeers = pinStore.listPins(),
             agent = hydratedAgentState(initialMasterId),
+            selectedTodoDeviceId = initialTodoDeviceId,
+            todoBoards = cachedTodoBoards,
         )
         if (savedEnrollment != null) {
             startConnection(savedEnrollment.first, savedEnrollment.second)
@@ -382,6 +402,8 @@ class UBrainRepository(context: Context) {
                 pushes = emptyList(),
                 unreadPushCount = 0,
                 agent = AgentUiState(),
+                selectedTodoDeviceId = null,
+                todoBoards = emptyMap(),
             )
         }
     }
@@ -1076,4 +1098,284 @@ class UBrainRepository(context: Context) {
         _uiState.value.relayState.devices.filter {
             it.id != _uiState.value.deviceId && it.enrolled == true && it.dispatch?.viewT3 == true
         }
+
+    fun todoDevices(): List<RelayDevice> =
+        _uiState.value.relayState.devices
+            .filter { it.id != _uiState.value.deviceId && it.enrolled == true }
+            .sortedWith(
+                compareByDescending<RelayDevice> { it.online && it.dispatch?.enabled == true }
+                    .thenByDescending { it.online }
+                    .thenBy { _uiState.value.displayName(it).lowercase() },
+            )
+
+    fun selectTodoDevice(deviceId: String) {
+        appStore.setSelectedTodoDeviceId(deviceId)
+        _uiState.update { it.copy(selectedTodoDeviceId = deviceId) }
+        val dev = _uiState.value.relayState.devices.firstOrNull { it.id == deviceId }
+        if (dev?.online == true && _uiState.value.connectionState == ConnectionState.OK) {
+            scope.launch { loadTodoBoard(deviceId, silent = false) }
+        }
+    }
+
+    private fun updateDeviceTodoState(deviceId: String, transform: (DeviceTodoState) -> DeviceTodoState) {
+        _uiState.update { cur ->
+            val current = cur.todoBoards[deviceId] ?: DeviceTodoState()
+            cur.copy(todoBoards = cur.todoBoards + (deviceId to transform(current)))
+        }
+    }
+
+    private fun friendlyTodoError(raw: String): String = when {
+        raw.contains("不支持的指令") -> "该设备的 U-Brain 版本尚未支持远程管理 TODO，请升级该设备客户端后再试。"
+        raw.contains("本机没有开启接收派活") -> "该设备未开启「接收派活」，请在该设备「设置 → 集成」中开启后再试。"
+        else -> raw
+    }
+
+    suspend fun loadTodoBoard(deviceId: String, silent: Boolean = false): Result<TaskBoard> {
+        if (!_uiState.value.enrolled) {
+            return Result.failure(IllegalStateException("设备尚未入网"))
+        }
+        if (!relayClient.awaitConnected(6_000L)) {
+            val msg = "连不上中转，请检查手机网络"
+            if (!silent) updateDeviceTodoState(deviceId) { it.copy(loading = false, error = msg) }
+            return Result.failure(IllegalStateException(msg))
+        }
+        val dev = _uiState.value.relayState.devices.firstOrNull { it.id == deviceId }
+        if (dev != null && !dev.online) {
+            val msg = "该设备当前离线"
+            if (!silent) updateDeviceTodoState(deviceId) { it.copy(loading = false, error = msg) }
+            return Result.failure(IllegalStateException(msg))
+        }
+        if (!silent) {
+            updateDeviceTodoState(deviceId) { it.copy(loading = true, error = null) }
+        }
+        return when (val outcome = relayClient.dispatchCommand(deviceId, "tasks.board", buildJsonObject { }, timeoutMs = 20_000L)) {
+            is CommandOutcome.Err -> {
+                val msg = friendlyTodoError(outcome.error)
+                updateDeviceTodoState(deviceId) { it.copy(loading = false, error = msg) }
+                Result.failure(IllegalStateException(msg))
+            }
+            is CommandOutcome.Ok -> {
+                val parsed = outcome.result?.let {
+                    runCatching { json.decodeFromJsonElement(TaskBoard.serializer(), it) }.getOrNull()
+                }
+                if (parsed == null) {
+                    val msg = "设备返回的 TODO 数据格式无效"
+                    updateDeviceTodoState(deviceId) { it.copy(loading = false, error = msg) }
+                    Result.failure(IllegalStateException(msg))
+                } else {
+                    appStore.saveCachedTodoBoard(deviceId, parsed)
+                    updateDeviceTodoState(deviceId) {
+                        it.copy(
+                            board = parsed,
+                            loading = false,
+                            error = null,
+                            lastLoadedAt = System.currentTimeMillis(),
+                        )
+                    }
+                    Result.success(parsed)
+                }
+            }
+        }
+    }
+
+    private suspend fun mutateTodoBoard(
+        deviceId: String,
+        kind: String,
+        args: JsonObject,
+        timeoutMs: Long = 35_000L,
+    ): Result<TaskBoard> {
+        if (!relayClient.awaitConnected(6_000L)) {
+            return Result.failure(IllegalStateException("连不上中转，请检查手机网络"))
+        }
+        updateDeviceTodoState(deviceId) { it.copy(mutating = true) }
+        return try {
+            when (val outcome = relayClient.dispatchCommand(deviceId, kind, args, timeoutMs = timeoutMs)) {
+                is CommandOutcome.Err -> Result.failure(IllegalStateException(friendlyTodoError(outcome.error)))
+                is CommandOutcome.Ok -> {
+                    val parsed = outcome.result?.let {
+                        runCatching { json.decodeFromJsonElement(TaskBoard.serializer(), it) }.getOrNull()
+                    }
+                    if (parsed == null) {
+                        Result.failure(IllegalStateException("设备返回的 TODO 数据格式无效"))
+                    } else {
+                        appStore.saveCachedTodoBoard(deviceId, parsed)
+                        updateDeviceTodoState(deviceId) {
+                            it.copy(
+                                board = parsed,
+                                error = null,
+                                lastLoadedAt = System.currentTimeMillis(),
+                            )
+                        }
+                        Result.success(parsed)
+                    }
+                }
+            }
+        } finally {
+            updateDeviceTodoState(deviceId) { it.copy(mutating = false) }
+        }
+    }
+
+    suspend fun createTodo(
+        deviceId: String,
+        title: String,
+        description: String,
+        projectId: String?,
+        newProjectName: String? = null,
+        newProjectCwd: String? = null,
+        priority: Int = 2,
+    ): Result<TaskBoard> {
+        val cleanTitle = title.trim()
+        if (cleanTitle.isEmpty()) return Result.failure(IllegalArgumentException("请填写任务标题"))
+        val args = buildJsonObject {
+            put("title", cleanTitle)
+            if (description.trim().isNotEmpty()) put("description", description.trim())
+            val newName = newProjectName?.trim().orEmpty()
+            if (newName.isNotEmpty()) {
+                put(
+                    "newProject",
+                    buildJsonObject {
+                        put("name", newName)
+                        val cleanCwd = newProjectCwd?.trim().orEmpty()
+                        if (cleanCwd.isNotEmpty()) put("cwd", cleanCwd)
+                    },
+                )
+            } else if (!projectId.isNullOrBlank()) {
+                put("projectId", projectId)
+            } else {
+                put("projectId", JsonNull)
+            }
+            put("priority", priority.coerceIn(0, 3))
+        }
+        return mutateTodoBoard(deviceId, "tasks.create", args)
+    }
+
+    suspend fun updateTodo(
+        deviceId: String,
+        id: String,
+        title: String,
+        description: String,
+        projectId: String?,
+        newProjectName: String? = null,
+        newProjectCwd: String? = null,
+        priority: Int = 2,
+    ): Result<TaskBoard> {
+        val cleanTitle = title.trim()
+        if (cleanTitle.isEmpty()) return Result.failure(IllegalArgumentException("请填写任务标题"))
+        val args = buildJsonObject {
+            put("id", id)
+            put("title", cleanTitle)
+            put("description", description.trim())
+            val newName = newProjectName?.trim().orEmpty()
+            if (newName.isNotEmpty()) {
+                put(
+                    "newProject",
+                    buildJsonObject {
+                        put("name", newName)
+                        val cleanCwd = newProjectCwd?.trim().orEmpty()
+                        if (cleanCwd.isNotEmpty()) put("cwd", cleanCwd)
+                    },
+                )
+            } else if (!projectId.isNullOrBlank()) {
+                put("projectId", projectId)
+            } else {
+                put("projectId", JsonNull)
+            }
+            put("priority", priority.coerceIn(0, 3))
+        }
+        return mutateTodoBoard(deviceId, "tasks.update", args)
+    }
+
+    suspend fun toggleTodoProject(deviceId: String, projectId: String, enabled: Boolean): Result<TaskBoard> =
+        mutateTodoBoard(
+            deviceId,
+            "tasks.action",
+            buildJsonObject {
+                put("action", "project")
+                put("projectId", projectId)
+                put("enabled", enabled)
+            },
+        )
+
+    suspend fun startTodo(deviceId: String, id: String): Result<TaskBoard> =
+        mutateTodoBoard(
+            deviceId,
+            "tasks.action",
+            buildJsonObject {
+                put("action", "start")
+                put("id", id)
+            },
+            timeoutMs = 45_000L,
+        )
+
+    suspend fun completeTodo(deviceId: String, id: String): Result<TaskBoard> =
+        mutateTodoBoard(
+            deviceId,
+            "tasks.action",
+            buildJsonObject {
+                put("action", "complete")
+                put("id", id)
+            },
+        )
+
+    suspend fun retryTodo(deviceId: String, id: String): Result<TaskBoard> =
+        mutateTodoBoard(
+            deviceId,
+            "tasks.action",
+            buildJsonObject {
+                put("action", "retry")
+                put("id", id)
+            },
+            timeoutMs = 45_000L,
+        )
+
+    suspend fun approveTodo(deviceId: String, id: String, reviewSha: String): Result<TaskBoard> =
+        mutateTodoBoard(
+            deviceId,
+            "tasks.action",
+            buildJsonObject {
+                put("action", "approve")
+                put("id", id)
+                put("reviewSha", reviewSha)
+            },
+            timeoutMs = 90_000L,
+        )
+
+    suspend fun rejectTodo(deviceId: String, id: String, feedback: String): Result<TaskBoard> {
+        val clean = feedback.trim()
+        if (clean.isEmpty()) return Result.failure(IllegalArgumentException("请填写需要修改的内容"))
+        return mutateTodoBoard(
+            deviceId,
+            "tasks.action",
+            buildJsonObject {
+                put("action", "reject")
+                put("id", id)
+                put("feedback", clean)
+            },
+            timeoutMs = 45_000L,
+        )
+    }
+
+    suspend fun reviewTodo(deviceId: String, id: String): Result<TaskReview> {
+        if (!relayClient.awaitConnected(6_000L)) {
+            return Result.failure(IllegalStateException("连不上中转，请检查手机网络"))
+        }
+        return when (
+            val outcome = relayClient.dispatchCommand(
+                deviceId,
+                "tasks.review",
+                buildJsonObject { put("id", id) },
+                timeoutMs = 30_000L,
+            )
+        ) {
+            is CommandOutcome.Err -> Result.failure(IllegalStateException(friendlyTodoError(outcome.error)))
+            is CommandOutcome.Ok -> {
+                val parsed = outcome.result?.let {
+                    runCatching { json.decodeFromJsonElement(TaskReview.serializer(), it) }.getOrNull()
+                }
+                if (parsed == null) Result.failure(IllegalStateException("无法解析变更内容"))
+                else Result.success(parsed)
+            }
+        }
+    }
 }
+

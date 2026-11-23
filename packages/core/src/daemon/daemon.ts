@@ -4375,12 +4375,14 @@ export class YouBrainDaemon {
     this.#dispatchEvents = events;
 
     const automation = this.#taskAutomation;
+    const tasks = this.#tasks;
     const executor = automation
       ? new DispatchExecutor({
           dataDir: paths.dataDir,
           deviceId,
           now: () => this.#clock.nowMs(),
           t3: automation,
+          ...(tasks ? { tasksPort: tasks } : {}),
           role: this.#local.role === "server" ? "server" : "desktop",
           outboxPort: {
             list: () => (hub ? hub.outbox() : Promise.resolve([])),

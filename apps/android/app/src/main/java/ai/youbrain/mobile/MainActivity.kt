@@ -39,6 +39,8 @@ import ai.youbrain.mobile.ui.OnboardingScreen
 import ai.youbrain.mobile.ui.PushCenterScreen
 import ai.youbrain.mobile.ui.SettingsScreen
 import ai.youbrain.mobile.ui.T3DeckScreen
+import ai.youbrain.mobile.ui.TodoLogic
+import ai.youbrain.mobile.ui.TodoScreen
 import ai.youbrain.mobile.ui.components.IosNavigationBar
 import ai.youbrain.mobile.ui.components.IosTabBar
 import ai.youbrain.mobile.ui.theme.IosTheme
@@ -154,6 +156,10 @@ class MainActivity : ComponentActivity() {
                 deviceId = intent.getStringExtra(RelayForegroundService.EXTRA_DEVICE_ID),
                 threadUrl = intent.getStringExtra(RelayForegroundService.EXTRA_THREAD_URL),
             )
+            "todos" -> repo.navigateTo(
+                tab = AppTab.TODOS,
+                deviceId = intent.getStringExtra(RelayForegroundService.EXTRA_DEVICE_ID),
+            )
             "pushes" -> repo.navigateTo(AppTab.PUSHES)
         }
     }
@@ -187,8 +193,12 @@ private fun MainTabsShell(
     LaunchedEffect(state.navTarget) {
         val nav = state.navTarget ?: return@LaunchedEffect
         currentTab = nav.tab
-        if (nav.deviceId != null) targetT3DeviceId = nav.deviceId
-        if (nav.threadUrl != null) targetT3ThreadUrl = nav.threadUrl
+        if (nav.tab == AppTab.TODOS && nav.deviceId != null) {
+            repository.selectTodoDevice(nav.deviceId)
+        } else {
+            if (nav.deviceId != null) targetT3DeviceId = nav.deviceId
+            if (nav.threadUrl != null) targetT3ThreadUrl = nav.threadUrl
+        }
     }
 
     LaunchedEffect(currentTab) {
@@ -206,6 +216,10 @@ private fun MainTabsShell(
         }
     }
 
+    val todoReviewCount = remember(state.todoBoards) {
+        TodoLogic.totalReviewCount(state.todoBoards.mapValues { it.value.board })
+    }
+
     val c = IosTheme.colors
 
     Scaffold(
@@ -216,6 +230,7 @@ private fun MainTabsShell(
                 title = when (currentTab) {
                     AppTab.AGENT -> "主控"
                     AppTab.T3 -> "设备 T3"
+                    AppTab.TODOS -> "设备 TODO"
                     AppTab.PUSHES -> "消息"
                     AppTab.SETTINGS -> "设置"
                 },
@@ -227,6 +242,7 @@ private fun MainTabsShell(
             IosTabBar(
                 currentTab = currentTab,
                 unreadCount = state.unreadPushCount,
+                todoReviewCount = todoReviewCount,
                 onSelectTab = { nextTab ->
                     currentTab = nextTab
                     if (nextTab == AppTab.PUSHES) {
@@ -257,6 +273,16 @@ private fun MainTabsShell(
                         AppTab.AGENT -> AgentScreen(
                             state = state,
                             repository = repository,
+                            onOpenDeviceT3 = { devId, threadUrl ->
+                                targetT3DeviceId = devId
+                                targetT3ThreadUrl = threadUrl
+                                currentTab = AppTab.T3
+                            },
+                        )
+                        AppTab.TODOS -> TodoScreen(
+                            state = state,
+                            repository = repository,
+                            isVisibleTab = true,
                             onOpenDeviceT3 = { devId, threadUrl ->
                                 targetT3DeviceId = devId
                                 targetT3ThreadUrl = threadUrl

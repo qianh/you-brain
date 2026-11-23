@@ -9,6 +9,7 @@ class AppStore(context: Context) {
     private val prefs = context.getSharedPreferences("ubrain_app", Context.MODE_PRIVATE)
     private val pushesFile = File(context.filesDir, "pushes_cache.json")
     private val agentSnapshotsFile = File(context.filesDir, "agent_snapshots.json")
+    private val todoBoardsFile = File(context.filesDir, "todo_boards_cache.json")
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     fun getLastPushSeq(): Long = prefs.getLong("last_push_seq", 0L)
@@ -24,6 +25,14 @@ class AppStore(context: Context) {
     fun setSelectedMasterDeviceId(deviceId: String?) {
         prefs.edit().apply {
             if (deviceId == null) remove("master_device_id") else putString("master_device_id", deviceId)
+        }.apply()
+    }
+
+    fun getSelectedTodoDeviceId(): String? = prefs.getString("todo_device_id", null)
+
+    fun setSelectedTodoDeviceId(deviceId: String?) {
+        prefs.edit().apply {
+            if (deviceId == null) remove("todo_device_id") else putString("todo_device_id", deviceId)
         }.apply()
     }
 
@@ -79,6 +88,31 @@ class AppStore(context: Context) {
     }
 
     @Synchronized
+    fun loadCachedTodoBoards(): Map<String, TaskBoard> {
+        return try {
+            if (!todoBoardsFile.exists()) return emptyMap()
+            json.decodeFromString<Map<String, TaskBoard>>(todoBoardsFile.readText())
+        } catch (_: Throwable) {
+            emptyMap()
+        }
+    }
+
+    @Synchronized
+    fun saveCachedTodoBoard(deviceId: String, board: TaskBoard) {
+        if (deviceId.isBlank()) return
+        runCatching {
+            val existing = LinkedHashMap(loadCachedTodoBoards())
+            existing.remove(deviceId)
+            existing[deviceId] = board
+            while (existing.size > 12) {
+                val oldestKey = existing.keys.firstOrNull() ?: break
+                existing.remove(oldestKey)
+            }
+            todoBoardsFile.writeText(json.encodeToString(existing))
+        }
+    }
+
+    @Synchronized
     fun loadAgentSnapshot(masterDeviceId: String?): CachedAgentSnapshot? {
         if (masterDeviceId.isNullOrBlank()) return null
         return loadAllAgentSnapshots()[masterDeviceId]
@@ -116,8 +150,9 @@ class AppStore(context: Context) {
 
     @Synchronized
     fun clearPushesAndSeq() {
-        prefs.edit().remove("last_push_seq").remove("master_device_id").apply()
+        prefs.edit().remove("last_push_seq").remove("master_device_id").remove("todo_device_id").apply()
         runCatching { pushesFile.delete() }
         runCatching { agentSnapshotsFile.delete() }
+        runCatching { todoBoardsFile.delete() }
     }
 }

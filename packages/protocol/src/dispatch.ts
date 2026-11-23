@@ -40,6 +40,11 @@ export const DISPATCH_KINDS = [
   "dispatch.followup",
   "dispatch.refresh",
   "notice.reply",
+  "tasks.board",
+  "tasks.create",
+  "tasks.update",
+  "tasks.action",
+  "tasks.review",
 ] as const;
 
 export type DispatchKind = (typeof DISPATCH_KINDS)[number];
@@ -142,6 +147,48 @@ export const NoticeReplyArgsSchema = z.strictObject({
     .refine((value) => value.trim().length > 0, { message: "回复不能为空" }),
 });
 
+const TaskPrioritySchema = z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]);
+const TaskNewProjectSchema = z.strictObject({
+  name: z.string().trim().min(1).max(100),
+  cwd: z.string().trim().min(1).max(4096).refine((value) => value.startsWith("/"), "项目文件夹必须是绝对路径").optional(),
+});
+const taskOneProject = (body: { projectId?: string | null | undefined; newProject?: unknown }): boolean =>
+  !(body.newProject !== undefined && body.projectId);
+const taskOneProjectMessage = { message: "projectId 与 newProject 只能二选一" };
+
+export const TasksBoardArgsSchema = z.strictObject({});
+
+export const TasksCreateArgsSchema = z.strictObject({
+  title: z.string().trim().min(1).max(200),
+  description: z.string().max(20_000).optional(),
+  projectId: z.string().min(1).max(200).nullable().optional(),
+  newProject: TaskNewProjectSchema.optional(),
+  priority: TaskPrioritySchema.optional(),
+}).refine(taskOneProject, taskOneProjectMessage);
+
+export const TasksUpdateArgsSchema = z.strictObject({
+  id: z.string().min(1).max(200),
+  title: z.string().trim().min(1).max(200).optional(),
+  description: z.string().max(20_000).optional(),
+  retainImageIds: z.array(z.uuid()).max(4).optional(),
+  projectId: z.string().min(1).max(200).nullable().optional(),
+  newProject: TaskNewProjectSchema.optional(),
+  priority: TaskPrioritySchema.optional(),
+}).refine(taskOneProject, taskOneProjectMessage);
+
+export const TasksActionArgsSchema = z.discriminatedUnion("action", [
+  z.strictObject({ action: z.literal("project"), projectId: z.string().min(1).max(200), enabled: z.boolean() }),
+  z.strictObject({ action: z.literal("start"), id: z.string().min(1).max(200) }),
+  z.strictObject({ action: z.literal("complete"), id: z.string().min(1).max(200) }),
+  z.strictObject({ action: z.literal("retry"), id: z.string().min(1).max(200) }),
+  z.strictObject({ action: z.literal("approve"), id: z.string().min(1).max(200), reviewSha: z.string().regex(/^[a-f0-9]{40,64}$/u) }),
+  z.strictObject({ action: z.literal("reject"), id: z.string().min(1).max(200), feedback: z.string().trim().min(1).max(10_000) }),
+]);
+
+export const TasksReviewArgsSchema = z.strictObject({
+  id: z.string().min(1).max(200),
+});
+
 export const DispatchCommandSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("t3.projects"), args: T3ProjectsArgsSchema }),
   z.strictObject({ kind: z.literal("t3.start"), args: T3StartArgsSchema }),
@@ -155,6 +202,11 @@ export const DispatchCommandSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("dispatch.followup"), args: DispatchFollowupArgsSchema }),
   z.strictObject({ kind: z.literal("dispatch.refresh"), args: DispatchRefreshArgsSchema }),
   z.strictObject({ kind: z.literal("notice.reply"), args: NoticeReplyArgsSchema }),
+  z.strictObject({ kind: z.literal("tasks.board"), args: TasksBoardArgsSchema }),
+  z.strictObject({ kind: z.literal("tasks.create"), args: TasksCreateArgsSchema }),
+  z.strictObject({ kind: z.literal("tasks.update"), args: TasksUpdateArgsSchema }),
+  z.strictObject({ kind: z.literal("tasks.action"), args: TasksActionArgsSchema }),
+  z.strictObject({ kind: z.literal("tasks.review"), args: TasksReviewArgsSchema }),
 ]);
 
 export type DispatchCommand = z.infer<typeof DispatchCommandSchema>;

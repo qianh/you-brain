@@ -17,6 +17,8 @@ import {
   type T3ThreadBrief,
   type T3ThreadConversation,
 } from "../deck/t3/automation.js";
+import { TaskError } from "../tasks/service.js";
+import type { TaskBoard, TaskHttpPort, TaskReview } from "../tasks/types.js";
 import { AgentSessionStore } from "./agent-sessions.js";
 import { AuditLog } from "./audit.js";
 import type { DispatchFollowupResult, DispatchReadResult, OutboxEntry } from "./hub.js";
@@ -29,6 +31,9 @@ const ACTIVE_POLL_MS = 1_500;
 const ACTIVE_THREAD_STATUSES = new Set(["preparing", "queued", "starting", "running"]);
 const RETRY_MS = [60_000, 120_000, 300_000] as const;
 const SUMMARY_LIMIT = 32_000;
+/** 中转对单条 result 帧上限为 256 KB，这里预留外层封装与转义空间。 */
+const TASK_RESULT_MAX_BYTES = 190 * 1024;
+const UNLEDGERED_READ_KINDS = new Set<string>(["tasks.board", "tasks.review"]);
 const CLOSED = "本机没有开启接收派活";
 const REJECTED = "本机不接受这条指令";
 
@@ -116,11 +121,14 @@ export interface DispatchExecutorDeviceSnapshot {
   projects: Array<{ id: string; name: string }>;
 }
 
+export type DispatchTasksPort = Pick<TaskHttpPort, "board" | "create" | "update" | "action" | "review">;
+
 export interface DispatchExecutorOptions {
   dataDir: string;
   deviceId: string;
   now?: () => number;
   t3: DispatchT3Port;
+  tasksPort?: DispatchTasksPort;
   role?: "desktop" | "server";
   outboxPort?: DispatchOutboxPort;
   devicesPort?: () => Promise<DispatchExecutorDeviceSnapshot[]>;
@@ -143,7 +151,9 @@ function asLaunchMode(mode: RuntimeModeName): LaunchModeName | null {
 }
 
 function failureMessage(error: unknown): string {
-  if (error instanceof DispatchFailure || error instanceof T3AutomationError) return error.message;
+  if (error instanceof DispatchFailure || error instanceof T3AutomationError || error instanceof TaskError) {
+    return error.message;
+  }
   return "派活执行失败";
 }
 
@@ -172,6 +182,7 @@ export class DispatchExecutor {
   readonly #deviceId: string;
   readonly #now: () => number;
   readonly #t3: DispatchT3Port;
+  readonly #tasks: DispatchTasksPort | undefined;
   readonly #role: "desktop" | "server" | undefined;
   readonly #outbox: DispatchOutboxPort | undefined;
   readonly #devicesPort: DispatchExecutorOptions["devicesPort"];
@@ -195,6 +206,7 @@ export class DispatchExecutor {
     this.#deviceId = options.deviceId;
     this.#now = options.now ?? Date.now;
     this.#t3 = options.t3;
+    this.#tasks = options.tasksPort;
     this.#role = options.role;
     this.#outbox = options.outboxPort;
     this.#devicesPort = options.devicesPort;
@@ -220,7 +232,7 @@ export class DispatchExecutor {
     return this.#policy.write(patch);
   }
 
-  /** 未开启、未允许、验签失败、过期、重放不写命令账本；执行成功和业务失败要写。 */
+  /** 未开启、未允许、验签失败、过期、重放不写命令账本；执行成功和业务失败要写（只读大响应除外）。 */
   async handle(frame: CmdFrame): Promise<CommandOutcome> {
     const now = this.#now();
     const from = frameFrom(frame);
@@ -238,7 +250,8 @@ export class DispatchExecutor {
     if (typeof frame.nonce !== "string" || frame.nonce === "") return this.#reject(now, from, kind, "nonce 无效", REJECTED);
     if (this.#replay(from, frame.nonce, now)) return this.#reject(now, from, kind, "nonce 重放", REJECTED);
 
-    if (typeof frame.cmdId === "string" && frame.cmdId !== "") {
+    const skipLedger = UNLEDGERED_READ_KINDS.has(kind);
+    if (!skipLedger && typeof frame.cmdId === "string" && frame.cmdId !== "") {
       const cached = await this.#ledger.getCommand(frame.cmdId);
       if (cached) {
         await this.#audit.write({ ts: now, from, kind, outcome: "idempotent" });
@@ -261,12 +274,12 @@ export class DispatchExecutor {
 
     try {
       const result = await this.#run(parsed.data, frame, policy, sender, now);
-      await this.#ledger.putCommand(frame.cmdId, { ok: true, result });
+      if (!skipLedger) await this.#ledger.putCommand(frame.cmdId, { ok: true, result });
       await this.#audit.write({ ts: now, from, kind, outcome: "ok" });
       return { ok: true, result };
     } catch (error) {
       const message = failureMessage(error);
-      await this.#ledger.putCommand(frame.cmdId, { ok: false, error: message });
+      if (!skipLedger) await this.#ledger.putCommand(frame.cmdId, { ok: false, error: message });
       await this.#audit.write({ ts: now, from, kind, outcome: "error", reason: "执行失败" });
       return { ok: false, error: message };
     }
@@ -433,6 +446,16 @@ export class DispatchExecutor {
         return this.#dispatchRefresh(command.args.dispatchId);
       case "notice.reply":
         return this.#noticeReply(command.args.replyToken, command.args.text);
+      case "tasks.board":
+        return this.#tasksBoard(policy);
+      case "tasks.create":
+        return this.#tasksCreate(command.args, policy);
+      case "tasks.update":
+        return this.#tasksUpdate(command.args, policy);
+      case "tasks.action":
+        return this.#tasksAction(command.args, policy);
+      case "tasks.review":
+        return this.#tasksReview(command.args.id, policy);
       default: {
         const unreachable: never = command;
         return unreachable;
@@ -782,6 +805,78 @@ export class DispatchExecutor {
     return result;
   }
 
+  #requireTasks(): DispatchTasksPort {
+    if (!this.#tasks) throw new DispatchFailure("本机暂不支持远程管理 TODO");
+    return this.#tasks;
+  }
+
+  #assertProjectAllowed(policy: DispatchPolicy, projectId: string | null | undefined, newProject: unknown): void {
+    if (policy.allProjects) return;
+    if (newProject !== undefined) throw new DispatchFailure(REJECTED);
+    if (typeof projectId === "string" && projectId !== "" && !policy.allowedProjects.includes(projectId)) {
+      throw new DispatchFailure(REJECTED);
+    }
+  }
+
+  async #assertExistingTaskAllowed(tasks: DispatchTasksPort, policy: DispatchPolicy, id: string): Promise<void> {
+    if (policy.allProjects) return;
+    const board = await tasks.board();
+    const task = board.tasks.find((item) => item.id === id);
+    if (task && task.projectId !== null && !policy.allowedProjects.includes(task.projectId)) {
+      throw new DispatchFailure(REJECTED);
+    }
+  }
+
+  #presentTaskBoard(board: TaskBoard, policy: DispatchPolicy): TaskBoard {
+    const allowed = policy.allProjects ? null : new Set(policy.allowedProjects);
+    const filtered: TaskBoard = {
+      projects: allowed ? board.projects.filter((project) => allowed.has(project.id)) : structuredClone(board.projects),
+      tasks: allowed
+        ? board.tasks.filter((task) => task.projectId === null || allowed.has(task.projectId)).map((task) => structuredClone(task))
+        : structuredClone(board.tasks),
+      connectionError: board.connectionError,
+    };
+    return compactTaskBoard(filtered);
+  }
+
+  async #tasksBoard(policy: DispatchPolicy): Promise<TaskBoard> {
+    const tasks = this.#requireTasks();
+    return this.#presentTaskBoard(await tasks.board(), policy);
+  }
+
+  async #tasksCreate(args: Extract<DispatchCommand, { kind: "tasks.create" }>["args"], policy: DispatchPolicy): Promise<TaskBoard> {
+    const tasks = this.#requireTasks();
+    this.#assertProjectAllowed(policy, args.projectId, args.newProject);
+    const board = await tasks.create(args);
+    return this.#presentTaskBoard(board, policy);
+  }
+
+  async #tasksUpdate(args: Extract<DispatchCommand, { kind: "tasks.update" }>["args"], policy: DispatchPolicy): Promise<TaskBoard> {
+    const tasks = this.#requireTasks();
+    this.#assertProjectAllowed(policy, args.projectId, args.newProject);
+    await this.#assertExistingTaskAllowed(tasks, policy, args.id);
+    const board = await tasks.update(args);
+    return this.#presentTaskBoard(board, policy);
+  }
+
+  async #tasksAction(args: Extract<DispatchCommand, { kind: "tasks.action" }>["args"], policy: DispatchPolicy): Promise<TaskBoard> {
+    const tasks = this.#requireTasks();
+    if (args.action === "project") {
+      this.#assertProjectAllowed(policy, args.projectId, undefined);
+    } else {
+      await this.#assertExistingTaskAllowed(tasks, policy, args.id);
+    }
+    const board = await tasks.action(args);
+    return this.#presentTaskBoard(board, policy);
+  }
+
+  async #tasksReview(id: string, policy: DispatchPolicy): Promise<TaskReview> {
+    const tasks = this.#requireTasks();
+    await this.#assertExistingTaskAllowed(tasks, policy, id);
+    const review = await tasks.review(id);
+    return compactTaskReview(review);
+  }
+
   /** 手动名单优先；开了 trustEnrolled 再查云盘成员（公钥来自云盘，不来自中转）。 */
   async #sender(policy: DispatchPolicy, from: string): Promise<DispatchSender | undefined> {
     const listed = policy.allowedSenders.find((item) => item.deviceId === from);
@@ -836,3 +931,66 @@ export class DispatchExecutor {
     (this.#timer as { unref?: () => void }).unref?.();
   }
 }
+
+function jsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function trimString(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}…`;
+}
+
+function compactTaskBoard(board: TaskBoard): TaskBoard {
+  if (jsonBytes(board) <= TASK_RESULT_MAX_BYTES) return board;
+  const copy = structuredClone(board);
+  for (const task of copy.tasks) {
+    if (task.run && task.run.summary.length > 600) {
+      task.run.summary = trimString(task.run.summary, 600);
+    }
+  }
+  if (jsonBytes(copy) <= TASK_RESULT_MAX_BYTES) return copy;
+  for (const task of copy.tasks) {
+    if (task.status === "done" && task.description.length > 400) {
+      task.description = trimString(task.description, 400);
+    }
+  }
+  if (jsonBytes(copy) <= TASK_RESULT_MAX_BYTES) return copy;
+  const doneIndices = copy.tasks
+    .map((task, index) => ({ task, index }))
+    .filter(({ task }) => task.status === "done")
+    .sort((a, b) => a.task.updatedAt.localeCompare(b.task.updatedAt));
+  const drop = new Set<number>();
+  for (const item of doneIndices) {
+    drop.add(item.index);
+    const candidate = { ...copy, tasks: copy.tasks.filter((_, idx) => !drop.has(idx)) };
+    if (jsonBytes(candidate) <= TASK_RESULT_MAX_BYTES) return candidate;
+  }
+  return { ...copy, tasks: copy.tasks.filter((_, idx) => !drop.has(idx)) };
+}
+
+function compactTaskReview(review: TaskReview): TaskReview {
+  if (jsonBytes(review) <= TASK_RESULT_MAX_BYTES) return review;
+  const copy = structuredClone(review);
+  if (copy.task.run && copy.task.run.summary.length > 8_000) {
+    copy.task.run.summary = trimString(copy.task.run.summary, 8_000);
+  }
+  if (copy.stat.length > 16_000) {
+    copy.stat = trimString(copy.stat, 16_000);
+  }
+  if (jsonBytes(copy) <= TASK_RESULT_MAX_BYTES) return copy;
+  let low = 0;
+  let high = copy.diff.length;
+  const baseDiff = copy.diff;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    copy.diff = baseDiff.slice(0, mid);
+    copy.truncated = true;
+    if (jsonBytes(copy) <= TASK_RESULT_MAX_BYTES) low = mid;
+    else high = mid - 1;
+  }
+  copy.diff = baseDiff.slice(0, low);
+  copy.truncated = true;
+  return copy;
+}
+

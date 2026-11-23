@@ -140,6 +140,7 @@ fun IosNavigationBar(
 fun IosTabBar(
     currentTab: AppTab,
     unreadCount: Int,
+    todoReviewCount: Int = 0,
     onSelectTab: (AppTab) -> Unit,
 ) {
     val c = IosTheme.colors
@@ -170,6 +171,14 @@ fun IosTabBar(
                 label = "T3",
                 badgeCount = 0,
                 onClick = { onSelectTab(AppTab.T3) },
+                modifier = Modifier.weight(1f),
+            )
+            IosTabItem(
+                selected = currentTab == AppTab.TODOS,
+                icon = IosIcons.Checklist,
+                label = "TODO",
+                badgeCount = todoReviewCount,
+                onClick = { onSelectTab(AppTab.TODOS) },
                 modifier = Modifier.weight(1f),
             )
             IosTabItem(

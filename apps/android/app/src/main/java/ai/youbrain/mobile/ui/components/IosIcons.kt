@@ -312,6 +312,53 @@ object IosIcons {
         }
     }
 
+    val Checklist: ImageVector by lazy {
+        strokeIcon("Checklist", strokeWidth = 1.8f) {
+            // Top check + line
+            moveTo(4f, 7.5f)
+            lineTo(5.8f, 9.3f)
+            lineTo(8.8f, 6f)
+            moveTo(11.5f, 7.5f)
+            lineTo(20f, 7.5f)
+            // Middle check + line
+            moveTo(4f, 12.5f)
+            lineTo(5.8f, 14.3f)
+            lineTo(8.8f, 11f)
+            moveTo(11.5f, 12.5f)
+            lineTo(20f, 12.5f)
+            // Bottom dot/check + line
+            moveTo(4.5f, 17.5f)
+            lineTo(7.5f, 17.5f)
+            moveTo(11.5f, 17.5f)
+            lineTo(20f, 17.5f)
+        }
+    }
+
+    val Folder: ImageVector by lazy {
+        strokeIcon("Folder", strokeWidth = 1.75f) {
+            moveTo(3.5f, 7f)
+            curveTo(3.5f, 5.9f, 4.4f, 5f, 5.5f, 5f)
+            lineTo(9.5f, 5f)
+            lineTo(11.5f, 7.5f)
+            lineTo(18.5f, 7.5f)
+            curveTo(19.6f, 7.5f, 20.5f, 8.4f, 20.5f, 9.5f)
+            lineTo(20.5f, 17f)
+            curveTo(20.5f, 18.1f, 19.6f, 19f, 18.5f, 19f)
+            lineTo(5.5f, 19f)
+            curveTo(4.4f, 19f, 3.5f, 18.1f, 3.5f, 17f)
+            close()
+        }
+    }
+
+    val Play: ImageVector by lazy {
+        strokeIcon("Play", strokeWidth = 1.85f) {
+            moveTo(7.5f, 5.5f)
+            lineTo(18.5f, 12f)
+            lineTo(7.5f, 18.5f)
+            close()
+        }
+    }
+
     private inline fun strokeIcon(
         name: String,
         strokeWidth: Float = 1.8f,

@@ -13,8 +13,8 @@ android {
         applicationId = "ai.youbrain.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.1.5"
+        versionCode = 8
+        versionName = "0.1.7"
         resourceConfigurations += listOf("zh", "en")
     }
 

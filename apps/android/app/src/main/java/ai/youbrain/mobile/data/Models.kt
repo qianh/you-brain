@@ -203,3 +203,76 @@ data class EnrollmentConfig(
     val deviceId: String,
     val deviceName: String,
 )
+
+@Serializable
+data class TaskProject(
+    val id: String,
+    val name: String,
+    val cwd: String = "",
+    val enabled: Boolean = false,
+)
+
+@Serializable
+data class TaskImage(
+    val id: String,
+    val name: String,
+    val mimeType: String = "",
+    val sizeBytes: Long = 0L,
+)
+
+@Serializable
+data class TaskWorktreeBlock(
+    val uncommitted: Int = 0,
+    val untracked: Int = 0,
+)
+
+@Serializable
+data class TaskRun(
+    val projectCwd: String = "",
+    val requestId: String? = null,
+    val threadId: String? = null,
+    val threadUrl: String? = null,
+    val reviewSha: String? = null,
+    val summary: String = "",
+    val error: String? = null,
+    val branch: String? = null,
+    val worktreePath: String? = null,
+    val baseSha: String? = null,
+    val merged: Boolean? = null,
+)
+
+@Serializable
+data class DevelopmentTask(
+    val id: String,
+    val title: String,
+    val description: String = "",
+    val images: List<TaskImage> = emptyList(),
+    val projectId: String? = null,
+    val priority: Int = 2,
+    val status: String = "queued",
+    val createdAt: String = "",
+    val updatedAt: String = "",
+    val run: TaskRun? = null,
+    val manual: Boolean? = null,
+    val completedManually: Boolean? = null,
+    val error: String? = null,
+    val worktreeBlock: TaskWorktreeBlock? = null,
+)
+
+@Serializable
+data class TaskBoard(
+    val projects: List<TaskProject> = emptyList(),
+    val tasks: List<DevelopmentTask> = emptyList(),
+    val connectionError: String? = null,
+)
+
+@Serializable
+data class TaskReview(
+    val task: DevelopmentTask,
+    val headSha: String,
+    val baseSha: String,
+    val stat: String = "",
+    val diff: String = "",
+    val truncated: Boolean = false,
+)
+
