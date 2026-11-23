@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -68,7 +69,9 @@ fun PushCenterScreen(
     onOpenDeviceT3: (deviceId: String, threadUrl: String?) -> Unit,
 ) {
     val c = IosTheme.colors
+    val scope = rememberCoroutineScope()
     var filter by remember { mutableStateOf("all") }
+    var refreshing by remember { mutableStateOf(false) }
     val filtered = remember(state.pushes, filter) {
         if (filter == "all") state.pushes
         else state.pushes.filter { it.kind == filter }
@@ -80,12 +83,49 @@ fun PushCenterScreen(
             .background(c.groupedBg),
     ) {
         Column(modifier = Modifier.fillMaxWidth().background(c.chromeBg)) {
-            IosSegmentedControl(
-                items = KIND_FILTERS,
-                selectedKey = filter,
-                onSelect = { filter = it },
-                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                IosSegmentedControl(
+                    items = KIND_FILTERS,
+                    selectedKey = filter,
+                    onSelect = { filter = it },
+                    modifier = Modifier.weight(1f),
+                )
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(c.tertiaryFill)
+                        .clickable(enabled = !refreshing) {
+                            refreshing = true
+                            scope.launch {
+                                repository.refreshPushesNow()
+                                refreshing = false
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (refreshing) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(14.dp),
+                            strokeWidth = 1.8.dp,
+                            color = c.blue,
+                        )
+                    } else {
+                        Icon(
+                            imageVector = IosIcons.Refresh,
+                            contentDescription = "刷新通知",
+                            tint = c.blue,
+                            modifier = Modifier.size(15.dp),
+                        )
+                    }
+                }
+            }
             IosHairline()
         }
 

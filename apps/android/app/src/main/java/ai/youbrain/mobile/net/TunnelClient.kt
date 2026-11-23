@@ -8,15 +8,16 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -31,8 +32,25 @@ import kotlinx.serialization.json.put
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.zip.Deflater
 import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
+
+const val TUNNEL_WS_GZIP_CAP = "ws-gzip"
+
+private const val WS_GZIP_MIN_BYTES = 512
+private const val WS_CHUNK_BYTES = 48 * 1024
+private const val MAX_WS_MESSAGE_BYTES = 32 * 1024 * 1024
+private const val HEAD_GET_TIMEOUT_MS = 12_000L
+private const val HEAD_MUTATE_TIMEOUT_MS = 25_000L
+private const val BODY_IDLE_TIMEOUT_MS = 20_000L
+private const val BODY_MAX_TIMEOUT_MS = 90_000L
+private const val WS_OPEN_TIMEOUT_MS = 10_000L
+private const val PAIR_TIMEOUT_MS = 10_000L
+// 比对端 10 分钟空闲清理提前 2 分钟关闭，避免命中服务端静默回收后的半死会话
+private const val CLIENT_IDLE_SWEEP_MS = 8 * 60_000L
 
 data class TunnelHttpResponse(
     val status: Int,
@@ -72,6 +90,143 @@ interface T3Upstream {
     suspend fun pairCredential(): String?
 }
 
+internal sealed interface DecodedWsMessage {
+    data class Text(val text: String) : DecodedWsMessage
+    data class Binary(val bytes: ByteArray) : DecodedWsMessage
+}
+
+/**
+ * 对齐 packages/core/src/dispatch/tunnel.ts 的 encodeWsFrames：
+ * 支持 ws-gzip 压缩（level 1）及超过 48 KB 的分片（more: true），彻底消除大体积 T3 快照超出 160 KB 隧道单帧上限导致卡死的问题。
+ */
+internal fun encodeWsFrames(
+    id: String,
+    text: String?,
+    binary: ByteArray?,
+    wsGzip: Boolean,
+): List<JsonObject> {
+    val isText = text != null
+    if (!wsGzip) {
+        return listOf(
+            buildJsonObject {
+                put("k", "ws-msg")
+                put("id", id)
+                if (isText) put("text", text!!)
+                else put("body", Base64Url.encodeStd(binary ?: ByteArray(0)))
+            },
+        )
+    }
+    val raw = if (isText) text!!.toByteArray(Charsets.UTF_8) else (binary ?: ByteArray(0))
+    if (raw.size < WS_GZIP_MIN_BYTES && raw.size <= WS_CHUNK_BYTES) {
+        return listOf(
+            buildJsonObject {
+                put("k", "ws-msg")
+                put("id", id)
+                if (isText) put("text", text!!)
+                else put("body", Base64Url.encodeStd(raw))
+            },
+        )
+    }
+    val gz = if (raw.size >= WS_GZIP_MIN_BYTES) gzipFast(raw) else null
+    val useGzip = gz != null && (gz.size + 16 < raw.size || (isText && raw.size > WS_CHUNK_BYTES))
+    if (!useGzip && raw.size <= WS_CHUNK_BYTES) {
+        return listOf(
+            buildJsonObject {
+                put("k", "ws-msg")
+                put("id", id)
+                if (isText) put("text", text!!)
+                else put("body", Base64Url.encodeStd(raw))
+            },
+        )
+    }
+    val payload = if (useGzip) gz!! else raw
+    val total = maxOf(1, (payload.size + WS_CHUNK_BYTES - 1) / WS_CHUNK_BYTES)
+    val out = ArrayList<JsonObject>(total)
+    for (index in 0 until total) {
+        val start = index * WS_CHUNK_BYTES
+        val end = minOf(payload.size, start + WS_CHUNK_BYTES)
+        val encoded = Base64Url.encodeStd(payload.copyOfRange(start, end))
+        val more = index < total - 1
+        out.add(
+            buildJsonObject {
+                put("k", "ws-msg")
+                put("id", id)
+                if (isText) put("text", encoded) else put("body", encoded)
+                if (useGzip) put("enc", "gzip")
+                if (more) put("more", true)
+            },
+        )
+    }
+    return out
+}
+
+internal class WsReassembler {
+    private val buffer = ByteArrayOutputStream()
+    private var hasParts = false
+
+    @Synchronized
+    fun push(msg: JsonObject): DecodedWsMessage? {
+        val isGzip = msg["enc"]?.jsonPrimitive?.contentOrNull == "gzip"
+        val moreField = msg["more"]?.jsonPrimitive?.booleanOrNull
+        val isMultipart = moreField != null || hasParts
+        val textField = msg["text"]?.jsonPrimitive?.contentOrNull
+        val bodyField = msg["body"]?.jsonPrimitive?.contentOrNull
+        if (!isGzip && !isMultipart) {
+            if (textField != null) return DecodedWsMessage.Text(textField)
+            if (bodyField != null) return DecodedWsMessage.Binary(Base64Url.decodeStd(bodyField))
+            return DecodedWsMessage.Text("")
+        }
+        val isText = textField != null
+        val chunk = Base64Url.decodeStd(textField ?: bodyField.orEmpty())
+        if (buffer.size() + chunk.size > MAX_WS_MESSAGE_BYTES) {
+            buffer.reset()
+            hasParts = false
+            throw IllegalStateException("WebSocket 消息过大")
+        }
+        buffer.write(chunk)
+        if (moreField == true) {
+            hasParts = true
+            return null
+        }
+        val joined = buffer.toByteArray()
+        buffer.reset()
+        hasParts = false
+        val decoded = if (isGzip) gunzipLimited(joined, MAX_WS_MESSAGE_BYTES) else joined
+        return if (isText) {
+            DecodedWsMessage.Text(String(decoded, Charsets.UTF_8))
+        } else {
+            DecodedWsMessage.Binary(decoded)
+        }
+    }
+}
+
+private fun gzipFast(raw: ByteArray): ByteArray {
+    val bos = ByteArrayOutputStream(minOf(raw.size, 8192))
+    object : GZIPOutputStream(bos) {
+        init {
+            def.setLevel(Deflater.BEST_SPEED)
+        }
+    }.use { it.write(raw) }
+    return bos.toByteArray()
+}
+
+private fun gunzipLimited(compressed: ByteArray, maxBytes: Int): ByteArray {
+    if (compressed.isEmpty()) return ByteArray(0)
+    GZIPInputStream(ByteArrayInputStream(compressed)).use { gis ->
+        val out = ByteArrayOutputStream(minOf(maxBytes, maxOf(1024, compressed.size * 3)))
+        val buf = ByteArray(16 * 1024)
+        while (true) {
+            val n = gis.read(buf)
+            if (n <= 0) break
+            if (out.size() + n > maxBytes) {
+                throw IllegalStateException("解压数据超出上限")
+            }
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
+    }
+}
+
 /**
  * 隧道加密通道：按计数器保序重组乱序帧，并在封装前校验不超出中转单帧上限。
  */
@@ -90,6 +245,10 @@ class TunnelChannel(
     var lastUsed: Long = System.currentTimeMillis()
         private set
 
+    @Volatile
+    var lastReceived: Long = System.currentTimeMillis()
+        private set
+
     fun receive(ciphertext: String) {
         val opened = try {
             cipher.open(ciphertext)
@@ -97,7 +256,9 @@ class TunnelChannel(
             onBroken()
             return
         }
-        lastUsed = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        lastUsed = now
+        lastReceived = now
         synchronized(this) {
             if (opened.counter < expected || ahead.containsKey(opened.counter)) return
             ahead[opened.counter] = opened.plaintext
@@ -139,6 +300,7 @@ class TunnelSession(
     val deviceId: String,
     private val scope: CoroutineScope,
     cipher: TunnelCipher,
+    val wsGzip: Boolean = false,
     sendCiphertext: suspend (String) -> Unit,
     private val onClosedCallback: () -> Unit,
 ) : T3Upstream {
@@ -159,13 +321,19 @@ class TunnelSession(
     private val pairWaiters = ConcurrentHashMap<String, CompletableDeferred<String?>>()
 
     private class HttpStreamState(
-        val deferred: CompletableDeferred<TunnelHttpResponse>,
+        val headDeferred: CompletableDeferred<Unit> = CompletableDeferred(),
+        val bodyDeferred: CompletableDeferred<TunnelHttpResponse> = CompletableDeferred(),
     ) {
+        @Volatile
         var status: Int = 200
+        @Volatile
         var statusText: String = "OK"
+        @Volatile
         var headers: List<Pair<String, String>> = emptyList()
+        @Volatile
         var gzip: Boolean = false
-        var headReceived: Boolean = false
+        @Volatile
+        var lastChunkAt: Long = System.currentTimeMillis()
         val buffer = ByteArrayOutputStream()
     }
 
@@ -175,73 +343,107 @@ class TunnelSession(
     ) : UpstreamWs {
         @Volatile
         var wsClosed = false
+        private val openedFlag = AtomicBoolean(false)
+        private val inbound = WsReassembler()
+        private val outboundQueue = Channel<JsonObject>(Channel.UNLIMITED)
+        private val senderJob: Job
+        private var openWatchdogJob: Job? = null
+
+        init {
+            senderJob = scope.launch {
+                for (frame in outboundQueue) {
+                    if (closed || wsClosed) break
+                    try {
+                        channel.post(frame)
+                    } catch (_: Throwable) {
+                        failWs()
+                        break
+                    }
+                }
+            }
+        }
+
+        fun startOpenWatchdog(sentAt: Long) {
+            openWatchdogJob = scope.launch {
+                delay(WS_OPEN_TIMEOUT_MS)
+                if (!openedFlag.get() && !wsClosed && !closed) {
+                    if (channel.lastReceived < sentAt) {
+                        this@TunnelSession.close(notify = false)
+                    } else {
+                        failWs()
+                    }
+                }
+            }
+        }
 
         override fun sendText(text: String) {
             if (closed || wsClosed) return
-            scope.launch {
-                runCatching {
-                    channel.post(
-                        buildJsonObject {
-                            put("k", "ws-msg")
-                            put("id", id)
-                            put("text", text)
-                        },
-                    )
-                }.onFailure { failWs() }
+            val frames = encodeWsFrames(id = id, text = text, binary = null, wsGzip = wsGzip)
+            for (frame in frames) {
+                outboundQueue.trySend(frame)
             }
         }
 
         override fun sendBinary(bytes: ByteArray) {
             if (closed || wsClosed) return
-            scope.launch {
-                runCatching {
-                    channel.post(
-                        buildJsonObject {
-                            put("k", "ws-msg")
-                            put("id", id)
-                            put("body", Base64Url.encodeStd(bytes))
-                        },
-                    )
-                }.onFailure { failWs() }
+            val frames = encodeWsFrames(id = id, text = null, binary = bytes, wsGzip = wsGzip)
+            for (frame in frames) {
+                outboundQueue.trySend(frame)
             }
         }
 
         override fun close(code: Int, reason: String) {
             if (wsClosed) return
             wsClosed = true
+            openWatchdogJob?.cancel()
+            outboundQueue.close()
+            senderJob.cancel()
             wsStreams.remove(id)
-            scope.launch {
-                runCatching {
-                    channel.post(
-                        buildJsonObject {
-                            put("k", "ws-close")
-                            put("id", id)
-                            put("code", code)
-                            put("reason", reason)
-                        },
-                    )
+            if (!closed) {
+                scope.launch {
+                    runCatching {
+                        channel.post(
+                            buildJsonObject {
+                                put("k", "ws-close")
+                                put("id", id)
+                                put("code", code)
+                                put("reason", reason)
+                            },
+                        )
+                    }
                 }
             }
             listener.onClose(code, reason)
         }
 
-        fun onOpened() = listener.onOpen()
+        fun onOpened() {
+            if (wsClosed) return
+            if (openedFlag.compareAndSet(false, true)) {
+                openWatchdogJob?.cancel()
+                listener.onOpen()
+            }
+        }
 
         fun onRemoteMsg(msg: JsonObject) {
-            val text = msg["text"]?.jsonPrimitive?.contentOrNull
-            if (text != null) {
-                listener.onMessageText(text)
+            if (wsClosed) return
+            val decoded = try {
+                inbound.push(msg)
+            } catch (_: Throwable) {
+                failWs()
                 return
-            }
-            val bodyB64 = msg["body"]?.jsonPrimitive?.contentOrNull
-            if (bodyB64 != null) {
-                listener.onMessageBinary(Base64Url.decodeStd(bodyB64))
+            } ?: return
+            when (decoded) {
+                is DecodedWsMessage.Text -> listener.onMessageText(decoded.text)
+                is DecodedWsMessage.Binary -> listener.onMessageBinary(decoded.bytes)
             }
         }
 
         fun failWs() {
             if (wsClosed) return
             wsClosed = true
+            openWatchdogJob?.cancel()
+            outboundQueue.close()
+            senderJob.cancel()
             wsStreams.remove(id)
             listener.onError()
             listener.onClose(1011, "T3 连接中断")
@@ -250,6 +452,9 @@ class TunnelSession(
         fun closeRemote(code: Int, reason: String) {
             if (wsClosed) return
             wsClosed = true
+            openWatchdogJob?.cancel()
+            outboundQueue.close()
+            senderJob.cancel()
             wsStreams.remove(id)
             listener.onClose(code, reason)
         }
@@ -267,8 +472,8 @@ class TunnelSession(
     ): TunnelHttpResponse {
         if (closed) throw IllegalStateException("隧道已关闭")
         val id = nextId.getAndIncrement().toString()
-        val deferred = CompletableDeferred<TunnelHttpResponse>()
-        httpStreams[id] = HttpStreamState(deferred)
+        val stream = HttpStreamState()
+        httpStreams[id] = stream
 
         val rawHeaders = buildJsonArray {
             for ((k, v) in headers) {
@@ -288,6 +493,7 @@ class TunnelSession(
             emptyList()
         }
 
+        val sentAt = System.currentTimeMillis()
         try {
             val first = chunks.firstOrNull()
             channel.post(
@@ -311,7 +517,35 @@ class TunnelSession(
                     },
                 )
             }
-            return withTimeout(60_000L) { deferred.await() }
+
+            val headTimeout = if (method.equals("GET", ignoreCase = true) || method.equals("HEAD", ignoreCase = true)) {
+                HEAD_GET_TIMEOUT_MS
+            } else {
+                HEAD_MUTATE_TIMEOUT_MS
+            }
+            val gotHead = withTimeoutOrNull(headTimeout) {
+                stream.headDeferred.await()
+                true
+            } ?: false
+            if (!gotHead) {
+                if (channel.lastReceived < sentAt) {
+                    close(notify = false)
+                }
+                throw IllegalStateException("对端 T3 响应超时")
+            }
+
+            stream.lastChunkAt = System.currentTimeMillis()
+            while (true) {
+                val completed = withTimeoutOrNull(2_000L) { stream.bodyDeferred.await() }
+                if (completed != null) return completed
+                val now = System.currentTimeMillis()
+                if (now - stream.lastChunkAt > BODY_IDLE_TIMEOUT_MS || now - sentAt > BODY_MAX_TIMEOUT_MS) {
+                    if (channel.lastReceived < stream.lastChunkAt) {
+                        close(notify = false)
+                    }
+                    throw IllegalStateException("对端 T3 响应体传输超时")
+                }
+            }
         } catch (t: Throwable) {
             httpStreams.remove(id)
             throw t
@@ -332,6 +566,7 @@ class TunnelSession(
                 add(buildJsonArray { add(JsonPrimitive(k)); add(JsonPrimitive(v)) })
             }
         }
+        val sentAt = System.currentTimeMillis()
         try {
             channel.post(
                 buildJsonObject {
@@ -341,6 +576,7 @@ class TunnelSession(
                     put("headers", rawHeaders)
                 },
             )
+            ws.startOpenWatchdog(sentAt)
         } catch (t: Throwable) {
             ws.failWs()
             throw t
@@ -353,6 +589,7 @@ class TunnelSession(
         val id = nextId.getAndIncrement().toString()
         val deferred = CompletableDeferred<String?>()
         pairWaiters[id] = deferred
+        val sentAt = System.currentTimeMillis()
         return try {
             channel.post(
                 buildJsonObject {
@@ -360,9 +597,12 @@ class TunnelSession(
                     put("id", id)
                 },
             )
-            withTimeout(15_000L) { deferred.await() }
+            withTimeout(PAIR_TIMEOUT_MS) { deferred.await() }
         } catch (_: Throwable) {
             pairWaiters.remove(id)
+            if (channel.lastReceived < sentAt) {
+                close(notify = false)
+            }
             null
         }
     }
@@ -388,14 +628,18 @@ class TunnelSession(
                     hdrs.add(k to v)
                 }
                 stream.headers = hdrs
-                stream.headReceived = true
+                stream.lastChunkAt = System.currentTimeMillis()
+                stream.headDeferred.complete(Unit)
                 if (stream.status == 204 || stream.status == 205 || stream.status == 304 || stream.status in 100..199) {
                     httpStreams.remove(id)
-                    stream.deferred.complete(TunnelHttpResponse(stream.status, stream.statusText, stream.headers, ByteArray(0)))
+                    stream.bodyDeferred.complete(
+                        TunnelHttpResponse(stream.status, stream.statusText, stream.headers, ByteArray(0)),
+                    )
                 }
             }
             "chunk" -> {
                 val stream = httpStreams[id] ?: return
+                stream.lastChunkAt = System.currentTimeMillis()
                 val bodyB64 = msg["body"]?.jsonPrimitive?.contentOrNull.orEmpty()
                 if (bodyB64.isNotEmpty()) {
                     stream.buffer.write(Base64Url.decodeStd(bodyB64))
@@ -406,22 +650,28 @@ class TunnelSession(
                     val rawBytes = stream.buffer.toByteArray()
                     val decoded = try {
                         if (stream.gzip && rawBytes.isNotEmpty()) {
-                            GZIPInputStream(ByteArrayInputStream(rawBytes)).use { it.readBytes() }
+                            gunzipLimited(rawBytes, MAX_WS_MESSAGE_BYTES)
                         } else {
                             rawBytes
                         }
                     } catch (t: Throwable) {
-                        stream.deferred.completeExceptionally(t)
+                        stream.headDeferred.completeExceptionally(t)
+                        stream.bodyDeferred.completeExceptionally(t)
                         return
                     }
-                    stream.deferred.complete(
+                    stream.headDeferred.complete(Unit)
+                    stream.bodyDeferred.complete(
                         TunnelHttpResponse(stream.status, stream.statusText, stream.headers, decoded),
                     )
                 }
             }
             "err" -> {
                 val errMsg = msg["message"]?.jsonPrimitive?.contentOrNull ?: "对端 T3 出错"
-                httpStreams.remove(id)?.deferred?.completeExceptionally(IllegalStateException(errMsg))
+                httpStreams.remove(id)?.let { s ->
+                    val ex = IllegalStateException(errMsg)
+                    s.headDeferred.completeExceptionally(ex)
+                    s.bodyDeferred.completeExceptionally(ex)
+                }
                 wsStreams[id]?.failWs()
                 pairWaiters.remove(id)?.complete(null)
             }
@@ -447,8 +697,10 @@ class TunnelSession(
                 runCatching { channel.post(buildJsonObject { put("k", "bye") }) }
             }
         }
+        val closedEx = IllegalStateException("隧道已关闭")
         for ((_, s) in httpStreams) {
-            s.deferred.completeExceptionally(IllegalStateException("隧道已关闭"))
+            s.headDeferred.completeExceptionally(closedEx)
+            s.bodyDeferred.completeExceptionally(closedEx)
         }
         httpStreams.clear()
         for ((_, ws) in wsStreams.toMap()) {
@@ -468,8 +720,8 @@ class TunnelClient(
     private val selfDeviceId: () -> String,
     private val peerKey: (String) -> String?,
     private val pins: PeerPinStore,
-    private val dispatchOpen: suspend (to: String, sid: String, epk: String) -> CommandOutcome,
-    private val sendTun: suspend (to: String, sid: String, data: String) -> Unit,
+    private val dispatchOpen: suspend (to: String, sid: String, epk: String, caps: List<String>) -> CommandOutcome,
+    private val sendTun: suspend (to: String, sid: String, data: String, onDeliveryFailure: (Throwable) -> Unit) -> Unit,
 ) {
     private val mutex = Mutex()
     private val sessions = ConcurrentHashMap<String, TunnelSession>()
@@ -487,7 +739,7 @@ class TunnelClient(
                 return again
             }
             val inflight = opening[deviceId]
-            if (inflight != null) {
+            if (inflight != null && inflight.isActive) {
                 false to inflight
             } else {
                 val created = CompletableDeferred<TunnelSession>()
@@ -499,7 +751,7 @@ class TunnelClient(
         if (!isLeader) return deferred.await()
 
         return try {
-            val opened = openInternal(deviceId)
+            val opened = openWithRetry(deviceId)
             deferred.complete(opened)
             opened
         } catch (t: Throwable) {
@@ -512,10 +764,23 @@ class TunnelClient(
         }
     }
 
+    private suspend fun openWithRetry(deviceId: String): TunnelSession {
+        return try {
+            openInternal(deviceId)
+        } catch (firstErr: Throwable) {
+            val msg = firstErr.message.orEmpty()
+            if (msg.contains("超时")) {
+                openInternal(deviceId)
+            } else {
+                throw firstErr
+            }
+        }
+    }
+
     private suspend fun openInternal(deviceId: String): TunnelSession {
         val sid = Base64Url.newNonce(12)
         val ephemeral = TunnelCrypto.newEphemeral()
-        val outcome = dispatchOpen(deviceId, sid, ephemeral.publicKey)
+        val outcome = dispatchOpen(deviceId, sid, ephemeral.publicKey, listOf(TUNNEL_WS_GZIP_CAP))
         if (outcome is CommandOutcome.Err) throw IllegalStateException(outcome.error)
         val resultObj = (outcome as CommandOutcome.Ok).result?.jsonObject
             ?: throw IllegalStateException("对端握手应答格式无效")
@@ -523,6 +788,9 @@ class TunnelClient(
             ?: throw IllegalStateException("对端握手缺少 epk")
         val sig = resultObj["sig"]?.jsonPrimitive?.contentOrNull
             ?: throw IllegalStateException("对端握手缺少签名")
+        val wsGzip = (resultObj["caps"] as? JsonArray)?.any {
+            it.jsonPrimitive.contentOrNull == TUNNEL_WS_GZIP_CAP
+        } == true
 
         val pinnedPub = pins.resolve(deviceId, peerKey(deviceId))
         val transcript = TunnelCrypto.tunnelTranscript(
@@ -548,7 +816,12 @@ class TunnelClient(
             deviceId = deviceId,
             scope = scope,
             cipher = cipher,
-            sendCiphertext = { data -> sendTun(deviceId, sid, data) },
+            wsGzip = wsGzip,
+            sendCiphertext = { data ->
+                sendTun(deviceId, sid, data) {
+                    session.close(notify = false)
+                }
+            },
             onClosedCallback = {
                 sessions.remove(deviceId, session)
                 bySid.remove(key)
@@ -564,14 +837,27 @@ class TunnelClient(
         bySid["$from\u0000$sid"]?.receiveFrame(data)
     }
 
+    fun closeDeviceSession(deviceId: String) {
+        sessions.remove(deviceId)?.close(notify = false)
+    }
+
+    suspend fun forceResetSession(deviceId: String) {
+        val oldSession = mutex.withLock {
+            opening.remove(deviceId)?.completeExceptionally(IllegalStateException("正在重新建立 T3 隧道"))
+            sessions.remove(deviceId)
+        }
+        oldSession?.close(notify = true)
+    }
+
     fun closeAll() {
         sweeperJob?.cancel()
         sweeperJob = null
-        for (session in sessions.values.toList()) {
-            session.close(notify = false)
-        }
+        val snapshot = sessions.values.toList()
         sessions.clear()
         bySid.clear()
+        for (session in snapshot) {
+            session.close(notify = false)
+        }
     }
 
     private fun startSweeper() {
@@ -581,7 +867,7 @@ class TunnelClient(
                 delay(60_000L)
                 val now = System.currentTimeMillis()
                 for (session in sessions.values.toList()) {
-                    if (now - session.lastUsed() > 10 * 60_000L) {
+                    if (now - session.lastUsed() > CLIENT_IDLE_SWEEP_MS) {
                         session.close(notify = true)
                     }
                 }

@@ -7,8 +7,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.jsonObject
@@ -47,10 +50,13 @@ class LocalT3ProxyServer(
 
     private val stopped = AtomicBoolean(false)
     private val authVerifiedUntil = AtomicLong(0L)
+    private val pairMutex = Mutex()
     @Volatile
     private var cachedRootHtml: ByteArray? = null
     @Volatile
     private var lastRootSyncAt: Long = 0L
+    @Volatile
+    private var forceNextNavigationLive: Boolean = false
     private var acceptJob: Job? = null
     @Volatile
     private var pairFailedAt: Long = 0L
@@ -59,9 +65,10 @@ class LocalT3ProxyServer(
         private const val INJECT_PATH = "/__ubrain_t3_inject.js"
         private const val INJECT_JS = "/* u-brain mobile proxy */\n"
         private const val VIRTUAL_ORIGIN = "http://t3.tunnel"
-        private const val PAIR_RETRY_MS = 30_000L
+        private const val PAIR_RETRY_MS = 5_000L
         private const val AUTH_CACHE_MS = 10 * 60_000L
         private const val ROOT_SYNC_MS = 20_000L
+        private const val PREFETCH_SETTLE_MS = 1_200L
         private const val PERSISTENT_COOKIE_MAX_AGE_SEC = 2_592_000L
         private const val WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -178,6 +185,26 @@ class LocalT3ProxyServer(
         runCatching { serverSocket.close() }
     }
 
+    /**
+     * 手动强制刷新时重置配对冷却、认证缓存与首页快照标记，确保下一次导航直连对端拉取最新 HTML 与登录态。
+     */
+    fun prepareForceRefresh() {
+        pairFailedAt = 0L
+        authVerifiedUntil.set(0L)
+        lastRootSyncAt = 0L
+        forceNextNavigationLive = true
+    }
+
+    private fun scheduleBackgroundPrefetch(rawHtmlText: String) {
+        val cache = assetCache ?: return
+        scope.launch(Dispatchers.IO) {
+            delay(PREFETCH_SETTLE_MS)
+            if (!stopped.get()) {
+                runCatching { cache.prefetchFromHtml(rawHtmlText, upstream) }
+            }
+        }
+    }
+
     suspend fun warmup() {
         val now = System.currentTimeMillis()
         var pairedCookies: List<String> = emptyList()
@@ -222,8 +249,17 @@ class LocalT3ProxyServer(
         if (response.status in 200..299 && ct.contains("text/html", ignoreCase = true)) {
             val rawHtmlText = String(response.body, Charsets.UTF_8)
             cachedRootHtml = injectHtml(rawHtmlText).toByteArray(Charsets.UTF_8)
-            assetCache?.prefetchFromHtml(rawHtmlText, upstream)
+            scheduleBackgroundPrefetch(rawHtmlText)
         }
+    }
+
+    private fun attachSavedCookieIfMissing(headers: List<Pair<String, String>>): List<Pair<String, String>> {
+        if (cookieReader == null) return headers
+        if (headers.any { it.first.equals("cookie", ignoreCase = true) && it.second.isNotBlank() }) {
+            return headers
+        }
+        val savedCookie = cookieReader.invoke(origin)?.let { stripCookiePrefix(it, cookiePrefix) }.orEmpty()
+        return if (savedCookie.isNotEmpty()) headers + ("Cookie" to savedCookie) else headers
     }
 
     private suspend fun handleConnection(socket: Socket) {
@@ -284,10 +320,15 @@ class LocalT3ProxyServer(
                     }
                 }
 
-                val isForceReload = rawHeaders.any {
+                val isForceReload = forceNextNavigationLive || rawHeaders.any {
                     (it.first.equals("cache-control", ignoreCase = true) &&
-                        (it.second.contains("no-cache", ignoreCase = true) || it.second.contains("max-age=0", ignoreCase = true))) ||
+                        (it.second.contains("no-cache", ignoreCase = true) ||
+                            it.second.contains("no-store", ignoreCase = true) ||
+                            it.second.contains("max-age=0", ignoreCase = true))) ||
                         it.first.equals("pragma", ignoreCase = true)
+                }
+                if (isNavigation(rawHeaders) && forceNextNavigationLive) {
+                    forceNextNavigationLive = false
                 }
                 if (method == "GET" && path == "/" && !isForceReload) {
                     if (cachedRootHtml == null && assetCache != null) {
@@ -316,14 +357,8 @@ class LocalT3ProxyServer(
                 }
 
                 val body = readRequestBody(input, rawHeaders)
-                var fwdHeaders = forwardHeaders(rawHeaders, HOP_HEADERS)
+                val fwdHeaders = attachSavedCookieIfMissing(forwardHeaders(rawHeaders, HOP_HEADERS))
                 val isSessionCheck = method.equals("GET", ignoreCase = true) && path == "/api/auth/session"
-                if (isSessionCheck && fwdHeaders.none { it.first.equals("cookie", ignoreCase = true) && it.second.isNotBlank() }) {
-                    val savedCookie = cookieReader?.invoke(origin)?.let { stripCookiePrefix(it, cookiePrefix) }.orEmpty()
-                    if (savedCookie.isNotEmpty()) {
-                        fwdHeaders = fwdHeaders + ("Cookie" to savedCookie)
-                    }
-                }
                 val isNavGet = method.equals("GET", ignoreCase = true) && isNavigation(rawHeaders)
                 var pairedCookies: List<String> = emptyList()
                 var response = try {
@@ -366,6 +401,7 @@ class LocalT3ProxyServer(
                     if (sessionJson?.get("authenticated")?.jsonPrimitive?.booleanOrNull == true) {
                         authVerifiedUntil.set(System.currentTimeMillis() + AUTH_CACHE_MS)
                     } else {
+                        authVerifiedUntil.set(0L)
                         val freshCookies = runCatching { forcePairNow() }.getOrDefault(emptyList())
                         if (freshCookies.isNotEmpty()) {
                             pairedCookies = pairedCookies + freshCookies
@@ -402,9 +438,7 @@ class LocalT3ProxyServer(
                     val rawHtmlText = String(response.body, Charsets.UTF_8)
                     val finalHtmlBytes = injectHtml(rawHtmlText).toByteArray(Charsets.UTF_8)
                     if (response.status in 200..299) {
-                        assetCache?.let { cache ->
-                            scope.launch(Dispatchers.IO) { cache.prefetchFromHtml(rawHtmlText, upstream) }
-                        }
+                        scheduleBackgroundPrefetch(rawHtmlText)
                         if (path == "/") {
                             cachedRootHtml = finalHtmlBytes
                             lastRootSyncAt = System.currentTimeMillis()
@@ -437,10 +471,11 @@ class LocalT3ProxyServer(
         return accept.contains("text/html", ignoreCase = true)
     }
 
-    private suspend fun forcePairNow(): List<String> {
+    private suspend fun forcePairNow(): List<String> = pairMutex.withLock {
         val now = System.currentTimeMillis()
-        if (now - pairFailedAt < PAIR_RETRY_MS) return emptyList()
-        return try {
+        if (now < authVerifiedUntil.get()) return@withLock emptyList()
+        if (now - pairFailedAt < PAIR_RETRY_MS) return@withLock emptyList()
+        try {
             val credential = upstream.pairCredential() ?: error("没有拿到配对凭据")
             val payload = """{"credential":"${credential.replace("\"", "\\\"")}"}""".toByteArray(Charsets.UTF_8)
             val paired = upstream.fetch(
@@ -581,7 +616,18 @@ class LocalT3ProxyServer(
         }
 
         socket.soTimeout = 0
-        val fwdHeaders = forwardHeaders(rawHeaders, WS_SKIP_HEADERS)
+        var fwdHeaders = attachSavedCookieIfMissing(forwardHeaders(rawHeaders, WS_SKIP_HEADERS))
+        if (cookieReader != null && fwdHeaders.none { it.first.equals("cookie", ignoreCase = true) && it.second.isNotBlank() }) {
+            val paired = runCatching { autoPair(fwdHeaders) }.getOrDefault(emptyList())
+            val rawCookieHeader = if (paired.isNotEmpty()) {
+                stripCookiePrefix(paired.joinToString("; ") { it.substringBefore(';') }, cookiePrefix)
+            } else {
+                cookieReader.invoke(origin)?.let { stripCookiePrefix(it, cookiePrefix) }.orEmpty()
+            }
+            if (rawCookieHeader.isNotEmpty()) {
+                fwdHeaders = fwdHeaders + ("Cookie" to rawCookieHeader)
+            }
+        }
         val wsState = WsRelayState()
         val outChannel = Channel<Pair<Int, ByteArray>>(Channel.UNLIMITED)
         val writerJob = scope.launch(Dispatchers.IO) {
@@ -595,18 +641,28 @@ class LocalT3ProxyServer(
         }
         var remoteWs: UpstreamWs? = null
 
+        fun flushPendingIfReady() {
+            val up = remoteWs ?: return
+            val toSend: List<Any>
+            synchronized(wsState) {
+                if (!wsState.opened || wsState.pending.isEmpty()) return
+                toSend = ArrayList(wsState.pending)
+                wsState.pending.clear()
+            }
+            for (item in toSend) {
+                when (item) {
+                    is String -> up.sendText(item)
+                    is ByteArray -> up.sendBinary(item)
+                }
+            }
+        }
+
         val listener = object : UpstreamWsListener {
             override fun onOpen() {
                 synchronized(wsState) {
                     wsState.opened = true
-                    for (item in wsState.pending) {
-                        when (item) {
-                            is String -> remoteWs?.sendText(item)
-                            is ByteArray -> remoteWs?.sendBinary(item)
-                        }
-                    }
-                    wsState.pending.clear()
                 }
+                flushPendingIfReady()
             }
 
             override fun onMessageText(text: String) {
@@ -641,6 +697,7 @@ class LocalT3ProxyServer(
             runCatching { socket.close() }
             return
         }
+        flushPendingIfReady()
 
         var fragOpcode = -1
         val fragBuffer = ByteArrayOutputStream()

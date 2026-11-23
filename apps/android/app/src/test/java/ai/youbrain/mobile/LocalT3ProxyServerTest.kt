@@ -385,6 +385,19 @@ class LocalT3ProxyServerTest {
             val setCookies = sessionConn.headerFields["Set-Cookie"].orEmpty()
             assertTrue(setCookies.any { it.startsWith("dev_seed__t3_sid=session-xyz") && it.contains("Max-Age=2592000") })
             assertTrue(capturedSetCookies.any { it.startsWith("dev_seed__t3_sid=session-xyz") && it.contains("Max-Age=2592000") })
+
+            // 3) 手动点击刷新触发 prepareForceRefresh() 后，下一次 GET / 绕过内置 seed 快照，直接向对端拉取最新 HTML 并重新校验登录
+            val pairCallsBeforeRefresh = upstream.calls.count { it.path == "/api/auth/browser-session" }
+            proxy.prepareForceRefresh()
+            val refreshedConn = (URL(proxy.baseUrl).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                setRequestProperty("Accept", "text/html")
+                setRequestProperty("Connection", "close")
+            }
+            assertEquals(200, refreshedConn.responseCode)
+            val refreshedHtml = refreshedConn.inputStream.bufferedReader().readText()
+            assertTrue(refreshedHtml.contains("<title>T3</title>"))
+            assertTrue(upstream.calls.count { it.path == "/api/auth/browser-session" } > pairCallsBeforeRefresh)
         } finally {
             proxy.stop()
             scope.cancel()

@@ -2,11 +2,13 @@ package ai.youbrain.mobile.ui
 
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.graphics.Bitmap
 import android.net.Uri
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -33,15 +35,16 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +57,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import ai.youbrain.mobile.data.ConnectionState
 import ai.youbrain.mobile.data.RelayDevice
 import ai.youbrain.mobile.net.AppUiState
 import ai.youbrain.mobile.net.T3AssetCache
@@ -62,10 +66,17 @@ import ai.youbrain.mobile.ui.components.IosHairline
 import ai.youbrain.mobile.ui.components.IosIconBadge
 import ai.youbrain.mobile.ui.components.IosIcons
 import ai.youbrain.mobile.ui.theme.IosTheme
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import java.io.ByteArrayInputStream
 import java.net.URI
 
 private const val MAX_WEBVIEW_POOL = 4
+
+private val NO_CACHE_HEADERS = mapOf(
+    "Cache-Control" to "no-cache, no-store, must-revalidate",
+    "Pragma" to "no-cache",
+)
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -80,20 +91,64 @@ fun T3DeckScreen(
 ) {
     val context = LocalContext.current
     val c = IosTheme.colors
+    val scope = rememberCoroutineScope()
     val devices = remember(state.relayState.devices, state.deviceId) {
         repository.viewT3Devices()
     }
 
     var selectedId by remember { mutableStateOf<String?>(null) }
-    var reloadNonce by remember { mutableIntStateOf(0) }
-    var lastHandledReloadNonce by remember { mutableIntStateOf(0) }
     var renameDevice by remember { mutableStateOf<RelayDevice?>(null) }
     val proxyUrls = remember { mutableStateMapOf<String, String>() }
     val loadingIds = remember { mutableStateMapOf<String, Boolean>() }
+    val refreshingIds = remember { mutableStateMapOf<String, Boolean>() }
+    val progressByDevice = remember { mutableStateMapOf<String, Int>() }
     val errorByDevice = remember { mutableStateMapOf<String, String?>() }
 
     val webViews = remember { LinkedHashMap<String, WebView>(8, 0.75f, true) }
+    val refreshJobs = remember { HashMap<String, Job>() }
     var containerRef by remember { mutableStateOf<FrameLayout?>(null) }
+
+    fun reloadWebViewBypassCache(devId: String, freshBaseUrl: String) {
+        val wv = webViews[devId] ?: return
+        wv.stopLoading()
+        val curUrl = wv.url
+        val targetUrl = if (
+            curUrl.isNullOrBlank() ||
+            curUrl == "about:blank" ||
+            !curUrl.startsWith(freshBaseUrl.trimEnd('/'))
+        ) {
+            freshBaseUrl
+        } else {
+            curUrl
+        }
+        wv.loadUrl(targetUrl, NO_CACHE_HEADERS)
+    }
+
+    fun triggerHardRefresh(devId: String) {
+        refreshJobs[devId]?.cancel()
+        refreshJobs[devId] = scope.launch {
+            refreshingIds[devId] = true
+            errorByDevice[devId] = null
+            progressByDevice[devId] = 15
+            try {
+                val res = repository.forceRefreshDeviceT3(devId)
+                res.fold(
+                    onSuccess = { freshBaseUrl ->
+                        proxyUrls[devId] = freshBaseUrl
+                        errorByDevice[devId] = null
+                        reloadWebViewBypassCache(devId, freshBaseUrl)
+                    },
+                    onFailure = { t ->
+                        errorByDevice[devId] = t.message ?: "无法建立 T3 隧道"
+                        progressByDevice[devId] = 100
+                    },
+                )
+            } finally {
+                refreshingIds[devId] = false
+                loadingIds[devId] = false
+            }
+        }
+    }
 
     LaunchedEffect(preferredDeviceId, state.agent.masterDeviceId, devices) {
         if (!preferredDeviceId.isNullOrBlank() && devices.any { it.id == preferredDeviceId }) {
@@ -109,17 +164,32 @@ fun T3DeckScreen(
     val activeId = selectedId
     val activeDevice = devices.firstOrNull { it.id == activeId }
 
-    LaunchedEffect(activeId, activeDevice?.online, reloadNonce) {
+    LaunchedEffect(activeId, activeDevice?.online, state.connectionState) {
         val devId = activeId ?: return@LaunchedEffect
+        if (refreshingIds[devId] == true) return@LaunchedEffect
+
+        if (state.connectionState == ConnectionState.CONNECTING) {
+            if (webViews[devId] == null) {
+                loadingIds[devId] = true
+            }
+            return@LaunchedEffect
+        }
+        if (state.connectionState != ConnectionState.OK) {
+            if (webViews[devId] == null) {
+                errorByDevice[devId] = state.connectionError ?: "尚未连上中转服务器"
+                loadingIds[devId] = false
+            }
+            return@LaunchedEffect
+        }
         if (activeDevice?.online != true) {
             errorByDevice[devId] = "该设备当前离线"
             loadingIds[devId] = false
             return@LaunchedEffect
         }
+
         val wasInError = errorByDevice[devId] != null
-        val reloadRequested = reloadNonce != lastHandledReloadNonce
-        lastHandledReloadNonce = reloadNonce
-        proxyUrls[devId] = repository.getOrCreateT3ProxyImmediate(devId)
+        val freshBaseUrl = repository.getOrCreateT3ProxyImmediate(devId)
+        proxyUrls[devId] = freshBaseUrl
         loadingIds[devId] = false
         errorByDevice[devId] = null
 
@@ -127,11 +197,13 @@ fun T3DeckScreen(
         res.fold(
             onSuccess = {
                 errorByDevice[devId] = null
-                if (wasInError || reloadRequested) {
-                    webViews[devId]?.reload()
+                if (wasInError) {
+                    reloadWebViewBypassCache(devId, freshBaseUrl)
                 }
             },
-            onFailure = { t -> errorByDevice[devId] = t.message ?: "无法建立 T3 隧道" },
+            onFailure = { t ->
+                errorByDevice[devId] = t.message ?: "无法建立 T3 隧道"
+            },
         )
     }
 
@@ -143,12 +215,17 @@ fun T3DeckScreen(
             val u = URI(deep)
             (u.rawPath.ifEmpty { "/" }) + (u.rawQuery?.let { "?$it" } ?: "")
         }.getOrNull() ?: return@LaunchedEffect
+        errorByDevice[devId] = null
         val target = base.trimEnd('/') + rel
         webViews[devId]?.loadUrl(target)
     }
 
     DisposableEffect(Unit) {
         onDispose {
+            for (job in refreshJobs.values) {
+                job.cancel()
+            }
+            refreshJobs.clear()
             for (wv in webViews.values) {
                 runCatching { wv.destroy() }
             }
@@ -160,12 +237,15 @@ fun T3DeckScreen(
         activeId?.let { webViews[it]?.goBack() }
     }
 
+    val isActiveRefreshing = activeId != null && refreshingIds[activeId] == true
+    val activeProgress = activeId?.let { progressByDevice[it] } ?: 100
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(c.groupedBg),
     ) {
-        // 纤薄 iOS 设备切换胶囊栏（右侧固定刷新按钮，绝不被长名称挤压）
+        // 纤薄 iOS 设备切换胶囊栏（右侧固定强制刷新按钮，绝不被长名称挤压）
         if (isVisibleTab) {
             Column(modifier = Modifier.fillMaxWidth().background(c.chromeBg)) {
                 Row(
@@ -248,22 +328,47 @@ fun T3DeckScreen(
                                     .size(28.dp)
                                     .clip(CircleShape)
                                     .background(c.tertiaryFill)
-                                    .clickable {
-                                        webViews[activeId]?.reload() ?: run { reloadNonce += 1 }
+                                    .clickable(enabled = !isActiveRefreshing) {
+                                        triggerHardRefresh(activeId)
                                     },
                                 contentAlignment = Alignment.Center,
                             ) {
-                                Icon(
-                                    imageVector = IosIcons.Refresh,
-                                    contentDescription = "重载",
-                                    tint = c.blue,
-                                    modifier = Modifier.size(15.dp),
-                                )
+                                if (isActiveRefreshing) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(14.dp),
+                                        strokeWidth = 1.8.dp,
+                                        color = c.blue,
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = IosIcons.Refresh,
+                                        contentDescription = "强制刷新",
+                                        tint = c.blue,
+                                        modifier = Modifier.size(15.dp),
+                                    )
+                                }
                             }
                         }
                     }
                 }
-                IosHairline()
+                if (isActiveRefreshing || activeProgress in 1..99) {
+                    if (isActiveRefreshing && activeProgress < 20) {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth().height(2.dp),
+                            color = c.blue,
+                            trackColor = Color.Transparent,
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            progress = { (activeProgress / 100f).coerceIn(0.08f, 1f) },
+                            modifier = Modifier.fillMaxWidth().height(2.dp),
+                            color = c.blue,
+                            trackColor = Color.Transparent,
+                        )
+                    }
+                } else {
+                    IosHairline()
+                }
             }
         }
 
@@ -288,6 +393,7 @@ fun T3DeckScreen(
                                 }
                             }
                         }
+                        val boundDeviceId = currentId
                         val wv = WebView(container.context).apply {
                             setLayerType(View.LAYER_TYPE_HARDWARE, null)
                             settings.javaScriptEnabled = true
@@ -345,8 +451,45 @@ fun T3DeckScreen(
                                     }
                                     return true
                                 }
+
+                                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                                    progressByDevice[boundDeviceId] = 15
+                                }
+
+                                override fun onPageFinished(view: WebView?, url: String?) {
+                                    progressByDevice[boundDeviceId] = 100
+                                }
+
+                                override fun onReceivedError(
+                                    view: WebView?,
+                                    request: WebResourceRequest?,
+                                    error: WebResourceError?,
+                                ) {
+                                    if (request?.isForMainFrame == true && refreshingIds[boundDeviceId] != true) {
+                                        progressByDevice[boundDeviceId] = 100
+                                        errorByDevice[boundDeviceId] = "T3 页面连接超时或中断，请点击刷新重试"
+                                    }
+                                }
+
+                                override fun onReceivedHttpError(
+                                    view: WebView?,
+                                    request: WebResourceRequest?,
+                                    errorResponse: WebResourceResponse?,
+                                ) {
+                                    if (request?.isForMainFrame == true &&
+                                        errorResponse?.statusCode == 502 &&
+                                        refreshingIds[boundDeviceId] != true
+                                    ) {
+                                        progressByDevice[boundDeviceId] = 100
+                                        errorByDevice[boundDeviceId] = "对端设备的 T3 暂时没有响应，请点击刷新重试"
+                                    }
+                                }
                             }
                             webChromeClient = object : WebChromeClient() {
+                                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                                    progressByDevice[boundDeviceId] = newProgress
+                                }
+
                                 override fun onShowFileChooser(
                                     webView: WebView?,
                                     filePathCallback: ValueCallback<Array<Uri>>,
@@ -411,7 +554,7 @@ fun T3DeckScreen(
                         }
                     }
                 }
-                activeId != null && loadingIds[activeId] == true -> {
+                activeId != null && (loadingIds[activeId] == true || (isActiveRefreshing && webViews[activeId] == null)) -> {
                     Column(
                         modifier = Modifier.fillMaxSize(),
                         verticalArrangement = Arrangement.Center,
@@ -464,10 +607,17 @@ fun T3DeckScreen(
                                         .height(40.dp)
                                         .clip(RoundedCornerShape(10.dp))
                                         .background(c.blue)
-                                        .clickable { reloadNonce += 1 },
+                                        .clickable(enabled = !isActiveRefreshing) {
+                                            triggerHardRefresh(activeId)
+                                        },
                                     contentAlignment = Alignment.Center,
                                 ) {
-                                    Text("重试连接", color = Color.White, fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold)
+                                    Text(
+                                        text = if (isActiveRefreshing) "重连中…" else "重试连接",
+                                        color = Color.White,
+                                        fontSize = 14.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                    )
                                 }
                                 Box(
                                     modifier = Modifier

@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -64,9 +65,10 @@ class RelayClient(
     private val onTun: (from: String, sid: String, data: String) -> Unit,
 ) {
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
+        .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(0, TimeUnit.MILLISECONDS)
-        .writeTimeout(20, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .pingInterval(20, TimeUnit.SECONDS)
         .build()
 
     private val json = Json {
@@ -81,8 +83,12 @@ class RelayClient(
     private var identity: Ed25519Identity? = null
 
     private val stopped = AtomicBoolean(true)
+    @Volatile
     private var socket: WebSocket? = null
+    @Volatile
     private var opened = false
+    @Volatile
+    private var readySignal = CompletableDeferred<Unit>()
     private var failures = 0
     private var lastSeen = 0L
     private var pingJob: Job? = null
@@ -103,8 +109,8 @@ class RelayClient(
     }
 
     companion object {
-        private val RETRY_DELAYS = longArrayOf(2_000L, 5_000L, 15_000L, 30_000L, 60_000L)
-        private const val PING_MS = 30_000L
+        private val RETRY_DELAYS = longArrayOf(800L, 2_000L, 5_000L, 12_000L, 25_000L)
+        private const val PING_MS = 20_000L
         private val JSON_MEDIA = "application/json; charset=utf-8".toMediaType()
 
         fun normalizeRelayUrl(raw: String): String {
@@ -218,12 +224,26 @@ class RelayClient(
         reconnectNow()
     }
 
+    suspend fun awaitConnected(timeoutMs: Long = 6_000L): Boolean {
+        if (opened && socket != null) return true
+        if (stopped.get() || url.isBlank() || token.isBlank()) return false
+        reconnectIfDisconnected()
+        val sig = readySignal
+        return withTimeoutOrNull(timeoutMs) {
+            sig.await()
+            true
+        } ?: (opened && socket != null)
+    }
+
     private fun teardownSocket() {
         pingJob?.cancel()
         pingJob = null
         val old = socket
         socket = null
         opened = false
+        if (readySignal.isCompleted) {
+            readySignal = CompletableDeferred()
+        }
         runCatching { old?.close(1000, "bye") }
     }
 
@@ -259,6 +279,7 @@ class RelayClient(
                     opened = true
                     failures = 0
                     lastSeen = System.currentTimeMillis()
+                    readySignal.complete(Unit)
                     onConnection(ConnectionState.OK, null)
                     startPingLoop(currentWs)
                     scope.launch {
@@ -395,6 +416,11 @@ class RelayClient(
         params: Map<String, JsonElement> = emptyMap(),
         timeoutMs: Long = 20_000L,
     ): JsonElement? {
+        if (!opened || socket == null) {
+            if (!awaitConnected(minOf(timeoutMs, 6_000L))) {
+                throw IllegalStateException("还没连上中转")
+            }
+        }
         val ws = socket ?: throw IllegalStateException("还没连上中转")
         if (!opened) throw IllegalStateException("中转正在连接中")
         val id = nextReqId.getAndIncrement().toString()
@@ -419,7 +445,7 @@ class RelayClient(
         }
     }
 
-    suspend fun sendHello(appVersion: String = "0.1.4") {
+    suspend fun sendHello(appVersion: String = "0.1.5") {
         val dispatch = buildJsonObject {
             put("enabled", false)
             put("t3", buildJsonObject { put("ready", false) })
@@ -455,8 +481,22 @@ class RelayClient(
         timeoutMs: Long = 45_000L,
     ): CommandOutcome {
         val id = identity ?: return CommandOutcome.Err("设备身份未就绪")
-        if (socket == null || !opened) return CommandOutcome.Err("还没连上中转")
+        if (!opened || socket == null) {
+            if (!awaitConnected(minOf(timeoutMs, 6_000L))) {
+                return CommandOutcome.Err("还没连上中转")
+            }
+        }
+        return dispatchCommandAttempt(id, to, kind, args, timeoutMs, allowHopReconnect = true)
+    }
 
+    private suspend fun dispatchCommandAttempt(
+        id: Ed25519Identity,
+        to: String,
+        kind: String,
+        args: JsonElement,
+        timeoutMs: Long,
+        allowHopReconnect: Boolean,
+    ): CommandOutcome {
         val cmdId = "c-${UUID.randomUUID().toString().replace("-", "").take(18)}"
         val ts = System.currentTimeMillis()
         val nonce = Base64Url.newNonce(16)
@@ -481,21 +521,32 @@ class RelayClient(
         val waiter = CompletableDeferred<CommandOutcome>()
         pendingCmds[cmdId] = waiter
 
+        val cmdParams = mapOf(
+            "cmdId" to JsonPrimitive(cmdId),
+            "to" to JsonPrimitive(to),
+            "cmd" to cmd,
+            "ts" to JsonPrimitive(ts),
+            "nonce" to JsonPrimitive(nonce),
+            "sig" to JsonPrimitive(sig),
+        )
         try {
-            request(
-                "cmd",
-                mapOf(
-                    "cmdId" to JsonPrimitive(cmdId),
-                    "to" to JsonPrimitive(to),
-                    "cmd" to cmd,
-                    "ts" to JsonPrimitive(ts),
-                    "nonce" to JsonPrimitive(nonce),
-                    "sig" to JsonPrimitive(sig),
-                ),
-            )
-        } catch (t: Throwable) {
+            request("cmd", cmdParams, timeoutMs = minOf(timeoutMs, 6_000L))
+        } catch (firstErr: Throwable) {
             pendingCmds.remove(cmdId, waiter)
-            return CommandOutcome.Err(t.message ?: "派活请求发送失败")
+            val errMsg = firstErr.message.orEmpty()
+            val isHopDead = firstErr is kotlinx.coroutines.TimeoutCancellationException ||
+                errMsg.contains("发送中转请求失败") ||
+                errMsg.contains("还没连上中转") ||
+                errMsg.contains("连接断开")
+            if (allowHopReconnect && isHopDead) {
+                // 连中转自身的即时 ACK 都超时或发送失败，说明当前 WebSocket 半开假活，立即重连并用新 nonce 重发一次
+                reconnectNow()
+                if (!awaitConnected(minOf(timeoutMs, 6_000L))) {
+                    return CommandOutcome.Err("连不上中转，请检查网络")
+                }
+                return dispatchCommandAttempt(id, to, kind, args, timeoutMs, allowHopReconnect = false)
+            }
+            return CommandOutcome.Err(errMsg.ifBlank { "派活请求发送失败" })
         }
 
         return try {
@@ -506,7 +557,12 @@ class RelayClient(
         }
     }
 
-    suspend fun sendTun(to: String, sid: String, data: String) {
+    suspend fun sendTun(
+        to: String,
+        sid: String,
+        data: String,
+        onDeliveryFailure: ((Throwable) -> Unit)? = null,
+    ) {
         val ws = socket ?: throw IllegalStateException("还没连上中转")
         if (!opened) throw IllegalStateException("中转正在连接中")
         tunSemaphore.acquire()
@@ -529,9 +585,10 @@ class RelayClient(
         }
         scope.launch {
             try {
-                withTimeout(20_000L) { deferred.await() }
-            } catch (_: Throwable) {
+                withTimeout(12_000L) { deferred.await() }
+            } catch (t: Throwable) {
                 pendingReqs.remove(id, deferred)
+                onDeliveryFailure?.invoke(t)
             } finally {
                 tunSemaphore.release()
             }

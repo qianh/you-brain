@@ -13,6 +13,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -59,6 +60,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import ai.youbrain.mobile.data.AgentMessage
@@ -71,6 +73,7 @@ import ai.youbrain.mobile.ui.components.IosIconBadge
 import ai.youbrain.mobile.ui.components.IosIcons
 import ai.youbrain.mobile.ui.components.IosModalSheet
 import ai.youbrain.mobile.ui.components.IosTextField
+import ai.youbrain.mobile.ui.markdown.MarkdownContent
 import ai.youbrain.mobile.ui.theme.IosTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -316,9 +319,13 @@ fun AgentScreen(
                     label = if (agent.loading) "同步中…" else "同步对话",
                     accent = c.indigo,
                     onClick = {
-                        if (!agent.loading && agent.masterDeviceId != null) {
+                        if (!agent.loading) {
                             scope.launch {
-                                repository.loadAgentSessions(agent.masterDeviceId, agent.activeSessionId)
+                                val res = repository.syncAgentNow()
+                                actionFeedback = res.fold(
+                                    onSuccess = { "✓ 对话与在线状态已同步" },
+                                    onFailure = { "同步失败：${it.message}" },
+                                )
                             }
                         }
                     },
@@ -385,14 +392,22 @@ fun AgentScreen(
                     displayNameOf = { id, raw -> state.displayName(id, raw) },
                     onRefresh = { entry ->
                         scope.launch {
-                            repository.refreshDispatch(entry.dispatchId).onFailure {
-                                actionFeedback = "刷新失败: ${it.message}"
-                            }
+                            actionFeedback = repository.refreshDispatch(entry.dispatchId).fold(
+                                onSuccess = { "✓ 已同步：${entry.title}" },
+                                onFailure = { "刷新失败：${it.message}" },
+                            )
                         }
                     },
                     onFollowup = { entry -> followupTarget = entry },
                     onOpenT3 = { entry -> onOpenDeviceT3(entry.to, entry.threadUrl) },
-                    onRefreshAll = { scope.launch { repository.refreshOutboxList() } },
+                    onRefreshAll = {
+                        scope.launch {
+                            actionFeedback = repository.refreshOutboxListResult().fold(
+                                onSuccess = { count -> "✓ 派活列表已刷新（共 $count 项）" },
+                                onFailure = { "刷新失败：${it.message}" },
+                            )
+                        }
+                    },
                 )
                 IosHairline()
             }
@@ -445,7 +460,11 @@ fun AgentScreen(
         }
 
         // 持续对话区域（iMessage 气泡）
-        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+        BoxWithConstraints(modifier = Modifier.weight(1f).fillMaxWidth()) {
+            val chatWidth = (maxWidth - 24.dp).coerceAtLeast(240.dp)
+            val userMaxWidth = (chatWidth * 0.80f).coerceAtMost(360.dp)
+            val assistantMaxWidth = (chatWidth * 0.92f).coerceAtMost(640.dp)
+
             when {
                 agent.masterDeviceId == null -> {
                     Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
@@ -538,7 +557,11 @@ fun AgentScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         items(agent.messages, key = { "${it.position}-${it.role}" }) { msg ->
-                            IosChatBubble(message = msg)
+                            IosChatBubble(
+                                message = msg,
+                                userMaxWidth = userMaxWidth,
+                                assistantMaxWidth = assistantMaxWidth,
+                            )
                         }
                         if (isBusy) {
                             item(key = "live-typing-indicator") {
@@ -786,7 +809,11 @@ private fun QuickChip(
 }
 
 @Composable
-private fun IosChatBubble(message: AgentMessage) {
+private fun IosChatBubble(
+    message: AgentMessage,
+    userMaxWidth: Dp,
+    assistantMaxWidth: Dp,
+) {
     val c = IosTheme.colors
     val isUser = message.role == "user"
     val bubbleShape = RoundedCornerShape(
@@ -801,7 +828,7 @@ private fun IosChatBubble(message: AgentMessage) {
     ) {
         Box(
             modifier = Modifier
-                .widthIn(max = 312.dp)
+                .widthIn(max = if (isUser) userMaxWidth else assistantMaxWidth)
                 .clip(bubbleShape)
                 .background(if (isUser) c.sentBubble else c.receivedBubble)
                 .then(
@@ -811,12 +838,19 @@ private fun IosChatBubble(message: AgentMessage) {
                 .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
             SelectionContainer {
-                Text(
-                    text = message.text,
-                    color = if (isUser) Color.White else c.label,
-                    fontSize = 15.sp,
-                    lineHeight = 21.sp,
-                )
+                if (isUser) {
+                    Text(
+                        text = message.text,
+                        color = Color.White,
+                        fontSize = 15.sp,
+                        lineHeight = 21.sp,
+                    )
+                } else {
+                    MarkdownContent(
+                        markdown = message.text,
+                        maxContentWidth = (assistantMaxWidth - 28.dp).coerceAtLeast(180.dp),
+                    )
+                }
             }
         }
     }

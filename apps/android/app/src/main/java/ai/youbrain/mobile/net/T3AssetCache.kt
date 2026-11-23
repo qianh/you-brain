@@ -118,6 +118,8 @@ class T3AssetCache(
     private val inflight = ConcurrentHashMap<String, CompletableDeferred<CachedAsset?>>()
     private val prefetchingKeys = ConcurrentHashMap.newKeySet<String>()
     private val pruning = AtomicBoolean(false)
+    // 限制后台预拉取并发度，避免挤占实时认证、页面请求与 T3 WebSocket 的隧道帧窗口
+    private val prefetchSemaphore = Semaphore(4)
 
     @Volatile
     var seedIndexHtml: String? = null
@@ -314,7 +316,9 @@ class T3AssetCache(
             val entryAssets = coroutineScope {
                 entryPaths.map { p ->
                     async(Dispatchers.IO) {
-                        runCatching { getOrFetch(p, upstream) }.getOrNull()
+                        prefetchSemaphore.withPermit {
+                            runCatching { getOrFetch(p, upstream) }.getOrNull()
+                        }
                     }
                 }.awaitAll().filterNotNull()
             }
@@ -332,11 +336,10 @@ class T3AssetCache(
             }
             if (secondary.isEmpty()) return
 
-            val semaphore = Semaphore(20)
             val fetchedSecondary = coroutineScope {
                 secondary.map { p ->
                     async(Dispatchers.IO) {
-                        semaphore.withPermit {
+                        prefetchSemaphore.withPermit {
                             runCatching { getOrFetch(p, upstream) }.getOrNull()
                         }
                     }
@@ -358,7 +361,7 @@ class T3AssetCache(
                 coroutineScope {
                     cssLeaves.map { p ->
                         async(Dispatchers.IO) {
-                            semaphore.withPermit {
+                            prefetchSemaphore.withPermit {
                                 runCatching { getOrFetch(p, upstream) }
                             }
                         }

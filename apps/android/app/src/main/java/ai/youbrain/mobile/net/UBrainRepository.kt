@@ -28,12 +28,14 @@ import ai.youbrain.mobile.data.T3StartResponse
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -141,9 +143,15 @@ class UBrainRepository(context: Context) {
             } else if (state == ConnectionState.ERROR || state == ConnectionState.OFF) {
                 loadedMasterKey = null
                 prewarmedT3.clear()
+                tunnelClient.closeAll()
             }
         },
         onState = { state ->
+            for (dev in state.devices) {
+                if (!dev.online) {
+                    tunnelClient.closeDeviceSession(dev.id)
+                }
+            }
             val masterId = resolveMasterDeviceId(state, appStore.getSelectedMasterDeviceId())
             _uiState.update { current ->
                 current.copy(
@@ -167,12 +175,13 @@ class UBrainRepository(context: Context) {
             prewarmedT3.retainAll(onlineViewPeers.map { it.id }.toSet())
             val warmIds = onlineViewPeers
                 .sortedByDescending { it.id == masterId }
-                .take(3)
+                .take(2)
                 .map { it.id }
                 .filter { prewarmedT3.add(it) }
             if (warmIds.isNotEmpty()) {
                 scope.launch {
-                    // 优先串行打通主控与常用设备的加密隧道，避免同时并发风暴拖慢主通道
+                    // 避让连接建立初期的 hello/pushes/agent.session，再串行预握手常用设备隧道
+                    delay(600L)
                     for (devId in warmIds) {
                         if (ensureT3Tunnel(devId).isSuccess) {
                             getOrCreateT3ProxyImmediate(devId)
@@ -199,19 +208,22 @@ class UBrainRepository(context: Context) {
         selfDeviceId = { _uiState.value.deviceId },
         peerKey = { id -> _uiState.value.relayState.devices.firstOrNull { it.id == id }?.publicKey },
         pins = pinStore,
-        dispatchOpen = { to, sid, epk ->
+        dispatchOpen = { to, sid, epk, caps ->
             relayClient.dispatchCommand(
                 to = to,
                 kind = "t3.tunnel.open",
                 args = buildJsonObject {
                     put("sid", sid)
                     put("epk", epk)
+                    if (caps.isNotEmpty()) {
+                        put("caps", JsonArray(caps.map { JsonPrimitive(it) }))
+                    }
                 },
-                timeoutMs = 20_000L,
+                timeoutMs = 10_000L,
             )
         },
-        sendTun = { to, sid, data ->
-            relayClient.sendTun(to, sid, data)
+        sendTun = { to, sid, data, onDeliveryFailure ->
+            relayClient.sendTun(to, sid, data, onDeliveryFailure)
         },
     )
 
@@ -283,11 +295,24 @@ class UBrainRepository(context: Context) {
     }
 
     fun reconnectNow() {
+        loadedMasterKey = null
+        prewarmedT3.clear()
+        tunnelClient.closeAll()
         relayClient.reconnectNow()
     }
 
     fun reconnectIfDisconnected() {
         relayClient.reconnectIfDisconnected()
+    }
+
+    fun onAppForegrounded() {
+        if (!_uiState.value.enrolled) return
+        relayClient.reconnectIfDisconnected()
+        if (_uiState.value.connectionState == ConnectionState.OK) {
+            scope.launch {
+                pullMissedPushes()
+            }
+        }
     }
 
     fun resolveDisplayName(id: String, rawName: String): String =
@@ -683,15 +708,54 @@ class UBrainRepository(context: Context) {
         }
     }
 
-    suspend fun refreshOutboxList() {
-        val target = _uiState.value.agent.masterDeviceId ?: return
-        val outcome = relayClient.dispatchCommand(target, "dispatch.list", buildJsonObject { }, timeoutMs = 20_000L)
-        if (outcome is CommandOutcome.Ok && outcome.result != null) {
-            val parsed = runCatching { json.decodeFromJsonElement(DispatchListResponse.serializer(), outcome.result) }.getOrNull()
-            if (parsed != null) {
+    suspend fun syncAgentNow(): Result<Unit> {
+        if (!_uiState.value.enrolled) {
+            return Result.failure(IllegalStateException("设备尚未入网"))
+        }
+        if (!relayClient.awaitConnected(8_000L)) {
+            return Result.failure(IllegalStateException("连不上中转，请检查手机网络"))
+        }
+        runCatching { pullMissedPushes() }
+        val masterId = _uiState.value.agent.masterDeviceId
+            ?: resolveMasterDeviceId(_uiState.value.relayState, appStore.getSelectedMasterDeviceId())
+            ?: return Result.failure(IllegalStateException("暂未发现在线的主控设备"))
+        loadAgentSessions(masterId, _uiState.value.agent.activeSessionId)
+        val err = _uiState.value.agent.error
+        return if (err != null) Result.failure(IllegalStateException(err)) else Result.success(Unit)
+    }
+
+    suspend fun refreshOutboxListResult(): Result<Int> {
+        if (!relayClient.awaitConnected(6_000L)) {
+            return Result.failure(IllegalStateException("中转未连接"))
+        }
+        val target = _uiState.value.agent.masterDeviceId
+            ?: resolveMasterDeviceId(_uiState.value.relayState, appStore.getSelectedMasterDeviceId())
+            ?: return Result.failure(IllegalStateException("未选择主控设备"))
+        return when (val outcome = relayClient.dispatchCommand(target, "dispatch.list", buildJsonObject { }, timeoutMs = 15_000L)) {
+            is CommandOutcome.Err -> Result.failure(IllegalStateException(outcome.error))
+            is CommandOutcome.Ok -> {
+                val parsed = outcome.result?.let {
+                    runCatching { json.decodeFromJsonElement(DispatchListResponse.serializer(), it) }.getOrNull()
+                } ?: return Result.failure(IllegalStateException("看板返回格式无效"))
                 _uiState.update { it.copy(agent = it.agent.copy(outbox = parsed.entries)) }
+                Result.success(parsed.entries.size)
             }
         }
+    }
+
+    suspend fun refreshOutboxList() {
+        refreshOutboxListResult()
+    }
+
+    suspend fun refreshPushesNow(): Result<Int> {
+        if (!_uiState.value.enrolled) {
+            return Result.failure(IllegalStateException("设备尚未入网"))
+        }
+        if (!relayClient.awaitConnected(8_000L)) {
+            return Result.failure(IllegalStateException("连不上中转，请检查网络"))
+        }
+        val pulledCount = pullMissedPushes()
+        return Result.success(pulledCount)
     }
 
     suspend fun followupDispatch(dispatchId: String, prompt: String): Result<DispatchFollowupResponse> {
@@ -813,6 +877,20 @@ class UBrainRepository(context: Context) {
         return ensureT3Tunnel(deviceId).map { getOrCreateT3ProxyImmediate(deviceId) }
     }
 
+    suspend fun forceRefreshDeviceT3(deviceId: String): Result<String> {
+        if (!_uiState.value.enrolled) {
+            return Result.failure(IllegalStateException("设备尚未入网"))
+        }
+        if (!relayClient.awaitConnected(8_000L)) {
+            return Result.failure(IllegalStateException("连不上中转，请检查手机网络"))
+        }
+        prewarmedT3.remove(deviceId)
+        tunnelClient.forceResetSession(deviceId)
+        val proxy = getOrCreateT3ProxyServer(deviceId)
+        proxy.prepareForceRefresh()
+        return ensureT3Tunnel(deviceId).map { proxy.baseUrl }
+    }
+
     private fun getOrCreateT3ProxyServer(deviceId: String): LocalT3ProxyServer {
         t3Proxies[deviceId]?.let { return it }
 
@@ -831,16 +909,51 @@ class UBrainRepository(context: Context) {
                     method: String,
                     headers: List<Pair<String, String>>,
                     body: ByteArray?,
-                ): TunnelHttpResponse = tunnelClient.session(deviceId).fetch(path, method, headers, body)
+                ): TunnelHttpResponse {
+                    val s1 = tunnelClient.session(deviceId)
+                    return try {
+                        s1.fetch(path, method, headers, body)
+                    } catch (t: Throwable) {
+                        val canRetry = s1.closed && (
+                            method.equals("GET", ignoreCase = true) ||
+                                method.equals("HEAD", ignoreCase = true) ||
+                                path == "/api/auth/browser-session"
+                            )
+                        if (canRetry) {
+                            tunnelClient.session(deviceId).fetch(path, method, headers, body)
+                        } else {
+                            throw t
+                        }
+                    }
+                }
 
                 override suspend fun openSocket(
                     path: String,
                     headers: List<Pair<String, String>>,
                     listener: UpstreamWsListener,
-                ): UpstreamWs = tunnelClient.session(deviceId).openSocket(path, headers, listener)
+                ): UpstreamWs {
+                    val s1 = tunnelClient.session(deviceId)
+                    return try {
+                        s1.openSocket(path, headers, listener)
+                    } catch (t: Throwable) {
+                        if (s1.closed) {
+                            tunnelClient.session(deviceId).openSocket(path, headers, listener)
+                        } else {
+                            throw t
+                        }
+                    }
+                }
 
-                override suspend fun pairCredential(): String? =
-                    tunnelClient.session(deviceId).pairCredential()
+                override suspend fun pairCredential(): String? {
+                    val s1 = tunnelClient.session(deviceId)
+                    val first = s1.pairCredential()
+                    if (first != null) return first
+                    return if (s1.closed) {
+                        runCatching { tunnelClient.session(deviceId).pairCredential() }.getOrNull()
+                    } else {
+                        null
+                    }
+                }
             },
             cookiePrefix = cookiePrefix,
             preferredPort = stablePort,
@@ -866,15 +979,16 @@ class UBrainRepository(context: Context) {
         }
     }
 
-    private suspend fun pullMissedPushes() {
+    private suspend fun pullMissedPushes(): Int {
         val since = appStore.getLastPushSeq()
-        val pulled = runCatching { relayClient.pullPushes(sinceSeq = since, limit = 100) }.getOrNull() ?: return
+        val pulled = runCatching { relayClient.pullPushes(sinceSeq = since, limit = 100) }.getOrNull() ?: return 0
         for (item in pulled.items.sortedBy { it.seq }) {
             mergePushItem(item, notify = false)
         }
         if (pulled.latestSeq > since) {
             appStore.setLastPushSeq(pulled.latestSeq)
         }
+        return pulled.items.size
     }
 
     private fun mergePushItem(item: MobilePushItem, notify: Boolean) {

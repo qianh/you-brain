@@ -131,6 +131,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        (application as UBrainApp).repository.onAppForegrounded()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -196,7 +201,7 @@ private fun MainTabsShell(
         }
     LaunchedEffect(hasOnlineViewT3) {
         if (hasOnlineViewT3 && !everOpenedT3) {
-            delay(500L)
+            delay(2_500L)
             everOpenedT3 = true
         }
     }
