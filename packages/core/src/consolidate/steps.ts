@@ -190,18 +190,27 @@ export const topicSummariesStep: ConsolidationStep = {
       activeLimit: ctx.zone.activeLimit,
       historyDays: ctx.zone.historyDays,
     });
-    const outcomes = await mapWithLimit(changed, TOPIC_CONCURRENCY, (item) =>
-      rewriteTopic(ctx, day, loaded, item.topic.topicId),
-    );
+    // Write each topic as soon as it returns, one emit at a time: when the step budget or
+    // a daemon restart cuts the batch short, finished topics stay written and the retry
+    // only redoes the rest (selectChangedTopics skips topics rewritten after their last change).
+    let writes = Promise.resolve();
+    const outcomes = await mapWithLimit(changed, TOPIC_CONCURRENCY, async (item) => {
+      const outcome = await rewriteTopic(ctx, day, loaded, item.topic.topicId);
+      const rewrite = outcome.rewrite;
+      if (rewrite && !ctx.signal?.aborted) {
+        writes = writes.then(() =>
+          ctx.emit("topic.summary_rewritten", {
+            topicId: outcome.topicId,
+            summary: rewrite.summary,
+            nextStep: rewrite.nextStep,
+          }),
+        );
+        await writes;
+      }
+      return outcome;
+    });
     let failed = 0;
     for (const outcome of outcomes) {
-      if (outcome.rewrite) {
-        await ctx.emit("topic.summary_rewritten", {
-          topicId: outcome.topicId,
-          summary: outcome.rewrite.summary,
-          nextStep: outcome.rewrite.nextStep,
-        });
-      }
       if (outcome.failed) {
         failed += 1;
         ctx.warnings.push(`话题 ${outcome.topicId} 概要重写失败`);

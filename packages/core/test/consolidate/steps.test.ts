@@ -17,6 +17,7 @@ import {
   topicSummariesStep,
   type ConsolidationStep,
 } from "../../src/consolidate/index.js";
+import { LlmAbortError } from "../../src/llm/errors.js";
 import type { LlmCompleteRequest } from "../../src/llm/types.js";
 import { SqliteStore } from "../../src/store/sqlite-store.js";
 import { weeklyText } from "../../src/reminders/text.js";
@@ -72,6 +73,7 @@ async function settle(options: {
   zone?: { activeLimit: number; historyDays: number };
   cursors?: { get(key: string): string | null; set(key: string, value: string): void };
   topicTranscripts?: (input: { day: string; sessionKeys: readonly string[] }) => Promise<string>;
+  stepBudgetMs?: number;
 }) {
   const events = [...options.events];
   const requests: LlmCompleteRequest[] = [];
@@ -92,6 +94,7 @@ async function settle(options: {
     cursors,
     steps: options.steps ?? [topicSummariesStep],
     ...(options.topicTranscripts ? { topicTranscripts: options.topicTranscripts } : {}),
+    ...(options.stepBudgetMs === undefined ? {} : { stepBudgetMs: options.stepBudgetMs }),
   });
   return { result, events, requests, cursors };
 }
@@ -242,6 +245,44 @@ describe("topic summary rewrite", () => {
       },
     });
     expect(second.requests.every((request) => request.user.includes("话题：乙"))).toBe(true);
+    expect(second.requests).toHaveLength(1);
+    expect(second.result.ok).toBe(true);
+    expect(rewritten(second.events, "beta")).toEqual(["乙的新概要"]);
+  });
+
+  it("keeps topics finished before the step budget runs out, and skips them on retry", async () => {
+    const sessionA = key(7);
+    const sessionB = key(8);
+    const events = [
+      ...topic("alpha", "甲", sessionA),
+      ...topic("beta", "乙", sessionB),
+      conclusion("c-a", "alpha", sessionA),
+      conclusion("c-b", "beta", sessionB),
+    ];
+    const first = await settle({
+      events,
+      stepBudgetMs: 50,
+      complete: (request) => {
+        if (request.user.includes("话题：乙")) {
+          return new Promise<string>((_, reject) => {
+            request.signal?.addEventListener("abort", () => reject(new LlmAbortError()), { once: true });
+          });
+        }
+        return JSON.stringify({ summary: "甲的新概要", nextStep: "继续" });
+      },
+    });
+    expect(first.result.ok).toBe(false);
+    expect(first.result.steps[0]).toMatchObject({ id: "topic_summaries", error: "步骤执行超时" });
+    expect(rewritten(first.events, "alpha")).toEqual(["甲的新概要"]);
+    expect(rewritten(first.events, "beta")).toEqual([]);
+
+    const second = await settle({
+      events: first.events,
+      complete: (request) => {
+        if (request.user.includes("话题：甲")) throw new Error("甲不应再调用");
+        return JSON.stringify({ summary: "乙的新概要", nextStep: "" });
+      },
+    });
     expect(second.requests).toHaveLength(1);
     expect(second.result.ok).toBe(true);
     expect(rewritten(second.events, "beta")).toEqual(["乙的新概要"]);
