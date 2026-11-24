@@ -3690,28 +3690,9 @@ export class YouBrainDaemon {
       this.#deck.startNotices();
       this.#runRelayAutoJoin();
     }
-    if (this.#paths && this.#tasks === null) {
-      this.#taskAutomation ??= new T3Automation({
-        getUrl: async () => normalizeT3Url((await this.#uiPrefsStore().read())["you-brain.deck.t3-url"] ?? "") ?? DEFAULT_T3_URL,
-        env: this.#env,
-        homeDir: this.#homeDir,
-      });
-      this.#tasks = new TaskService({
-        dataDir: this.#paths.dataDir,
-        homeDir: this.#homeDir,
-        automation: this.#taskAutomation,
-        git: new TaskGit({ dataDir: this.#paths.dataDir, env: this.#env }),
-        now: () => this.#clock.now(),
-        onChange: () => this.changes.publish("deck", this.#clock.now().toISOString()),
-        projectContext: async (cwd) => {
-          const doc = await readPortraitFile(this.#paths.portraitDir, "projects").catch(() => null);
-          if (!doc?.content) return null;
-          const hit = lookupProjectPortrait(doc.content, cwd);
-          return hit.matched ? hit.portrait : null;
-        },
-      });
-      this.#tasks.start();
-      this.#startT3Watch(this.#taskAutomation);
+    if (this.#paths) {
+      this.#ensureTasks();
+      if (this.#taskAutomation) this.#startT3Watch(this.#taskAutomation);
     }
     return {
       today: () => readers.today(),
@@ -4122,17 +4103,47 @@ export class YouBrainDaemon {
     watch.start();
   }
 
+  #ensureTaskAutomation(): T3Automation {
+    this.#taskAutomation ??= new T3Automation({
+      getUrl: async () => normalizeT3Url((await this.#uiPrefsStore().read())["you-brain.deck.t3-url"] ?? "") ?? DEFAULT_T3_URL,
+      env: this.#env,
+      homeDir: this.#homeDir,
+    });
+    return this.#taskAutomation;
+  }
+
+  #ensureTasks(): TaskService | null {
+    const paths = this.#paths;
+    if (!paths) return null;
+    if (this.#tasks === null) {
+      const automation = this.#ensureTaskAutomation();
+      this.#tasks = new TaskService({
+        dataDir: paths.dataDir,
+        homeDir: this.#homeDir,
+        automation,
+        git: new TaskGit({ dataDir: paths.dataDir, env: this.#env }),
+        now: () => this.#clock.now(),
+        onChange: () => this.changes.publish("deck", this.#clock.now().toISOString()),
+        projectContext: async (cwd) => {
+          const doc = await readPortraitFile(paths.portraitDir, "projects").catch(() => null);
+          if (!doc?.content) return null;
+          const hit = lookupProjectPortrait(doc.content, cwd);
+          return hit.matched ? hit.portrait : null;
+        },
+      });
+      this.#tasks.start();
+    }
+    return this.#tasks;
+  }
+
   /** 装配跨设备派活（只在 paths 就绪的真实 daemon 里启用）。 */
   async #initDispatch(): Promise<void> {
     const paths = this.#paths;
     if (!paths || this.#dispatchHub !== null) return;
     const deviceId = await resolveDispatchDeviceId(paths.dataDir);
     this.#dispatchDeviceId = deviceId;
-    this.#taskAutomation ??= new T3Automation({
-      getUrl: async () => normalizeT3Url((await this.#uiPrefsStore().read())["you-brain.deck.t3-url"] ?? "") ?? DEFAULT_T3_URL,
-      env: this.#env,
-      homeDir: this.#homeDir,
-    });
+    const automation = this.#ensureTaskAutomation();
+    const tasks = this.#ensureTasks();
     const secretOptions = { platform: this.#platform, backend: this.#secretBackend };
     const relayToken = telegramRelayTokenStore(secretOptions);
     const identity = new DispatchDeviceIdentity({
@@ -4156,8 +4167,6 @@ export class YouBrainDaemon {
     });
     this.#dispatchEvents = events;
 
-    const automation = this.#taskAutomation;
-    const tasks = this.#tasks;
     const executor = automation
       ? new DispatchExecutor({
           dataDir: paths.dataDir,

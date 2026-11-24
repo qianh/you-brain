@@ -11,13 +11,22 @@ import {
   type CommandSigningFields,
 } from "@you-brain/protocol";
 
+import { startRelayServer, type RelayServer } from "../../../../services/telegram-relay/src/server.js";
+import { startDaemon, type YouBrainDaemon } from "../../src/daemon/daemon.js";
+import { enrollRelay, TelegramRelayClient } from "../../src/deck/telegram/relay.js";
 import { DispatchExecutor, type DispatchT3Port } from "../../src/dispatch/index.js";
+import { MemoryDrive } from "../../src/drive/memory-drive.js";
 import { TaskService } from "../../src/tasks/service.js";
 import type { TaskAutomationPort, TaskBoard, TaskGitPort, TaskReview } from "../../src/tasks/types.js";
+import { makeDaemonDirs, throwingEmbedder } from "../daemon/helpers.js";
 
 const tempDirs: string[] = [];
+const cleanups: Array<() => void | Promise<void>> = [];
 
 afterEach(async () => {
+  while (cleanups.length > 0) {
+    await cleanups.pop()!();
+  }
   while (tempDirs.length > 0) {
     await rm(tempDirs.pop()!, { recursive: true, force: true });
   }
@@ -281,4 +290,192 @@ describe("dispatch tasks.* remote TODO management", () => {
 
     await tasks.stop();
   });
+
+  test("real YouBrainDaemon wires TaskService into DispatchExecutor on startup", async () => {
+    const relayKey = "relay-key-tasks-daemon-test";
+    const telegram = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => Response.json({ ok: true, result: { id: 1, username: "test_bot", first_name: "Test" } }),
+    });
+    cleanups.push(() => telegram.stop(true));
+
+    const relayDir = await mkdtemp(join(tmpdir(), "yb-tasks-relay-"));
+    tempDirs.push(relayDir);
+    const relay: RelayServer = await startRelayServer({
+      port: 0,
+      host: "127.0.0.1",
+      botToken: "123456:TEST-TOKEN",
+      relayKey,
+      dataDir: relayDir,
+      telegramApi: `http://127.0.0.1:${telegram.port}`,
+    });
+    cleanups.push(() => relay.stop());
+    const relayUrl = `http://127.0.0.1:${relay.port}`;
+
+    const dirs = await makeDaemonDirs("yb-tasks-daemon-");
+    tempDirs.push(dirs.root);
+    const daemon: YouBrainDaemon = await startDaemon({
+      homeDir: dirs.homeDir,
+      platform: "darwin",
+      env: dirs.env,
+      hostname: "mac-todo-test",
+      drive: new MemoryDrive(),
+      llm: null,
+      embedder: throwingEmbedder,
+      sourceRoots: {},
+      watch: false,
+      signals: false,
+    });
+    cleanups.push(() => daemon.stop());
+
+    const authHeaders = {
+      authorization: `Bearer ${daemon.token}`,
+      "content-type": "application/json",
+    };
+
+    const createInvite = async (): Promise<string> => {
+      const res = await fetch(`${relayUrl}/admin/invite`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${relayKey}` },
+      });
+      const body = (await res.json()) as { code: string };
+      return body.code;
+    };
+
+    // Enroll real daemon into relay
+    const daemonEnroll = await fetch(`${daemon.baseUrl}/api/deck/telegram`, {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({
+        action: "enroll-relay",
+        url: relayUrl,
+        code: await createInvite(),
+        name: "Mac-Daemon",
+      }),
+    });
+    expect(daemonEnroll.status).toBe(200);
+
+    // Enroll simulated mobile peer into relay
+    const phoneKeys = generateKeyPair();
+    const phoneId = "phone-mobile-0001";
+    const { token: phoneToken } = await enrollRelay(relayUrl, {
+      code: await createInvite(),
+      deviceId: phoneId,
+      name: "Test Phone",
+      publicKey: phoneKeys.publicKey,
+    });
+
+    type CmdResFrame = { cmdId: string; ok: boolean; result?: unknown; error?: string };
+    const pending = new Map<string, (frame: CmdResFrame) => void>();
+    let targetDeviceId: string | null = null;
+    let phoneConnected = false;
+
+    const phone = new TelegramRelayClient({
+      url: relayUrl,
+      token: phoneToken,
+      deviceId: phoneId,
+      name: "Test Phone",
+      onState: (state) => {
+        const peer = state.devices.find((d) => d.id !== phoneId && d.online);
+        if (peer) targetDeviceId = peer.id;
+      },
+      onMessage: () => undefined,
+      onConnection: (status) => {
+        if (status === "ok") phoneConnected = true;
+      },
+      onDispatchFrame: (frame) => {
+        if (frame.t === "cmdres" && typeof frame.cmdId === "string") {
+          const parsed: CmdResFrame = {
+            cmdId: frame.cmdId,
+            ok: frame.ok === true,
+            ...(frame.result !== undefined ? { result: frame.result } : {}),
+            ...(typeof frame.error === "string" ? { error: frame.error } : {}),
+          };
+          pending.get(frame.cmdId)?.(parsed);
+          pending.delete(frame.cmdId);
+        }
+      },
+    });
+    phone.start();
+    cleanups.push(() => phone.stop());
+
+    const deadline = Date.now() + 8_000;
+    while ((!phoneConnected || !targetDeviceId) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    expect(phoneConnected).toBe(true);
+    expect(targetDeviceId).not.toBeNull();
+
+    // Wait until daemon sees the mobile peer on the relay, then trust it and enable dispatch
+    let trusted = false;
+    while (!trusted && Date.now() < deadline) {
+      const trustRes = await fetch(`${daemon.baseUrl}/api/dispatch/trust-device`, {
+        method: "POST",
+        headers: authHeaders,
+        body: JSON.stringify({ deviceId: phoneId }),
+      });
+      if (trustRes.status === 200) {
+        trusted = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    expect(trusted).toBe(true);
+
+    const policyRes = await fetch(`${daemon.baseUrl}/api/dispatch/policy`, {
+      method: "PUT",
+      headers: authHeaders,
+      body: JSON.stringify({
+        enabled: true,
+        allProjects: true,
+      }),
+    });
+    expect(policyRes.status).toBe(200);
+
+    const sendRemote = async (kind: string, args: unknown) => {
+      const frame = makeSignedFrame(phoneKeys, phoneId, targetDeviceId!, kind, args, Date.now());
+      const response = new Promise<CmdResFrame>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pending.delete(frame.cmdId);
+          reject(new Error(`timeout waiting for ${kind}`));
+        }, 8_000);
+        pending.set(frame.cmdId, (res) => {
+          clearTimeout(timer);
+          resolve(res);
+        });
+      });
+      await phone.request("cmd", {
+        cmdId: frame.cmdId,
+        to: frame.to,
+        cmd: frame.cmd,
+        ts: frame.ts,
+        nonce: frame.nonce,
+        sig: frame.sig,
+      });
+      return response;
+    };
+
+    const boardRes = await sendRemote("tasks.board", {});
+    expect(boardRes.ok).toBe(true);
+
+    const createRes = await sendRemote("tasks.create", {
+      title: "手机端远程 TODO",
+      description: "验证真实 daemon 启动后 tasksPort 已接入",
+      projectId: null,
+      priority: 1,
+    });
+    expect(createRes.ok).toBe(true);
+    if (createRes.ok) {
+      const board = createRes.result as TaskBoard;
+      expect(board.tasks.some((t) => t.title === "手机端远程 TODO")).toBe(true);
+    }
+
+    const httpTasks = await fetch(`${daemon.baseUrl}/api/tasks`, {
+      headers: { authorization: `Bearer ${daemon.token}` },
+    });
+    expect(httpTasks.status).toBe(200);
+    const localBoard = (await httpTasks.json()) as TaskBoard;
+    expect(localBoard.tasks.some((t) => t.title === "手机端远程 TODO")).toBe(true);
+  }, 15_000);
 });
