@@ -19,6 +19,8 @@ const REDIRECT_URI = "http://127.0.0.1/u-brain-todo";
 const CLIENT_ACCESS = "full-access";
 const REFRESH_BEFORE_MS = 24 * 60 * 60 * 1000;
 const PROJECTS_CACHE_TTL_MS = 15_000;
+const CAPABILITIES_CACHE_TTL_MS = 60_000;
+const ANTIGRAVITY_INSTANCE_ID = "antigravity";
 /** 读尾部消息时覆盖的条目数；一轮里助手消息之间夹着工具调用等条目。 */
 const TAIL_ITEMS = 60;
 export const MASTER_AGENT_PREAMBLE_START = "<!-- u-brain-master-agent -->";
@@ -96,23 +98,54 @@ function model(value: unknown): value is ModelSelection {
   return object(value) && text(value.instanceId) && text(value.model);
 }
 
-/** 为主控轻量化编排构造低推理耗时选项；保留原实例与模型，只覆盖 effort / reasoningEffort 为 low。 */
+type LaunchMode = "auto-accept-edits" | "auto" | "full-access";
+
+/** 为主控轻量化编排构造低推理耗时选项；保留原实例与模型。antigravity 走 thought_level，其余走 effort / reasoningEffort。 */
 function withLowEffortSelection(selection: ModelSelection): ModelSelection {
   const existing = Array.isArray(selection.options)
     ? selection.options.filter(
         (item): item is { id: string; value: unknown } =>
-          object(item) && typeof item.id === "string" && item.id !== "effort" && item.id !== "reasoningEffort",
+          object(item) && typeof item.id === "string",
       )
     : [];
+  if (selection.instanceId === ANTIGRAVITY_INSTANCE_ID) {
+    if (existing.some((item) => item.id === "thought_level")) {
+      return { instanceId: selection.instanceId, model: selection.model, options: existing };
+    }
+    return {
+      instanceId: selection.instanceId,
+      model: selection.model,
+      options: [...existing, { id: "thought_level", value: "low" }],
+    };
+  }
+  const filtered = existing.filter((item) => item.id !== "effort" && item.id !== "reasoningEffort");
   return {
     instanceId: selection.instanceId,
     model: selection.model,
     options: [
-      ...existing,
+      ...filtered,
       { id: "effort", value: "low" },
       { id: "reasoningEffort", value: "low" },
     ],
   };
+}
+
+/** 当目标 provider 不支持请求的 runtimeMode（如 antigravity 不支持 auto）时，在 maxMode 范围内映射到兼容模式。 */
+export function resolveProviderRuntimeMode(
+  requested: LaunchMode,
+  supported: readonly string[] | null,
+  maxMode?: RuntimeMode,
+): LaunchMode {
+  if (!supported || supported.length === 0 || supported.includes(requested)) return requested;
+  if (requested === "auto") {
+    if (maxMode === "full-access" && supported.includes("full-access")) return "full-access";
+    if (supported.includes("auto-accept-edits")) return "auto-accept-edits";
+  }
+  if (requested === "full-access") {
+    if (supported.includes("auto")) return "auto";
+    if (supported.includes("auto-accept-edits")) return "auto-accept-edits";
+  }
+  return requested;
 }
 
 function runtimeMode(value: unknown): RuntimeMode | undefined {
@@ -180,6 +213,7 @@ export class T3Automation implements TaskAutomationPort {
   #opening: Promise<string | null> | null = null;
   #environments = new Map<string, string>();
   #projectsCache: { expiresAt: number; projects: T3Project[] } | null = null;
+  #capabilitiesCache: { expiresAt: number; runtimeModes: Map<string, string[]> } | null = null;
   #threadItemCounts = new Map<string, number>();
   #rpcId = 0;
 
@@ -245,14 +279,16 @@ export class T3Automation implements TaskAutomationPort {
 
   /**
    * 跨设备派活：在项目根目录开普通会话。
-   * 模型沿用 start()（项目默认，否则该项目最近一次会话）；不走 worktree / plan。
+   * 模型优先用显式 modelSelection，其次项目默认，最后该项目最近一次会话；不走 worktree / plan。
    */
   async launchThread(input: {
     projectId: string;
     title: string;
     prompt: string;
     requestId: string;
-    runtimeMode: "auto-accept-edits" | "auto" | "full-access";
+    runtimeMode: LaunchMode;
+    maxMode?: RuntimeMode;
+    modelSelection?: ModelSelection;
     fastOrchestrator?: boolean;
   }): Promise<{ threadId: string; threadUrl: string }> {
     const url = await this.#url();
@@ -261,28 +297,52 @@ export class T3Automation implements TaskAutomationPort {
       project = (await this.#projects(true)).find((item) => item.id === input.projectId);
     }
     if (!project) throw new T3AutomationError("INVALID_INPUT", "T3 中已找不到这个项目，请重新选择项目。");
-    const history = await this.#threads(project.id);
-    const latest = history.find((thread) => text(thread.providerInstanceId) && text(thread.model));
-    const selection = model(project.defaultModelSelection) ? project.defaultModelSelection
-      : latest ? { instanceId: latest.providerInstanceId, model: latest.model } : undefined;
+    let selection = model(input.modelSelection) ? input.modelSelection
+      : model(project.defaultModelSelection) ? project.defaultModelSelection : undefined;
+    if (!selection) {
+      const history = await this.#threads(project.id);
+      const latest = history.find((thread) => text(thread.providerInstanceId) && text(thread.model));
+      if (latest) selection = { instanceId: latest.providerInstanceId, model: latest.model };
+    }
     if (!selection) throw new T3AutomationError("INVALID_INPUT", "请先在 T3 中为这个项目选择模型或创建一次会话");
-    const launchArgs = (selectedModel: ModelSelection, keySuffix = "") => ({
+    const supportedModes = await this.#providerRuntimeModes(selection.instanceId);
+    const effectiveMode = resolveProviderRuntimeMode(input.runtimeMode, supportedModes, input.maxMode);
+    const launchArgs = (selectedModel: ModelSelection, mode: LaunchMode, keySuffix = "") => ({
       projectId: project.id, title: input.title, message: input.prompt, modelSelection: selectedModel,
-      runtimeMode: input.runtimeMode, interactionMode: "default",
+      runtimeMode: mode, interactionMode: "default",
       workspaceStrategy: { type: "root" },
       clientRequestId: `u-brain-dispatch-${input.requestId}${keySuffix}`,
     });
-    let launched: unknown;
+    const fallbackMode: LaunchMode | null =
+      effectiveMode === "auto" && selection.instanceId === ANTIGRAVITY_INSTANCE_ID
+        ? (input.maxMode === "full-access" ? "full-access" : "auto-accept-edits")
+        : null;
+    const primarySelection = input.fastOrchestrator ? withLowEffortSelection(selection) : selection;
+    const attempts: Array<{ model: ModelSelection; mode: LaunchMode; suffix: string }> = [
+      { model: primarySelection, mode: effectiveMode, suffix: "" },
+    ];
     if (input.fastOrchestrator) {
+      attempts.push({ model: selection, mode: effectiveMode, suffix: "-fallback" });
+    }
+    if (fallbackMode && fallbackMode !== effectiveMode) {
+      attempts.push({ model: primarySelection, mode: fallbackMode, suffix: "-mode-fallback" });
+      if (input.fastOrchestrator) {
+        attempts.push({ model: selection, mode: fallbackMode, suffix: "-fallback-mode" });
+      }
+    }
+    let launched: unknown;
+    let lastError: unknown;
+    for (const attempt of attempts) {
       try {
-        launched = await this.#call("t3_thread_launch", launchArgs(withLowEffortSelection(selection)), 60_000);
+        launched = await this.#call("t3_thread_launch", launchArgs(attempt.model, attempt.mode, attempt.suffix), 60_000);
+        lastError = undefined;
+        break;
       } catch (error) {
         if (!(error instanceof T3AutomationError) || error.code === "AUTH_REQUIRED" || error.code === "INVALID_RESPONSE") throw error;
-        launched = await this.#call("t3_thread_launch", launchArgs(selection, "-fallback"), 60_000);
+        lastError = error;
       }
-    } else {
-      launched = await this.#call("t3_thread_launch", launchArgs(selection), 60_000);
     }
+    if (lastError !== undefined) throw lastError;
     if (!object(launched) || !text(launched.threadId)) invalidResponse();
     return { threadId: launched.threadId, threadUrl: await this.#threadUrl(url, launched.threadId) };
   }
@@ -481,6 +541,26 @@ export class T3Automation implements TaskAutomationPort {
     const url = normalizeT3Url(await this.#options.getUrl());
     if (!url) throw new T3AutomationError("INVALID_INPUT", "TODO 只能连接本机 T3 HTTP(S) 服务根地址。");
     return url;
+  }
+
+  async #providerRuntimeModes(instanceId: string): Promise<string[] | null> {
+    if (this.#capabilitiesCache && Date.now() < this.#capabilitiesCache.expiresAt) {
+      return this.#capabilitiesCache.runtimeModes.get(instanceId) ?? null;
+    }
+    try {
+      const value = await this.#call("orchestrator_capabilities", {});
+      if (!object(value) || !Array.isArray(value.providers)) return null;
+      const runtimeModes = new Map<string, string[]>();
+      for (const provider of value.providers) {
+        if (!object(provider) || !text(provider.providerInstanceId) || !Array.isArray(provider.runtimeModes)) continue;
+        const modes = provider.runtimeModes.filter((item): item is string => text(item));
+        if (modes.length > 0) runtimeModes.set(provider.providerInstanceId, modes);
+      }
+      this.#capabilitiesCache = { expiresAt: Date.now() + CAPABILITIES_CACHE_TTL_MS, runtimeModes };
+      return runtimeModes.get(instanceId) ?? null;
+    } catch {
+      return null;
+    }
   }
 
   async #projects(forceRefresh = false): Promise<T3Project[]> {

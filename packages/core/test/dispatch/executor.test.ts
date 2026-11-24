@@ -29,7 +29,7 @@ interface ThreadRow {
 
 class FakeT3 implements DispatchT3Port {
   calls = 0;
-  launches: Array<{ projectId: string; title: string; prompt: string; requestId: string; runtimeMode: string }> = [];
+  launches: Array<{ projectId: string; title: string; prompt: string; requestId: string; runtimeMode: string; maxMode?: string }> = [];
   followups: Array<{ threadId: string; prompt: string; commandId: string }> = [];
   projectsImpl = [
     { id: "p1", name: "you-brain", cwd: "/repo" },
@@ -46,7 +46,7 @@ class FakeT3 implements DispatchT3Port {
     return this.projectsImpl;
   }
 
-  async launchThread(input: { projectId: string; title: string; prompt: string; requestId: string; runtimeMode: "auto-accept-edits" | "auto" | "full-access" }): Promise<{ threadId: string; threadUrl: string }> {
+  async launchThread(input: { projectId: string; title: string; prompt: string; requestId: string; runtimeMode: "auto-accept-edits" | "auto" | "full-access"; maxMode?: string }): Promise<{ threadId: string; threadUrl: string }> {
     this.calls += 1;
     this.launches.push(input);
     if (this.failLaunch) throw new T3AutomationError("UNAVAILABLE", "无法连接 T3");
@@ -266,6 +266,7 @@ describe("目标端执行器", () => {
       prompt: "做这件事",
       requestId: "d-1",
       runtimeMode: "auto",
+      maxMode: "auto",
     }]);
     expect(value).toMatchObject({ threadId: "thread-1", mode: "auto", capped: false });
     expect(h.notifies).toEqual([{ fromName: "Mac A", projectName: "you-brain", title: "标题" }]);

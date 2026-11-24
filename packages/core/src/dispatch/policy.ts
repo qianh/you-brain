@@ -12,6 +12,17 @@ export interface DispatchSender {
   publicKey: string;
 }
 
+export interface MasterModelOption {
+  id: string;
+  value: unknown;
+}
+
+export interface MasterModelSelection {
+  instanceId: string;
+  model: string;
+  options?: MasterModelOption[];
+}
+
 export interface DispatchPolicy {
   enabled: boolean;
   /** 允许「允许的发起设备」在它们的指挥台里查看并操作本机 T3（经加密隧道）。与 enabled（接收派活）各自独立。 */
@@ -28,6 +39,10 @@ export interface DispatchPolicy {
   maxMode: RuntimeModeName;
   allowedSenders: DispatchSender[];
   allowedProjects: string[];
+  /** 手机端主控会话默认使用的 T3 项目 ID（优先于自动挑选）。 */
+  masterProjectId?: string;
+  /** 手机端主控会话默认使用的模型与选项（显式配置时优先于项目默认模型）。 */
+  masterModelSelection?: MasterModelSelection;
 }
 
 export function defaultDispatchPolicy(): DispatchPolicy {
@@ -76,9 +91,45 @@ function dedupeProjects(value: unknown): string[] {
   return projects;
 }
 
+function normalizeMasterProjectId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed === "" ? undefined : trimmed;
+}
+
+function normalizeMasterModelOptions(value: unknown): MasterModelOption[] | undefined {
+  const raw: Array<{ id: string; value: unknown }> = [];
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      if (!isRecord(item) || typeof item.id !== "string" || item.id.trim() === "" || item.value === undefined) continue;
+      raw.push({ id: item.id.trim(), value: item.value });
+    }
+  } else if (isRecord(value)) {
+    for (const [id, optionValue] of Object.entries(value)) {
+      if (id.trim() === "" || optionValue === undefined) continue;
+      raw.push({ id: id.trim(), value: optionValue });
+    }
+  }
+  if (raw.length === 0) return undefined;
+  const deduped = new Map<string, MasterModelOption>();
+  for (const option of raw) deduped.set(option.id, option);
+  return [...deduped.values()];
+}
+
+function normalizeMasterModelSelection(value: unknown): MasterModelSelection | undefined {
+  if (!isRecord(value)) return undefined;
+  const instanceId = typeof value.instanceId === "string" ? value.instanceId.trim() : "";
+  const model = typeof value.model === "string" ? value.model.trim() : "";
+  if (instanceId === "" || model === "") return undefined;
+  const options = normalizeMasterModelOptions(value.options);
+  return options ? { instanceId, model, options } : { instanceId, model };
+}
+
 /** 缺文件、读不出或 JSON 损坏时整份回落默认；只是 maxMode 非法则单独回落 auto。 */
 export function normalizeDispatchPolicy(value: unknown): DispatchPolicy {
   if (!isRecord(value)) return defaultDispatchPolicy();
+  const masterProjectId = normalizeMasterProjectId(value.masterProjectId);
+  const masterModelSelection = normalizeMasterModelSelection(value.masterModelSelection);
   return {
     enabled: value.enabled === true,
     viewT3: value.viewT3 === true,
@@ -90,6 +141,8 @@ export function normalizeDispatchPolicy(value: unknown): DispatchPolicy {
     maxMode: isRuntimeMode(value.maxMode) ? value.maxMode : "auto",
     allowedSenders: dedupeSenders(value.allowedSenders),
     allowedProjects: dedupeProjects(value.allowedProjects),
+    ...(masterProjectId !== undefined ? { masterProjectId } : {}),
+    ...(masterModelSelection !== undefined ? { masterModelSelection } : {}),
   };
 }
 
@@ -124,6 +177,8 @@ export class PolicyStore {
         maxMode: patch.maxMode !== undefined ? patch.maxMode : current.maxMode,
         allowedSenders: patch.allowedSenders ?? current.allowedSenders,
         allowedProjects: patch.allowedProjects ?? current.allowedProjects,
+        masterProjectId: "masterProjectId" in patch ? patch.masterProjectId : current.masterProjectId,
+        masterModelSelection: "masterModelSelection" in patch ? patch.masterModelSelection : current.masterModelSelection,
       });
       await writeFileAtomic(this.#file, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
       await chmod(this.#file, 0o600);
