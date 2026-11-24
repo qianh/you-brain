@@ -31,6 +31,15 @@ bunx wrangler@4 deploy                   # 输出 https://u-brain-telegram-relay
 
 ## 在自有 VPS 上部署
 
+**推荐：一键部署脚本。** 在本机仓库里执行，会按下面 1–3 步自动完成（本地测试、同步 `src`、建运行用户、首次生成环境文件、安装 systemd 单元、部署 coturn、重启、自检），已有的 `/etc/u-brain-relay.env` 不会被改动，重复执行即升级：
+
+```bash
+services/telegram-relay/deploy/deploy.sh --dry-run   # 先看会同步什么，不改 VPS
+services/telegram-relay/deploy/deploy.sh             # 正式部署 / 升级
+```
+
+连接信息取自 `--target user@host --port N`、环境变量 `RELAY_SSH_TARGET` / `RELAY_SSH_PORT`，或仓库根 `.env` 的 `Address` / `SSH_Port`（需 root + 密钥登录）。`--skip-turn` 跳过 coturn，`--skip-test` 跳过本地测试。首次部署后仍需手工填 `BOT_TOKEN`，并配好 Caddy / cloudflared 反代。下面是手工步骤，脚本出问题时可对照。
+
 中转只监听 `127.0.0.1`，由 Caddy 提供 HTTPS 并反代，WebSocket 不需要额外配置。密钥只放在权限 `0600` 的环境文件里，不要写进命令行参数、shell 历史或聊天。
 
 需要一台 Linux VPS，本机已装好 `bun`（或做一条到 `/usr/local/bin/bun` 的符号链接）和 Caddy。在仓库里执行：
@@ -70,6 +79,17 @@ bunx wrangler@4 deploy                   # 输出 https://u-brain-telegram-relay
    curl --config "$cfg"
    rm -f "$cfg"
    ```
+
+### 远程桌面的 TURN 中继（coturn）
+
+远程桌面（WebRTC）在两台设备跨网或开 VPN 时靠 TURN 中继兜底。中转只负责签发临时凭据，TURN 服务本身要在 VPS 上装 coturn，一条命令搞定（幂等，重跑会复用已有密钥）：
+
+```bash
+scp services/telegram-relay/deploy/setup-turn.sh root@<VPS>:/root/
+ssh root@<VPS> 'bash /root/setup-turn.sh [公网IP或域名]'
+```
+
+脚本会装 coturn、写 `/etc/turnserver.conf`、把 `RELAY_TURN_URLS` 与 `RELAY_TURN_SECRET` 写进 `/etc/u-brain-relay.env`（先备份）、重启 coturn 和中转，并用同一算法签一个临时凭据自检。云厂商若另有安全组，需放行 3478/tcp+udp 与 49152-65535/udp。`coturn.conf.example` 仅作手工配置参考。
 
 ### 从 Cloudflare 切换，以及回滚
 
