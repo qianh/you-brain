@@ -108,7 +108,7 @@ describe("TelegramSection 中转邀请码入网", () => {
     expect(result.error).not.toContain(secretCode);
   });
 
-  test("未入网时展示邀请码入网入口与标注过渡期的旧共享密钥入口，且邀请码输入框为密码类型", () => {
+  test("未入网时仅展示邀请码入网入口与云盘自动同步说明，不再展示旧共享密钥入口", () => {
     const html = renderToStaticMarkup(
       <DaemonProvider>
         <ToastProvider>
@@ -133,7 +133,7 @@ describe("TelegramSection 中转邀请码入网", () => {
     expect(html).toContain("用邀请码入网");
     expect(html).toContain('id="telegram-enroll-code"');
     expect(html).toMatch(/id="telegram-enroll-code"[^>]*type="password"/);
-    expect(html).toContain("旧方式，过渡期用");
-    expect(html).toContain('id="telegram-relay-key"');
+    expect(html).not.toContain('id="telegram-relay-key"');
+    expect(html).not.toContain("u-brain-relay:");
   });
 });

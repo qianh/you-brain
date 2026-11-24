@@ -6,7 +6,7 @@ import { DaemonProvider, FrozenDaemon, useDaemon } from "./daemon-context.js";
 import { PageActiveContext } from "./page-active.js";
 import { useDelayed } from "./components/use-delayed.js";
 import { loadChunk } from "./lib/load-chunk.js";
-import { settingsHref } from "./lib/route.js";
+import { readQuery, settingsHref } from "./lib/route.js";
 import { FrozenRoute, Router, useRoute } from "./router.js";
 import { Shell } from "./shell.js";
 import { ThemeProvider } from "./theme-context.js";
@@ -21,6 +21,7 @@ const loadTopics = () => import("./pages/topics.js");
 const loadKnowledge = () => import("./pages/knowledge.js");
 const loadTasks = () => import("./pages/tasks.js");
 const loadSearch = () => import("./pages/search.js");
+const loadStatus = () => import("./pages/status.js");
 const loadSettings = () => import("./pages/settings.js");
 const DshDeckPage = lazy(() => loadChunk(loadDeck).then((m) => ({ default: m.DshDeckPage })));
 const TodayPage = lazy(() => loadChunk(loadToday).then((m) => ({ default: m.TodayPage })));
@@ -28,6 +29,7 @@ const TopicsPage = lazy(() => loadChunk(loadTopics).then((m) => ({ default: m.To
 const KnowledgePage = lazy(() => loadChunk(loadKnowledge).then((m) => ({ default: m.KnowledgePage })));
 const TasksPage = lazy(() => loadChunk(loadTasks).then((m) => ({ default: m.TasksPage })));
 const SearchPage = lazy(() => loadChunk(loadSearch).then((m) => ({ default: m.SearchPage })));
+const StatusPage = lazy(() => loadChunk(loadStatus).then((m) => ({ default: m.StatusPage })));
 const SettingsPage = lazy(() => loadChunk(loadSettings).then((m) => ({ default: m.SettingsPage })));
 const DesignPage = lazy(() => loadChunk(() => import("./pages/design.js")).then((m) => ({ default: m.DesignPage })));
 const PanelPage = lazy(() => loadChunk(() => import("./pages/panel.js")).then((m) => ({ default: m.PanelPage })));
@@ -42,7 +44,7 @@ const ReminderPopupPage = lazy(() =>
 function prefetchPages(): () => void {
   const timer = window.setTimeout(() => {
     const terminal = () => import("./pages/deck-tty7-terminal.js");
-    for (const load of [loadDeck, loadToday, loadTopics, loadKnowledge, loadTasks, loadSearch, loadSettings, terminal]) {
+    for (const load of [loadDeck, loadToday, loadTopics, loadKnowledge, loadTasks, loadSearch, loadStatus, loadSettings, terminal]) {
       void load().catch(() => undefined);
     }
   }, 1_500);
@@ -75,23 +77,26 @@ export function App() {
 }
 
 function Frame() {
-  const { location, navigate } = useRoute();
+  const { href, location, navigate } = useRoute();
   const { loading, today, t } = useDaemon();
   const panel = location.pathname === "/panel";
   const reminderPopup = location.pathname === "/reminder-popup";
   useEffect(() => {
     if (location.pathname === "/") navigate("/deck", "replace");
   }, [location.pathname, navigate]);
-  // 顶部导航收敛后,旧入口指到设置里的对应分区。
+  // 顶部导航收敛后,旧入口指到设置里的对应分区;状态页独立在 /status。
   useEffect(() => {
+    if (location.pathname === "/settings" && readQuery(href, "section") === "status") {
+      navigate("/status", "replace");
+      return;
+    }
     const redirects: Record<string, string> = {
       "/portrait": settingsHref("portrait"),
-      "/devices": settingsHref("devices"),
-      "/status": settingsHref("status"),
+      "/devices": settingsHref("account"),
     };
     const target = redirects[location.pathname];
     if (target) navigate(target, "replace");
-  }, [location.pathname, navigate]);
+  }, [href, location.pathname, navigate]);
   useEffect(() => {
     const page =
       location.pathname === "/panel"
@@ -106,9 +111,11 @@ function Frame() {
                 ? t("navKnowledge")
                 : location.pathname === "/search"
                   ? t("navSearch")
-                  : location.pathname === "/settings"
-                    ? t("navSettings")
-                    : t("navMemory");
+                  : location.pathname === "/status"
+                    ? t("navStatus")
+                    : location.pathname === "/settings"
+                      ? t("navSettings")
+                      : t("navMemory");
     document.title = `${page} · U-Brain`;
   }, [location.pathname, t]);
 
@@ -136,6 +143,7 @@ function Frame() {
   else if (location.pathname === "/knowledge") page = <KeepAlive active="/knowledge" />;
   else if (location.pathname === "/todos") page = <KeepAlive active="/todos" />;
   else if (location.pathname === "/search") page = <Suspense fallback={<PageLoading />}><SearchPage /></Suspense>;
+  else if (location.pathname === "/status") page = <Suspense fallback={<PageLoading />}><StatusPage /></Suspense>;
   else if (location.pathname === "/settings") page = <Suspense fallback={<PageLoading />}><SettingsPage /></Suspense>;
   else if (location.pathname === "/_design") page = <Suspense fallback={<PageLoading />}><DesignPage /></Suspense>;
   return <Shell>{page}</Shell>;

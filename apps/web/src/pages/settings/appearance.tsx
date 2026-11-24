@@ -1,18 +1,10 @@
-import { useEffect, useState } from "react";
 import type { SharedConfig } from "@you-brain/protocol";
 
 import { Card } from "../../components/card.js";
 import { Icon } from "../../components/icons.js";
-import { Input } from "../../components/input.js";
-import { Kbd } from "../../components/kbd.js";
 import { Segmented } from "../../components/segmented.js";
-import { Toggle } from "../../components/toggle.js";
 import { useDaemon } from "../../daemon-context.js";
-import { prefs } from "../../lib/prefs.js";
-import { modLabel, shortcutMod } from "../../lib/shortcuts.js";
-import { TERMINAL_NOTIFY_KEY, terminalNotifyOn, terminalNotifyValue } from "../../lib/terminal-notify.js";
 import { useTheme, type ThemeChoice } from "../../theme-context.js";
-import { shortcutGlyph, shortcutParts } from "./logic.js";
 import { SettingRow } from "./setting-row.js";
 
 const THEMES: readonly ThemeChoice[] = ["system", "light", "dark", "dopamine"];
@@ -25,25 +17,12 @@ const THEME_LABEL = {
 } as const satisfies Record<ThemeChoice, string>;
 
 export function AppearanceSection({
-  draft,
   onAppearance,
 }: {
-  draft: SharedConfig;
   onAppearance: (patch: Partial<SharedConfig["ui"]>) => Promise<void>;
 }) {
   const { t, language } = useDaemon();
   const { choice, setChoice } = useTheme();
-  const [shortcut, setShortcut] = useState(draft.ui.shortcut);
-  // 偏好由 daemon 保存，即时生效，不走本页的保存栏。
-  const [notifyOn, setNotifyOn] = useState(() => terminalNotifyOn(prefs.getItem(TERMINAL_NOTIFY_KEY)));
-  const mod = modLabel(shortcutMod(navigator.platform));
-  const glyphs = shortcutParts(shortcut).map((part) => shortcutGlyph(part, mod === "⌘" ? "⌘" : "Ctrl"));
-
-  useEffect(() => setShortcut(draft.ui.shortcut), [draft.ui.shortcut]);
-
-  const commitShortcut = (): void => {
-    if (shortcut !== draft.ui.shortcut) void onAppearance({ shortcut });
-  };
 
   const moveTheme = (delta: number): void => {
     const index = THEMES.indexOf(choice);
@@ -104,48 +83,6 @@ export function AppearanceSection({
             onChange={(value) => {
               const next = value === "en" ? "en" : "zh";
               if (next !== language) void onAppearance({ language: next });
-            }}
-          />
-        </SettingRow>
-        <SettingRow
-          title={t("shortcut")}
-          hint={
-            <span className="settings-shortcut-hint">
-              {glyphs.length > 0 ? (
-                <span className="settings-chords">
-                  {glyphs.map((glyph, index) => (
-                    <Kbd key={`${glyph}-${index}`}>{glyph}</Kbd>
-                  ))}
-                </span>
-              ) : null}
-              <span>{t("shortcutHint")}</span>
-            </span>
-          }
-        >
-          <Input
-            label={t("shortcut")}
-            className="settings-mono"
-            value={shortcut}
-            spellCheck={false}
-            onChange={(event) => setShortcut(event.target.value)}
-            onBlur={commitShortcut}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                commitShortcut();
-              }
-            }}
-          />
-        </SettingRow>
-        <SettingRow title={t("terminalNotify")} hint={t("terminalNotifyHint")} control="toggle">
-          <Toggle
-            checked={notifyOn}
-            label={t("terminalNotify")}
-            onChange={(checked) => {
-              const value = terminalNotifyValue(checked);
-              if (value === null) prefs.removeItem(TERMINAL_NOTIFY_KEY);
-              else prefs.setItem(TERMINAL_NOTIFY_KEY, value);
-              setNotifyOn(checked);
             }}
           />
         </SettingRow>

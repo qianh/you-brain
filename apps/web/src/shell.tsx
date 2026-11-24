@@ -217,7 +217,7 @@ export function Shell({ children }: { children: ReactNode }) {
               <Kbd>{chord("K")}</Kbd>
             </button>
           </Tooltip>
-          <StatusCapsule kind={kind} label={capsuleText(kind, capsuleWarningCount(status), t)} onClick={() => navigate(settingsHref("status"))} />
+          <StatusCapsule kind={kind} label={capsuleText(kind, capsuleWarningCount(status), t)} onClick={() => navigate("/status")} />
           <Tooltip content={t("reload")} shortcut={chord("R")}>
             <button
               type="button"

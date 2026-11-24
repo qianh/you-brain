@@ -19,7 +19,6 @@ import {
 } from "@you-brain/protocol";
 
 import { SessionSourceSchema } from "../domain/session.js";
-import { WebhookEventKindSchema, type WebhookEventKind } from "../webhook/kinds.js";
 import type { NotionBlockModel } from "../notion/model.js";
 
 export type { NotionBlockModel, NotionSegment } from "../notion/model.js";
@@ -615,45 +614,6 @@ export interface ConsolidateActionResult {
   steps: ConsolidateStepResult[];
 }
 
-export const WebhookPutSchema = z
-  .object({
-    enabled: z.boolean().optional(),
-    url: z.string().optional(),
-    secret: z.string().optional(),
-    events: z.array(WebhookEventKindSchema).optional(),
-  })
-  .strict();
-
-export type WebhookPutBody = z.infer<typeof WebhookPutSchema>;
-
-export const WebhookLastSchema = z.object({
-  at: z.string(),
-  ok: z.boolean(),
-  status: z.number().int().optional(),
-  error: z.string().optional(),
-  eventId: z.string().optional(),
-});
-
-export const WebhookPublicSchema = z.object({
-  enabled: z.boolean(),
-  url: z.string(),
-  hasSecret: z.boolean(),
-  events: z.array(WebhookEventKindSchema),
-  active: z.boolean(),
-  last: WebhookLastSchema.nullable(),
-  pending: z.number().int().nonnegative(),
-});
-
-export type WebhookPublic = z.infer<typeof WebhookPublicSchema>;
-
-export const WebhookTestResultSchema = z.object({
-  ok: z.boolean(),
-  status: z.number().int().optional(),
-  error: z.string().optional(),
-});
-
-export type WebhookTestResult = z.infer<typeof WebhookTestResultSchema>;
-
 /** PUT /api/secrets/llm. The key goes to the OS keychain and is never echoed back. */
 export const LlmKeyPutSchema = z
   .object({
@@ -1166,8 +1126,6 @@ export interface NotionPageView {
   database?: { id: string; columns: Array<{ name: string; type: string; options?: string[] }> };
 }
 
-export type { WebhookEventKind };
-
 export const DaemonEventSchema = z.object({
   id: z.number().int().nonnegative(),
   kind: z.enum(["ready", "topics", "today", "status", "portrait", "devices", "notion", "deck"]),
@@ -1365,14 +1323,6 @@ export const DeckTelegramActionBodySchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("unbind") }).strict(),
   z.object({ action: z.literal("test") }).strict(),
   z.object({ action: z.literal("set-notifications"), enabled: z.boolean() }).strict(),
-  z
-    .object({
-      action: z.literal("set-relay"),
-      url: z.string().trim().min(1).max(300),
-      key: z.string().trim().min(1).max(300),
-      name: z.string().trim().max(40).optional(),
-    })
-    .strict(),
   z
     .object({
       action: z.literal("enroll-relay"),

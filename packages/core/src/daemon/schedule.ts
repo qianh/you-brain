@@ -59,10 +59,6 @@ export const INTERVALS = {
   refineBackfillBatch: 8,
   /** Pause between backfill passes so the normal tick work keeps running. */
   refineBackfillMs: 15_000,
-  /** Coalesce webhook sends after an event lands. Never wait longer than this. */
-  webhookDebounceMs: 2_000,
-  /** Retry sweep. Backoff is enforced by the delivery state, not by this interval. */
-  webhookMs: 60_000,
 } as const;
 
 /** `last === null` means the job has never run and is due immediately. */

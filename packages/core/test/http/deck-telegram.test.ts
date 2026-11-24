@@ -31,10 +31,15 @@ async function withServer(run: (server: DaemonHttpServer, actions: DeckTelegramA
       if (body.action === "test") throw new YouBrainError("INVALID_INPUT", "还没有绑定 Telegram");
       return STATUS;
     },
-    async telegramInvite() {
-      return { invite: "u-brain-relay:abc" };
+    async telegramEnrollInvite() {
+      return {
+        url: "https://relay.example.com",
+        code: "ABCD2345",
+        expiresAt: "2026-11-24T10:00:00.000Z",
+        pairingUri: "ubrain://enroll?url=https%3A%2F%2Frelay.example.com&code=ABCD2345",
+      };
     },
-  } as Pick<DeckHttpPort, "telegramStatus" | "telegramAction" | "telegramInvite"> as DeckHttpPort;
+  } as Pick<DeckHttpPort, "telegramStatus" | "telegramAction" | "telegramEnrollInvite"> as DeckHttpPort;
   const server = await startDaemonHttp({ dataDir: dir, deps: { deck } as HttpDeps });
   try {
     await run(server, actions);
@@ -63,6 +68,7 @@ it("reads status and forwards validated actions", async () => {
     expect(actions).toEqual([{ action: "pair" }]);
 
     expect((await call(server, "POST", { action: "set-token" })).status).toBe(400);
+    expect((await call(server, "POST", { action: "set-relay", url: "https://relay.example.com", key: "0123456789abcdef" })).status).toBe(400);
     expect((await call(server, "POST", { action: "rm -rf" })).status).toBe(400);
     expect((await call(server, "POST", { action: "set-notifications", enabled: "true" })).status).toBe(400);
     expect(actions).toHaveLength(1);
@@ -77,11 +83,11 @@ it("reads status and forwards validated actions", async () => {
   });
 });
 
-it("hands out the relay connection info only by POST", async () => {
+it("hands out the enroll invite only by POST", async () => {
   await withServer(async (server) => {
-    const invite = await call(server, "POST", undefined, "/api/deck/telegram/invite");
+    const invite = await call(server, "POST", undefined, "/api/deck/telegram/enroll-invite");
     expect(invite.status).toBe(200);
-    expect(await invite.json()).toEqual({ invite: "u-brain-relay:abc" });
-    expect((await call(server, "GET", undefined, "/api/deck/telegram/invite")).status).toBe(405);
+    expect(await invite.json()).toMatchObject({ code: "ABCD2345" });
+    expect((await call(server, "GET", undefined, "/api/deck/telegram/enroll-invite")).status).toBe(405);
   });
 });

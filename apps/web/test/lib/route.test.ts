@@ -36,6 +36,9 @@ describe("routes", () => {
     expect(settingsHref("model")).toBe("/settings?section=model");
     expect(settingsHref()).toBe("/settings?section=account");
     expect(parseAppLocation("/settings?section=appearance").section).toBe("appearance");
+    expect(parseAppLocation("/settings?section=devices").section).toBe("account");
+    expect(parseAppLocation("/settings?section=refine").section).toBe("capture");
+    expect(parseAppLocation("/settings?section=consolidation").section).toBe("capture");
     expect(parseAppLocation("/settings?section=nope").section).toBe("account");
     expect(parseAppLocation("/settings").section).toBe("account");
     expect(searchHref("京都 夜")).toBe("/search?q=%E4%BA%AC%E9%83%BD%20%E5%A4%9C");

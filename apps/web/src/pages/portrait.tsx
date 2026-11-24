@@ -181,7 +181,7 @@ export function PortraitPage({ embedded = false, fileSettings }: { embedded?: bo
                   }
                   action={
                     emptyCopy.kind === "off" ? (
-                      <Button variant="primary" onClick={() => navigate(settingsHref("consolidation"))}>
+                      <Button variant="primary" onClick={() => navigate(settingsHref("capture"))}>
                         {t("portraitEnableConsolidation")}
                       </Button>
                     ) : (

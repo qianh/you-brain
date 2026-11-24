@@ -540,22 +540,23 @@ describe("TelegramBridge", () => {
     ctx.bridge.stop();
   });
 
-  it("set-relay uses options.deviceId when no relay.deviceId is stored yet", async () => {
+  it("enroll-relay uses options.deviceId when no relay.deviceId is stored yet", async () => {
     const dir = await mkdtemp(join(tmpdir(), "yb-tg-devid-"));
-    const relayKey = new MemorySecretStore(null);
+    const relayToken = new MemorySecretStore(null);
     const bridge = new TelegramBridge({
       configPath: join(dir, "deck", "telegram.json"),
       token: new MemorySecretStore(null),
-      relayKey,
+      relayToken,
+      dispatchIdentity: { ensure: async () => ({ publicKey: "pk", privateKey: "sk" }) } as never,
       deviceId: "stable-dev-id-1234",
       notices: () => ({ epoch: "e1", latest: 0, notices: [] }),
       sessions: async () => ({ available: true, detail: "", workspaces: [], sessions: [], harnesses: [], appearance: null }),
       send: async () => undefined,
       dismiss: () => undefined,
-      relayFetch: async () => new Response(JSON.stringify({ ok: true, botConfigured: true }), { status: 200 }),
+      relayFetch: async () => new Response(JSON.stringify({ token: "ubd_token_123" }), { status: 200 }),
     });
     try {
-      await bridge.action({ action: "set-relay", url: "https://relay.example.com", key: "0123456789abcdef" });
+      await bridge.action({ action: "enroll-relay", url: "https://relay.example.com", code: "ABCD2345" });
       const saved = JSON.parse(await readFile(join(dir, "deck", "telegram.json"), "utf8")) as {
         relay: { deviceId: string };
       };

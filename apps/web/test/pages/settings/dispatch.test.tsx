@@ -3,7 +3,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import type {
   DispatchDevicesResponse,
-  DispatchOutboxEntry,
   DispatchPolicyPutBody,
   DispatchPolicyResponse,
 } from "@you-brain/core/http/types.js";
@@ -40,7 +39,10 @@ function makeStubClient(overrides: Partial<BrowserDaemon> = {}): BrowserDaemon {
       policy: {
         enabled: false,
         notify: true,
-        viewT3: false, trustEnrolled: false, allProjects: false, autoConfigured: false,
+        viewT3: false,
+        trustEnrolled: true,
+        allProjects: true,
+        autoConfigured: true,
         maxMode: "auto",
         allowedProjects: [],
         allowedSenders: [],
@@ -51,18 +53,18 @@ function makeStubClient(overrides: Partial<BrowserDaemon> = {}): BrowserDaemon {
     updateDispatchPolicy: async (body: DispatchPolicyPutBody) => ({
       policy: {
         enabled: body.enabled ?? false,
-        notify: body.notify ?? true,
-        maxMode: body.maxMode ?? "auto",
-        allowedProjects: body.allowedProjects ?? [],
+        notify: true,
+        viewT3: body.viewT3 ?? false,
+        trustEnrolled: true,
+        allProjects: true,
+        autoConfigured: true,
+        maxMode: "auto",
+        allowedProjects: [],
         allowedSenders: [],
       },
       projects: [],
       knownSenders: [],
     }),
-    dispatchOutbox: async () => ({ entries: [] }),
-    dispatchOutboxItem: async () => {
-      throw new Error("not implemented");
-    },
     ...overrides,
   } as unknown as BrowserDaemon;
 }
@@ -79,7 +81,7 @@ function renderSection(props: DispatchSectionProps): string {
   );
 }
 
-describe("DispatchSection 渲染与交互", () => {
+describe("DispatchSection 精简后渲染与交互", () => {
   test("client.dispatchDevices 不存在时整个区块不渲染", () => {
     const clientWithoutDispatch = {} as unknown as BrowserDaemon;
     const html = renderSection({ client: clientWithoutDispatch });
@@ -87,136 +89,53 @@ describe("DispatchSection 渲染与交互", () => {
     expect(html).not.toContain("跨设备派活");
   });
 
-  test("加载后显示设备列表、本机策略与派活记录，选项中不包含 approval-required", () => {
+  test("仅渲染两个核心开关（允许派活、允许查看 T3 与终端会话），不再渲染权限档位、白名单与已发派活列表", () => {
     const devices: DispatchDevicesResponse = {
       self: { deviceId: "dev-self", name: "工作室 Mac" },
       connected: true,
       enrolled: true,
-      devices: [
-        {
-          id: "dev-self",
-          name: "工作室 Mac",
-          online: true,
-          self: true,
-          enrolled: true,
-          dispatch: {
-            enabled: true,
-            t3: { ready: true, version: "0.2.0" },
-            projects: [{ id: "p1", name: "you-brain" }],
-            maxMode: "auto",
-          },
-        },
-        {
-          id: "dev-vps",
-          name: "VPS 主控",
-          online: false,
-          self: false,
-          enrolled: true,
-          dispatch: {
-            enabled: false,
-            t3: { ready: false },
-            projects: [],
-            maxMode: "auto-accept-edits",
-          },
-        },
-      ],
+      devices: [],
     };
-
     const policy: DispatchPolicyResponse = {
       policy: {
         enabled: true,
         notify: true,
-        viewT3: false, trustEnrolled: false, allProjects: false, autoConfigured: false,
+        viewT3: true,
+        trustEnrolled: true,
+        allProjects: true,
+        autoConfigured: true,
         maxMode: "auto",
-        allowedProjects: ["p1"],
-        allowedSenders: [{ deviceId: "dev-vps", name: "VPS 主控", publicKey: "pk-vps" }],
+        allowedProjects: [],
+        allowedSenders: [],
       },
-      projects: [
-        { id: "p1", name: "you-brain" },
-        { id: "p2", name: "ashare-ledger" },
-      ],
-      knownSenders: [
-        { deviceId: "dev-vps", name: "VPS 主控", enrolled: true, publicKey: "pk-vps" },
-        { deviceId: "dev-legacy", name: "旧 Mac", enrolled: false },
-      ],
+      projects: [{ id: "p1", name: "you-brain" }],
+      knownSenders: [],
     };
-
-    const outbox: DispatchOutboxEntry[] = [
-      {
-        dispatchId: "disp-1",
-        to: "dev-vps",
-        deviceName: "VPS 主控",
-        projectId: "p1",
-        title: "跑一轮夜间构建",
-        mode: "auto",
-        cmdId: "cmd-1",
-        threadId: "t-1",
-        threadUrl: "http://127.0.0.1:3773/env/t-1",
-        status: "done",
-        createdAt: 1_760_000_000_000,
-        updatedAt: 1_760_000_060_000,
-        lastSummary: "全部测试通过，产出物已校验。",
-      },
-    ];
 
     const html = renderSection({
       client: makeStubClient(),
       initialDevices: devices,
       initialPolicy: policy,
-      initialOutbox: outbox,
-      initialExpandedId: "disp-1",
     });
 
-    // 设备区块
-    expect(html).toContain("工作室 Mac");
-    expect(html).toContain("本机");
-    expect(html).toContain("VPS 主控");
-    expect(html).toContain("在线");
-    expect(html).toContain("离线");
-    expect(html).toContain("可派 1 个项目");
-
-    // 策略区块：只有 3 个档位，绝不出现 approval-required
-    expect(html).toContain('value="auto-accept-edits"');
-    expect(html).toContain('value="auto"');
-    expect(html).toContain('value="full-access"');
-    expect(html).not.toContain("approval-required");
-
-    // 未入网发起设备灰显且说明
-    expect(html).toContain("旧 Mac");
-    expect(html).toContain("未入网，无法允许派活");
-
-    // 我发出的派活：展开显示完整摘要和纯文本 threadUrl（不做外链）
-    expect(html).toContain("跑一轮夜间构建");
-    expect(html).toContain("已完成");
-    expect(html).toContain("全部测试通过，产出物已校验。");
-    expect(html).toContain("http://127.0.0.1:3773/env/t-1");
-    expect(html).not.toContain('href="http://127.0.0.1:3773/env/t-1"');
-    expect(html).toContain("刷新");
+    expect(html).toContain("允许其他设备向本机派活");
+    expect(html).toContain("允许查看本机 T3 与终端会话");
+    expect(html).not.toContain('name="dispatch-max-mode"');
+    expect(html).not.toContain("you-brain");
+    expect(html).not.toContain("我发出的派活");
   });
 
-  test("信任所有入网设备、全部项目打开时只显示这两个开关，不再列手动勾选项", () => {
+  test("未入网时提示先用邀请码入网", () => {
     const html = renderSection({
       client: makeStubClient(),
-      initialPolicy: {
-        policy: {
-          enabled: true,
-          notify: true,
-          viewT3: true,
-          trustEnrolled: true,
-          allProjects: true,
-          autoConfigured: true,
-          maxMode: "auto",
-          allowedProjects: [],
-          allowedSenders: [],
-        },
-        projects: [{ id: "p2", name: "ashare-ledger" }],
-        knownSenders: [{ deviceId: "dev-legacy", name: "旧 Mac", enrolled: false }],
+      initialDevices: {
+        self: { deviceId: "dev-self", name: "工作室 Mac" },
+        connected: false,
+        enrolled: false,
+        devices: [],
       },
     });
-    expect(html).toContain("信任所有入网设备");
-    expect(html).toContain("全部项目（含以后新加的）");
-    expect(html).not.toContain("ashare-ledger");
-    expect(html).not.toContain("旧 Mac");
+    expect(html).toContain("本机尚未入网");
   });
 
   test("切换策略开关调用 updateDispatchPolicy 且失败时回滚", async () => {
@@ -232,12 +151,15 @@ describe("DispatchSection 渲染与交互", () => {
       policy: {
         enabled: false,
         notify: true,
-        viewT3: false, trustEnrolled: false, allProjects: false, autoConfigured: false,
+        viewT3: false,
+        trustEnrolled: true,
+        allProjects: true,
+        autoConfigured: false,
         maxMode: "auto",
         allowedProjects: [],
         allowedSenders: [],
       },
-      projects: [{ id: "p1", name: "you-brain" }],
+      projects: [],
       knownSenders: [],
     };
 
@@ -254,69 +176,16 @@ describe("DispatchSection 渲染与交互", () => {
       onCommit: (saved) => {
         state = saved;
       },
-      onRollback: (previous, msg) => {
+      onRollback: (previous, message) => {
         state = previous;
-        toasts.push(msg);
+        toasts.push(message);
       },
       fallbackError: "保存失败",
     });
 
     expect(ok).toBe(false);
     expect(calls).toEqual([{ enabled: true }]);
-    expect(state.policy.enabled).toBe(false);
+    expect(state).toEqual(initial);
     expect(toasts).toEqual(["目标策略写入失败"]);
-
-    const html = renderSection({
-      client,
-      initialPolicy: state,
-    });
-    expect(html).toContain('aria-checked="false"');
-  });
-
-  test("空状态、未入网提示、T3 不可用提示与 full-access 页内二次确认", () => {
-    const html = renderSection({
-      client: makeStubClient(),
-      initialDevices: {
-        self: { deviceId: "dev-self", name: "本机" },
-        connected: false,
-        enrolled: false,
-        devices: [],
-      },
-      initialPolicy: {
-        policy: {
-          enabled: true,
-          notify: true,
-          viewT3: false, trustEnrolled: false, allProjects: false, autoConfigured: false,
-          maxMode: "auto",
-          allowedProjects: [],
-          allowedSenders: [],
-        },
-        projects: [],
-        knownSenders: [],
-      },
-      initialOutbox: [],
-      initialFullAccessPending: true,
-    });
-
-    expect(html).toContain("本机尚未入网");
-    expect(html).toContain("暂无已发现的设备");
-    expect(html).toContain("本机 T3 未连接，无法选择项目");
-    expect(html).toContain("暂无其他已知设备");
-    expect(html).toContain("还没有发出过派活任务");
-    expect(html).toContain("对方派来的任务将无需逐项批准");
-    expect(html).toContain("确认开启完全访问");
-  });
-
-  test("本机不支持接收派活与请求错误状态完整展示", () => {
-    const html = renderSection({
-      client: makeStubClient(),
-      initialDevicesError: "中转超时",
-      initialPolicyUnavailable: "本机不支持接收派活",
-      initialOutboxError: "派活列表读取失败",
-    });
-
-    expect(html).toContain("中转超时");
-    expect(html).toContain("本机不支持接收派活");
-    expect(html).toContain("派活列表读取失败");
   });
 });

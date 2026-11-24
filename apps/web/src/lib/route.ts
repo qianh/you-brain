@@ -1,11 +1,7 @@
 export const SETTINGS_SECTIONS = [
   "account",
   "model",
-  "status",
-  "devices",
   "capture",
-  "refine",
-  "consolidation",
   "portrait",
   "integrations",
   "appearance",
@@ -24,6 +20,8 @@ export interface AppLocation {
 
 export function parseSettingsSection(search: string): SettingsSection {
   const value = new URLSearchParams(search).get("section");
+  if (value === "devices") return "account";
+  if (value === "refine" || value === "consolidation") return "capture";
   if (value !== null && (SETTINGS_SECTIONS as readonly string[]).includes(value)) {
     return value as SettingsSection;
   }

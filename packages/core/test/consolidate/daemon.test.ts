@@ -410,7 +410,7 @@ describe("consolidation daemon", () => {
     expect(await readFile(join(dirs.homeDir, "portrait", "full.md"), "utf8")).toBe(written ?? "");
   });
 
-  it("resets consolidation backoff and triggers on the next tick after consolidateLlm config changes", async () => {
+  it("resets consolidation backoff and triggers on the next tick after llm config changes", async () => {
     const dirs = await trackDirs();
     const clock = testClock();
     const drive = new MemoryDrive({ now: () => clock.now() });
@@ -446,14 +446,14 @@ describe("consolidation daemon", () => {
     expect(await leaseFinishedAt(drive)).toBeNull();
     expect((await readStatus(daemon)).consolidation.lastRun?.ok).toBe(false);
 
-    // Fix model and update consolidateLlm config; backoff and consolidation interval should reset immediately.
+    // Fix model and update llm config; backoff and consolidation interval should reset immediately.
     failSummaries = false;
     expect(
       (
         await send(daemon, "/api/config", {
           method: "PUT",
           body: JSON.stringify({
-            consolidateLlm: { enabled: true, provider: "magpie", model: "stable/model", baseUrl: "" },
+            llm: { provider: "magpie", model: "stable/model", baseUrl: "" },
           }),
         })
       ).status,

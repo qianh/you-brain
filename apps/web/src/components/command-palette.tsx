@@ -132,10 +132,9 @@ export function CommandPalette({
       { href: "/todos", label: t("navTasks"), icon: "check-circle" },
       { href: "/today", label: t("navToday"), icon: "calendar" },
       { href: "/topics", label: t("topicsBook"), icon: "book" },
-      { href: "/settings?section=portrait", label: t("navPortrait"), icon: "user" },
+      { href: settingsHref("portrait"), label: t("navPortrait"), icon: "user" },
       { href: "/search", label: t("navSearch"), icon: "search" },
-      { href: "/settings?section=devices", label: t("navDevices"), icon: "laptop" },
-      { href: "/settings?section=status", label: t("navStatus"), icon: "activity" },
+      { href: "/status", label: t("navStatus"), icon: "activity" },
       { href: settingsHref("account"), label: t("navSettings"), icon: "settings" },
     ];
     for (const jump of jumps) {

@@ -10,14 +10,10 @@ export interface SettingsNavItem {
 }
 
 export const SETTINGS_NAV: readonly SettingsNavItem[] = [
-  { id: "account", label: "groupAccountDrive", hint: "accountHint", icon: "user" },
+  { id: "account", label: "navAccountDevices", hint: "accountDevicesHint", icon: "user" },
   { id: "model", label: "groupModel", hint: "modelHint", icon: "cpu" },
-  { id: "status", label: "navStatus", hint: "statusHint", icon: "activity" },
-  { id: "devices", label: "navDevices", hint: "devicesHint", icon: "laptop" },
-  { id: "capture", label: "navCapture", hint: "captureHint", icon: "inbox" },
-  { id: "refine", label: "navRefine", hint: "refineHint", icon: "sparkles" },
-  { id: "consolidation", label: "navConsolidation", hint: "consolidationHint", icon: "bell" },
-  { id: "portrait", label: "portrait", hint: "settingsPortraitHint", icon: "book-open" },
+  { id: "capture", label: "navCapture", hint: "captureMemoryHint", icon: "inbox" },
+  { id: "portrait", label: "portrait", hint: "portraitHint", icon: "book-open" },
   { id: "integrations", label: "navIntegrations", hint: "integrationsHint", icon: "plug" },
   { id: "appearance", label: "navAppearance", hint: "settingsNow", icon: "palette" },
 ];

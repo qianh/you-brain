@@ -40,10 +40,6 @@ export {
   TodoActionBodySchema,
   TopicMutationBodySchema,
   UploadActionBodySchema,
-  WebhookPublicSchema,
-  WebhookPutSchema,
-  WebhookTestResultSchema,
-  WebhookLastSchema,
   ReferenceKindSchema,
   ReferenceMaterializeBodySchema,
 } from "./types.js";
@@ -106,9 +102,5 @@ export type {
   UploadActionInput,
   UploadActionResult,
   UserEvent,
-  WebhookEventKind,
-  WebhookPublic,
-  WebhookPutBody,
-  WebhookTestResult,
   ZoneSettings,
 } from "./types.js";

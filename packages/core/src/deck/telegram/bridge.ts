@@ -18,7 +18,6 @@ import {
 } from "./api.js";
 import {
   TelegramRelayClient,
-  checkRelay,
   enrollRelay,
   requestRelayInvite,
   normalizeRelayUrl,
@@ -28,7 +27,6 @@ import {
   type TelegramRelayState,
   type TelegramRouteCandidate,
 } from "./relay.js";
-import { encodeRelayInvite } from "./invite.js";
 import {
   PENDING_CHOICE_TTL_MS,
   formatChoiceList,
@@ -64,7 +62,6 @@ export type TelegramAction =
   | { action: "unbind" }
   | { action: "test" }
   | { action: "set-notifications"; enabled: boolean }
-  | { action: "set-relay"; url: string; key: string; name?: string | undefined }
   | { action: "enroll-relay"; url: string; code: string; name?: string | undefined }
   | { action: "clear-relay" };
 
@@ -133,7 +130,6 @@ type Stored = z.infer<typeof StoredSchema>;
 
 const EMPTY_BINDING = { botId: null, chatId: null, chatName: null, offset: 0 };
 const EMPTY: Stored = { ...EMPTY_BINDING, relay: null, notificationsEnabled: false };
-const RELAY_KEY_MIN = 16;
 
 function defaultDeviceName(): string {
   return hostname().replace(/\.local$/, "").slice(0, 40) || "U-Brain";
@@ -377,11 +373,6 @@ export class TelegramBridge {
       this.#changed();
       return this.status();
     }
-    if (input.action === "set-relay") {
-      await this.#setRelay(input);
-      this.#changed();
-      return this.status();
-    }
     if (input.action === "enroll-relay") {
       await this.#enrollRelay(input);
       this.#changed();
@@ -469,44 +460,6 @@ export class TelegramBridge {
       if (!this.#relayState?.bound) throw new YouBrainError("INVALID_INPUT", "还没有绑定 Telegram");
       await relay.send(`✅ U-Brain 测试消息：「${this.#stored.relay?.name ?? ""}」经中转推送正常。`);
     }
-  }
-
-  async #setRelay(input: { url: string; key: string; name?: string | undefined }): Promise<void> {
-    const relayKey = this.#options.relayKey;
-    if (!relayKey) throw new YouBrainError("INVALID_INPUT", "这个版本不支持中转");
-    let url: string;
-    try {
-      url = normalizeRelayUrl(input.url);
-    } catch (error) {
-      throw new YouBrainError("INVALID_INPUT", error instanceof Error ? error.message : String(error));
-    }
-    const key = input.key.trim();
-    if (key.length < RELAY_KEY_MIN) throw new YouBrainError("INVALID_INPUT", `中转密钥至少 ${RELAY_KEY_MIN} 位，应与部署时的 RELAY_KEY 一致`);
-    try {
-      await checkRelay(url, key, this.#options.relayFetch);
-    } catch (error) {
-      throw new YouBrainError("INVALID_INPUT", error instanceof Error ? error.message : String(error));
-    }
-    await relayKey.set(key);
-    const name = input.name?.trim().slice(0, 40) || this.#stored.relay?.name || this.#options.deviceName || defaultDeviceName();
-    const existingId = this.#stored.relay?.deviceId;
-    const optionId = this.#options.deviceId;
-    const deviceId =
-      existingId && /^[A-Za-z0-9_-]{8,64}$/.test(existingId)
-        ? existingId
-        : optionId && /^[A-Za-z0-9_-]{8,64}$/.test(optionId)
-          ? optionId
-          : randomUUID();
-    const relay = { url, name, deviceId };
-    // 换到中转：本机不再自己收 Telegram 消息，直连的绑定作废（中转里另行绑定）。
-    this.#loop?.abort();
-    this.#loop = null;
-    this.#api = null;
-    this.#pair = null;
-    this.#sent.clear();
-    this.#recent = null;
-    await this.#save({ chatId: null, chatName: null, relay });
-    if (this.#started) this.#runRelay(relay, { key });
   }
 
   async #enrollRelay(input: { url: string; code: string; name?: string | undefined }): Promise<void> {
@@ -938,14 +891,6 @@ export class TelegramBridge {
     this.#sent.set(messageId, target);
     this.#recent = { target, at: this.#now() };
     if (this.#sent.size > SENT_KEPT) this.#sent.delete(this.#sent.keys().next().value!);
-  }
-
-  /** 中转连接信息（地址 + 密钥），给另一台电脑粘贴用；没用中转时报错。 */
-  async relayInvite(): Promise<string> {
-    const relay = this.#stored.relay;
-    const key = relay ? ((await this.#options.relayKey?.get().catch(() => null))?.trim() ?? "") : "";
-    if (!relay || !key) throw new YouBrainError("INVALID_INPUT", "这台电脑还没有连接中转");
-    return encodeRelayInvite(relay.url, key);
   }
 
   /** 已入网（有设备令牌）时返回中转地址和令牌，没入网返回 null。同账号设备自动入网时用。 */

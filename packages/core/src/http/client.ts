@@ -43,9 +43,6 @@ import {
   type VirtualDeviceCreateBody,
   type VirtualDeviceResponse,
   type RemoveDeviceResponse,
-  type WebhookPublic,
-  type WebhookPutBody,
-  type WebhookTestResult,
   type NotionDatabaseView,
   type NotionDeleteBlockBody,
   type NotionTableEditBody,
@@ -149,9 +146,6 @@ export interface DaemonClient {
   status(): Promise<StatusResponse>;
   uiPrefs(): Promise<{ prefs: UiPrefs }>;
   patchUiPrefs(patch: UiPrefsPatch): Promise<{ prefs: UiPrefs }>;
-  webhook(): Promise<WebhookPublic>;
-  updateWebhook(body: WebhookPutBody): Promise<WebhookPublic>;
-  testWebhook(): Promise<WebhookTestResult>;
   quota(): Promise<QuotaView>;
   reminders(all?: boolean): Promise<RemindersResponse>;
   /** Optional so the web client can adopt the write call in a later task. */
@@ -323,9 +317,6 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     status: () => request("GET", "/api/status"),
     uiPrefs: () => request("GET", "/api/ui-prefs"),
     patchUiPrefs: (patch) => request("PUT", "/api/ui-prefs", patch),
-    webhook: () => request("GET", "/api/webhook"),
-    updateWebhook: (body) => request("PUT", "/api/webhook", body),
-    testWebhook: () => request("POST", "/api/actions/webhook-test"),
     quota: () => request("GET", "/api/quota"),
     reminders: (all) => request("GET", all ? "/api/reminders?all=1" : "/api/reminders"),
     reminderAction: (body) => request("POST", "/api/actions/reminder", body),

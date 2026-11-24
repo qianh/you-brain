@@ -14,7 +14,6 @@ import {
   createDefaultRoles,
   createDefaultSharedConfig,
   resolveWebProcessor,
-  ulid,
   type Event,
   type EventOf,
   type EventType,
@@ -95,9 +94,6 @@ import type {
   SyncActionResult,
   UploadActionInput,
   UploadActionResult,
-  WebhookPublic,
-  WebhookPutBody,
-  WebhookTestResult,
   ZoneSettings,
 } from "../http/types.js";
 import { isCliNoOutputTimeout } from "../llm/cli/exec.js";
@@ -178,24 +174,6 @@ import {
 import { localDayKey } from "../consolidate/schedule.js";
 import { resolveMergedTopic } from "../topics/zones.js";
 import { timeZoneOffsetMinutes } from "../reminders/time.js";
-import {
-  WEBHOOK_STATE_CURSOR,
-  applyWebhookUpdate,
-  countWebhookPending,
-  defaultWebhookConfig,
-  emptyWebhookState,
-  parseWebhookState,
-  postWebhook,
-  readWebhookConfig,
-  runWebhookDelivery,
-  serializeWebhookState,
-  webhookConfigPath,
-  webhookErrorHost,
-  webhookUrlProblem,
-  writeWebhookConfig,
-  type WebhookConfig,
-  type WebhookFetch,
-} from "../webhook/index.js";
 
 import { CodingInjection, portraitConsentIds } from "../portrait/injection.js";
 import { FilePortraitConsentStore, portraitConsentPath } from "../portrait/consent.js";
@@ -498,8 +476,6 @@ export interface DaemonOptions {
   /** Default true. Tests set false so discovery is driven only by scan() and the 10 minute timer. */
   watch?: boolean;
   port?: number;
-  /** Test injection. Defaults to the global fetch. Tests must not open a real connection. */
-  webhookFetch?: WebhookFetch;
   /** Test injection. Defaults to openGoogleDrive. Tests must not open a browser. */  googleOpen?: typeof openGoogleDrive;
   /** Test injection. Defaults to the global fetch. Tests must not reach Google. */
   revokeFetch?: typeof fetch;
@@ -974,7 +950,6 @@ export class YouBrainDaemon {
   #consent: FilePortraitConsentStore | null = null;
   #output: OutputService | null = null;
   #llm: LlmBackend | null = null;
-  #consolidateLlm: LlmBackend | null = null;
   readonly #reorganizeJob = new ReorganizeJob({ now: () => this.#clock.now().toISOString() });
   #llmWarning: LlmSetupWarning | null = null;
   #llmOverride: LlmBackend | null | undefined;
@@ -1052,12 +1027,6 @@ export class YouBrainDaemon {
   #lastRefineBackfill: number | null = null;
   /** Sessions uploaded after this process started are the live path's job, not the backfill's. */
   #bootedAtMs: number | null = null;
-  #lastWebhook: number | null = null;
-  #webhook: WebhookConfig = defaultWebhookConfig();
-  #webhookFetch: WebhookFetch = fetch;
-  #webhookTimer: { cancel(): void } | null = null;
-  /** Serializes delivery and config writes. Independent of the daemon tick chain. */
-  #webhookChain: Promise<void> = Promise.resolve();
   #consolidationState: ConsolidationState = emptyConsolidationState();
   /** Latest keyboard, pointer, or captured-session time. Not the heartbeat clock. */
   #lastActivityAt: string | null = null;
@@ -1163,7 +1132,6 @@ export class YouBrainDaemon {
     this.#env = options.env ?? process.env;
     this.#appVersion = options.appVersion ?? APP_VERSION;
     this.#watchEnabled = options.watch !== false;
-    this.#webhookFetch = options.webhookFetch ?? fetch;
     this.#llmOverride = options.llm;
     const platform = options.platform ?? process.platform;
     assertSupportedPlatform(platform);
@@ -1212,10 +1180,6 @@ export class YouBrainDaemon {
     });
     this.#files = readCaptureFiles(this.#store.getCursor(CAPTURE_FILES_CURSOR));
     this.#restoreLiveFromFiles();
-    this.#webhook = await log.time("readWebhook", () =>
-      readWebhookConfig(webhookConfigPath(this.#paths.dataDir)),
-    );
-    this.#armWebhookWindow();
     const consent = new FilePortraitConsentStore(portraitConsentPath(this.#paths.dataDir));
     this.#consent = consent;
     const managedStatePath = join(this.#paths.dataDir, "managed-blocks.json");
@@ -1228,7 +1192,6 @@ export class YouBrainDaemon {
     });
     if (this.#llmOverride !== undefined) {
       this.#llm = this.#llmOverride;
-      this.#consolidateLlm = this.#llmOverride;
       this.#llmKnown = true;
     }
     await log.time("mountOutput", () => {
@@ -1325,10 +1288,8 @@ export class YouBrainDaemon {
     if (!this.#llmKnown) {
       try {
         this.#llm = await log.time("createLlm", () => this.#createLlm());
-        this.#consolidateLlm = await this.#createConsolidateLlm();
       } catch {
         this.#llm = null;
-        this.#consolidateLlm = null;
       }
       this.#llmKnown = true;
     }
@@ -1507,9 +1468,6 @@ export class YouBrainDaemon {
     await this.#taskAutomation?.close();
     this.#tasks = null;
     this.#taskAutomation = null;
-    this.#webhookTimer?.cancel();
-    this.#webhookTimer = null;
-    await this.#webhookChain.catch(() => undefined);
     await Promise.race([
       this.#online.catch(() => undefined),
       delay(BACKGROUND_STOP_MS),
@@ -1689,9 +1647,8 @@ export class YouBrainDaemon {
         intervalDue(this.#lastPull, now, pullInterval(this.changes.subscriberCount()))
       ) {
         try {
-          const pulled = await this.#traced("pull", () => this.#sync!.pull());
+          await this.#traced("pull", () => this.#sync!.pull());
           this.#rememberSyncSuccess();
-          if (pulled.applied > 0) this.#scheduleWebhook();
         } catch (error) {
           this.#rememberSyncFailure(error);
           await this.#reviewDrive(error);
@@ -1830,14 +1787,6 @@ export class YouBrainDaemon {
         .finally(() => {
           this.#topicFilesJob = null;
         });
-    }
-    if (!this.#stopped && intervalDue(this.#lastWebhook, now, INTERVALS.webhookMs)) {
-      try {
-        await this.#traced("webhook", () => this.#runWebhook());
-      } catch {
-        // One bad delivery must not stop the loop.
-      }
-      this.#lastWebhook = this.#clock.nowMs();
     }
   }
 
@@ -2800,7 +2749,6 @@ export class YouBrainDaemon {
   async #emitCopied(event: Event): Promise<void> {
     if (this.#sync) {
       await appendCopied(this.#sync, event);
-      this.#scheduleWebhook();
       return;
     }
     if (!this.#log || !this.#store) return;
@@ -2808,13 +2756,11 @@ export class YouBrainDaemon {
     this.#enqueueLocal(allocated);
     persistTopicBook(this.#store, applyEvents(foldEventsCached(this.#store.listEvents()), [allocated]));
     this.#onTopicsChanged();
-    this.#scheduleWebhook();
   }
 
   async #emitUser<T extends EventType>(type: T, data: EventOf<T>["data"]): Promise<void> {
     if (this.#sync) {
       await this.#sync.append(type, data);
-      this.#scheduleWebhook();
       if (type === "reminder.issued") this.#notifyMobileReminder(data as EventOf<"reminder.issued">["data"]);
       return;
     }
@@ -2823,7 +2769,6 @@ export class YouBrainDaemon {
     this.#enqueueLocal(event);
     persistTopicBook(this.#store, applyEvents(foldEventsCached(this.#store.listEvents()), [event]));
     this.#onTopicsChanged();
-    this.#scheduleWebhook();
     if (type === "reminder.issued") this.#notifyMobileReminder(data as EventOf<"reminder.issued">["data"]);
   }
 
@@ -2832,7 +2777,6 @@ export class YouBrainDaemon {
     if (items.length === 0) return;
     if (this.#sync) {
       await this.#sync.appendMany(items);
-      this.#scheduleWebhook();
       return;
     }
     if (!this.#log || !this.#store) return;
@@ -2841,7 +2785,6 @@ export class YouBrainDaemon {
     for (const event of events) this.#enqueueLocal(event);
     persistTopicBook(this.#store, applyEvents(foldEventsCached(this.#store.listEvents()), events));
     this.#onTopicsChanged();
-    this.#scheduleWebhook();
   }
 
   #notifyMobileReminder(data: EventOf<"reminder.issued">["data"]): void {
@@ -3010,134 +2953,6 @@ export class YouBrainDaemon {
     };
   }
 
-  /** A disabled file with no cursor must not backfill events from before this start. */
-  #armWebhookWindow(): void {
-    const store = this.#store;
-    if (!store || !this.#webhook.enabled) return;
-    const state = parseWebhookState(store.getCursor(WEBHOOK_STATE_CURSOR));
-    if (state.enabledAt !== null) return;
-    state.enabledAt = this.#clock.now().toISOString();
-    store.setCursor(WEBHOOK_STATE_CURSOR, serializeWebhookState(state));
-  }
-
-  #markWebhookEnabled(at: string): void {
-    const store = this.#store;
-    if (!store) return;
-    const state = parseWebhookState(store.getCursor(WEBHOOK_STATE_CURSOR));
-    state.enabledAt = at;
-    store.setCursor(WEBHOOK_STATE_CURSOR, serializeWebhookState(state));
-  }
-
-  /** One in flight. A timer that is already waiting is left alone so the wait stays ≤ 2s. */
-  #scheduleWebhook(): void {
-    if (this.#stopped || !this.#webhook.enabled) return;
-    if (this.#roles.mainDevice !== this.#local.deviceId) return;
-    if (this.#webhookTimer) return;
-    this.#webhookTimer = this.#clock.schedule(INTERVALS.webhookDebounceMs, () => {
-      this.#webhookTimer = null;
-      return this.#runWebhook().catch(() => undefined);
-    });
-  }
-
-  #runWebhook(): Promise<void> {
-    return this.#enqueueWebhook(() => this.#deliverWebhook());
-  }
-
-  #enqueueWebhook<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.#webhookChain.then(fn, fn);
-    this.#webhookChain = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
-  }
-
-  async #deliverWebhook(): Promise<void> {
-    if (this.#stopped) return;
-    const store = this.#store;
-    if (!store || !this.#webhook.enabled) return;
-    if (this.#roles.mainDevice !== this.#local.deviceId) return;
-    const result = await runWebhookDelivery({
-      events: store.listEventsByType(this.#webhook.events),
-      state: parseWebhookState(store.getCursor(WEBHOOK_STATE_CURSOR)),
-      now: this.#clock.now(),
-      config: this.#webhook,
-      fetch: this.#webhookFetch,
-      signal: this.#abort.signal,
-    });
-    if (this.#store !== store) return;
-    store.setCursor(WEBHOOK_STATE_CURSOR, serializeWebhookState(result.state));
-    const error = result.state.last?.error;
-    if (result.failed > 0 && error) console.error(`webhook: ${error}`);
-  }
-
-  async #writeWebhook(body: WebhookPutBody): Promise<WebhookPublic> {
-    const next = applyWebhookUpdate(this.#webhook, {
-      ...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
-      ...(body.url !== undefined ? { url: body.url } : {}),
-      ...(body.secret !== undefined ? { secret: body.secret } : {}),
-      ...(body.events !== undefined ? { events: body.events } : {}),
-    });
-    const turningOn = next.enabled && !this.#webhook.enabled;
-    await writeWebhookConfig(webhookConfigPath(this.#paths.dataDir), next);
-    this.#webhook = next;
-    if (turningOn) this.#markWebhookEnabled(this.#clock.now().toISOString());
-    if (next.enabled) this.#scheduleWebhook();
-    return this.#webhookView();
-  }
-
-  #webhookView(): WebhookPublic {
-    const store = this.#store;
-    const state = store
-      ? parseWebhookState(store.getCursor(WEBHOOK_STATE_CURSOR))
-      : emptyWebhookState();
-    const pending =
-      this.#webhook.enabled && store
-        ? countWebhookPending(
-            store.listEventsByType(this.#webhook.events),
-            state,
-            this.#webhook.events,
-          )
-        : 0;
-    return {
-      enabled: this.#webhook.enabled,
-      url: this.#webhook.url,
-      hasSecret: this.#webhook.secret !== "",
-      events: [...this.#webhook.events],
-      active: this.#webhook.enabled && this.#roles.mainDevice === this.#local.deviceId,
-      last: state.last,
-      pending,
-    };
-  }
-
-  async #testWebhook(): Promise<WebhookTestResult> {
-    const url = this.#webhook.url;
-    if (url === "") throw new YouBrainError("INVALID_INPUT", "还没有保存 Webhook URL");
-    const problem = webhookUrlProblem(url);
-    if (problem) throw new YouBrainError("INVALID_INPUT", problem);
-    const now = this.#clock.now();
-    const result = await postWebhook({
-      url,
-      secret: this.#webhook.secret,
-      payload: {
-        id: `test-${ulid(now.getTime())}`,
-        type: "webhook.test",
-        occurredAt: now.toISOString(),
-        deviceId: this.#local.deviceId,
-        data: {},
-      },
-      fetch: this.#webhookFetch,
-      now,
-      signal: this.#abort.signal,
-    });
-    if (result.ok) return { ok: true, status: result.status };
-    if (result.reason === "aborted") {
-      return { ok: false, error: `${webhookErrorHost(url)}: 连接失败` };
-    }
-    if (result.reason === "http") return { ok: false, status: result.status, error: result.error };
-    return { ok: false, error: result.error };
-  }
-
   async #onConfigChanged(update: {
     shared?: SharedConfig;
     roles?: Roles;
@@ -3145,7 +2960,6 @@ export class YouBrainDaemon {
   }): Promise<void> {
     if (update.shared) {
       const prevLlm = this.#shared.llm;
-      const prevConsolidateLlm = this.#shared.consolidateLlm;
       const prevPortraitClients = this.#shared.integrations.codingPortraitClients;
       this.#shared = keepLocalLlm(update.shared, this.#shared);
       this.#clearCliStall();
@@ -3158,12 +2972,8 @@ export class YouBrainDaemon {
       });
       if (this.#llmOverride === undefined) {
         this.#llm = await this.#createLlm();
-        this.#consolidateLlm = await this.#createConsolidateLlm();
       }
-      if (
-        JSON.stringify(prevLlm) !== JSON.stringify(this.#shared.llm) ||
-        JSON.stringify(prevConsolidateLlm) !== JSON.stringify(this.#shared.consolidateLlm)
-      ) {
+      if (JSON.stringify(prevLlm) !== JSON.stringify(this.#shared.llm)) {
         this.#resetConsolidationBackoff();
       }
       await this.#rewatch();
@@ -3473,29 +3283,6 @@ export class YouBrainDaemon {
     this.#zone.historyDays = this.#shared.topics.historyDays;
   }
 
-  async #createConsolidateLlm(): Promise<LlmBackend | null> {
-    if (this.#llmOverride !== undefined) return this.#llmOverride;
-    if (!this.#shared.consolidateLlm.enabled) return null;
-    try {
-      return await createLlmBackend({
-        config: this.#shared.consolidateLlm,
-        getApiKey: (provider) =>
-          getLlmApiKey(provider, {
-            platform: this.#platform,
-            backend: this.#secretBackend,
-          }),
-        dataDir: this.#paths.dataDir,
-        env: this.#env,
-        homeDir: this.#homeDir,
-        ...(this.#options.llmTimeoutMs === undefined
-          ? { timeoutMs: CONSOLIDATE_HTTP_TIMEOUT_MS }
-          : { timeoutMs: this.#options.llmTimeoutMs }),
-      });
-    } catch {
-      return null;
-    }
-  }
-
   async #createLlm(): Promise<LlmBackend | null> {
     try {
       const backend = await createLlmBackend({
@@ -3556,11 +3343,9 @@ export class YouBrainDaemon {
     if (
       this.#llmOverride === undefined &&
       this.#llmKnown &&
-      (body.provider === this.#shared.llm.provider ||
-        (this.#shared.consolidateLlm.enabled && body.provider === this.#shared.consolidateLlm.provider))
+      body.provider === this.#shared.llm.provider
     ) {
       this.#llm = await this.#createLlm();
-      this.#consolidateLlm = await this.#createConsolidateLlm();
       this.#resetConsolidationBackoff();
       this.#statusChanged(this.#clock.now().toISOString());
     }
@@ -4088,9 +3873,6 @@ export class YouBrainDaemon {
       writeRoles: (roles) => this.#writeRoles(roles),
       readConfig: async () => this.#shared,
       writeConfig: (config) => this.#writeConfig(config),
-      readWebhook: () => Promise.resolve(this.#webhookView()),
-      writeWebhook: (body) => this.#enqueueWebhook(() => this.#writeWebhook(body)),
-      testWebhook: () => this.#testWebhook(),
       writeLlmKey: (body) => this.#writeLlmKey(body),
       testLlm: (body) => this.#testLlm(body),
       googleLogin: () => this.#googleLogin(),
@@ -4669,7 +4451,6 @@ export class YouBrainDaemon {
         : {
             telegramStatus: async () => deck.telegram!.status(),
             telegramAction: (body) => deck.telegram!.action(body),
-            telegramInvite: async () => ({ invite: await deck.telegram!.relayInvite() }),
             telegramEnrollInvite: async () => {
               const invite = await deck.telegram!.requestInvite();
               if (!invite) throw new HttpError(409, "NOT_ENROLLED", "本机还没有入网中转，无法生成配对码");
@@ -4741,7 +4522,6 @@ export class YouBrainDaemon {
 
   async #writeConfig(config: SharedConfig): Promise<void> {
     const previousLlm = this.#shared.llm;
-    const previousConsolidateLlm = this.#shared.consolidateLlm;
     const previousPortraitClients = this.#shared.integrations.codingPortraitClients;
     this.#shared = config;
     this.#clearCliStall();
@@ -4754,16 +4534,12 @@ export class YouBrainDaemon {
     });
     if (this.#llmOverride === undefined) {
       this.#llm = await this.#createLlm();
-      this.#consolidateLlm = await this.#createConsolidateLlm();
     }
-    if (
-      JSON.stringify(previousLlm) !== JSON.stringify(config.llm) ||
-      JSON.stringify(previousConsolidateLlm) !== JSON.stringify(config.consolidateLlm)
-    ) {
+    if (JSON.stringify(previousLlm) !== JSON.stringify(config.llm)) {
       this.#resetConsolidationBackoff();
+      // 模型选择变了：指挥台的补丁和环境层凭据要跟着重新生成（如 magpie 网关路由）。
+      this.#deck?.refresh();
     }
-    // 模型选择变了：指挥台的补丁和环境层凭据要跟着重新生成（如 magpie 网关路由）。
-    if (JSON.stringify(previousLlm) !== JSON.stringify(config.llm)) this.#deck?.refresh();
     await this.#rewatch();
     if (
       JSON.stringify(previousPortraitClients) !==
@@ -4809,10 +4585,9 @@ export class YouBrainDaemon {
     if (!this.#sync) return { started: false, at };
     await this.#run(async () => {
       try {
-        const pulled = await this.#sync?.pull();
+        await this.#sync?.pull();
         this.#rememberSyncSuccess();
         this.#lastPull = this.#clock.nowMs();
-        if (pulled && pulled.applied > 0) this.#scheduleWebhook();
       } catch (error) {
         this.#rememberSyncFailure(error);
         await this.#reviewDrive(error);
@@ -5152,9 +4927,7 @@ export class YouBrainDaemon {
     const enabled = this.#roles.consolidation.enabled;
     const time = this.#roles.consolidation.time;
     const timeZone = this.#roles.timezone;
-    const rawLlm =
-      (this.#shared.consolidateLlm.enabled ? this.#consolidateLlm : null) ?? this.#llm;
-    const effectiveLlm = rawLlm ? this.#wrapConsolidateLlm(rawLlm, signal) : null;
+    const effectiveLlm = this.#llm ? this.#wrapConsolidateLlm(this.#llm, signal) : null;
     const isAlive = (): boolean =>
       !this.#stopped &&
       !signal.aborted &&

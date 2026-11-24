@@ -86,9 +86,6 @@ import {
   TopicReorganizePlanBodySchema,
   UploadActionBodySchema,
   VirtualDeviceCreateBodySchema,
-  WebhookPublicSchema,
-  WebhookPutSchema,
-  WebhookTestResultSchema,
   DeckBridgeRepliesBodySchema,
   DeckBridgeSendBodySchema,
   DeckDshLoginBodySchema,
@@ -355,11 +352,6 @@ export async function handleApi(
   if (path === "/api/config") {
     if (request.method === "GET") return config(context);
     if (request.method === "PUT") return writeConfig(request, context);
-    return methodNotAllowed("GET, PUT");
-  }
-  if (path === "/api/webhook") {
-    if (request.method === "GET") return readWebhook(context);
-    if (request.method === "PUT") return writeWebhook(request, context);
     return methodNotAllowed("GET, PUT");
   }
   if (path === "/api/secrets/llm") {
@@ -636,13 +628,6 @@ export async function handleApi(
       return json(await port.museSend(body));
     });
   }
-  if (path === "/api/deck/telegram/invite") {
-    return method(request, "POST", async () => {
-      const port = deck(context);
-      if (!port.telegramInvite) notSupported();
-      return json(await port.telegramInvite());
-    });
-  }
   if (path === "/api/deck/telegram/enroll-invite") {
     return method(request, "POST", async () => {
       const port = deck(context);
@@ -808,9 +793,6 @@ export async function handleApi(
   if (path === "/api/actions/sync") return method(request, "POST", () => sync(context));
   if (path === "/api/actions/morning-digest") {
     return method(request, "POST", () => regenerateMorningDigest(context));
-  }
-  if (path === "/api/actions/webhook-test") {
-    return method(request, "POST", () => sendWebhookTest(context));
   }
   if (path === "/api/actions/consolidate") {
     return method(request, "POST", () => consolidate(request, context));
@@ -1311,22 +1293,6 @@ async function writeRoles(request: Request, context: ApiContext): Promise<Respon
   }
   await context.deps.writeRoles(next);
   return json(next);
-}
-
-async function readWebhook(context: ApiContext): Promise<Response> {
-  if (!context.deps.readWebhook) throw new HttpError(500, "INTERNAL_ERROR", "webhook 未接入");
-  return json(WebhookPublicSchema.parse(await context.deps.readWebhook()));
-}
-
-async function writeWebhook(request: Request, context: ApiContext): Promise<Response> {
-  if (!context.deps.writeWebhook) throw new HttpError(500, "INTERNAL_ERROR", "webhook 未接入");
-  const body = WebhookPutSchema.parse(await readJson(request));
-  return json(WebhookPublicSchema.parse(await context.deps.writeWebhook(body)));
-}
-
-async function sendWebhookTest(context: ApiContext): Promise<Response> {
-  if (!context.deps.testWebhook) throw new HttpError(500, "INTERNAL_ERROR", "webhook 未接入");
-  return json(WebhookTestResultSchema.parse(await context.deps.testWebhook()));
 }
 
 function notSupported(): never {

@@ -32,9 +32,6 @@ import type {
   TopicsResponse,
   UploadActionInput,
   UploadActionResult,
-  WebhookPublic,
-  WebhookPutBody,
-  WebhookTestResult,
   LlmKeyPutBody,
   LlmTestBody,
   LlmTestResult,
@@ -177,10 +174,6 @@ export interface HttpDeps {
   topicReorganizeStatus?(): TopicReorganizeStatus;
   applyTopicReorganization?(body: TopicReorganizeApplyBody): Promise<TopicReorganizeResult>;
   /** Optional so older test doubles keep compiling. The daemon always supplies it. */
-  readWebhook?(): Promise<WebhookPublic>;
-  writeWebhook?(body: WebhookPutBody): Promise<WebhookPublic>;
-  testWebhook?(): Promise<WebhookTestResult>;
-  /** Optional so older test doubles keep compiling. The daemon always supplies it. */
   writeLlmKey?(body: LlmKeyPutBody): Promise<void>;
   /** Optional so older test doubles keep compiling. The daemon always supplies it. */
   testLlm?(body: LlmTestBody): Promise<LlmTestResult>;
@@ -282,8 +275,6 @@ export interface DeckHttpPort {
   /** Telegram 桥：推送「等你回复」、回复提醒即输入。可选，旧测试替身可不提供。 */
   telegramStatus?(): Promise<DeckTelegramStatusResponse>;
   telegramAction?(body: DeckTelegramActionBody): Promise<DeckTelegramStatusResponse>;
-  /** 中转连接信息（含密钥），给另一台电脑粘贴用。 */
-  telegramInvite?(): Promise<{ invite: string }>;
   /** 一次性设备入网邀请码 + 配对链接，给手机端扫码/粘贴入网。 */
   telegramEnrollInvite?(): Promise<DeckTelegramEnrollInviteResponse>;
 }

@@ -9,7 +9,6 @@ import { validateSettings } from "../../lib/copy.js";
 import {
   appearanceConfig,
   configSaveBody,
-  isCliProvider,
   isSettingsDirty,
   llmKeyPayload,
 } from "./logic.js";
@@ -61,22 +60,19 @@ export function useSettingsDraft(): SettingsDraftApi {
     setDraft((current) => (current ? { ...current, ui: { ...current.ui, ...config.ui } } : current));
   }, [config, roles]);
 
+  // Only validate fields that are visible and editable in the simplified settings UI.
   const issues = draft && rolesDraft
     ? validateSettings({
-        idleMinutes: draft.refine.idleMinutes,
+        idleMinutes: 15,
         activeLimit: draft.topics.activeLimit,
-        historyDays: draft.topics.historyDays,
-        morningDigestTime: draft.reminders.morningDigestTime,
-        weeklyReviewTime: draft.reminders.weeklyReviewTime,
+        historyDays: 14,
+        morningDigestTime: "08:00",
+        weeklyReviewTime: "20:00",
         consolidateTime: rolesDraft.consolidation.time,
-        timezone: rolesDraft.timezone,
-        driveRoot: draft.drive.root,
+        timezone: "UTC",
+        driveRoot: "you-brain",
         baseUrl: draft.llm.baseUrl,
-        consolidateBaseUrl:
-          draft.consolidateLlm.enabled && !isCliProvider(draft.consolidateLlm.provider)
-            ? draft.consolidateLlm.baseUrl
-            : "",
-        variants: draft.portrait.variants,
+        variants: [{ id: "full", path: "portrait/full.md" }],
       })
     : [];
 

@@ -73,9 +73,6 @@ import type {
   NotionTestResult,
   NotionTreeView,
   NotionUpdateBlockBody,
-  WebhookPublic,
-  WebhookPutBody,
-  WebhookTestResult,
   OAuthClientPublic,
   OAuthClientPutBody,
   DeckDshWebResponse,
@@ -179,9 +176,6 @@ export interface BrowserDaemon
   /** 自带 OAuth 凭据（每人自己的 Google Cloud 项目）。 */
   oauthClient(): Promise<OAuthClientPublic>;
   putOAuthClient(body: OAuthClientPutBody): Promise<OAuthClientPublic>;
-  webhook(): Promise<WebhookPublic>;
-  updateWebhook(body: WebhookPutBody): Promise<WebhookPublic>;
-  testWebhook(): Promise<WebhookTestResult>;
   reminderAction(reminderId: string, action: ReminderActionName, until?: string): Promise<ReminderView>;
   /** 弹框回复：关闭提醒并记下这句话。 */
   reminderReply(reminderId: string, text: string): Promise<ReminderView>;
@@ -257,7 +251,6 @@ export interface BrowserDaemon
   deckNotices(): Promise<DeckNoticesResponse>;
   deckTelegram(): Promise<DeckTelegramStatusResponse>;
   deckTelegramAction(body: DeckTelegramActionBody): Promise<DeckTelegramStatusResponse>;
-  deckTelegramInvite(): Promise<{ invite: string }>;
   deckTelegramEnrollInvite?(): Promise<DeckTelegramEnrollInviteResponse>;
   dispatchTrustDevice?(body: DispatchTrustDeviceBody): Promise<DispatchPolicyResponse>;
   deckNoticeDismiss(body: DeckNoticeDismissBody): Promise<{ ok: true }>;
@@ -429,9 +422,6 @@ export function createBrowserDaemon(options?: {
     putOAuthClient: (body) => request<OAuthClientPublic>("PUT", "/api/oauth-client", body),
     uiPrefs: () => request<{ prefs: Record<string, string> }>("GET", "/api/ui-prefs"),
     patchUiPrefs: (patch) => request<{ prefs: Record<string, string> }>("PUT", "/api/ui-prefs", patch),
-    webhook: () => request<WebhookPublic>("GET", "/api/webhook"),
-    updateWebhook: (body) => request<WebhookPublic>("PUT", "/api/webhook", body),
-    testWebhook: () => request<WebhookTestResult>("POST", "/api/actions/webhook-test"),
     notionStatus: () => request<NotionStatusView>("GET", "/api/notion"),
     notionTree: () => request<NotionTreeView>("GET", "/api/notion/tree"),
     notionPage: (pageId: string) =>
@@ -474,7 +464,6 @@ export function createBrowserDaemon(options?: {
     deckNotices: () => request<DeckNoticesResponse>("GET", "/api/deck/notices"),
     deckTelegram: () => request<DeckTelegramStatusResponse>("GET", "/api/deck/telegram"),
     deckTelegramAction: (body) => request<DeckTelegramStatusResponse>("POST", "/api/deck/telegram", body),
-    deckTelegramInvite: () => request<{ invite: string }>("POST", "/api/deck/telegram/invite"),
     deckTelegramEnrollInvite: () => request<DeckTelegramEnrollInviteResponse>("POST", "/api/deck/telegram/enroll-invite"),
     dispatchDevices: () => request<DispatchDevicesResponse>("GET", "/api/dispatch/devices"),
     dispatchStartThread: (body: DispatchStartThreadBody) =>

@@ -7,7 +7,7 @@ import { Button } from "../components/button.js";
 import { Card, Section } from "../components/card.js";
 import { EmptyState } from "../components/empty.js";
 import { Icon } from "../components/icons.js";
-import { PageHeader } from "../components/page.js";
+import { Page, PageHeader } from "../components/page.js";
 import { Row } from "../components/row.js";
 import { SkeletonStat } from "../components/skeleton.js";
 import { StatBlock, StatGrid } from "../components/stat.js";
@@ -150,7 +150,7 @@ export function StatusPage({ embedded = false }: { embedded?: boolean } = {}) {
               : t("statusAllClearBody");
   const logs = logsBesideWarnings(readLogs(status), warnings);
 
-  return (
+  const content = (
     <div className="status-page">
       {embedded ? null : (
       <PageHeader
@@ -275,7 +275,7 @@ export function StatusPage({ embedded = false }: { embedded?: boolean } = {}) {
                 label={t("statusStatDaily")}
                 hint={consolidationHint(view, finishedAt, finishedRelative, t)}
                 english={language === "en"}
-                onSelect={() => navigate(settingsHref("consolidation"))}
+                onSelect={() => navigate(settingsHref("capture"))}
               />
             </StatGrid>
           </Card>
@@ -300,6 +300,8 @@ export function StatusPage({ embedded = false }: { embedded?: boolean } = {}) {
       ) : null}
     </div>
   );
+
+  return embedded ? content : <Page>{content}</Page>;
 }
 
 function consolidationHint(
@@ -317,7 +319,7 @@ function consolidationHint(
 function sourceEnabled(config: SharedConfig | null): Record<string, boolean> | null {
   if (!config) return null;
   const sources = config.capture.sources;
-  return Object.fromEntries(CAPTURE_SOURCE_IDS.map((id) => [id, sources[id].enabled]));
+  return Object.fromEntries(CAPTURE_SOURCE_IDS.filter((id) => id !== "deck").map((id) => [id, sources[id].enabled]));
 }
 
 function LogRow({

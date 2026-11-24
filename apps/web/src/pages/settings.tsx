@@ -9,19 +9,14 @@ import { useDelayed } from "../components/use-delayed.js";
 import { useDaemon } from "../daemon-context.js";
 import { settingsHref, type SettingsSection } from "../lib/route.js";
 import { useRoute } from "../router.js";
+import { PortraitPage } from "./portrait.js";
 import { AccountSection } from "./settings/account.js";
 import { AppearanceSection } from "./settings/appearance.js";
 import { CaptureSection } from "./settings/capture.js";
-import { ConsolidationSection } from "./settings/consolidation.js";
 import { IntegrationsSection } from "./settings/integrations.js";
 import { settingsNavItem } from "./settings/meta.js";
-import { DevicesPage } from "./devices.js";
 import { ModelSection } from "./settings/model.js";
-import { PortraitPage } from "./portrait.js";
-import { StatusPage } from "./status.js";
 import { SettingsNav } from "./settings/nav.js";
-import { PortraitSection } from "./settings/portrait.js";
-import { RefineSection } from "./settings/refine.js";
 import { SaveBar } from "./settings/save-bar.js";
 import { useSettingsDraft } from "./settings/use-draft.js";
 import { useLeaveGuard } from "./settings/use-leave-guard.js";
@@ -153,23 +148,9 @@ function SectionBody({
   savedProvider: string;
 }) {
   const { draft, rolesDraft } = draftApi;
-  // 这三页不依赖设置草稿,直接渲染迁移过来的页面内容。
-  if (section === "status") return <StatusPage embedded />;
-  if (section === "devices") return <DevicesPage embedded />;
   if (!draft || !rolesDraft) return null;
-  if (section === "portrait") {
-    return (
-      <PortraitPage embedded fileSettings={(
-        <PortraitSection
-          draft={draft}
-          issues={draftApi.issues}
-          onDraft={draftApi.editDraft}
-        />
-      )} />
-    );
-  }
   if (section === "account") {
-    return <AccountSection draft={draft} issues={draftApi.issues} onDraft={draftApi.editDraft} />;
+    return <AccountSection />;
   }
   if (section === "model") {
     return (
@@ -187,11 +168,9 @@ function SectionBody({
       />
     );
   }
-  if (section === "capture") return <CaptureSection draft={draft} onDraft={draftApi.editDraft} />;
-  if (section === "refine") return <RefineSection draft={draft} issues={draftApi.issues} onDraft={draftApi.editDraft} />;
-  if (section === "consolidation") {
+  if (section === "capture") {
     return (
-      <ConsolidationSection
+      <CaptureSection
         draft={draft}
         roles={rolesDraft}
         issues={draftApi.issues}
@@ -200,6 +179,11 @@ function SectionBody({
       />
     );
   }
-  if (section === "integrations") return <IntegrationsSection draft={draft} onDraft={draftApi.editDraft} />;
-  return <AppearanceSection draft={draft} onAppearance={draftApi.persistAppearance} />;
+  if (section === "portrait") {
+    return <PortraitPage embedded />;
+  }
+  if (section === "integrations") {
+    return <IntegrationsSection draft={draft} onDraft={draftApi.editDraft} />;
+  }
+  return <AppearanceSection onAppearance={draftApi.persistAppearance} />;
 }

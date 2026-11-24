@@ -10,25 +10,20 @@ import { Tooltip } from "../../components/tooltip.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import { roleCandidates } from "./logic.js";
 
-const FOLLOW_MAIN = "";
+const UNSET = "";
 
 export function RoleSection({
   devices,
   mainId,
-  webId,
   t,
   onMain,
-  onWeb,
 }: {
   devices: readonly DeviceRecord[];
   mainId: string | null;
-  webId: string | null;
   t: (key: MessageKey, vars?: Record<string, string | number>) => string;
   onMain: (deviceId: string) => void;
-  onWeb: (deviceId: string | null) => void;
 }) {
   const mainDevices = roleCandidates(devices, "main", mainId);
-  const webDevices = roleCandidates(devices, "web", webId);
   return (
     <Section title={t("devicesRoles")}>
       <Card>
@@ -41,33 +36,12 @@ export function RoleSection({
           title={t("roleMainTitle")}
           hint={t("roleMainHint")}
           label={t("rolePickMain")}
-          value={mainId ?? FOLLOW_MAIN}
+          value={mainId ?? UNSET}
           placeholder={t("rolePickMain")}
           emptyHint={t("roleEmptyMain")}
           options={namedOptions(mainDevices, mainId)}
           onChange={(value) => {
             if (value !== "" && value !== (mainId ?? "")) onMain(value);
-          }}
-        />
-        <RoleRow
-          icon={
-            <Tile>
-              <Icon name="globe" />
-            </Tile>
-          }
-          title={t("roleWebTitle")}
-          hint={t("roleWebHint")}
-          label={t("rolePickWeb")}
-          value={webId ?? FOLLOW_MAIN}
-          placeholder={t("roleFollow")}
-          emptyHint={t("roleEmptyWeb")}
-          options={[
-            { value: FOLLOW_MAIN, label: t("roleFollow") },
-            ...namedOptions(webDevices, webId),
-          ]}
-          onChange={(value) => {
-            const next = value === FOLLOW_MAIN ? null : value;
-            if (next !== webId) onWeb(next);
           }}
         />
       </Card>
@@ -112,7 +86,7 @@ function RoleRow({
   options: readonly SelectOption[];
   onChange: (value: string) => void;
 }) {
-  const deviceChoices = options.filter((option) => option.value !== FOLLOW_MAIN);
+  const deviceChoices = options.filter((option) => option.value !== UNSET);
   const blocked = deviceChoices.length === 0;
   const select = (
     <span className="devices-select">

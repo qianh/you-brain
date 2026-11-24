@@ -7,12 +7,12 @@ import { MemorySecretStore } from "../../src/auth/secret-store.js";
 import type { SessionNotice, SessionNoticeList } from "../../src/deck/session-notices.js";
 import { TelegramBridge } from "../../src/deck/telegram/bridge.js";
 import { normalizeRelayUrl, type RelaySocketLike } from "../../src/deck/telegram/relay.js";
-import { decodeRelayInvite, encodeRelayInvite } from "../../src/deck/telegram/invite.js";
 import type { Tty7Session, Tty7SendInput } from "../../src/deck/tty7.js";
 import { RelayCore, type RelayPorts, type RelaySocket, type TgMessage } from "../../../../services/telegram-relay/src/core.js";
 import type { TelegramRouteJudge } from "../../src/deck/telegram/router.js";
 
 const KEY = "relay-key-0123456789abcdef";
+const INVITE_CODE = "ABCD2345";
 const URL_ = "https://relay.example.workers.dev";
 const OWNER = 1001;
 
@@ -21,9 +21,10 @@ class FakeRelay {
   store = new Map<string, unknown>();
   sockets: Array<RelaySocket & { fake: FakeSocket }> = [];
   sent: Array<{ text: string; reply_parameters?: { message_id: number } }> = [];
+  tokens = new Set<string>();
   nextId = 700;
   nextIncoming = 1;
-  rejectKey = false;
+  rejectEnroll = false;
   ports: RelayPorts = {
     storage: {
       get: async <T>(key: string) => structuredClone(this.store.get(key)) as T | undefined,
@@ -45,20 +46,32 @@ class FakeRelay {
   core = new RelayCore(this.ports);
 
   fetch = async (url: string, init: RequestInit): Promise<Response> => {
-    expect(url).toBe(`${URL_}/check`);
-    const auth = new Headers(init.headers).get("Authorization");
-    if (this.rejectKey || auth !== `Bearer ${KEY}`) return Response.json({ ok: false }, { status: 401 });
-    return Response.json({ ok: true, botConfigured: true });
+    if (url === `${URL_}/invite`) {
+      const auth = new Headers(init.headers).get("Authorization") ?? "";
+      const token = auth.replace(/^Bearer\s+/i, "");
+      if (!this.tokens.has(token)) return Response.json({ ok: false, error: "无效令牌" }, { status: 401 });
+      return Response.json({ url: URL_, code: INVITE_CODE, expiresAt: "2099-01-01T00:00:00.000Z" });
+    }
+    expect(url).toBe(`${URL_}/enroll`);
+    const body = JSON.parse(String(init.body ?? "{}")) as { code?: string; deviceId?: string };
+    if (this.rejectEnroll || body.code !== INVITE_CODE) {
+      return Response.json({ ok: false, error: "中转不认这个邀请码" }, { status: 401 });
+    }
+    const token = `ubd_${body.deviceId ?? "dev"}_${this.tokens.size + 1}`;
+    this.tokens.add(token);
+    return Response.json({ token });
   };
 
   socket = (url: string, headers: Record<string, string>): RelaySocketLike => {
     const parsed = new URL(url);
     expect(parsed.protocol).toBe("wss:");
-    expect(headers.Authorization).toBe(`Bearer ${KEY}`);
+    const bearer = (headers.Authorization ?? "").replace(/^Bearer\s+/i, "");
+    expect(this.tokens.has(bearer)).toBe(true);
     const fake = new FakeSocket();
     const entry = {
       deviceId: parsed.searchParams.get("device")!,
       name: parsed.searchParams.get("name")!,
+      auth: "enrolled" as const,
       fake,
       send: (frame: string) => fake.emit("message", { data: frame }),
     };
@@ -146,15 +159,16 @@ function notice(seq: number, pane: number, title: string): SessionNotice {
   };
 }
 
-async function device(relay: FakeRelay, name: string, token: string | null = null, routeJudge?: TelegramRouteJudge) {
+async function device(relay: FakeRelay, _name: string, token: string | null = null, routeJudge?: TelegramRouteJudge) {
   const dir = await mkdtemp(join(tmpdir(), "ub-telegram-relay-"));
   const list: SessionNoticeList = { epoch: "e1", latest: 0, notices: [] };
   const sends: Tty7SendInput[] = [];
-  const relayKey = new MemorySecretStore(null);
+  const relayToken = new MemorySecretStore(null);
   const bridge = new TelegramBridge({
     configPath: join(dir, "deck", "telegram.json"),
     token: new MemorySecretStore(token),
-    relayKey,
+    relayToken,
+    dispatchIdentity: { ensure: async () => ({ publicKey: "pk", privateKey: "sk" }) } as never,
     notices: () => list,
     sessions: async () => ({ available: true, detail: "", workspaces: [], sessions: [session(1)], harnesses: [], appearance: null }),
     send: async (input) => void sends.push(input),
@@ -170,7 +184,7 @@ async function device(relay: FakeRelay, name: string, token: string | null = nul
     list.latest = item.seq;
     bridge.noticesChanged();
   };
-  return { bridge, sends, push, relayKey, dir };
+  return { bridge, sends, push, relayToken, dir };
 }
 
 describe("TelegramBridge 中转模式", () => {
@@ -179,14 +193,14 @@ describe("TelegramBridge 中转模式", () => {
     const mac = await device(relay, "MacBook");
     const mini = await device(relay, "Mac mini");
 
-    await expect(mac.bridge.action({ action: "set-relay", url: URL_, key: "short" })).rejects.toThrow("至少 16 位");
-    relay.rejectKey = true;
-    await expect(mac.bridge.action({ action: "set-relay", url: URL_, key: KEY })).rejects.toThrow("不认这个密钥");
-    relay.rejectKey = false;
+    await expect(mac.bridge.action({ action: "enroll-relay", url: URL_, code: "   " })).rejects.toThrow("邀请码");
+    relay.rejectEnroll = true;
+    await expect(mac.bridge.action({ action: "enroll-relay", url: URL_, code: INVITE_CODE })).rejects.toThrow("邀请码无效或已过期");
+    relay.rejectEnroll = false;
 
-    await mac.bridge.action({ action: "set-relay", url: `${URL_}/`, key: KEY, name: "MacBook" });
-    expect(await mac.relayKey.get()).toBe(KEY);
-    await mini.bridge.action({ action: "set-relay", url: URL_, key: KEY, name: "Mac mini" });
+    await mac.bridge.action({ action: "enroll-relay", url: `${URL_}/`, code: INVITE_CODE, name: "MacBook" });
+    expect(await mac.relayToken.get()).toMatch(/^ubd_/);
+    await mini.bridge.action({ action: "enroll-relay", url: URL_, code: INVITE_CODE, name: "Mac mini" });
     await until(() => mac.bridge.status().connection === "ok" && mini.bridge.status().connection === "ok", "connected");
 
     const pairing = (await mac.bridge.action({ action: "pair" })).pairing!;
@@ -239,7 +253,7 @@ describe("TelegramBridge 中转模式", () => {
     const mac = await device(relay, "MacBook");
     const mini = await device(relay, "Mac mini");
     for (const [bridge, name] of [[vps, "VPS 主控"], [mac, "MacBook"], [mini, "Mac mini"]] as const) {
-      await bridge.bridge.action({ action: "set-relay", url: URL_, key: KEY, name });
+      await bridge.bridge.action({ action: "enroll-relay", url: URL_, code: INVITE_CODE, name });
     }
     await until(() => [vps, mac, mini].every((item) => item.bridge.status().connection === "ok"), "connected");
     const pairing = (await vps.bridge.action({ action: "pair" })).pairing!;
@@ -277,22 +291,16 @@ describe("TelegramBridge 中转模式", () => {
     for (const item of [vps, mac, mini]) item.bridge.stop();
   });
 
-  it("连接信息：已连中转的电脑导出地址和密钥，新电脑粘贴即可连上", async () => {
-    expect(decodeRelayInvite("随便")).toBeNull();
-    expect(decodeRelayInvite("u-brain-relay:!!!")).toBeNull();
-    expect(decodeRelayInvite(` ${encodeRelayInvite(URL_, KEY)}\n`)).toEqual({ url: URL_, key: KEY });
-
+  it("一次性入网邀请码：已入网设备申请邀请码，新设备凭码入网连接", async () => {
     const relay = new FakeRelay();
     const mac = await device(relay, "MacBook");
-    await expect(mac.bridge.relayInvite()).rejects.toThrow("还没有连接中转");
-    await mac.bridge.action({ action: "set-relay", url: URL_, key: KEY });
-    const invite = await mac.bridge.relayInvite();
-    expect(invite.startsWith("u-brain-relay:")).toBe(true);
-    expect(invite).not.toContain(KEY);
+    expect(await mac.bridge.requestInvite()).toBeNull();
+    await mac.bridge.action({ action: "enroll-relay", url: URL_, code: INVITE_CODE });
+    const invite = await mac.bridge.requestInvite();
+    expect(invite).toMatchObject({ url: URL_, code: INVITE_CODE });
 
     const mini = await device(relay, "Mac mini");
-    const decoded = decodeRelayInvite(invite)!;
-    await mini.bridge.action({ action: "set-relay", url: decoded.url, key: decoded.key, name: "Mac mini" });
+    await mini.bridge.action({ action: "enroll-relay", url: invite!.url, code: invite!.code, name: "Mac mini" });
     await until(() => mini.bridge.status().connection === "ok", "mini connected");
     mac.bridge.stop();
     mini.bridge.stop();
@@ -303,13 +311,13 @@ describe("TelegramBridge 中转模式", () => {
     expect(() => normalizeRelayUrl("http://a.workers.dev")).toThrow("https");
     const relay = new FakeRelay();
     const mac = await device(relay, "MacBook");
-    await mac.bridge.action({ action: "set-relay", url: URL_, key: KEY });
+    await mac.bridge.action({ action: "enroll-relay", url: URL_, code: INVITE_CODE });
     await until(() => mac.bridge.status().connection === "ok", "connected");
     await expect(mac.bridge.action({ action: "set-token", token: "123456789:AAbbccddeeffgghhiijjkkllmmnnooppqq" })).rejects.toThrow("中转");
     const status = await mac.bridge.action({ action: "clear-relay" });
     expect(status.relay).toBeNull();
     expect(status.connection).toBe("off");
-    expect(await mac.relayKey.get()).toBeNull();
+    expect(await mac.relayToken.get()).toBeNull();
     mac.bridge.stop();
   });
 });

@@ -1,6 +1,5 @@
 import type { SharedConfig } from "@you-brain/protocol";
 
-import { Banner } from "../../components/banner.js";
 import { Card, Section } from "../../components/card.js";
 import { Row } from "../../components/row.js";
 import { SourceTile } from "../../components/tile.js";
@@ -12,7 +11,6 @@ import { toggleMember } from "./logic.js";
 import { NotionSection } from "./notion.js";
 import { SearchKeySection } from "./search-key.js";
 import { TelegramSection } from "./telegram.js";
-import { WebhookSection } from "./webhook.js";
 
 /** Only CLI tools with a managed global instructions file support auto-injecting coding.md. */
 export const PORTRAIT_INJECTABLE_CLIENTS = [
@@ -34,7 +32,6 @@ export function IntegrationsSection({
 
   return (
     <div className="settings-stack">
-      <Banner tone="info">{t("cursorHint")}</Banner>
       <Section title={t("codingPortrait")}>
         <Card>
           {PORTRAIT_INJECTABLE_CLIENTS.map((source) => (
@@ -62,7 +59,6 @@ export function IntegrationsSection({
           ))}
         </Card>
       </Section>
-      <WebhookSection />
       <TelegramSection />
       <DispatchSection />
       <NotionSection />

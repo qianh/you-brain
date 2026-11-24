@@ -158,9 +158,8 @@ async function openDrivePortrait(timeoutSeconds: number) {
   if (!opened) {
     throw new CliError("打不开 Google Drive：未登录，或当前运行的不是内置官方 OAuth 凭据的构建");
   }
-  const llmConfig = shared.consolidateLlm.enabled ? shared.consolidateLlm : shared.llm;
   const llm = await createLlmBackend({
-    config: llmConfig,
+    config: shared.llm,
     getApiKey: (provider) => getLlmApiKey(provider, { platform, backend: secretBackend }),
     dataDir,
     env: process.env,
