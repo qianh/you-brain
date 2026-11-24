@@ -199,7 +199,7 @@ export const RdQualitySchema = z.enum(RD_QUALITIES);
 const RD_SESSION_ID_RE = /^[A-Za-z0-9_-]{8,64}$/u;
 
 export const RdOpenArgsSchema = z.strictObject({
-  sessionId: z.string().regex(RD_SESSION_ID_RE),
+  sessionId: z.string().regex(RD_SESSION_ID_RE).optional(),
   offerSdp: z.string().min(1).max(48_000),
   quality: RdQualitySchema.optional(),
   displayId: z.number().int().nonnegative().optional(),

@@ -116,10 +116,11 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import java.util.Locale
+import java.util.UUID
 import kotlin.math.hypot
 
 private sealed interface MobileRdStatus {
-    data object Connecting : MobileRdStatus
+    data class Connecting(val stageText: String = "正在获取穿透配置…") : MobileRdStatus
     data object Ready : MobileRdStatus
     data object Closed : MobileRdStatus
     data class Failed(val reason: String) : MobileRdStatus
@@ -195,7 +196,7 @@ fun RemoteDesktopScreen(
     val scope = rememberCoroutineScope()
     val json = remember { Json { ignoreUnknownKeys = true; encodeDefaults = true } }
 
-    var status by remember { mutableStateOf<MobileRdStatus>(MobileRdStatus.Connecting) }
+    var status by remember { mutableStateOf<MobileRdStatus>(MobileRdStatus.Connecting()) }
     var inputMode by remember { mutableStateOf(RdInputMode.TOUCHPAD) }
     var quality by remember { mutableStateOf("hd") }
     var displays by remember { mutableStateOf<List<RdDisplayInfo>>(emptyList()) }
@@ -380,13 +381,18 @@ fun RemoteDesktopScreen(
     DisposableEffect(device.id, reconnectNonce) {
         val mainHandler = Handler(Looper.getMainLooper())
         var disposed = false
-        var sessionId = ""
+        var sessionId = "rd-" + UUID.randomUUID().toString().replace("-", "").take(20)
+        var rdOpenReady = false
         var remoteDescReady = false
+        var settled = false
+        var everReady = false
+        var hasTurn = false
         val localIceBuffer = ArrayList<RdIceCandidate>()
         val remoteIceBuffer = ArrayList<RdIceCandidate>()
         var iceFlushJob: Job? = null
+        var iceTimeoutJob: Job? = null
 
-        status = MobileRdStatus.Connecting
+        status = MobileRdStatus.Connecting("正在获取穿透配置…")
         rttMs = null
         activeSessionId = ""
 
@@ -395,10 +401,38 @@ fun RemoteDesktopScreen(
             webViewRef?.evaluateJavascript(script, null)
         }
 
+        fun iceFailedReason(): String = if (hasTurn) {
+            "ICE / TURN 建连失败或超时，请检查中转 TURN 端口（3478/udp、3478/tcp）与双方网络后重试。"
+        } else {
+            "ICE / P2P 无法跨网直连（当前中转未配置 TURN 中继，跨局域网或开启 VPN 时 UDP 打洞通常会失败）。请在中转 VPS 部署 coturn 并配置 RELAY_TURN_URLS / RELAY_TURN_SECRET，或将两台设备切到同一局域网。"
+        }
+
+        fun markReady() {
+            if (disposed || settled) return
+            settled = true
+            everReady = true
+            iceTimeoutJob?.cancel()
+            iceTimeoutJob = null
+            status = MobileRdStatus.Ready
+        }
+
+        fun failWith(reason: String) {
+            if (disposed || settled) return
+            settled = true
+            iceTimeoutJob?.cancel()
+            iceTimeoutJob = null
+            status = MobileRdStatus.Failed(reason)
+            evalJs("window.__rdClose && window.__rdClose();")
+            if (rdOpenReady) {
+                rdOpenReady = false
+                repository.closeRemoteDesktopAsync(device.id, sessionId)
+            }
+        }
+
         fun flushLocalIce() {
             iceFlushJob?.cancel()
             iceFlushJob = null
-            if (disposed || sessionId.isEmpty() || localIceBuffer.isEmpty()) return
+            if (disposed || !remoteDescReady || localIceBuffer.isEmpty()) return
             val batch = ArrayList<RdIceCandidate>(minOf(32, localIceBuffer.size))
             repeat(minOf(32, localIceBuffer.size)) {
                 batch.add(localIceBuffer.removeAt(0))
@@ -426,7 +460,7 @@ fun RemoteDesktopScreen(
                 if (disposed || ev.from != device.id) return@collect
                 when (ev) {
                     is RdPeerEvent.Ice -> {
-                        if (sessionId.isNotEmpty() && ev.sessionId != sessionId) return@collect
+                        if (ev.sessionId != sessionId) return@collect
                         if (!remoteDescReady) {
                             remoteIceBuffer.addAll(ev.candidates)
                         } else {
@@ -434,14 +468,18 @@ fun RemoteDesktopScreen(
                         }
                     }
                     is RdPeerEvent.State -> {
-                        if (sessionId.isNotEmpty() && ev.sessionId != sessionId) return@collect
+                        if (ev.sessionId != sessionId) return@collect
                         ev.displays?.let { displays = it }
                         ev.activeDisplayId?.let { activeDisplayId = it }
                         ev.permissions?.let { permissions = it }
                         if (ev.state == "closed") {
+                            settled = true
+                            iceTimeoutJob?.cancel()
+                            iceTimeoutJob = null
+                            rdOpenReady = false
                             status = MobileRdStatus.Closed
                         } else if (ev.state == "error") {
-                            status = MobileRdStatus.Failed(ev.error ?: "远端桌面宿主异常")
+                            failWith(ev.error ?: "远端桌面宿主异常")
                         }
                     }
                 }
@@ -452,12 +490,14 @@ fun RemoteDesktopScreen(
             mainHandler = mainHandler,
             onOffer = { offerSdp ->
                 if (disposed) return@RdWebBridge
+                if (!settled) status = MobileRdStatus.Connecting("正在请求远端桌面会话…")
                 scope.launch {
                     val res = repository.openRemoteDesktop(
                         toDeviceId = device.id,
                         offerSdp = offerSdp,
                         quality = quality,
                         displayId = activeDisplayId.takeIf { displays.isNotEmpty() },
+                        sessionId = sessionId,
                     )
                     if (disposed) {
                         res.getOrNull()?.let { repository.closeRemoteDesktopAsync(device.id, it.sessionId) }
@@ -467,21 +507,32 @@ fun RemoteDesktopScreen(
                         onSuccess = { open ->
                             sessionId = open.sessionId
                             activeSessionId = open.sessionId
+                            rdOpenReady = true
                             displays = open.displays
                             activeDisplayId = open.activeDisplayId
                             permissions = open.permissions
                             val escapedAnswer = json.encodeToString(open.answerSdp)
                             evalJs("window.__rdApplyAnswer && window.__rdApplyAnswer($escapedAnswer);")
                             remoteDescReady = true
+                            if (!settled) {
+                                status = MobileRdStatus.Connecting("正在建立实时连接（ICE 穿透中）…")
+                            }
                             if (remoteIceBuffer.isNotEmpty()) {
                                 val drained = ArrayList(remoteIceBuffer)
                                 remoteIceBuffer.clear()
                                 pushRemoteCandidates(drained)
                             }
                             flushLocalIce()
+                            if (!settled) {
+                                iceTimeoutJob?.cancel()
+                                iceTimeoutJob = scope.launch {
+                                    delay(15_000L)
+                                    failWith(iceFailedReason())
+                                }
+                            }
                         },
                         onFailure = { err ->
-                            status = MobileRdStatus.Failed(err.message ?: "无法建立桌面协同会话")
+                            failWith(err.message ?: "无法建立桌面协同会话")
                         },
                     )
                 }
@@ -489,7 +540,7 @@ fun RemoteDesktopScreen(
             onLocalIce = { cand ->
                 if (disposed) return@RdWebBridge
                 localIceBuffer.add(cand)
-                if (sessionId.isEmpty()) return@RdWebBridge
+                if (!remoteDescReady) return@RdWebBridge
                 if (localIceBuffer.size >= 24) {
                     flushLocalIce()
                 } else if (iceFlushJob == null) {
@@ -500,7 +551,7 @@ fun RemoteDesktopScreen(
                 }
             },
             onTrackReady = {
-                if (!disposed) status = MobileRdStatus.Ready
+                markReady()
             },
             onVideoSize = { w, h ->
                 if (!disposed && w > 0 && h > 0) {
@@ -546,13 +597,18 @@ fun RemoteDesktopScreen(
             onConnState = { st ->
                 if (disposed) return@RdWebBridge
                 when (st) {
-                    "connected" -> status = MobileRdStatus.Ready
-                    "failed" -> status = MobileRdStatus.Failed("WebRTC 媒体通道连接失败，请检查网络或重试")
-                    "closed" -> if (status == MobileRdStatus.Ready) status = MobileRdStatus.Closed
+                    "connected", "completed" -> markReady()
+                    "failed" -> failWith(iceFailedReason())
+                    "closed" -> if (everReady) {
+                        settled = true
+                        iceTimeoutJob?.cancel()
+                        iceTimeoutJob = null
+                        status = MobileRdStatus.Closed
+                    }
                 }
             },
             onError = { reason ->
-                if (!disposed) status = MobileRdStatus.Failed(reason)
+                failWith(reason)
             },
         )
 
@@ -586,6 +642,9 @@ fun RemoteDesktopScreen(
                     scope.launch {
                         val iceServers: List<RdIceServer> = repository.fetchTurnIceServers()
                         if (disposed) return@launch
+                        hasTurn = iceServers.any { srv ->
+                            srv.urls.any { it.startsWith("turn:", ignoreCase = true) || it.startsWith("turns:", ignoreCase = true) }
+                        }
                         val iceJson = json.encodeToString(iceServers)
                         val escaped = json.encodeToString(iceJson)
                         view.evaluateJavascript("window.__rdStart($escaped);", null)
@@ -606,9 +665,11 @@ fun RemoteDesktopScreen(
             disposed = true
             eventsJob.cancel()
             iceFlushJob?.cancel()
+            iceTimeoutJob?.cancel()
             runCatching { fastPortRef?.close() }
             fastPortRef = null
-            if (sessionId.isNotEmpty()) {
+            if (rdOpenReady) {
+                rdOpenReady = false
                 repository.closeRemoteDesktopAsync(device.id, sessionId)
             }
             webViewRef = null
@@ -937,14 +998,14 @@ fun RemoteDesktopScreen(
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     when (val st = status) {
-                        MobileRdStatus.Connecting -> {
+                        is MobileRdStatus.Connecting -> {
                             CircularProgressIndicator(
                                 color = Color(0xFF3B82F6),
                                 modifier = Modifier.size(28.dp),
                                 strokeWidth = 2.6.dp,
                             )
                             Text(
-                                text = "正在建立 60fps 桌面画面协同…",
+                                text = st.stageText,
                                 color = Color.White,
                                 fontSize = 14.sp,
                             )
@@ -1438,6 +1499,18 @@ private const val RD_WEBVIEW_HTML = """
       window.RdNative.postVideoSize(video.videoWidth, video.videoHeight);
     }
   });
+  video.addEventListener('loadeddata', function() {
+    if (video.videoWidth > 0 && video.videoHeight > 0 && window.RdNative) {
+      window.RdNative.postVideoSize(video.videoWidth, video.videoHeight);
+      window.RdNative.postTrackReady();
+    }
+  });
+  video.addEventListener('playing', function() {
+    if (video.videoWidth > 0 && video.videoHeight > 0 && window.RdNative) {
+      window.RdNative.postVideoSize(video.videoWidth, video.videoHeight);
+      window.RdNative.postTrackReady();
+    }
+  });
   video.addEventListener('resize', function() {
     if (video.videoWidth > 0 && video.videoHeight > 0 && window.RdNative) {
       window.RdNative.postVideoSize(video.videoWidth, video.videoHeight);
@@ -1470,6 +1543,9 @@ private const val RD_WEBVIEW_HTML = """
 
     fastDc = pc.createDataChannel('input-fast', { ordered: false, maxRetransmits: 0 });
     ctrlDc = pc.createDataChannel('control', { ordered: true });
+    ctrlDc.onopen = function() {
+      if (window.RdNative) window.RdNative.postTrackReady();
+    };
     ctrlDc.onmessage = function(ev) {
       if (typeof ev.data === 'string' && window.RdNative) {
         window.RdNative.postControl(ev.data);
@@ -1484,17 +1560,28 @@ private const val RD_WEBVIEW_HTML = """
       }
       var p = video.play();
       if (p && typeof p.catch === 'function') p.catch(function() {});
-      if (window.RdNative) window.RdNative.postTrackReady();
     };
 
     pc.onicecandidate = function(ev) {
-      if (ev.candidate && ev.candidate.candidate && window.RdNative) {
-        window.RdNative.postIce(
-          ev.candidate.candidate,
-          ev.candidate.sdpMid || '',
-          typeof ev.candidate.sdpMLineIndex === 'number' ? ev.candidate.sdpMLineIndex : -1,
-          ev.candidate.usernameFragment || ''
-        );
+      if (!window.RdNative) return;
+      if (!ev.candidate || !ev.candidate.candidate) {
+        window.RdNative.postIce('', '', -1, '');
+        return;
+      }
+      window.RdNative.postIce(
+        ev.candidate.candidate,
+        ev.candidate.sdpMid || '',
+        typeof ev.candidate.sdpMLineIndex === 'number' ? ev.candidate.sdpMLineIndex : -1,
+        ev.candidate.usernameFragment || ''
+      );
+    };
+
+    pc.oniceconnectionstatechange = function() {
+      if (pc && window.RdNative) {
+        var st = pc.iceConnectionState || '';
+        if (st === 'connected' || st === 'completed' || st === 'failed') {
+          window.RdNative.postState(st);
+        }
       }
     };
 

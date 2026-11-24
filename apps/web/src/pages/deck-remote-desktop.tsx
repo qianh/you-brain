@@ -38,14 +38,40 @@ import {
 } from "../lib/remote-desktop-input.js";
 
 const FALLBACK_ICE_SERVERS: IceServerEntry[] = [
-  { urls: ["stun:stun.cloudflare.com:3478", "stun:stun.l.google.com:19302"] },
+  {
+    urls: [
+      "stun:stun.cloudflare.com:3478",
+      "stun:stun.miwifi.com:3478",
+      "stun:stun.qq.com:3478",
+      "stun:stun.l.google.com:19302",
+    ],
+  },
 ];
 
+const ICE_CONNECT_TIMEOUT_MS = 15_000;
+
+export type ConnectStage = "turn" | "signaling" | "ice";
+
 type SessionStatus =
-  | { kind: "connecting" }
+  | { kind: "connecting"; stage: ConnectStage }
   | { kind: "ready" }
   | { kind: "closed" }
   | { kind: "error"; reason: string };
+
+export function generateRdSessionId(): string {
+  const uuid =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID().replace(/-/g, "")
+      : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}${Math.random().toString(36).slice(2, 10)}`;
+  const clean = uuid.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 24);
+  return `rd-${clean.padEnd(8, "0")}`;
+}
+
+export function hasTurnIceServer(servers: readonly IceServerEntry[]): boolean {
+  return servers.some((entry) =>
+    entry.urls.some((url) => /^turns?:/iu.test(url.trim())),
+  );
+}
 
 function isRdOpenResult(value: unknown): value is RdOpenResult {
   if (value === null || typeof value !== "object") return false;
@@ -103,7 +129,7 @@ export function DeckRemoteDesktopPane({
     [toast],
   );
 
-  const [status, setStatus] = useState<SessionStatus>({ kind: "connecting" });
+  const [status, setStatus] = useState<SessionStatus>({ kind: "connecting", stage: "turn" });
   const [quality, setQuality] = useState<RdQuality>("hd");
   const [displays, setDisplays] = useState<RdDisplayInfo[]>([]);
   const [activeDisplayId, setActiveDisplayId] = useState<number>(0);
@@ -122,6 +148,7 @@ export function DeckRemoteDesktopPane({
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const fastDcRef = useRef<RTCDataChannel | null>(null);
   const controlDcRef = useRef<RTCDataChannel | null>(null);
+  const onVideoMediaReadyRef = useRef<(() => void) | null>(null);
   const pressedButtonRef = useRef<0 | 1 | 2 | undefined>(undefined);
   const pressedKeysRef = useRef(new Set<string>());
   const pendingMoveRef = useRef<FastInputMessage | null>(null);
@@ -197,26 +224,79 @@ export function DeckRemoteDesktopPane({
     }
 
     let disposed = false;
-    let sessionId: string | null = null;
+    let sessionId = generateRdSessionId();
+    let rdOpenReady = false;
     let remoteDescriptionReady = false;
+    let settled = false;
+    let everReady = false;
+    let hasTurn = false;
     const remoteIceBuffer: RdIceCandidate[] = [];
     const localIceBuffer: RdIceCandidate[] = [];
     let localIceTimer: ReturnType<typeof setTimeout> | null = null;
+    let iceTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
     let pingTimer: ReturnType<typeof setInterval> | null = null;
     const sseAbort = new AbortController();
 
-    setStatus({ kind: "connecting" });
+    setStatus({ kind: "connecting", stage: "turn" });
     setRttMs(null);
     setResolution(null);
 
     let pc: RTCPeerConnection | null = null;
+
+    const clearIceTimeout = () => {
+      if (iceTimeoutTimer !== null) {
+        clearTimeout(iceTimeoutTimer);
+        iceTimeoutTimer = null;
+      }
+    };
+
+    const iceFailedReason = () =>
+      hasTurn ? t("deckRdIceFailedWithTurn") : t("deckRdIceFailedNoTurn");
+
+    const sendCloseIfOpened = () => {
+      if (!rdOpenReady || typeof client.dispatchSend !== "function") return;
+      rdOpenReady = false;
+      const closingId = sessionId;
+      void client
+        .dispatchSend({
+          to: deviceId,
+          kind: "rd.close",
+          args: { sessionId: closingId },
+        })
+        .catch(() => undefined);
+    };
+
+    const markReady = () => {
+      if (disposed || settled) return;
+      settled = true;
+      everReady = true;
+      clearIceTimeout();
+      setStatus({ kind: "ready" });
+    };
+
+    const failWith = (reason: string) => {
+      if (disposed || settled) return;
+      settled = true;
+      clearIceTimeout();
+      setStatus({ kind: "error", reason });
+      if (pc) {
+        try {
+          pc.close();
+        } catch {
+          // ignore
+        }
+      }
+      sendCloseIfOpened();
+    };
+
+    onVideoMediaReadyRef.current = markReady;
 
     const flushLocalIce = () => {
       if (localIceTimer !== null) {
         clearTimeout(localIceTimer);
         localIceTimer = null;
       }
-      if (disposed || !sessionId || localIceBuffer.length === 0) return;
+      if (disposed || !remoteDescriptionReady || localIceBuffer.length === 0) return;
       const batch = localIceBuffer.splice(0, 32);
       void client
         .dispatchSend!({
@@ -233,7 +313,7 @@ export function DeckRemoteDesktopPane({
     const enqueueLocalIce = (candidate: RdIceCandidate) => {
       if (disposed) return;
       localIceBuffer.push(candidate);
-      if (!sessionId) return;
+      if (!remoteDescriptionReady) return;
       if (localIceBuffer.length >= 24) {
         flushLocalIce();
       } else if (localIceTimer === null) {
@@ -264,7 +344,7 @@ export function DeckRemoteDesktopPane({
           (event) => {
             if (disposed || event.from !== deviceId) return;
             if (event.kind === "rd.ice") {
-              if (sessionId && event.data.sessionId !== sessionId) return;
+              if (event.data.sessionId !== sessionId) return;
               for (const item of event.data.candidates) {
                 if (!remoteDescriptionReady) {
                   remoteIceBuffer.push(item);
@@ -275,21 +355,19 @@ export function DeckRemoteDesktopPane({
               return;
             }
             if (event.kind === "rd.state") {
-              if (sessionId && event.data.sessionId !== sessionId) return;
+              if (event.data.sessionId !== sessionId) return;
               if (event.data.displays) setDisplays(event.data.displays);
               if (event.data.activeDisplayId !== undefined) {
                 setActiveDisplayId(event.data.activeDisplayId);
               }
               if (event.data.permissions) setPermissions(event.data.permissions);
-              if (event.data.state === "ready") {
-                setStatus({ kind: "ready" });
-              } else if (event.data.state === "closed") {
+              if (event.data.state === "closed") {
+                settled = true;
+                clearIceTimeout();
+                rdOpenReady = false;
                 setStatus({ kind: "closed" });
               } else if (event.data.state === "error") {
-                setStatus({
-                  kind: "error",
-                  reason: event.data.error || t("dshDeckT3CheckError"),
-                });
+                failWith(event.data.error || t("dshDeckT3CheckError"));
               }
             }
           },
@@ -309,6 +387,7 @@ export function DeckRemoteDesktopPane({
         }
       }
       if (disposed) return;
+      hasTurn = hasTurnIceServer(iceServers);
 
       pc = new RTCPeerConnection({
         iceServers: iceServers.map((entry) => ({
@@ -333,13 +412,21 @@ export function DeckRemoteDesktopPane({
       fastDcRef.current = fastDc;
       controlDcRef.current = controlDc;
 
-      controlDc.addEventListener("open", () => {
+      const onControlOpen = () => {
         if (disposed) return;
+        markReady();
         sendControl({ t: "ping", ts: Math.round(performance.now()) });
-        pingTimer = setInterval(() => {
-          sendControl({ t: "ping", ts: Math.round(performance.now()) });
-        }, 2_000);
-      });
+        if (pingTimer === null) {
+          pingTimer = setInterval(() => {
+            sendControl({ t: "ping", ts: Math.round(performance.now()) });
+          }, 2_000);
+        }
+      };
+      if (controlDc.readyState === "open") {
+        onControlOpen();
+      } else {
+        controlDc.addEventListener("open", onControlOpen);
+      }
 
       controlDc.addEventListener("message", (ev) => {
         if (disposed || typeof ev.data !== "string") return;
@@ -377,11 +464,14 @@ export function DeckRemoteDesktopPane({
           video.srcObject = stream;
         }
         void video.play().catch(() => undefined);
-        setStatus({ kind: "ready" });
       });
 
       pc.addEventListener("icecandidate", (ev) => {
-        if (disposed || !ev.candidate) return;
+        if (disposed) return;
+        if (!ev.candidate || !ev.candidate.candidate) {
+          enqueueLocalIce({ candidate: "" });
+          return;
+        }
         enqueueLocalIce({
           candidate: ev.candidate.candidate,
           sdpMid: ev.candidate.sdpMid,
@@ -390,14 +480,27 @@ export function DeckRemoteDesktopPane({
         });
       });
 
+      pc.addEventListener("iceconnectionstatechange", () => {
+        if (disposed || !pc) return;
+        const iceState = pc.iceConnectionState;
+        if (iceState === "connected" || iceState === "completed") {
+          for (const receiver of pc.getReceivers()) applyZeroPlayoutDelay(receiver);
+          markReady();
+        } else if (iceState === "failed") {
+          failWith(iceFailedReason());
+        }
+      });
+
       pc.addEventListener("connectionstatechange", () => {
         if (disposed || !pc) return;
         if (pc.connectionState === "connected") {
-          setStatus({ kind: "ready" });
           for (const receiver of pc.getReceivers()) applyZeroPlayoutDelay(receiver);
+          markReady();
         } else if (pc.connectionState === "failed") {
-          setStatus({ kind: "error", reason: "ICE / P2P 连接协商失败" });
-        } else if (pc.connectionState === "closed") {
+          failWith(iceFailedReason());
+        } else if (pc.connectionState === "closed" && everReady) {
+          settled = true;
+          clearIceTimeout();
           setStatus({ kind: "closed" });
         }
       });
@@ -407,25 +510,39 @@ export function DeckRemoteDesktopPane({
       await pc.setLocalDescription(offer);
       if (disposed) return;
 
+      setStatus({ kind: "connecting", stage: "signaling" });
       const outcome = await client.dispatchSend!({
         to: deviceId,
         kind: "rd.open",
         args: {
+          sessionId,
           offerSdp: pc.localDescription?.sdp ?? offer.sdp ?? "",
           quality: qualityRef.current,
         },
       });
-      if (disposed) return;
+      if (disposed) {
+        if (outcome.ok && isRdOpenResult(outcome.result)) {
+          void client
+            .dispatchSend!({
+              to: deviceId,
+              kind: "rd.close",
+              args: { sessionId: outcome.result.sessionId },
+            })
+            .catch(() => undefined);
+        }
+        return;
+      }
       if (!outcome.ok) {
-        setStatus({ kind: "error", reason: outcome.error });
+        failWith(outcome.error);
         return;
       }
       if (!isRdOpenResult(outcome.result)) {
-        setStatus({ kind: "error", reason: "远端返回了无效的桌面会话应答" });
+        failWith("远端返回了无效的桌面会话应答");
         return;
       }
 
       sessionId = outcome.result.sessionId;
+      rdOpenReady = true;
       setDisplays(outcome.result.displays);
       setActiveDisplayId(outcome.result.activeDisplayId);
       setPermissions(outcome.result.permissions);
@@ -436,25 +553,33 @@ export function DeckRemoteDesktopPane({
       });
       if (disposed) return;
       remoteDescriptionReady = true;
+      if (!settled) {
+        setStatus({ kind: "connecting", stage: "ice" });
+      }
 
       while (remoteIceBuffer.length > 0) {
         const next = remoteIceBuffer.shift();
         if (next) applyRemoteCandidate(next);
       }
       flushLocalIce();
+
+      if (!settled) {
+        iceTimeoutTimer = setTimeout(() => {
+          failWith(iceFailedReason());
+        }, ICE_CONNECT_TIMEOUT_MS);
+      }
     };
 
     void start().catch((error: unknown) => {
       if (disposed) return;
-      setStatus({
-        kind: "error",
-        reason: error instanceof Error ? error.message : String(error),
-      });
+      failWith(error instanceof Error ? error.message : String(error));
     });
 
     return () => {
       disposed = true;
+      onVideoMediaReadyRef.current = null;
       sseAbort.abort();
+      clearIceTimeout();
       if (localIceTimer !== null) clearTimeout(localIceTimer);
       if (pingTimer !== null) clearInterval(pingTimer);
       if (moveRafRef.current !== null) {
@@ -472,15 +597,7 @@ export function DeckRemoteDesktopPane({
           // ignore
         }
       }
-      if (sessionId && typeof client.dispatchSend === "function") {
-        void client
-          .dispatchSend({
-            to: deviceId,
-            kind: "rd.close",
-            args: { sessionId },
-          })
-          .catch(() => undefined);
-      }
+      sendCloseIfOpened();
     };
   }, [active, client, deviceId, push, reconnectNonce, reloadCount, sendControl, t]);
 
@@ -770,6 +887,20 @@ export function DeckRemoteDesktopPane({
               setResolution({ w: el.videoWidth, h: el.videoHeight });
             }
           }}
+          onLoadedData={(event) => {
+            const el = event.currentTarget;
+            if (el.videoWidth > 0 && el.videoHeight > 0) {
+              setResolution({ w: el.videoWidth, h: el.videoHeight });
+              onVideoMediaReadyRef.current?.();
+            }
+          }}
+          onPlaying={(event) => {
+            const el = event.currentTarget;
+            if (el.videoWidth > 0 && el.videoHeight > 0) {
+              setResolution({ w: el.videoWidth, h: el.videoHeight });
+              onVideoMediaReadyRef.current?.();
+            }
+          }}
           onResize={(event) => {
             const el = event.currentTarget;
             if (el.videoWidth > 0 && el.videoHeight > 0) {
@@ -781,7 +912,13 @@ export function DeckRemoteDesktopPane({
         {status.kind === "connecting" ? (
           <div className="deck-rd-overlay" role="status">
             <Spinner />
-            <p>{t("deckRdConnecting")}</p>
+            <p>
+              {status.stage === "turn"
+                ? t("deckRdStageTurn")
+                : status.stage === "signaling"
+                  ? t("deckRdStageSignaling")
+                  : t("deckRdStageIce")}
+            </p>
           </div>
         ) : status.kind === "closed" ? (
           <div className="deck-rd-overlay" role="status">

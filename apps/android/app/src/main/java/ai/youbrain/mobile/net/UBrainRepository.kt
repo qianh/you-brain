@@ -1155,6 +1155,7 @@ class UBrainRepository(context: Context) {
                 urls = listOf(
                     "stun:stun.cloudflare.com:3478",
                     "stun:stun.miwifi.com:3478",
+                    "stun:stun.qq.com:3478",
                     "stun:stun.l.google.com:19302",
                 ),
             ),
@@ -1169,6 +1170,7 @@ class UBrainRepository(context: Context) {
         offerSdp: String,
         quality: String = "hd",
         displayId: Int? = null,
+        sessionId: String = "rd-" + UUID.randomUUID().toString().replace("-", "").take(20),
     ): Result<RdOpenResult> {
         if (!_uiState.value.enrolled) {
             return Result.failure(IllegalStateException("设备尚未入网"))
@@ -1177,13 +1179,14 @@ class UBrainRepository(context: Context) {
             return Result.failure(IllegalStateException("连不上中转，请检查手机网络"))
         }
         val args = buildJsonObject {
+            put("sessionId", sessionId)
             put("offerSdp", offerSdp)
             put("quality", quality)
             if (displayId != null && displayId >= 0) {
                 put("displayId", displayId)
             }
         }
-        return when (val outcome = relayClient.dispatchCommand(toDeviceId, "rd.open", args, timeoutMs = 20_000L)) {
+        return when (val outcome = relayClient.dispatchCommand(toDeviceId, "rd.open", args, timeoutMs = 45_000L)) {
             is CommandOutcome.Err -> Result.failure(IllegalStateException(outcome.error))
             is CommandOutcome.Ok -> {
                 val el = outcome.result ?: return Result.failure(IllegalStateException("对端未返回桌面会话信息"))

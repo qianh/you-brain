@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   MediaStreamTrack,
   RTCPeerConnection,
@@ -35,6 +36,7 @@ const MAX_ICE_BATCH = 32;
 
 export interface RemoteDesktopPort {
   readonly supported: boolean;
+  warmup?(): void;
   setSignalingEvents(events: RemoteDesktopSignalingEvents | null): void;
   openSession(fromDeviceId: string, args: RdOpenArgs): Promise<RdOpenResult>;
   addIceCandidates(fromDeviceId: string, args: RdIceArgs): Promise<{ ok: true }>;
@@ -131,12 +133,18 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     this.#events = events;
   }
 
+  warmup(): void {
+    if (!this.supported || !this.#bridge?.warmup) return;
+    void this.#bridge.warmup().catch(() => {});
+  }
+
   async openSession(fromDeviceId: string, args: RdOpenArgs): Promise<RdOpenResult> {
     if (!this.supported || !this.#bridge) {
       throw new Error("当前设备不支持远程桌面宿主");
     }
 
-    const existing = this.#sessions.get(args.sessionId);
+    const sessionId = args.sessionId ?? `rd-${randomUUID().replace(/-/g, "").slice(0, 24)}`;
+    const existing = this.#sessions.get(sessionId);
     if (existing) {
       await this.#disposeSession(existing, false);
     }
@@ -158,24 +166,22 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     }
 
     const quality: RdQuality = args.quality ?? "hd";
-    const snapshot = await this.#bridge.ensureStarted({
-      quality,
-      ...(args.displayId !== undefined ? { displayId: args.displayId } : {}),
-      promptPermissions: false,
-    });
-
-    let iceEntries: IceServerEntry[];
-    try {
-      iceEntries = await this.#getIceServers();
-    } catch {
-      iceEntries = DEFAULT_CLIENT_ICE_SERVERS;
-    }
+    const [snapshot, iceEntries] = await Promise.all([
+      this.#bridge.ensureStarted({
+        quality,
+        ...(args.displayId !== undefined ? { displayId: args.displayId } : {}),
+        promptPermissions: false,
+      }),
+      Promise.resolve()
+        .then(() => this.#getIceServers())
+        .catch(() => DEFAULT_CLIENT_ICE_SERVERS),
+    ]);
 
     const hasIceServers = iceEntries.length > 0;
     const pc = new RTCPeerConnection({
       iceServers: toWeriftIceServers(iceEntries),
-      iceUseDefaultStunServer: hasIceServers,
-      iceAdditionalHostAddresses: ["127.0.0.1"],
+      iceUseDefaultStunServer: false,
+      ...(!hasIceServers ? { iceAdditionalHostAddresses: ["127.0.0.1"] } : {}),
       iceStunGatherTimeout: this.#iceStunGatherTimeoutSec,
       codecs: { video: buildH264Codecs() },
       pendingRtp: { enabled: true, maxLength: 96 },
@@ -205,7 +211,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     );
 
     const session: ActiveRdSession = {
-      sessionId: args.sessionId,
+      sessionId,
       peerDeviceId: fromDeviceId,
       pc,
       streamer,

@@ -10,6 +10,7 @@ import { BrowserDaemonError, type BrowserDaemon } from "../../api/client.js";
 import { Banner } from "../../components/banner.js";
 import { Button } from "../../components/button.js";
 import { Card, CardHead, Section } from "../../components/card.js";
+import { SkeletonRow } from "../../components/skeleton.js";
 import { Toggle } from "../../components/toggle.js";
 import { useToast } from "../../components/toast.js";
 import { useDaemon } from "../../daemon-context.js";
@@ -59,6 +60,16 @@ export function DispatchSection(props: DispatchSectionProps = {}) {
   const [policyError, setPolicyError] = useState<string | null>(props.initialPolicyError ?? null);
   const [savingPolicy, setSavingPolicy] = useState(false);
 
+  const hasInitialSnapshot =
+    props.initialDevices !== undefined ||
+    props.initialPolicy !== undefined ||
+    props.initialPolicyUnavailable !== undefined ||
+    props.initialPolicyError !== undefined;
+
+  const [policyLoading, setPolicyLoading] = useState(
+    !hasInitialSnapshot && typeof client.dispatchPolicy === "function",
+  );
+
   const loadDevices = useCallback(async () => {
     if (typeof client.dispatchDevices !== "function") {
       setUnsupported(true);
@@ -76,7 +87,11 @@ export function DispatchSection(props: DispatchSectionProps = {}) {
   }, [client]);
 
   const loadPolicy = useCallback(async () => {
-    if (typeof client.dispatchPolicy !== "function") return;
+    if (typeof client.dispatchPolicy !== "function") {
+      setPolicyLoading(false);
+      return;
+    }
+    setPolicyLoading(true);
     try {
       const next = await client.dispatchPolicy();
       setPolicyData(next);
@@ -91,14 +106,10 @@ export function DispatchSection(props: DispatchSectionProps = {}) {
         return;
       }
       setPolicyError(errorMessage(error, t("dispatchLoadError")));
+    } finally {
+      setPolicyLoading(false);
     }
   }, [client, t]);
-
-  const hasInitialSnapshot =
-    props.initialDevices !== undefined ||
-    props.initialPolicy !== undefined ||
-    props.initialPolicyUnavailable !== undefined ||
-    props.initialPolicyError !== undefined;
 
   useEffect(() => {
     if (!hasApi) {
@@ -172,6 +183,12 @@ export function DispatchSection(props: DispatchSectionProps = {}) {
             >
               {policyError}
             </Banner>
+          </div>
+        ) : null}
+        {policyLoading && policyData === null && !policyError && !policyUnavailable ? (
+          <div className="notion-form" aria-busy="true">
+            <SkeletonRow />
+            <SkeletonRow />
           </div>
         ) : null}
         {policyData && policy ? (

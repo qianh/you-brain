@@ -12,6 +12,7 @@ import {
   normalizeWheelDelta,
 } from "../../src/lib/remote-desktop-input.js";
 import { T3_ACTIVE_KEY, T3_ENDPOINTS_KEY, T3_URL_KEY } from "../../src/lib/t3-endpoints.js";
+import { generateRdSessionId, hasTurnIceServer } from "../../src/pages/deck-remote-desktop.js";
 import { DeckT3Panel } from "../../src/pages/deck-t3.js";
 
 const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -108,5 +109,30 @@ describe("DeckT3Panel 远端设备桌面协同按钮", () => {
     // 只有工作室 Mac Studio 渲染了 .deck-t3-rd-btn
     expect(html.match(/class="deck-t3-rd-btn"/g)).toHaveLength(1);
     expect(html).toContain('aria-label="桌面画面协同：工作室 Mac Studio"');
+  });
+});
+
+describe("DeckRemoteDesktopPane 会话 ID 与 TURN 检测辅助函数", () => {
+  test("generateRdSessionId 生成符合协议正则的唯一会话 ID", () => {
+    const id1 = generateRdSessionId();
+    const id2 = generateRdSessionId();
+    expect(id1).toMatch(/^rd-[A-Za-z0-9_-]{8,64}$/);
+    expect(id2).toMatch(/^rd-[A-Za-z0-9_-]{8,64}$/);
+    expect(id1).not.toBe(id2);
+  });
+
+  test("hasTurnIceServer 准确区分纯 STUN 与带 TURN/TURNS 配置", () => {
+    expect(
+      hasTurnIceServer([{ urls: ["stun:stun.cloudflare.com:3478", "stun:stun.miwifi.com:3478"] }]),
+    ).toBe(false);
+    expect(
+      hasTurnIceServer([
+        { urls: ["stun:stun.cloudflare.com:3478"] },
+        { urls: ["turn:1.2.3.4:3478?transport=udp"], username: "u", credential: "p" },
+      ]),
+    ).toBe(true);
+    expect(
+      hasTurnIceServer([{ urls: ["TURNS:turn.example.com:5349?transport=tcp"] }]),
+    ).toBe(true);
   });
 });

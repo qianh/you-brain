@@ -942,6 +942,9 @@ export class YouBrainDaemon {
   #dispatchExecutor: DispatchExecutor | null = null;
   /** 云盘里登记的入网设备（不含本机），信任入网设备时用来验签；一分钟内复用。 */
   #dispatchMembers: { list: DispatchSender[]; at: number } | null = null;
+  #dispatchMembersRefreshing: Promise<DispatchSender[]> | null = null;
+  #dispatchProjectsCache: Array<{ id: string; name: string }> = [];
+  #dispatchProjectsRefreshing: Promise<Array<{ id: string; name: string }>> | null = null;
   /** 本机派活身份已登记进云盘（本次进程内）。 */
   #dispatchMemberPublished: string | null = null;
   #dispatchTrustRunning: Promise<void> | null = null;
@@ -1460,6 +1463,10 @@ export class YouBrainDaemon {
     this.#dispatchHub = null;
     this.#dispatchPort = null;
     this.#dispatchEvents = null;
+    this.#dispatchMembers = null;
+    this.#dispatchMembersRefreshing = null;
+    this.#dispatchProjectsCache = [];
+    this.#dispatchProjectsRefreshing = null;
     this.#deck?.telegram?.attachT3(null);
     const backgroundConsolidation = [
       this.#consolidationJob?.promise,
@@ -3057,16 +3064,37 @@ export class YouBrainDaemon {
     if (cached && this.#clock.nowMs() - cached.at < 60_000) return cached.list;
     const sync = this.#sync;
     if (!sync) return cached?.list ?? [];
-    try {
-      const self = this.#dispatchDeviceId;
-      const list = (await sync.listRelayMembers())
-        .filter((member) => member.deviceId !== self)
-        .map((member) => ({ deviceId: member.deviceId, name: member.name, publicKey: member.publicKey }));
-      this.#dispatchMembers = { list, at: this.#clock.nowMs() };
-      return list;
-    } catch {
-      return cached?.list ?? [];
+
+    let refresh = this.#dispatchMembersRefreshing;
+    if (!refresh) {
+      refresh = (async () => {
+        try {
+          const self = this.#dispatchDeviceId;
+          const list = (await sync.listRelayMembers())
+            .filter((member) => member.deviceId !== self)
+            .map((member) => ({ deviceId: member.deviceId, name: member.name, publicKey: member.publicKey }));
+          this.#dispatchMembers = { list, at: this.#clock.nowMs() };
+          return list;
+        } catch {
+          return this.#dispatchMembers?.list ?? [];
+        } finally {
+          if (this.#dispatchMembersRefreshing === refresh) {
+            this.#dispatchMembersRefreshing = null;
+          }
+        }
+      })();
+      this.#dispatchMembersRefreshing = refresh;
     }
+
+    if (cached) return cached.list;
+
+    return Promise.race([
+      refresh,
+      new Promise<DispatchSender[]>((resolve) => {
+        const timer = setTimeout(() => resolve([]), 2_500);
+        (timer as { unref?: () => void }).unref?.();
+      }),
+    ]);
   }
 
   /**
@@ -3101,6 +3129,7 @@ export class YouBrainDaemon {
       this.#dispatchMemberPublished = signature;
     }
     this.#dispatchMembers = null;
+    this.#dispatchMembersRefreshing = null;
     await this.#relayMembers();
     if (!executor) return;
     const policy = await executor.policy();
@@ -4337,8 +4366,31 @@ export class YouBrainDaemon {
       },
       projects: async () => {
         if (!this.#taskAutomation) return [];
-        const list = await this.#taskAutomation.projects();
-        return list.map(({ id, name }) => ({ id, name }));
+        let refresh = this.#dispatchProjectsRefreshing;
+        if (!refresh) {
+          refresh = this.#taskAutomation
+            .projects()
+            .then((list) => {
+              const mapped = list.map(({ id, name }) => ({ id, name }));
+              this.#dispatchProjectsCache = mapped;
+              return mapped;
+            })
+            .catch(() => this.#dispatchProjectsCache)
+            .finally(() => {
+              if (this.#dispatchProjectsRefreshing === refresh) {
+                this.#dispatchProjectsRefreshing = null;
+              }
+            });
+          this.#dispatchProjectsRefreshing = refresh;
+        }
+        if (this.#dispatchProjectsCache.length > 0) return this.#dispatchProjectsCache;
+        return Promise.race([
+          refresh,
+          new Promise<Array<{ id: string; name: string }>>((resolve) => {
+            const timer = setTimeout(() => resolve(this.#dispatchProjectsCache), 2_500);
+            (timer as { unref?: () => void }).unref?.();
+          }),
+        ]);
       },
       trustedIds: async () => {
         const ids = new Set<string>();
@@ -4370,6 +4422,7 @@ export class YouBrainDaemon {
             updatedAt: this.#clock.now().toISOString(),
           });
           this.#dispatchMembers = null;
+          this.#dispatchMembersRefreshing = null;
           await this.#relayMembers();
         }
         await hub.refreshHello();

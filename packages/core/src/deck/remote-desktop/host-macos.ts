@@ -28,6 +28,7 @@ const VIDEO_HEADER_BYTES = 24;
 const MAX_VIDEO_FRAME_BYTES = 16 * 1024 * 1024;
 
 export interface RemoteDesktopHostBridge {
+  warmup?(): Promise<void>;
   ensureStarted(options: {
     quality: RdQuality;
     displayId?: number;
@@ -276,6 +277,10 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
 
   getStateSnapshot(): HostStateSnapshot {
     return this.#state;
+  }
+
+  async warmup(): Promise<void> {
+    await buildMacOsRemoteHostHelper(this.#home);
   }
 
   async ensureStarted(options: {

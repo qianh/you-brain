@@ -301,6 +301,8 @@ export class DispatchExecutor {
     const next = await this.#policy.write(patch);
     if (!next.remoteDesktop && this.#remoteDesktop) {
       await this.#remoteDesktop.closeAll("本机已关闭远程桌面").catch(() => undefined);
+    } else if (next.remoteDesktop && this.#remoteDesktop?.supported) {
+      this.#remoteDesktop.warmup?.();
     }
     return next;
   }
@@ -428,6 +430,16 @@ export class DispatchExecutor {
     if (this.#started) return;
     this.#started = true;
     this.#schedule(0);
+    if (this.#remoteDesktop?.supported) {
+      void this.#policy
+        .read()
+        .then((policy) => {
+          if (this.#started && policy.remoteDesktop) {
+            this.#remoteDesktop?.warmup?.();
+          }
+        })
+        .catch(() => undefined);
+    }
   }
 
   stop(): void {

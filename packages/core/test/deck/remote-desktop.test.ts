@@ -384,4 +384,94 @@ describe("RemoteDesktopHostManager WebRTC end-to-end loopback", () => {
     await clientPc.close();
     await manager.closeAll();
   });
+
+  test("openSession omits sessionId falls back to valid rd- id, and warmup invokes bridge.warmup safely", async () => {
+    let warmupCalls = 0;
+    const mockBridge: RemoteDesktopHostBridge = {
+      async warmup() {
+        warmupCalls += 1;
+      },
+      async ensureStarted() {
+        return {
+          displays: [{ id: 1, name: "Main", width: 1280, height: 800, scaleFactor: 2, primary: true }],
+          activeDisplayId: 1,
+          permissions: { screenRecording: true, accessibility: true },
+        };
+      },
+      async configure() {
+        return {
+          displays: [{ id: 1, name: "Main", width: 1280, height: 800, scaleFactor: 2, primary: true }],
+          activeDisplayId: 1,
+          permissions: { screenRecording: true, accessibility: true },
+        };
+      },
+      getStateSnapshot() {
+        return {
+          displays: [{ id: 1, name: "Main", width: 1280, height: 800, scaleFactor: 2, primary: true }],
+          activeDisplayId: 1,
+          permissions: { screenRecording: true, accessibility: true },
+        };
+      },
+      requestKeyframe() {},
+      requestPermissionsPrompt() {},
+      handleFastInput() {},
+      handleControlInput() {},
+      releaseInputs() {},
+      subscribeVideo() {
+        return () => {};
+      },
+      subscribeState() {
+        return () => {};
+      },
+      subscribeClipboard() {
+        return () => {};
+      },
+      subscribeError() {
+        return () => {};
+      },
+      async close() {},
+    };
+
+    const manager = new RemoteDesktopHostManager({
+      supported: true,
+      bridge: mockBridge,
+      getIceServers: () => [],
+      helperIdleGraceMs: 0,
+    });
+    manager.warmup();
+    expect(warmupCalls).toBe(1);
+
+    const unsupportedManager = new RemoteDesktopHostManager({
+      supported: false,
+      bridge: mockBridge,
+      getIceServers: () => [],
+    });
+    unsupportedManager.warmup();
+    expect(warmupCalls).toBe(1);
+
+    const clientPc = new RTCPeerConnection({
+      codecs: {
+        video: [
+          new RTCRtpCodecParameters({
+            mimeType: "video/H264",
+            clockRate: 90_000,
+            parameters: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+          }),
+        ],
+      },
+    });
+    clientPc.addTransceiver("video", { direction: "recvonly" });
+    clientPc.createDataChannel("control", { ordered: true });
+    const offer = await clientPc.createOffer();
+    await clientPc.setLocalDescription(offer);
+
+    const opened = await manager.openSession("peer-android-old", {
+      offerSdp: offer.sdp,
+      quality: "smooth",
+    });
+    expect(opened.sessionId).toMatch(/^rd-[A-Za-z0-9_-]{8,64}$/);
+    await manager.closeSession("peer-android-old", { sessionId: opened.sessionId });
+    await clientPc.close();
+    await manager.closeAll();
+  });
 });
