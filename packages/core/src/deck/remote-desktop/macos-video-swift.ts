@@ -1,6 +1,12 @@
 /**
  * macOS ScreenCaptureKit + VideoToolbox 60fps 零 B 帧硬件编码管线 Swift 源码片段。
  * 保持独立媒体模块，供 `U-Brain Remote Host.app` 编译时组合。
+ *
+ * 低延迟要点：
+ * - 关键帧只在开流、切换、丢包（PLI/FIR）时按需产生，长 GOP 避免每 2 秒一次的大 IDR 突发卡顿；
+ * - 编码积压超过 2 帧直接丢弃新帧，永不排队累积延迟；
+ * - 码率可在会话中无关键帧地动态调整（弱网自适应）；
+ * - 控制端本地渲染光标时光标不进画面，鼠标移动不再触发整帧编码。
  */
 export const MACOS_VIDEO_PIPELINE_SWIFT = `import AppKit
 import CoreGraphics
@@ -38,6 +44,7 @@ final class HardwareH264Encoder {
     private var bitrateBps: Int = 8_500_000
     private var fps: Int = 60
     private var forceNextKeyframe = true
+    private var inFlight = 0
     private let queue = DispatchQueue(label: "app.you-brain.rd.encoder", qos: .userInteractive)
     var onEncodedFrame: ((Bool, UInt64, Data?, Data?, Data) -> Void)?
 
@@ -63,22 +70,36 @@ final class HardwareH264Encoder {
         }
     }
 
+    /** 仅调整码率，不重建会话、不强制关键帧。 */
+    func setBitrate(_ bps: Int) {
+        queue.async {
+            let clamped = max(300_000, min(60_000_000, bps))
+            guard clamped != self.bitrateBps else { return }
+            self.bitrateBps = clamped
+            self.applyDynamicRates()
+        }
+    }
+
     func requestKeyframe() {
         queue.async {
             self.forceNextKeyframe = true
         }
     }
 
-    func encode(pixelBuffer: CVImageBuffer, pts: CMTime) {
+    func encode(pixelBuffer: CVImageBuffer, pts: CMTime, force: Bool = false) {
         queue.async {
             guard let session = self.session else { return }
+            let wantsKeyframe = self.forceNextKeyframe || force
+            // 硬件编码器积压时丢弃新帧：宁可少一帧也不让画面延迟累积。关键帧请求不丢。
+            if self.inFlight >= 2 && !wantsKeyframe { return }
             var frameProps: [CFString: Any]? = nil
-            if self.forceNextKeyframe {
+            if wantsKeyframe {
                 frameProps = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue as Any]
                 self.forceNextKeyframe = false
             }
+            self.inFlight += 1
             var infoFlags = VTEncodeInfoFlags()
-            VTCompressionSessionEncodeFrame(
+            let status = VTCompressionSessionEncodeFrame(
                 session,
                 imageBuffer: pixelBuffer,
                 presentationTimeStamp: pts,
@@ -86,8 +107,14 @@ final class HardwareH264Encoder {
                 frameProperties: frameProps as CFDictionary?,
                 infoFlagsOut: &infoFlags
             ) { [weak self] status, _, sampleBuffer in
+                guard let self else { return }
+                self.queue.async { self.inFlight = max(0, self.inFlight - 1) }
                 guard status == noErr, let sampleBuffer, CMSampleBufferDataIsReady(sampleBuffer) else { return }
-                self?.handleSampleBuffer(sampleBuffer)
+                self.handleSampleBuffer(sampleBuffer)
+            }
+            if status != noErr {
+                self.inFlight = max(0, self.inFlight - 1)
+                if wantsKeyframe { self.forceNextKeyframe = true }
             }
         }
     }
@@ -122,12 +149,17 @@ final class HardwareH264Encoder {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_Baseline_AutoLevel)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_H264EntropyMode, value: kVTH264EntropyMode_CAVLC)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: (fps * 2) as CFNumber)
-        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 2.0 as CFNumber)
+        // 长 GOP：关键帧由 PLI/FIR、开流与切换按需触发，30 秒兜底一次，避免周期性大 IDR 突发。
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: (fps * 30) as CFNumber)
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 30.0 as CFNumber)
+        if #available(macOS 12.0, *) {
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
+        }
         self.session = session
         applyDynamicRates()
         VTCompressionSessionPrepareToEncodeFrames(session)
         forceNextKeyframe = true
+        inFlight = 0
     }
 
     private func applyDynamicRates() {
@@ -141,9 +173,11 @@ final class HardwareH264Encoder {
 
     private func teardownLocked() {
         if let session {
+            VTCompressionSessionCompleteFrames(session, untilPresentationTimeStamp: .invalid)
             VTCompressionSessionInvalidate(session)
             self.session = nil
         }
+        inFlight = 0
     }
 
     private func handleSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
@@ -211,11 +245,14 @@ final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStreamDelegate {
     private let encoder = HardwareH264Encoder()
     private let sampleQueue = DispatchQueue(label: "app.you-brain.rd.capture", qos: .userInteractive)
     private var stream: SCStream?
+    private var currentConfig: SCStreamConfiguration?
     private var activeDisplayId: CGDirectDisplayID = CGMainDisplayID()
     private var maxDimension: Int = 1920
     private var fps: Int = 60
     private var bitrateBps: Int = 8_500_000
+    private var showsCursor = true
     private var latestPixelBuffer: CVPixelBuffer?
+    private var lastPts: CMTime = .invalid
     private let bufferLock = NSLock()
 
     var onEncodedFrame: ((Bool, UInt64, Data?, Data?, Data) -> Void)? {
@@ -265,6 +302,24 @@ final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStreamDelegate {
         return list.first(where: { $0.id == activeDisplayId }) ?? list.first
     }
 
+    var isRunning: Bool { stream != nil }
+
+    func setBitrate(_ bps: Int) {
+        bitrateBps = bps
+        encoder.setBitrate(bps)
+    }
+
+    /** 切换光标是否画进画面；已开流时在线更新配置，无需重启采集。 */
+    func setShowsCursor(_ value: Bool) {
+        guard value != showsCursor else { return }
+        showsCursor = value
+        guard let stream, let config = currentConfig else { return }
+        config.showsCursor = value
+        stream.updateConfiguration(config) { [weak self] _ in
+            self?.requestKeyframe()
+        }
+    }
+
     func startOrUpdate(displayId: CGDirectDisplayID?, maxDimension: Int, fps: Int, bitrateBps: Int, completion: @escaping (CGDirectDisplayID, [DisplayDescriptor]) -> Void) {
         self.maxDimension = maxDimension
         self.fps = fps
@@ -286,6 +341,8 @@ final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStreamDelegate {
             let chosenSCDisplay: SCDisplay
             if let requested = displayId, let matched = content.displays.first(where: { $0.displayID == requested }) {
                 chosenSCDisplay = matched
+            } else if let current = content.displays.first(where: { $0.displayID == self.activeDisplayId }), self.stream != nil {
+                chosenSCDisplay = current
             } else if let primary = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) {
                 chosenSCDisplay = primary
             } else {
@@ -308,12 +365,14 @@ final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStreamDelegate {
             config.width = targetW
             config.height = targetH
             config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(1, fps)))
-            config.queueDepth = 3
+            config.queueDepth = 4
             config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
-            config.showsCursor = true
+            config.colorSpaceName = CGColorSpace.sRGB
+            config.showsCursor = self.showsCursor
             if #available(macOS 13.0, *) {
                 config.capturesAudio = false
             }
+            self.currentConfig = config
 
             let filter = SCContentFilter(display: chosenSCDisplay, excludingWindows: [])
             if let existing = self.stream {
@@ -341,17 +400,23 @@ final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
+    /** 立即输出关键帧：静止画面也能用缓存的最后一帧即时重编，不必等下一次屏幕变化。 */
     func requestKeyframe() {
-        encoder.requestKeyframe()
         bufferLock.lock()
         let cached = latestPixelBuffer
+        let prev = lastPts
         bufferLock.unlock()
         if let cached {
-            let nowPts = CMTime(
-                value: Int64(DispatchTime.now().uptimeNanoseconds / 1_000),
-                timescale: 1_000_000
-            )
-            encoder.encode(pixelBuffer: cached, pts: nowPts)
+            var nowPts = CMClockGetTime(CMClockGetHostTimeClock())
+            if prev.isValid && CMTimeCompare(nowPts, prev) <= 0 {
+                nowPts = CMTimeAdd(prev, CMTime(value: 1, timescale: 1_000_000))
+            }
+            bufferLock.lock()
+            lastPts = nowPts
+            bufferLock.unlock()
+            encoder.encode(pixelBuffer: cached, pts: nowPts, force: true)
+        } else {
+            encoder.requestKeyframe()
         }
     }
 
@@ -360,8 +425,10 @@ final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStreamDelegate {
             stream = nil
             current.stopCapture { _ in }
         }
+        currentConfig = nil
         bufferLock.lock()
         latestPixelBuffer = nil
+        lastPts = .invalid
         bufferLock.unlock()
         encoder.stop()
     }
@@ -375,10 +442,14 @@ final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStreamDelegate {
             return
         }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        var pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         bufferLock.lock()
+        if lastPts.isValid && CMTimeCompare(pts, lastPts) <= 0 {
+            pts = CMTimeAdd(lastPts, CMTime(value: 1, timescale: 1_000_000))
+        }
         latestPixelBuffer = pixelBuffer
+        lastPts = pts
         bufferLock.unlock()
-        let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         encoder.encode(pixelBuffer: pixelBuffer, pts: pts)
     }
 

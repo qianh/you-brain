@@ -17,15 +17,22 @@ import type {
   RdQuality,
 } from "@you-brain/protocol";
 
+import { LossBasedBitrateController } from "./bitrate.js";
+import { HostFileTransfer, type FileChannelPort } from "./file-transfer.js";
 import { MacOsRemoteDesktopBridge, type RemoteDesktopHostBridge } from "./host-macos.js";
 import { LowLatencyH264RtpStreamer } from "./rtp-h264.js";
 import {
+  CLIPBOARD_CHUNK_CHARS,
+  CLIPBOARD_MAX_CHARS,
   DEFAULT_CLIENT_ICE_SERVERS,
   QUALITY_PRESETS,
   type ControlClientMessage,
   type ControlServerMessage,
   type FastInputMessage,
+  type HostClipboardEvent,
+  type HostCursorShape,
   type HostStateSnapshot,
+  type HostStreamOptions,
   type RemoteDesktopSignalingEvents,
 } from "./types.js";
 
@@ -33,12 +40,16 @@ const MAX_SESSIONS = 2;
 const SESSION_IDLE_TIMEOUT_MS = 10 * 60_000;
 const ICE_BATCH_FLUSH_MS = 15;
 const MAX_ICE_BATCH = 32;
+const STATS_INTERVAL_MS = 2_000;
+const FILE_DRAIN_LOW_WATER = 1024 * 1024;
+const MAX_DOWNLOAD_ALLOW = 200;
 
 export interface RemoteDesktopPort {
   readonly supported: boolean;
   warmup?(): void;
   setSignalingEvents(events: RemoteDesktopSignalingEvents | null): void;
-  openSession(fromDeviceId: string, args: RdOpenArgs): Promise<RdOpenResult>;
+  /** `iceServers` 由调用方预先解析（宿主子进程场景）；缺省时由实现自行获取。 */
+  openSession(fromDeviceId: string, args: RdOpenArgs, iceServers?: IceServerEntry[]): Promise<RdOpenResult>;
   addIceCandidates(fromDeviceId: string, args: RdIceArgs): Promise<{ ok: true }>;
   closeSession(fromDeviceId: string, args: RdCloseArgs): Promise<{ ok: true }>;
   closeAll(reason?: string): Promise<void>;
@@ -56,6 +67,37 @@ interface ActiveRdSession {
   closed: boolean;
   iceQueue: RdIceCandidate[];
   iceFlushTimer: ReturnType<typeof setTimeout> | null;
+  /** 控制端本地渲染光标（光标不进画面）。 */
+  localCursor: boolean;
+  /** 控制端开启双向剪贴板自动同步。 */
+  clipboardSync: boolean;
+  fileTransfer: HostFileTransfer | null;
+  /** 远端剪贴板通告过、允许控制端下载的文件路径。 */
+  allowedDownloads: Set<string>;
+  bitrate: LossBasedBitrateController;
+  statsTimer: ReturnType<typeof setInterval> | null;
+  clipboardInbound: { id: string; n: number; parts: string[]; received: number; chars: number } | null;
+}
+
+function chunkId(): string {
+  return randomUUID().replace(/-/g, "").slice(0, 12);
+}
+
+function fileChannelPort(dc: RTCDataChannel): FileChannelPort {
+  return {
+    send: (data) => dc.send(data),
+    get bufferedAmount() {
+      return dc.bufferedAmount;
+    },
+    get isOpen() {
+      return dc.readyState === "open";
+    },
+    waitDrain: async () => {
+      while (dc.readyState === "open" && dc.bufferedAmount > FILE_DRAIN_LOW_WATER) {
+        await new Promise((resolve) => setTimeout(resolve, 8));
+      }
+    },
+  };
 }
 
 function toWeriftIceServers(entries: IceServerEntry[]): RTCIceServer[] {
@@ -114,7 +156,11 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
   #unsubState: (() => void) | null = null;
   #unsubClipboard: (() => void) | null = null;
   #unsubError: (() => void) | null = null;
+  #unsubCursor: (() => void) | null = null;
   #latestClipboardRecipient: ActiveRdSession | null = null;
+  #lastCursor: HostCursorShape | null = null;
+  #appliedStreamOptions: string | null = null;
+  #appliedBitrate: number | null = null;
 
   constructor(options?: RemoteDesktopHostManagerOptions) {
     this.supported = options?.supported ?? process.platform === "darwin";
@@ -138,7 +184,11 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     void this.#bridge.warmup().catch(() => {});
   }
 
-  async openSession(fromDeviceId: string, args: RdOpenArgs): Promise<RdOpenResult> {
+  async openSession(
+    fromDeviceId: string,
+    args: RdOpenArgs,
+    overrideIceServers?: IceServerEntry[],
+  ): Promise<RdOpenResult> {
     if (!this.supported || !this.#bridge) {
       throw new Error("当前设备不支持远程桌面宿主");
     }
@@ -172,10 +222,14 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
         ...(args.displayId !== undefined ? { displayId: args.displayId } : {}),
         promptPermissions: false,
       }),
-      Promise.resolve()
-        .then(() => this.#getIceServers())
-        .catch(() => DEFAULT_CLIENT_ICE_SERVERS),
+      overrideIceServers
+        ? Promise.resolve(overrideIceServers)
+        : Promise.resolve()
+            .then(() => this.#getIceServers())
+            .catch(() => DEFAULT_CLIENT_ICE_SERVERS),
     ]);
+    // 新开流以预设码率起步；自适应控制器随后按丢包调整。
+    this.#appliedBitrate = null;
 
     const hasIceServers = iceEntries.length > 0;
     const pc = new RTCPeerConnection({
@@ -222,7 +276,28 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       closed: false,
       iceQueue: [],
       iceFlushTimer: null,
+      localCursor: false,
+      clipboardSync: false,
+      fileTransfer: null,
+      allowedDownloads: new Set(),
+      bitrate: new LossBasedBitrateController({
+        maxBps: QUALITY_PRESETS[quality].bitrateBps,
+        onChange: () => this.#applyBitrate(),
+      }),
+      statsTimer: null,
+      clipboardInbound: null,
     };
+
+    sender.onRtcp.subscribe((packet) => {
+      if (session.closed) return;
+      const reports = (packet as { reports?: Array<{ ssrc: number; fractionLost: number }> }).reports;
+      if (!Array.isArray(reports)) return;
+      for (const report of reports) {
+        if (report.ssrc === sender.ssrc) {
+          session.bitrate.onReceiverReport(report.fractionLost, Date.now());
+        }
+      }
+    });
 
     sender.onKeyFrameRequest.subscribe(() => {
       if (!session.closed) {
@@ -246,6 +321,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       if (session.closed) return;
       if (state === "connected") {
         session.lastActiveAt = Date.now();
+        this.#startStats(session);
         this.#bridge?.requestKeyframe();
         const cur = this.#bridge?.getStateSnapshot() ?? snapshot;
         this.#events?.onState(session.peerDeviceId, session.sessionId, {
@@ -270,6 +346,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       await pc.setLocalDescription(answer);
       const answerSdp = pc.localDescription?.sdp ?? answer.sdp;
       this.#sessions.set(session.sessionId, session);
+      this.#applyStreamOptions();
       this.#ensureIdleSweep();
       this.#bridge.requestKeyframe();
       return {
@@ -337,6 +414,9 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     for (const session of active) {
       await this.#disposeSession(session, Boolean(reason), reason);
     }
+    this.#appliedStreamOptions = null;
+    this.#appliedBitrate = null;
+    this.#lastCursor = null;
     if (this.#bridge) {
       this.#bridge.releaseInputs();
       await this.#bridge.close().catch(() => {});
@@ -356,13 +436,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       for (const session of this.#sessions.values()) {
         if (session.closed) continue;
         session.displayId = state.activeDisplayId;
-        this.#sendControlMessage(session, {
-          t: "state",
-          displays: state.displays,
-          activeDisplayId: state.activeDisplayId,
-          permissions: state.permissions,
-          quality: session.quality,
-        });
+        this.#sendControlMessage(session, this.#stateMessage(session, state));
         this.#events?.onState(session.peerDeviceId, session.sessionId, {
           state: "ready",
           displays: state.displays,
@@ -372,18 +446,19 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       }
     });
 
-    this.#unsubClipboard = bridge.subscribeClipboard((text) => {
-      const target = this.#latestClipboardRecipient;
-      if (target && !target.closed) {
-        this.#sendControlMessage(target, { t: "cb", text });
-        return;
-      }
-      for (const session of this.#sessions.values()) {
-        if (!session.closed) {
-          this.#sendControlMessage(session, { t: "cb", text });
-        }
-      }
+    this.#unsubClipboard = bridge.subscribeClipboard((text, meta) => {
+      this.#onHostClipboard(text, meta);
     });
+
+    this.#unsubCursor =
+      bridge.subscribeCursor?.((cursor) => {
+        this.#lastCursor = cursor;
+        for (const session of this.#sessions.values()) {
+          if (!session.closed && session.localCursor) {
+            this.#sendControlMessage(session, { t: "cursor", ...cursor });
+          }
+        }
+      }) ?? null;
 
     this.#unsubError = bridge.subscribeError((message) => {
       for (const session of this.#sessions.values()) {
@@ -414,18 +489,32 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       return;
     }
 
+    if (dc.label === "file") {
+      const transfer = new HostFileTransfer(fileChannelPort(dc), {
+        isDownloadAllowed: (path) => session.allowedDownloads.has(path),
+      });
+      void session.fileTransfer?.dispose();
+      session.fileTransfer = transfer;
+      dc.onMessage.subscribe((raw) => {
+        if (session.closed) return;
+        session.lastActiveAt = Date.now();
+        transfer.handleMessage(raw);
+      });
+      dc.stateChanged.subscribe((st) => {
+        if (st === "closed" && session.fileTransfer === transfer) {
+          session.fileTransfer = null;
+          void transfer.dispose();
+        }
+      });
+      return;
+    }
+
     if (dc.label === "control") {
       session.controlDc = dc;
       const sendInitialState = () => {
         if (session.closed || !this.#bridge) return;
         const snap: HostStateSnapshot = this.#bridge.getStateSnapshot();
-        this.#sendControlMessage(session, {
-          t: "state",
-          displays: snap.displays,
-          activeDisplayId: snap.activeDisplayId,
-          permissions: snap.permissions,
-          quality: session.quality,
-        });
+        this.#sendControlMessage(session, this.#stateMessage(session, snap));
         this.#bridge.requestKeyframe();
       };
       if (dc.readyState === "open") {
@@ -463,12 +552,28 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
           case "qual":
             if (isValidQuality(msg.quality) && msg.quality in QUALITY_PRESETS) {
               session.quality = msg.quality;
+              session.bitrate.setMax(QUALITY_PRESETS[msg.quality].bitrateBps);
               void this.#reconfigureBridge(session);
+            }
+            return;
+          case "cfg":
+            session.localCursor = msg.localCursor === true;
+            session.clipboardSync = msg.clipboardSync === true;
+            this.#applyStreamOptions();
+            if (session.localCursor) {
+              if (this.#lastCursor) {
+                this.#sendControlMessage(session, { t: "cursor", ...this.#lastCursor });
+              } else {
+                this.#bridge?.requestCursor?.();
+              }
             }
             return;
           case "cb.get":
             this.#latestClipboardRecipient = session;
             this.#bridge?.handleControlInput(msg);
+            return;
+          case "cb.set":
+            this.#onClientClipboard(session, msg);
             return;
           default:
             this.#bridge?.handleControlInput(msg);
@@ -485,19 +590,160 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
         quality: session.quality,
         ...(session.displayId !== undefined ? { displayId: session.displayId } : {}),
       });
+      // 重新配置会把编码码率重置为预设值，之后需重新下发自适应码率。
+      this.#appliedBitrate = null;
+      this.#applyBitrate();
       if (!session.closed) {
-        this.#sendControlMessage(session, {
-          t: "state",
-          displays: snap.displays,
-          activeDisplayId: snap.activeDisplayId,
-          permissions: snap.permissions,
-          quality: session.quality,
-        });
+        this.#sendControlMessage(session, this.#stateMessage(session, snap));
         this.#bridge.requestKeyframe();
       }
     } catch {
       // ignore transient reconfigure error
     }
+  }
+
+  #stateMessage(session: ActiveRdSession, snap: HostStateSnapshot): ControlServerMessage {
+    return {
+      t: "state",
+      displays: snap.displays,
+      activeDisplayId: snap.activeDisplayId,
+      permissions: snap.permissions,
+      quality: session.quality,
+      ...(snap.doubleClickMs !== undefined ? { doubleClickMs: snap.doubleClickMs } : {}),
+    };
+  }
+
+  /** 宿主剪贴板变化：主动拉取的结果只回给请求方；监听到的变化推给开了自动同步的会话。 */
+  #onHostClipboard(text: string, meta?: HostClipboardEvent): void {
+    const live = [...this.#sessions.values()].filter((item) => !item.closed);
+    let targets: ActiveRdSession[];
+    if (meta?.auto) {
+      targets = live.filter((item) => item.clipboardSync);
+    } else {
+      const target = this.#latestClipboardRecipient;
+      targets = target && !target.closed ? [target] : live;
+    }
+    for (const session of targets) {
+      if (meta?.files && meta.files.length > 0) {
+        for (const file of meta.files) {
+          session.allowedDownloads.add(file.path);
+        }
+        while (session.allowedDownloads.size > MAX_DOWNLOAD_ALLOW) {
+          const first = session.allowedDownloads.values().next().value;
+          if (first === undefined) break;
+          session.allowedDownloads.delete(first);
+        }
+        this.#sendControlMessage(session, { t: "cb.files", files: meta.files });
+      }
+      if (text || !meta?.files?.length) {
+        this.#sendClipboardText(session, text, Boolean(meta?.auto));
+      }
+    }
+  }
+
+  #sendClipboardText(session: ActiveRdSession, text: string, auto: boolean): void {
+    const clipped = text.length > CLIPBOARD_MAX_CHARS ? text.slice(0, CLIPBOARD_MAX_CHARS) : text;
+    if (clipped.length <= CLIPBOARD_CHUNK_CHARS) {
+      this.#sendControlMessage(session, { t: "cb", text: clipped, ...(auto ? { auto: true } : {}) });
+      return;
+    }
+    const id = chunkId();
+    const n = Math.ceil(clipped.length / CLIPBOARD_CHUNK_CHARS);
+    for (let i = 0; i < n; i += 1) {
+      this.#sendControlMessage(session, {
+        t: "cb",
+        text: clipped.slice(i * CLIPBOARD_CHUNK_CHARS, (i + 1) * CLIPBOARD_CHUNK_CHARS),
+        ...(auto ? { auto: true } : {}),
+        chunk: { id, i, n },
+      });
+    }
+  }
+
+  /** 控制端写剪贴板：支持分片重组；写入后同步给其他开了自动同步的会话。 */
+  #onClientClipboard(session: ActiveRdSession, msg: Extract<ControlClientMessage, { t: "cb.set" }>): void {
+    if (typeof msg.text !== "string") return;
+    let full: string | null = null;
+    const chunk = msg.chunk;
+    if (!chunk) {
+      session.clipboardInbound = null;
+      full = msg.text;
+    } else {
+      const n = Math.trunc(chunk.n);
+      const i = Math.trunc(chunk.i);
+      if (!(n >= 1 && n <= Math.ceil(CLIPBOARD_MAX_CHARS / 1_000) && i >= 0 && i < n)) return;
+      let inbound = session.clipboardInbound;
+      if (!inbound || inbound.id !== chunk.id || inbound.n !== n) {
+        inbound = { id: String(chunk.id), n, parts: new Array<string>(n), received: 0, chars: 0 };
+        session.clipboardInbound = inbound;
+      }
+      if (inbound.parts[i] === undefined) {
+        inbound.parts[i] = msg.text;
+        inbound.received += 1;
+        inbound.chars += msg.text.length;
+      }
+      if (inbound.chars > CLIPBOARD_MAX_CHARS) {
+        session.clipboardInbound = null;
+        return;
+      }
+      if (inbound.received < n) return;
+      session.clipboardInbound = null;
+      full = inbound.parts.join("");
+    }
+    this.#bridge?.handleControlInput({ t: "cb.set", text: full });
+    for (const other of this.#sessions.values()) {
+      if (other !== session && !other.closed && other.clipboardSync) {
+        this.#sendClipboardText(other, full, true);
+      }
+    }
+  }
+
+  /** 汇总所有会话的能力声明下发给助手：全部会话都本地渲染光标时，光标才不进画面。 */
+  #applyStreamOptions(): void {
+    if (!this.#bridge?.setStreamOptions) return;
+    const live = [...this.#sessions.values()].filter((item) => !item.closed);
+    const options: HostStreamOptions = {
+      showCursorInVideo: live.length === 0 || live.some((item) => !item.localCursor),
+      cursorShape: live.some((item) => item.localCursor),
+      clipboardWatch: live.some((item) => item.clipboardSync),
+    };
+    const key = JSON.stringify(options);
+    if (key === this.#appliedStreamOptions) return;
+    this.#appliedStreamOptions = key;
+    this.#bridge.setStreamOptions(options);
+  }
+
+  /** 多会话共用一路编码，取各会话自适应码率的最小值。 */
+  #applyBitrate(): void {
+    if (!this.#bridge?.setBitrate) return;
+    let target = Number.POSITIVE_INFINITY;
+    for (const session of this.#sessions.values()) {
+      if (!session.closed) target = Math.min(target, session.bitrate.targetBps);
+    }
+    if (!Number.isFinite(target)) return;
+    if (this.#appliedBitrate === null) {
+      // 编码器此时为预设码率；目标与预设一致时无需下发。
+      const presetMax = Math.min(
+        ...[...this.#sessions.values()].filter((item) => !item.closed).map((item) => item.bitrate.maxBps),
+      );
+      this.#appliedBitrate = presetMax;
+    }
+    if (Math.abs(target - this.#appliedBitrate) / Math.max(1, this.#appliedBitrate) < 0.02) return;
+    this.#appliedBitrate = target;
+    this.#bridge.setBitrate(target);
+  }
+
+  #startStats(session: ActiveRdSession): void {
+    if (session.statsTimer) return;
+    session.statsTimer = setInterval(() => {
+      if (session.closed) return;
+      this.#sendControlMessage(session, {
+        t: "stats",
+        bitrateBps: this.#appliedBitrate ?? session.bitrate.targetBps,
+        lossPct: Math.round(session.bitrate.lastLoss * 1000) / 10,
+        rttMs: null,
+      });
+    }, STATS_INTERVAL_MS);
+    session.statsTimer.unref?.();
   }
 
   #sendControlMessage(session: ActiveRdSession, payload: ControlServerMessage): void {
@@ -553,12 +799,26 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       session.iceFlushTimer = null;
     }
     session.iceQueue.length = 0;
+    if (session.statsTimer) {
+      clearInterval(session.statsTimer);
+      session.statsTimer = null;
+    }
     if (this.#latestClipboardRecipient === session) {
       this.#latestClipboardRecipient = null;
     }
     session.streamer.close();
     this.#bridge?.releaseInputs();
+    const transfer = session.fileTransfer;
+    session.fileTransfer = null;
+    session.clipboardInbound = null;
+    await transfer?.dispose().catch(() => {});
     await session.pc.close().catch(() => {});
+    if (this.#sessions.size > 0) {
+      this.#applyStreamOptions();
+      this.#applyBitrate();
+    } else {
+      this.#appliedStreamOptions = null;
+    }
 
     if (notifyPeer) {
       this.#events?.onState(session.peerDeviceId, session.sessionId, {

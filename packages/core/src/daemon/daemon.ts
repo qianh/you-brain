@@ -226,7 +226,7 @@ import { NotionService } from "../notion/service.js";
 import {
   DEFAULT_CLIENT_ICE_SERVERS,
   DeckService,
-  RemoteDesktopHostManager,
+  ProcessRemoteDesktopPort,
   type DeckServiceOptions,
 } from "../deck/index.js";
 import {
@@ -4202,7 +4202,8 @@ export class YouBrainDaemon {
     });
     this.#dispatchEvents = events;
 
-    const remoteDesktopPort = new RemoteDesktopHostManager({
+    // 宿主跑在专用子进程：daemon 主循环的偶发阻塞不再拖慢远程画面与输入。
+    const remoteDesktopPort = new ProcessRemoteDesktopPort({
       supported: this.#platform === "darwin" && this.#local.role !== "server",
       getIceServers: async () => (await hub?.turnCredentials())?.iceServers ?? DEFAULT_CLIENT_ICE_SERVERS,
     });

@@ -122,6 +122,19 @@ program
   });
 
 program
+  .command("rd-host")
+  .description("远程桌面宿主子进程。由 daemon 拉起，不要手动调用。")
+  .action(async () => {
+    try {
+      const { serveRemoteDesktopHost } = await import("@you-brain/core/deck/remote-desktop/index.js");
+      await serveRemoteDesktopHost();
+    } catch (error) {
+      fail(error);
+    }
+    process.exit(0);
+  });
+
+program
   .command("native-check")
   .description("检查编译产物里的 sharp 与嵌入模型")
   .action(async () => {
@@ -726,6 +739,7 @@ async function readConfig<T>(path: string, fallback: T, parse: (input: unknown) 
 const TOP_COMMANDS = new Set([
   "daemon",
   "embed-worker",
+  "rd-host",
   "native-check",
   "mcp",
   "setup",
@@ -753,7 +767,7 @@ try {
 // 查询命令打完日志后进程不会自己退出。
 // mcp 要一直占住 stdin。这里退出会在 initialize 写出之前把进程杀掉。
 const command = invokedCommand();
-// mcp 和 embed-worker 占着 stdin。这里退出会在它们写完响应之前把进程杀掉。
-if (command !== "mcp" && command !== "embed-worker") {
+// mcp、embed-worker 和 rd-host 占着 stdin。这里退出会在它们写完响应之前把进程杀掉。
+if (command !== "mcp" && command !== "embed-worker" && command !== "rd-host") {
   process.exit(0);
 }

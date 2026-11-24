@@ -62,7 +62,7 @@ describe("remote-desktop-input 坐标与低延迟参数辅助函数", () => {
 
     expect(
       extractModifiers({ metaKey: true, ctrlKey: false, altKey: true, shiftKey: false }),
-    ).toEqual({ meta: true, alt: true });
+    ).toEqual({ meta: true, ctrl: false, alt: true, shift: false });
 
     const fakeReceiver = {} as RTCRtpReceiver & {
       playoutDelayHint?: number;

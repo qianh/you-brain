@@ -256,6 +256,11 @@ export interface BrowserDaemon
   deckTelegramEnrollInvite?(): Promise<DeckTelegramEnrollInviteResponse>;
   dispatchTrustDevice?(body: DispatchTrustDeviceBody): Promise<DispatchPolicyResponse>;
   dispatchTurn?(): Promise<DispatchTurnResponse>;
+  /** 远程桌面下载分片写入本机「下载」文件夹。 */
+  dispatchRdSave?(
+    params: { token: string; name: string; offset: number; final: boolean },
+    chunk: Blob,
+  ): Promise<{ path: string; name: string; size: number }>;
   dispatchRdEvents?(
     listener: (event: DispatchRdStreamEvent) => void,
     options?: { signal?: AbortSignal },
@@ -490,6 +495,12 @@ export function createBrowserDaemon(options?: {
     dispatchTrustDevice: (body: DispatchTrustDeviceBody) =>
       request<DispatchPolicyResponse>("POST", "/api/dispatch/trust-device", body),
     dispatchTurn: () => request<DispatchTurnResponse>("GET", "/api/dispatch/turn"),
+    dispatchRdSave: (params, chunk) =>
+      request<{ path: string; name: string; size: number }>(
+        "POST",
+        `/api/dispatch/rd/save?token=${encodeURIComponent(params.token)}&name=${encodeURIComponent(params.name)}&offset=${params.offset}${params.final ? "&final=1" : ""}`,
+        chunk,
+      ),
     dispatchRdEvents: (listener, rdOptions) =>
       readRdEvents(fetchImpl, token, listener, rdOptions?.signal),
     deckNoticeDismiss: (body: DeckNoticeDismissBody) =>

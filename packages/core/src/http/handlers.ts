@@ -30,6 +30,7 @@ import { TaskError } from "../tasks/service.js";
 import { TaskActionSchema, TaskCreateSchema, TaskImageIdSchema, TaskUpdateSchema } from "../tasks/schema.js";
 import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT } from "../tasks/types.js";
 import { probeT3Web } from "../deck/t3/probe.js";
+import { RemoteDownloadSink } from "../deck/remote-desktop/file-transfer.js";
 import { DEFAULT_T3_URL, normalizeT3Url } from "../deck/t3/index.js";
 import type { QuotaView } from "../quota/types.js";
 import { acceptActivityAt } from "../reminders/activity.js";
@@ -716,6 +717,29 @@ export async function handleApi(
       if (!port.trustDevice) notSupported();
       const body = DispatchTrustDeviceBodySchema.parse(await readJson(request));
       return json(await port.trustDevice(body));
+    });
+  }
+  if (path === "/api/dispatch/rd/save") {
+    // 远程桌面下载落盘：控制端把收到的文件分片依次写入本机「下载」文件夹。
+    return method(request, "POST", async () => {
+      const token = url.searchParams.get("token") ?? "";
+      const name = url.searchParams.get("name") ?? "file";
+      const offset = Number(url.searchParams.get("offset") ?? "0");
+      if (!Number.isSafeInteger(offset) || offset < 0) throw new HttpError(400, "INVALID_INPUT", "offset 无效");
+      const buffer = await request.arrayBuffer();
+      try {
+        return json(
+          await rdDownloadSink().append({
+            token,
+            name,
+            offset,
+            bytes: new Uint8Array(buffer),
+            final: url.searchParams.get("final") === "1",
+          }),
+        );
+      } catch (error) {
+        throw new HttpError(400, "INVALID_INPUT", error instanceof Error ? error.message : String(error));
+      }
     });
   }
   if (path === "/api/dispatch/turn") {
@@ -2036,4 +2060,10 @@ export function createDispatchHttpPort(options: DispatchHttpPortOptions): Dispat
         }
       : {}),
   };
+}
+
+let rdDownloadSinkInstance: RemoteDownloadSink | null = null;
+function rdDownloadSink(): RemoteDownloadSink {
+  rdDownloadSinkInstance ??= new RemoteDownloadSink();
+  return rdDownloadSinkInstance;
 }

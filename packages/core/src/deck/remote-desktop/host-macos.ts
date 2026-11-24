@@ -14,11 +14,16 @@ import { MACOS_REMOTE_HOST_APP_SWIFT, MACOS_REMOTE_HOST_PLIST } from "./macos-ap
 import { MACOS_UI_BRIDGE_SWIFT } from "./macos-ui-swift.js";
 import { MACOS_VIDEO_PIPELINE_SWIFT } from "./macos-video-swift.js";
 import {
+  CLIPBOARD_MAX_CHARS,
   QUALITY_PRESETS,
   type ControlClientMessage,
   type EncodedVideoFrame,
   type FastInputMessage,
+  type HostClipboardEvent,
+  type HostClipboardFile,
+  type HostCursorShape,
   type HostStateSnapshot,
+  type HostStreamOptions,
 } from "./types.js";
 
 const exec = promisify(execFile);
@@ -45,9 +50,18 @@ export interface RemoteDesktopHostBridge {
   handleFastInput(msg: FastInputMessage): void;
   handleControlInput(msg: ControlClientMessage): void;
   releaseInputs(): void;
+  /** 汇总后的流选项：光标是否进画面、是否上报光标形状、是否监听剪贴板。 */
+  setStreamOptions?(options: HostStreamOptions): void;
+  /** 动态调整编码码率（不触发关键帧）。 */
+  setBitrate?(bps: number): void;
+  /** 让助手立即重发当前光标形状。 */
+  requestCursor?(): void;
+  /** 把 PNG 图片写入远端剪贴板。 */
+  writeClipboardImage?(pngBase64: string): void;
   subscribeVideo(listener: (frame: EncodedVideoFrame) => void): () => void;
   subscribeState(listener: (state: HostStateSnapshot) => void): () => void;
-  subscribeClipboard(listener: (text: string) => void): () => void;
+  subscribeClipboard(listener: (text: string, meta?: HostClipboardEvent) => void): () => void;
+  subscribeCursor?(listener: (cursor: HostCursorShape) => void): () => void;
   subscribeError(listener: (error: string) => void): () => void;
   close(): Promise<void>;
 }
@@ -169,6 +183,10 @@ export async function buildMacOsRemoteHostHelper(home = homedir()): Promise<stri
           "-framework",
           "ApplicationServices",
           "-framework",
+          "Carbon",
+          "-framework",
+          "IOKit",
+          "-framework",
           "CoreGraphics",
           "-framework",
           "CoreMedia",
@@ -246,7 +264,41 @@ function parseStatePayload(raw: Record<string, unknown>, fallback: HostStateSnap
       }
     : fallback.permissions;
 
-  return { displays, activeDisplayId, permissions };
+  const doubleClickMs =
+    typeof raw.doubleClickMs === "number" && raw.doubleClickMs > 0
+      ? Math.min(5_000, Math.trunc(raw.doubleClickMs))
+      : fallback.doubleClickMs;
+
+  return { displays, activeDisplayId, permissions, ...(doubleClickMs !== undefined ? { doubleClickMs } : {}) };
+}
+
+function parseClipboardFiles(raw: unknown): HostClipboardFile[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const files: HostClipboardFile[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as Record<string, unknown>;
+    if (typeof rec.path !== "string" || !rec.path.startsWith("/")) continue;
+    files.push({
+      path: rec.path,
+      name: typeof rec.name === "string" && rec.name ? rec.name : rec.path.split("/").pop() || "file",
+      size: typeof rec.size === "number" && rec.size >= 0 ? Math.trunc(rec.size) : 0,
+    });
+  }
+  return files.length > 0 ? files : undefined;
+}
+
+function parseCursor(raw: Record<string, unknown>): HostCursorShape | null {
+  if (typeof raw.png !== "string") return null;
+  const num = (value: unknown, fallback: number) =>
+    typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  return {
+    png: raw.png,
+    hx: num(raw.hx, 0),
+    hy: num(raw.hy, 0),
+    w: Math.max(1, num(raw.w, 16)),
+    h: Math.max(1, num(raw.h, 16)),
+  };
 }
 
 export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
@@ -267,9 +319,12 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
   readonly #decoder = new BinaryVideoFrameDecoder();
   readonly #videoListeners = new Set<(frame: EncodedVideoFrame) => void>();
   readonly #stateListeners = new Set<(state: HostStateSnapshot) => void>();
-  readonly #clipboardListeners = new Set<(text: string) => void>();
+  readonly #clipboardListeners = new Set<(text: string, meta?: HostClipboardEvent) => void>();
+  readonly #cursorListeners = new Set<(cursor: HostCursorShape) => void>();
   readonly #errorListeners = new Set<(error: string) => void>();
   #closed = false;
+  /** 最近一次流选项；助手重启后需要补发。 */
+  #streamOptions: HostStreamOptions | null = null;
 
   constructor(options?: { homeDir?: string }) {
     this.#home = options?.homeDir ?? homedir();
@@ -298,6 +353,7 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
         });
       }
       await this.#startPromise;
+      if (this.#streamOptions) this.setStreamOptions(this.#streamOptions);
     }
     return this.configure(options);
   }
@@ -377,19 +433,20 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
           ...(msg.ctrl !== undefined ? { ctrl: msg.ctrl } : {}),
           ...(msg.alt !== undefined ? { alt: msg.alt } : {}),
           ...(msg.shift !== undefined ? { shift: msg.shift } : {}),
+          ...(msg.t === "kd" && msg.rep ? { rep: true } : {}),
         });
         break;
       }
       case "txt":
         if (msg.text) {
-          this.#sendCtrl({ op: "txt", text: msg.text.slice(0, 4096) });
+          this.#sendCtrl({ op: "txt", text: msg.text.slice(0, 65_536) });
         }
         break;
       case "cb.get":
         this.#sendCtrl({ op: "cb.get" });
         break;
       case "cb.set":
-        this.#sendCtrl({ op: "cb.set", text: msg.text.slice(0, 262_144) });
+        this.#sendCtrl({ op: "cb.set", text: msg.text.slice(0, CLIPBOARD_MAX_CHARS) });
         break;
       case "idr":
         this.requestKeyframe();
@@ -406,6 +463,30 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
     this.#sendCtrl({ op: "release" });
   }
 
+  setStreamOptions(options: HostStreamOptions): void {
+    this.#streamOptions = { ...options };
+    this.#sendCtrl({
+      op: "opts",
+      showCursor: options.showCursorInVideo,
+      cursorShape: options.cursorShape,
+      clipboardWatch: options.clipboardWatch,
+    });
+  }
+
+  setBitrate(bps: number): void {
+    if (!Number.isFinite(bps) || bps <= 0) return;
+    this.#sendCtrl({ op: "br", bps: Math.round(bps) });
+  }
+
+  requestCursor(): void {
+    this.#sendCtrl({ op: "cursor.get" });
+  }
+
+  writeClipboardImage(pngBase64: string): void {
+    if (!pngBase64) return;
+    this.#sendCtrl({ op: "cb.img", png: pngBase64 });
+  }
+
   subscribeVideo(listener: (frame: EncodedVideoFrame) => void): () => void {
     this.#videoListeners.add(listener);
     return () => {
@@ -420,10 +501,17 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
     };
   }
 
-  subscribeClipboard(listener: (text: string) => void): () => void {
+  subscribeClipboard(listener: (text: string, meta?: HostClipboardEvent) => void): () => void {
     this.#clipboardListeners.add(listener);
     return () => {
       this.#clipboardListeners.delete(listener);
+    };
+  }
+
+  subscribeCursor(listener: (cursor: HostCursorShape) => void): () => void {
+    this.#cursorListeners.add(listener);
+    return () => {
+      this.#cursorListeners.delete(listener);
     };
   }
 
@@ -505,7 +593,17 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
                 for (const w of waiters) w(this.#state);
                 for (const listener of this.#stateListeners) listener(this.#state);
               } else if (ev === "cb" && typeof msg.text === "string") {
-                for (const listener of this.#clipboardListeners) listener(msg.text);
+                const files = parseClipboardFiles(msg.files);
+                const meta: HostClipboardEvent = {
+                  ...(msg.auto === true ? { auto: true } : {}),
+                  ...(files ? { files } : {}),
+                };
+                for (const listener of this.#clipboardListeners) listener(msg.text, meta);
+              } else if (ev === "cursor") {
+                const cursor = parseCursor(msg);
+                if (cursor) {
+                  for (const listener of this.#cursorListeners) listener(cursor);
+                }
               } else if (ev === "error" && typeof msg.message === "string") {
                 for (const listener of this.#errorListeners) listener(msg.message);
               }

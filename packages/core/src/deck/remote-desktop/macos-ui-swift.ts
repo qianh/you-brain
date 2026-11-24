@@ -1,16 +1,27 @@
 /**
- * macOS 辅助功能输入与剪贴板桥接 Swift 源码片段。
+ * macOS 辅助功能输入、剪贴板、光标形状与电源管理桥接 Swift 源码片段。
  */
 export const MACOS_UI_BRIDGE_SWIFT = `import AppKit
 import ApplicationServices
+import Carbon
 import CoreGraphics
 import Foundation
+import IOKit.pwr_mgt
 
 final class DesktopUiBridge {
     private var pressedButtons = Set<Int>()
     private var pressedKeys = Set<UInt16>()
     private var lastPoint = CGPoint(x: 200, y: 200)
+    private var scrollRemainderX = 0.0
+    private var scrollRemainderY = 0.0
     private let eventSource = CGEventSource(stateID: .hidSystemState)
+    /** 宿主自己写入剪贴板后的 changeCount，监听器据此忽略回声。 */
+    var ownPasteboardChangeCount: Int = -1
+
+    init() {
+        // 合成事件不应被本机物理按键的修饰键状态污染。
+        eventSource?.localEventsSuppressionInterval = 0
+    }
 
     static func checkPermissions(prompt: Bool) -> (screenRecording: Bool, accessibility: Bool) {
         let screenOk: Bool
@@ -91,8 +102,13 @@ final class DesktopUiBridge {
         if let nx = normX, let ny = normY {
             _ = resolvePoint(normX: nx, normY: ny, bounds: bounds)
         }
-        let vy = Int32((-dy).rounded())
-        let vx = Int32((-dx).rounded())
+        // 累积小数部分：触控板细粒度滚动不再被取整吞掉。
+        scrollRemainderY += -dy
+        scrollRemainderX += -dx
+        let vy = Int32(scrollRemainderY.rounded(.towardZero))
+        let vx = Int32(scrollRemainderX.rounded(.towardZero))
+        scrollRemainderY -= Double(vy)
+        scrollRemainderX -= Double(vx)
         guard vx != 0 || vy != 0 else { return }
         guard let ev = CGEvent(
             scrollWheelEvent2Source: eventSource,
@@ -102,11 +118,12 @@ final class DesktopUiBridge {
             wheel2: vx,
             wheel3: 0
         ) else { return }
+        ev.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
         ev.location = lastPoint
         ev.post(tap: .cghidEventTap)
     }
 
-    func keyEvent(keyCode: UInt16, down: Bool, meta: Bool?, ctrl: Bool?, alt: Bool?, shift: Bool?) {
+    func keyEvent(keyCode: UInt16, down: Bool, meta: Bool?, ctrl: Bool?, alt: Bool?, shift: Bool?, repeatKey: Bool = false) {
         if down {
             pressedKeys.insert(keyCode)
         } else {
@@ -128,26 +145,114 @@ final class DesktopUiBridge {
         if let shift {
             if shift { flags.insert(.maskShift) } else { flags.remove(.maskShift) }
         }
+        // 方向键与功能键需要带 NumericPad / SecondaryFn 标记，部分应用据此识别。
+        if (0x7b...0x7e).contains(keyCode) {
+            flags.insert(.maskNumericPad)
+            flags.insert(.maskSecondaryFn)
+        } else if [0x72, 0x73, 0x74, 0x75, 0x77, 0x79].contains(keyCode) || DesktopUiBridge.functionKeys.contains(keyCode) {
+            flags.insert(.maskSecondaryFn)
+        }
         ev.flags = flags
+        if repeatKey && down {
+            ev.setIntegerValueField(.keyboardEventAutorepeat, value: 1)
+        }
         ev.post(tap: .cghidEventTap)
     }
 
+    private static let functionKeys: Set<UInt16> = [
+        0x7a, 0x78, 0x63, 0x76, 0x60, 0x61, 0x62, 0x64, 0x65, 0x6d, 0x67, 0x6f,
+        0x69, 0x6b, 0x71, 0x6a, 0x40, 0x4f, 0x50, 0x5a,
+    ]
+
+    /** 当前输入源是否为纯键盘布局（ABC、US 等）。中文/日文等输入法返回 false。 */
+    static func currentInputSourceIsPlainLayout() -> Bool {
+        guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else { return true }
+        guard let raw = TISGetInputSourceProperty(source, kTISPropertyInputSourceType) else { return true }
+        let type = Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue() as String
+        return type == (kTISTypeKeyboardLayout as String)
+    }
+
+    /**
+     * 文本直输。远端为普通键盘布局时用 Unicode 键盘事件逐字注入（不碰剪贴板）；
+     * 远端正在使用输入法时，Unicode 事件会被输入法截获成拼音，改走「写剪贴板 + ⌘V + 恢复剪贴板」。
+     * 必须在主线程调用。
+     */
     func insertText(_ text: String) {
         guard !text.isEmpty else { return }
-        let utf16 = Array(text.utf16)
-        var offset = 0
-        let chunkSize = 16
-        while offset < utf16.count {
-            let end = min(utf16.count, offset + chunkSize)
-            var slice = Array(utf16[offset..<end])
+        if DesktopUiBridge.currentInputSourceIsPlainLayout() && !text.contains("\\n") {
+            postUnicode(text)
+        } else {
+            pasteText(text)
+        }
+    }
+
+    private func postUnicode(_ text: String) {
+        // 按字素切片，避免把 emoji 代理对拆开；每个事件最多 16 个 UTF-16 单元。
+        var batch: [UInt16] = []
+        func flush() {
+            guard !batch.isEmpty else { return }
+            var slice = batch
             if let down = CGEvent(keyboardEventSource: eventSource, virtualKey: 0, keyDown: true),
                let up = CGEvent(keyboardEventSource: eventSource, virtualKey: 0, keyDown: false) {
+                down.flags = []
+                up.flags = []
                 down.keyboardSetUnicodeString(stringLength: slice.count, unicodeString: &slice)
                 up.keyboardSetUnicodeString(stringLength: slice.count, unicodeString: &slice)
                 down.post(tap: .cghidEventTap)
                 up.post(tap: .cghidEventTap)
             }
-            offset = end
+            batch.removeAll(keepingCapacity: true)
+        }
+        for ch in text {
+            let units = Array(String(ch).utf16)
+            if batch.count + units.count > 16 { flush() }
+            batch.append(contentsOf: units)
+        }
+        flush()
+    }
+
+    private func snapshotPasteboard(_ pb: NSPasteboard) -> [[NSPasteboard.PasteboardType: Data]] {
+        guard let items = pb.pasteboardItems else { return [] }
+        return items.map { item in
+            var dict: [NSPasteboard.PasteboardType: Data] = [:]
+            for type in item.types {
+                if let data = item.data(forType: type) { dict[type] = data }
+            }
+            return dict
+        }
+    }
+
+    private func restorePasteboard(_ pb: NSPasteboard, _ saved: [[NSPasteboard.PasteboardType: Data]]) {
+        pb.clearContents()
+        let items: [NSPasteboardItem] = saved.map { dict in
+            let item = NSPasteboardItem()
+            for (type, data) in dict { item.setData(data, forType: type) }
+            return item
+        }
+        if !items.isEmpty { pb.writeObjects(items) }
+        ownPasteboardChangeCount = pb.changeCount
+    }
+
+    private func pasteText(_ text: String) {
+        let pb = NSPasteboard.general
+        let saved = snapshotPasteboard(pb)
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        let ours = pb.changeCount
+        ownPasteboardChangeCount = ours
+        if let down = CGEvent(keyboardEventSource: eventSource, virtualKey: 0x09, keyDown: true),
+           let up = CGEvent(keyboardEventSource: eventSource, virtualKey: 0x09, keyDown: false) {
+            down.flags = .maskCommand
+            up.flags = .maskCommand
+            down.post(tap: .cghidEventTap)
+            up.post(tap: .cghidEventTap)
+        }
+        // 给目标应用留出读取剪贴板的时间，之后恢复用户原来的剪贴板内容。
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+            guard let self else { return }
+            if pb.changeCount == ours {
+                self.restorePasteboard(pb, saved)
+            }
         }
     }
 
@@ -159,6 +264,17 @@ final class DesktopUiBridge {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
+        ownPasteboardChangeCount = pb.changeCount
+    }
+
+    func writeClipboardImage(_ png: Data) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setData(png, forType: .png)
+        if let image = NSImage(data: png), let tiff = image.tiffRepresentation {
+            pb.setData(tiff, forType: .tiff)
+        }
+        ownPasteboardChangeCount = pb.changeCount
     }
 
     func releaseAll() {
@@ -172,10 +288,149 @@ final class DesktopUiBridge {
         pressedButtons.removeAll()
         for key in Array(pressedKeys) {
             if let ev = CGEvent(keyboardEventSource: eventSource, virtualKey: CGKeyCode(key), keyDown: false) {
+                ev.flags = []
                 ev.post(tap: .cghidEventTap)
             }
         }
         pressedKeys.removeAll()
+        scrollRemainderX = 0
+        scrollRemainderY = 0
+    }
+}
+
+/** 轮询远端剪贴板 changeCount，变化时上报文本或复制的文件列表。主线程运行。 */
+final class ClipboardWatcher {
+    private var timer: Timer?
+    private var lastChangeCount = NSPasteboard.general.changeCount
+    var onChange: (([String: Any]) -> Void)?
+    weak var ui: DesktopUiBridge?
+
+    var isRunning: Bool { timer != nil }
+
+    func start() {
+        guard timer == nil else { return }
+        lastChangeCount = NSPasteboard.general.changeCount
+        let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in self?.poll() }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    private func poll() {
+        let pb = NSPasteboard.general
+        let count = pb.changeCount
+        guard count != lastChangeCount else { return }
+        lastChangeCount = count
+        if let ui, ui.ownPasteboardChangeCount == count { return }
+        var payload: [String: Any] = ["ev": "cb", "auto": true]
+        let urls = (pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+        if !urls.isEmpty {
+            var files: [[String: Any]] = []
+            for url in urls.prefix(50) {
+                var isDir: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), !isDir.boolValue else { continue }
+                let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 0
+                files.append(["path": url.path, "name": url.lastPathComponent, "size": size])
+            }
+            if !files.isEmpty { payload["files"] = files }
+        }
+        if let text = pb.string(forType: .string) {
+            payload["text"] = text
+        } else if payload["files"] == nil {
+            return
+        } else {
+            payload["text"] = ""
+        }
+        onChange?(payload)
+    }
+}
+
+/** 轮询当前系统光标形状，变化时上报 PNG 与热点，供控制端本地渲染零延迟光标。主线程运行。 */
+final class CursorShapeMonitor {
+    private var timer: Timer?
+    private var lastSignature: UInt64 = 0
+    var onChange: (([String: Any]) -> Void)?
+
+    func start() {
+        guard timer == nil else { return }
+        lastSignature = 0
+        let t = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in self?.poll() }
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
+        poll()
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    func resend() {
+        lastSignature = 0
+        poll()
+    }
+
+    private func poll() {
+        guard let cursor = NSCursor.currentSystem else { return }
+        let image = cursor.image
+        let size = image.size
+        guard size.width > 0, size.height > 0,
+              let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return }
+        let hotspot = cursor.hotSpot
+        var sig: UInt64 = 1469598103934665603
+        func mix(_ v: UInt64) { sig = (sig ^ v) &* 1099511628211 }
+        mix(UInt64(cg.width)); mix(UInt64(cg.height))
+        mix(UInt64(bitPattern: Int64(hotspot.x * 100))); mix(UInt64(bitPattern: Int64(hotspot.y * 100)))
+        if let data = cg.dataProvider?.data, let ptr = CFDataGetBytePtr(data) {
+            let len = CFDataGetLength(data)
+            var i = 0
+            // 每 4 字节采样一次足以区分光标形状，且 30Hz 轮询开销可忽略。
+            while i < len {
+                mix(UInt64(ptr[i]))
+                i += 4
+            }
+        }
+        guard sig != lastSignature else { return }
+        lastSignature = sig
+        let rep = NSBitmapImageRep(cgImage: cg)
+        guard let png = rep.representation(using: .png, properties: [:]) else { return }
+        onChange?([
+            "ev": "cursor",
+            "png": png.base64EncodedString(),
+            "hx": Double(hotspot.x),
+            "hy": Double(hotspot.y),
+            "w": Double(size.width),
+            "h": Double(size.height),
+        ])
+    }
+}
+
+/** 远程会话期间阻止显示器休眠，并在开始时唤醒屏幕。 */
+final class DisplayWakeGuard {
+    private var assertionId: IOPMAssertionID = 0
+    private var active = false
+
+    func engage() {
+        var userActivity: IOPMAssertionID = 0
+        IOPMAssertionDeclareUserActivity("U-Brain 远程桌面" as CFString, kIOPMUserActiveLocal, &userActivity)
+        guard !active else { return }
+        let result = IOPMAssertionCreateWithName(
+            kIOPMAssertionTypePreventUserIdleDisplaySleep as CFString,
+            IOPMAssertionLevel(kIOPMAssertionLevelOn),
+            "U-Brain 远程桌面会话进行中" as CFString,
+            &assertionId
+        )
+        active = result == kIOReturnSuccess
+    }
+
+    func release() {
+        guard active else { return }
+        IOPMAssertionRelease(assertionId)
+        active = false
     }
 }
 `;

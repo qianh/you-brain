@@ -71,8 +71,15 @@ final class RemoteHostAppDelegate: NSObject, NSApplicationDelegate {
     private let videoWriteLock = NSLock()
     private let capture = ScreenCapturePipeline()
     private let ui = DesktopUiBridge()
+    private let clipboardWatcher = ClipboardWatcher()
+    private let cursorMonitor = CursorShapeMonitor()
+    private let wakeGuard = DisplayWakeGuard()
     private var currentBounds: CGRect = CGDisplayBounds(CGMainDisplayID())
     private var stopping = false
+
+    private func onMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread { work() } else { DispatchQueue.main.sync(execute: work) }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let args = CommandLine.arguments
@@ -94,6 +101,13 @@ final class RemoteHostAppDelegate: NSObject, NSApplicationDelegate {
         capture.onError = { [weak self] message in
             self?.emitCtrl(["ev": "error", "message": message])
         }
+        clipboardWatcher.ui = ui
+        clipboardWatcher.onChange = { [weak self] payload in
+            self?.emitCtrl(payload)
+        }
+        cursorMonitor.onChange = { [weak self] payload in
+            self?.emitCtrl(payload)
+        }
 
         let displays = ScreenCapturePipeline.enumerateDisplays()
         let mainId = CGMainDisplayID()
@@ -109,6 +123,7 @@ final class RemoteHostAppDelegate: NSObject, NSApplicationDelegate {
                 "screenRecording": perms.screenRecording,
                 "accessibility": perms.accessibility,
             ],
+            "doubleClickMs": Int(NSEvent.doubleClickInterval * 1000),
         ])
 
         let fd = ctrlFD
@@ -123,7 +138,7 @@ final class RemoteHostAppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
                 buffer.append(contentsOf: scratch[0..<n])
-                if buffer.count > 524_288 {
+                if buffer.count > 32 * 1024 * 1024 {
                     DispatchQueue.main.async { self?.shutdown() }
                     return
                 }
@@ -204,24 +219,43 @@ final class RemoteHostAppDelegate: NSObject, NSApplicationDelegate {
                 meta: cmd["meta"] as? Bool,
                 ctrl: cmd["ctrl"] as? Bool,
                 alt: cmd["alt"] as? Bool,
-                shift: cmd["shift"] as? Bool
+                shift: cmd["shift"] as? Bool,
+                repeatKey: (cmd["rep"] as? Bool) ?? false
             )
         case "txt":
             if let text = cmd["text"] as? String {
-                ui.insertText(text)
+                // 主线程同步执行：保证与后续按键事件严格有序。
+                onMain { self.ui.insertText(text) }
             }
         case "idr":
             capture.requestKeyframe()
-        case "cb.get":
-            DispatchQueue.main.async {
-                let text = self.ui.readClipboard()
-                self.emitCtrl(["ev": "cb", "text": text])
+        case "br":
+            if let bps = cmd["bps"] as? Int, bps > 0 {
+                capture.setBitrate(bps)
             }
+        case "opts":
+            let showCursor = (cmd["showCursor"] as? Bool) ?? true
+            let cursorShape = (cmd["cursorShape"] as? Bool) ?? false
+            let clipWatch = (cmd["clipboardWatch"] as? Bool) ?? false
+            onMain {
+                self.capture.setShowsCursor(showCursor)
+                if cursorShape { self.cursorMonitor.start() } else { self.cursorMonitor.stop() }
+                if clipWatch { self.clipboardWatcher.start() } else { self.clipboardWatcher.stop() }
+            }
+        case "cursor.get":
+            onMain { self.cursorMonitor.resend() }
+        case "cb.get":
+            var text = ""
+            onMain { text = self.ui.readClipboard() }
+            emitCtrl(["ev": "cb", "text": text])
         case "cb.set":
+            // 同步写入：控制端紧随其后的 ⌘V 必须读到新内容。
             if let text = cmd["text"] as? String {
-                DispatchQueue.main.async {
-                    self.ui.writeClipboard(text)
-                }
+                onMain { self.ui.writeClipboard(text) }
+            }
+        case "cb.img":
+            if let b64 = cmd["png"] as? String, let data = Data(base64Encoded: b64) {
+                onMain { self.ui.writeClipboardImage(data) }
             }
         case "perm":
             let prompt = (cmd["prompt"] as? Bool) ?? true
@@ -246,6 +280,7 @@ final class RemoteHostAppDelegate: NSObject, NSApplicationDelegate {
             let bitrateBps = (cmd["bitrateBps"] as? Int) ?? 8_500_000
             let prompt = (cmd["prompt"] as? Bool) ?? false
             DispatchQueue.main.async {
+                self.wakeGuard.engage()
                 let perms = DesktopUiBridge.checkPermissions(prompt: prompt)
                 let reqDisplay = displayIdNum.map { CGDirectDisplayID($0) }
                 self.capture.startOrUpdate(
@@ -266,6 +301,7 @@ final class RemoteHostAppDelegate: NSObject, NSApplicationDelegate {
                             "screenRecording": perms.screenRecording || refreshedPerms.screenRecording,
                             "accessibility": perms.accessibility || refreshedPerms.accessibility,
                         ],
+                        "doubleClickMs": Int(NSEvent.doubleClickInterval * 1000),
                     ])
                 }
             }
@@ -282,6 +318,9 @@ final class RemoteHostAppDelegate: NSObject, NSApplicationDelegate {
         guard !stopping else { return }
         stopping = true
         ui.releaseAll()
+        clipboardWatcher.stop()
+        cursorMonitor.stop()
+        wakeGuard.release()
         capture.stop()
         ctrlWriteLock.lock()
         if ctrlFD >= 0 { Darwin.close(ctrlFD); ctrlFD = -1 }
@@ -294,6 +333,7 @@ final class RemoteHostAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         ui.releaseAll()
+        wakeGuard.release()
         capture.stop()
     }
 }
