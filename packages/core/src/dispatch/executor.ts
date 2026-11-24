@@ -23,7 +23,13 @@ import { AgentSessionStore } from "./agent-sessions.js";
 import { AuditLog } from "./audit.js";
 import type { DispatchFollowupResult, DispatchReadResult, OutboxEntry } from "./hub.js";
 import { Ledger, type CommandOutcome, type DispatchRecord } from "./ledger.js";
-import { PolicyStore, type DispatchPolicy, type DispatchSender } from "./policy.js";
+import { PolicyStore, type DispatchPolicy, type DispatchSender, type MasterModelSelection } from "./policy.js";
+
+const EXPLICIT_REASONING_OPTION_IDS = new Set(["thought_level", "effort", "reasoningEffort"]);
+
+function hasExplicitReasoningOption(selection: MasterModelSelection | undefined): boolean {
+  return Boolean(selection?.options?.some((item) => EXPLICIT_REASONING_OPTION_IDS.has(item.id)));
+}
 
 const TTL_MS = 60_000;
 const POLL_MS = 15_000;
@@ -100,6 +106,8 @@ export interface DispatchT3Port {
     prompt: string;
     requestId: string;
     runtimeMode: "auto-accept-edits" | "auto" | "full-access";
+    maxMode?: RuntimeModeName;
+    modelSelection?: MasterModelSelection;
     fastOrchestrator?: boolean;
   }): Promise<{ threadId: string; threadUrl: string }>;
   followup(threadId: string, prompt: string, commandId: string): Promise<void>;
@@ -482,6 +490,7 @@ export class DispatchExecutor {
       prompt: args.prompt,
       requestId: args.dispatchId,
       runtimeMode: effective,
+      maxMode: policy.maxMode,
     });
     const record: DispatchRecord = {
       threadId: launched.threadId,
@@ -566,6 +575,10 @@ export class DispatchExecutor {
   async #resolveDefaultProject(policy: DispatchPolicy): Promise<{ id: string; name: string } | null> {
     const visible = await this.#visibleProjects(policy);
     if (visible.length === 0) return null;
+    if (policy.masterProjectId) {
+      const pinned = visible.find((item) => item.id === policy.masterProjectId);
+      if (pinned) return pinned;
+    }
     const preferred = await this.#t3.defaultDispatchProject?.().catch(() => null);
     if (preferred && visible.some((item) => item.id === preferred.id)) return preferred;
     return visible[0]!;
@@ -671,13 +684,16 @@ export class DispatchExecutor {
         args.title?.trim() ||
         (session.title !== "主控会话" ? session.title : args.text.trim().slice(0, 36) || "主控会话");
       const preamble = await this.#buildMasterPreamble();
+      const modelSelection = policy.masterModelSelection;
       const launched = await this.#t3.launchThread({
         projectId,
         title,
         prompt: `${preamble}\n\n${args.text}`,
         requestId: args.requestId,
         runtimeMode: effective,
-        fastOrchestrator: true,
+        maxMode: policy.maxMode,
+        ...(modelSelection ? { modelSelection } : {}),
+        fastOrchestrator: !hasExplicitReasoningOption(modelSelection),
       });
       await this.#sessions.bindThread(session.sessionId, {
         threadId: launched.threadId,

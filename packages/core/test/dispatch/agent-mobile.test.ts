@@ -62,14 +62,17 @@ class MockAgentT3 implements DispatchT3Port {
     prompt: string;
     requestId: string;
     runtimeMode: string;
+    maxMode?: string;
+    modelSelection?: { instanceId: string; model: string; options?: Array<{ id: string; value: unknown }> };
     fastOrchestrator?: boolean;
   }> = [];
   sent: Array<{ threadId: string; message: string; requestId: string }> = [];
   threadStatus = "running";
   messages: Array<{ position: number; role: "user" | "assistant"; text: string; runId: string | null }> = [];
+  projectList = [{ id: "proj-1", name: "you-brain", cwd: "/repo" }];
 
   async projects() {
-    return [{ id: "proj-1", name: "you-brain", cwd: "/repo" }];
+    return this.projectList;
   }
 
   async defaultDispatchProject() {
@@ -82,6 +85,8 @@ class MockAgentT3 implements DispatchT3Port {
     prompt: string;
     requestId: string;
     runtimeMode: "auto-accept-edits" | "auto" | "full-access";
+    maxMode?: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
+    modelSelection?: { instanceId: string; model: string; options?: Array<{ id: string; value: unknown }> };
     fastOrchestrator?: boolean;
   }) {
     this.launches.push(input);
@@ -532,5 +537,73 @@ describe("移动端主控会话、派活看板、快捷回复与全量推送", (
     expect(before.trustedDeviceIds).toEqual([]);
     const after = await port.trustDevice!({ deviceId: "device-phone" });
     expect(after.trustedDeviceIds).toEqual(["device-phone"]);
+  });
+
+  test("masterProjectId 与 masterModelSelection 优先锁定主控项目与模型，且不被无关策略更新抹掉", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ub-agent-master-pin-"));
+    tempDirs.push(dir);
+    const phoneKeys = generateKeyPair();
+    const now = 1_760_000_000_000;
+    const t3 = new MockAgentT3();
+    t3.projectList = [
+      { id: "proj-1", name: "project", cwd: "/project" },
+      { id: "proj-home", name: "home-repo", cwd: "/project/home-repo" },
+    ];
+    const executor = new DispatchExecutor({
+      dataDir: dir,
+      deviceId: "device-vps",
+      now: () => now,
+      t3,
+      role: "server",
+      emitEvent: () => undefined,
+    });
+    await executor.updatePolicy({
+      enabled: true,
+      allProjects: true,
+      maxMode: "full-access",
+      allowedSenders: [{ deviceId: "device-phone", name: "Android", publicKey: phoneKeys.publicKey }],
+      masterProjectId: "proj-home",
+      masterModelSelection: {
+        instanceId: "antigravity",
+        model: "gemini-4-neon",
+        options: [{ id: "thought_level", value: "medium" }],
+      },
+    });
+    // 更新无关字段不应清空 masterProjectId / masterModelSelection
+    const kept = await executor.updatePolicy({ notify: false });
+    expect(kept.masterProjectId).toBe("proj-home");
+    expect(kept.masterModelSelection).toEqual({
+      instanceId: "antigravity",
+      model: "gemini-4-neon",
+      options: [{ id: "thought_level", value: "medium" }],
+    });
+
+    const sessRes = await executor.handle(makeSignedFrame(phoneKeys, "device-phone", "device-vps", "agent.session", {}, now));
+    expect(sessRes.ok).toBe(true);
+    const { activeSessionId, defaultProject } = (
+      sessRes as { ok: true; result: { activeSessionId: string; defaultProject: { id: string; name: string } } }
+    ).result;
+    expect(defaultProject).toEqual({ id: "proj-home", name: "home-repo" });
+
+    const sendRes = await executor.handle(
+      makeSignedFrame(phoneKeys, "device-phone", "device-vps", "agent.send", {
+        sessionId: activeSessionId,
+        text: "帮我查仓库状态",
+        requestId: "req-master-1",
+      }, now),
+    );
+    expect(sendRes.ok).toBe(true);
+    expect(t3.launches).toHaveLength(1);
+    expect(t3.launches[0]).toMatchObject({
+      projectId: "proj-home",
+      runtimeMode: "auto",
+      maxMode: "full-access",
+      fastOrchestrator: false,
+      modelSelection: {
+        instanceId: "antigravity",
+        model: "gemini-4-neon",
+        options: [{ id: "thought_level", value: "medium" }],
+      },
+    });
   });
 });

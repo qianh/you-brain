@@ -40,4 +40,6 @@ export {
   normalizeDispatchPolicy,
   type DispatchPolicy,
   type DispatchSender,
+  type MasterModelOption,
+  type MasterModelSelection,
 } from "./policy.js";

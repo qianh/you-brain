@@ -1,15 +1,15 @@
 import { describe, expect, test } from "bun:test";
 
-import { T3Automation } from "../../src/deck/t3/automation.js";
-import { fakeT3, fakeThread, type FakeProject, type FakeThread } from "./t3-mcp-fake.js";
+import { T3Automation, resolveProviderRuntimeMode } from "../../src/deck/t3/automation.js";
+import { fakeT3, fakeThread, type FakeProject, type FakeProviderCapability, type FakeThread } from "./t3-mcp-fake.js";
 
 const baseUrl = "http://127.0.0.1:3773/";
 const selection = { instanceId: "codex", model: "configured-model" };
 const project: FakeProject = { id: "project-1", title: "Project", workspaceRoot: "/repo", defaultModelSelection: null };
 const startInput = { projectId: project.id, title: "Implement", prompt: "Do the task", cwd: "/worktrees/new", branch: "todo/new", requestId: "req-1" };
 
-function harness(input: { projects?: FakeProject[]; threads?: FakeThread[] } = {}) {
-  const t3 = fakeT3({ projects: input.projects ?? [project], threads: input.threads ?? [] });
+function harness(input: { projects?: FakeProject[]; threads?: FakeThread[]; providers?: FakeProviderCapability[] } = {}) {
+  const t3 = fakeT3({ projects: input.projects ?? [project], threads: input.threads ?? [], ...(input.providers ? { providers: input.providers } : {}) });
   const client = new T3Automation({ getUrl: async () => baseUrl, getToken: async () => t3.token, fetch: t3.fetch });
   const launches = () => t3.calls.filter((call) => call.name === "t3_thread_launch");
   const sends = () => t3.calls.filter((call) => call.name === "t3_thread_send");
@@ -296,6 +296,64 @@ describe("T3 adapter for phone notices", () => {
         { id: "effort", value: "low" },
         { id: "reasoningEffort", value: "low" },
       ],
+    });
+  });
+
+  test("honors explicit modelSelection, maps unsupported antigravity auto mode within maxMode, and adapts antigravity thought_level", async () => {
+    expect(resolveProviderRuntimeMode("auto", ["approval-required", "auto-accept-edits", "full-access"], "full-access")).toBe("full-access");
+    expect(resolveProviderRuntimeMode("auto", ["approval-required", "auto-accept-edits", "full-access"], "auto")).toBe("auto-accept-edits");
+    expect(resolveProviderRuntimeMode("auto", ["approval-required", "auto", "full-access"], "full-access")).toBe("auto");
+
+    const { client, launches } = harness({
+      projects: [{ ...project, defaultModelSelection: selection }],
+      providers: [
+        { providerInstanceId: "antigravity", runtimeModes: ["approval-required", "auto-accept-edits", "full-access"] },
+      ],
+    });
+
+    await client.launchThread({
+      projectId: project.id,
+      title: "主控-medium",
+      prompt: "查状态",
+      requestId: "req-agy-1",
+      runtimeMode: "auto",
+      maxMode: "full-access",
+      modelSelection: {
+        instanceId: "antigravity",
+        model: "gemini-4-neon",
+        options: [{ id: "thought_level", value: "medium" }],
+      },
+      fastOrchestrator: false,
+    });
+    expect(launches()[0]?.args).toMatchObject({
+      runtimeMode: "full-access",
+      modelSelection: {
+        instanceId: "antigravity",
+        model: "gemini-4-neon",
+        options: [{ id: "thought_level", value: "medium" }],
+      },
+    });
+
+    await client.launchThread({
+      projectId: project.id,
+      title: "主控-fast-agy",
+      prompt: "查状态",
+      requestId: "req-agy-2",
+      runtimeMode: "auto",
+      maxMode: "auto",
+      modelSelection: {
+        instanceId: "antigravity",
+        model: "gemini-4-neon",
+      },
+      fastOrchestrator: true,
+    });
+    expect(launches()[1]?.args).toMatchObject({
+      runtimeMode: "auto-accept-edits",
+      modelSelection: {
+        instanceId: "antigravity",
+        model: "gemini-4-neon",
+        options: [{ id: "thought_level", value: "low" }],
+      },
     });
   });
 });

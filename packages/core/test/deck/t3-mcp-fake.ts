@@ -32,7 +32,12 @@ export function fakeThread(overrides: Partial<FakeThread> = {}): FakeThread {
   };
 }
 
-export function fakeT3(input: { projects: FakeProject[]; threads?: FakeThread[]; token?: string; environmentId?: string }) {
+export interface FakeProviderCapability {
+  providerInstanceId: string;
+  runtimeModes?: string[];
+}
+
+export function fakeT3(input: { projects: FakeProject[]; threads?: FakeThread[]; providers?: FakeProviderCapability[]; token?: string; environmentId?: string }) {
   const token = input.token ?? "synthetic-token";
   /** 新的在前，与 t3_thread_list 一致。 */
   const threads: FakeThread[] = [...(input.threads ?? [])];
@@ -54,6 +59,9 @@ export function fakeT3(input: { projects: FakeProject[]; threads?: FakeThread[];
     calls.push({ name, args });
     if (state.toolFailure) return failure(state.toolFailure.code, state.toolFailure.message);
     if (state.invalid) return result({ unexpected: true });
+    if (name === "orchestrator_capabilities" && input.providers) {
+      return result({ providers: input.providers });
+    }
     if (name === "t3_project_list") return result({ projects: input.projects, nextCursor: null });
     if (name === "t3_attachment_prepare_upload") return result({ attachmentId: "uploaded-image", relativeUrl: state.uploadUrl });
     if (name === "t3_project_create") {
