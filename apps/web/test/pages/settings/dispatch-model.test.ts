@@ -16,6 +16,7 @@ function makePolicyResponse(overrides?: Partial<DispatchPolicyResponse>): Dispat
       enabled: false,
       notify: true,
       viewT3: false,
+      remoteDesktop: false,
       trustEnrolled: true,
       allProjects: true,
       autoConfigured: true,
@@ -32,9 +33,14 @@ function makePolicyResponse(overrides?: Partial<DispatchPolicyResponse>): Dispat
 describe("dispatch-model: 乐观更新与失败回滚", () => {
   test("applyOptimisticPolicyPatch 只更新传入的开关字段并保留其余策略字段", () => {
     const current = makePolicyResponse();
-    const updated = applyOptimisticPolicyPatch(current, { enabled: true, viewT3: true });
+    const updated = applyOptimisticPolicyPatch(current, {
+      enabled: true,
+      viewT3: true,
+      remoteDesktop: true,
+    });
     expect(updated.policy.enabled).toBe(true);
     expect(updated.policy.viewT3).toBe(true);
+    expect(updated.policy.remoteDesktop).toBe(true);
     expect(updated.policy.maxMode).toBe("auto");
     expect(updated.policy.trustEnrolled).toBe(true);
   });

@@ -125,6 +125,13 @@
   display: flex;
   flex-direction: column;
 }
+.deck-t3-slot {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.deck-t3-slot[hidden] { display: none; }
 .deck-t3-pane {
   flex: 1;
   min-height: 0;
@@ -132,6 +139,198 @@
   flex-direction: column;
 }
 .deck-t3-pane[hidden] { display: none; }
+
+/* 设备标签旁的桌面画面协同入口按钮 */
+.deck-t3-device-group {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+}
+.deck-t3-tab.has-rd {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.deck-t3-tab.is-rd-active {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--surface-2);
+  color: var(--text);
+}
+.deck-t3-rd-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: var(--h-ctl-sm);
+  padding: 0;
+  margin-left: -1px;
+  border: 1px solid var(--border);
+  border-top-right-radius: var(--r-ctl);
+  border-bottom-right-radius: var(--r-ctl);
+  background: var(--surface);
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background var(--ease-color), color var(--ease-color), border-color var(--ease-color);
+}
+.deck-t3-rd-btn:hover {
+  background: var(--hover);
+  color: var(--accent);
+}
+.deck-t3-device-group.is-selected .deck-t3-rd-btn {
+  border-left-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.deck-t3-rd-btn.is-active {
+  z-index: 1;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent, #fff);
+}
+.deck-t3-rd-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* 跨设备桌面画面协同（WebRTC 60fps 低延迟视图） */
+.deck-rd-root {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2, 8px);
+}
+.deck-rd-root[hidden] { display: none; }
+.deck-rd-root:fullscreen {
+  padding: 8px;
+  background: #090b10;
+}
+.deck-rd-toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-ctl, 8px);
+  background: var(--surface);
+}
+.deck-rd-toolbar-left,
+.deck-rd-toolbar-right {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.deck-rd-device-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+.deck-rd-telemetry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--success) 12%, var(--surface-2));
+  color: var(--text-2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.deck-rd-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+.deck-rd-dot.is-live {
+  background: var(--success);
+}
+.deck-rd-focus-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-3);
+  font-size: 11px;
+}
+.deck-rd-focus-pill.is-focused {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.deck-rd-segmented {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-ctl, 8px);
+  background: var(--surface-2);
+}
+.deck-rd-seg-btn {
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: calc(var(--r-ctl, 8px) - 2px);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.deck-rd-seg-btn:hover {
+  color: var(--text);
+}
+.deck-rd-seg-btn.is-active {
+  background: var(--surface);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.deck-rd-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 10px);
+  background: #090b10;
+  outline: none;
+  user-select: none;
+  touch-action: none;
+}
+.deck-rd-stage.is-focused {
+  border-color: var(--accent);
+}
+.deck-rd-video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+  background: #090b10;
+}
+.deck-rd-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  background: rgba(9, 11, 16, 0.78);
+  color: #e5e7eb;
+  text-align: center;
+}
 
 .deck-t3-settings-sections {
   display: flex;

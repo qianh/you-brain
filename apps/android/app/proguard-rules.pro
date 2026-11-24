@@ -21,3 +21,9 @@
 -dontwarn org.bouncycastle.**
 -dontwarn javax.naming.**
 -dontwarn java.lang.invoke.**
+
+# Keep WebView @JavascriptInterface bridge methods for WebRTC remote desktop
+-keepclassmembers class ai.youbrain.mobile.ui.** {
+    @android.webkit.JavascriptInterface <methods>;
+}
+

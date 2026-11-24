@@ -62,6 +62,8 @@ export const ICON_NAMES = [
   "grip",
   "file",
   "table",
+  "screen-share",
+  "maximize",
 ] as const;
 
 export type CanonicalIcon = (typeof ICON_NAMES)[number];
@@ -137,6 +139,8 @@ const MARKUP: Record<CanonicalIcon, string> = {
   file: `<path d="M4 2.4h5.2L12.4 5.6V13.6H4z"/><path d="M9.2 2.4v3.2h3.2"/>`,
   table: `<rect x="2.4" y="3" width="11.2" height="10" rx="1.4"/><path d="M2.4 6.6h11.2M6.2 6.6V13"/>`,
   terminal: `<rect x="2.2" y="3" width="11.6" height="10" rx="1.4"/><path d="m4.6 6.2 2.2 1.8-2.2 1.8M8.4 10.2h3"/>`,
+  "screen-share": `<rect x="2" y="2.8" width="12" height="8.2" rx="1.3"/><path d="M5.6 13.4h4.8M8 11v2.4"/><path d="M6.2 8.2 9.8 5v2.6M9.8 5H7.2"/>`,
+  maximize: `<path d="M2.6 6V2.6H6M10 2.6h3.4V6M13.4 10v3.4H10M6 13.4H2.6V10"/>`,
 };
 
 function canonical(name: IconName): CanonicalIcon {

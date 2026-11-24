@@ -7,9 +7,13 @@ import {
   type DispatchCommand,
   type HelloDispatch,
   type LaunchModeName,
+  type RdDisplayInfo,
+  type RdIceCandidate,
+  type RdPermissions,
   type RuntimeModeName,
 } from "@you-brain/protocol";
 
+import type { RemoteDesktopPort } from "../deck/remote-desktop/session-manager.js";
 import {
   MASTER_AGENT_PREAMBLE_END,
   MASTER_AGENT_PREAMBLE_START,
@@ -33,8 +37,9 @@ const RETRY_MS = [60_000, 120_000, 300_000] as const;
 const SUMMARY_LIMIT = 32_000;
 /** 中转对单条 result 帧上限为 256 KB，这里预留外层封装与转义空间。 */
 const TASK_RESULT_MAX_BYTES = 190 * 1024;
-const UNLEDGERED_READ_KINDS = new Set<string>(["tasks.board", "tasks.review"]);
+const UNLEDGERED_READ_KINDS = new Set<string>(["tasks.board", "tasks.review", "rd.open", "rd.ice", "rd.close"]);
 const CLOSED = "本机没有开启接收派活";
+const RD_CLOSED = "本机没有开放远程桌面";
 const REJECTED = "本机不接受这条指令";
 
 const MASTER_AGENT_BASE_LINES = [
@@ -84,7 +89,34 @@ export interface OutboxUpdatedEvent {
   };
 }
 
-export type DispatchEmitEvent = ThreadStatusEvent | AgentStatusEvent | OutboxUpdatedEvent;
+export interface RdIceEmitEvent {
+  dispatchId: string;
+  kind: "rd.ice";
+  data: {
+    sessionId: string;
+    candidates: RdIceCandidate[];
+  };
+}
+
+export interface RdStateEmitEvent {
+  dispatchId: string;
+  kind: "rd.state";
+  data: {
+    sessionId: string;
+    state: "ready" | "closed" | "error";
+    displays?: RdDisplayInfo[];
+    activeDisplayId?: number;
+    permissions?: RdPermissions;
+    error?: string;
+  };
+}
+
+export type DispatchEmitEvent =
+  | ThreadStatusEvent
+  | AgentStatusEvent
+  | OutboxUpdatedEvent
+  | RdIceEmitEvent
+  | RdStateEmitEvent;
 
 export interface DispatchOutboxPort {
   list(): Promise<OutboxEntry[]>;
@@ -129,6 +161,7 @@ export interface DispatchExecutorOptions {
   now?: () => number;
   t3: DispatchT3Port;
   tasksPort?: DispatchTasksPort;
+  remoteDesktopPort?: RemoteDesktopPort;
   role?: "desktop" | "server";
   outboxPort?: DispatchOutboxPort;
   devicesPort?: () => Promise<DispatchExecutorDeviceSnapshot[]>;
@@ -183,6 +216,7 @@ export class DispatchExecutor {
   readonly #now: () => number;
   readonly #t3: DispatchT3Port;
   readonly #tasks: DispatchTasksPort | undefined;
+  readonly #remoteDesktop: RemoteDesktopPort | undefined;
   readonly #role: "desktop" | "server" | undefined;
   readonly #outbox: DispatchOutboxPort | undefined;
   readonly #devicesPort: DispatchExecutorOptions["devicesPort"];
@@ -207,6 +241,7 @@ export class DispatchExecutor {
     this.#now = options.now ?? Date.now;
     this.#t3 = options.t3;
     this.#tasks = options.tasksPort;
+    this.#remoteDesktop = options.remoteDesktopPort;
     this.#role = options.role;
     this.#outbox = options.outboxPort;
     this.#devicesPort = options.devicesPort;
@@ -218,6 +253,32 @@ export class DispatchExecutor {
     this.#ledger = new Ledger(options.dataDir, this.#now);
     this.#sessions = new AgentSessionStore(options.dataDir, this.#now);
     this.#audit = new AuditLog(options.dataDir);
+
+    this.#remoteDesktop?.setSignalingEvents({
+      onIce: (to, sessionId, candidates) => {
+        if (candidates.length === 0) return;
+        try {
+          this.#emit(to, {
+            dispatchId: sessionId,
+            kind: "rd.ice",
+            data: { sessionId, candidates },
+          });
+        } catch {
+          // 推送失败不影响会话
+        }
+      },
+      onState: (to, sessionId, payload) => {
+        try {
+          this.#emit(to, {
+            dispatchId: sessionId,
+            kind: "rd.state",
+            data: { sessionId, ...payload },
+          });
+        } catch {
+          // 推送失败不影响会话
+        }
+      },
+    });
   }
 
   agentSubscribers(): Promise<string[]> {
@@ -228,8 +289,17 @@ export class DispatchExecutor {
     return this.#policy.read();
   }
 
-  updatePolicy(patch: Partial<DispatchPolicy>): Promise<DispatchPolicy> {
-    return this.#policy.write(patch);
+  async updatePolicy(patch: Partial<DispatchPolicy>): Promise<DispatchPolicy> {
+    const next = await this.#policy.write(patch);
+    if (!next.remoteDesktop && this.#remoteDesktop) {
+      await this.#remoteDesktop.closeAll("本机已关闭远程桌面").catch(() => undefined);
+    }
+    return next;
+  }
+
+  closeRemoteDesktop(reason?: string): void {
+    if (!this.#remoteDesktop) return;
+    void this.#remoteDesktop.closeAll(reason).catch(() => undefined);
   }
 
   /** 未开启、未允许、验签失败、过期、重放不写命令账本；执行成功和业务失败要写（只读大响应除外）。 */
@@ -238,7 +308,14 @@ export class DispatchExecutor {
     const from = frameFrom(frame);
     const kind = frameKind(frame);
     const policy = await this.#policy.read();
-    if (!policy.enabled && kind !== "notice.reply") return this.#reject(now, from, kind, "未开启", CLOSED);
+    const isRemoteDesktop = kind === "rd.open" || kind === "rd.ice" || kind === "rd.close";
+    if (isRemoteDesktop) {
+      if (!policy.remoteDesktop || !this.#remoteDesktop?.supported || this.#role === "server") {
+        return this.#reject(now, from, kind, "未开放远程桌面", RD_CLOSED);
+      }
+    } else if (!policy.enabled && kind !== "notice.reply") {
+      return this.#reject(now, from, kind, "未开启", CLOSED);
+    }
 
     const sender = await this.#sender(policy, from);
     if (!sender) return this.#reject(now, from, kind, "发送方未允许", REJECTED);
@@ -313,6 +390,9 @@ export class DispatchExecutor {
   async hello(): Promise<HelloDispatch> {
     const policy = await this.#policy.read();
     const rolePart = this.#role ? { role: this.#role } : {};
+    const remoteDesktop = Boolean(
+      policy.remoteDesktop && this.#remoteDesktop?.supported && this.#role !== "server",
+    );
     try {
       return {
         enabled: policy.enabled,
@@ -320,6 +400,7 @@ export class DispatchExecutor {
         projects: await this.#visibleProjects(policy),
         maxMode: policy.maxMode,
         viewT3: policy.viewT3,
+        remoteDesktop,
         ...rolePart,
       };
     } catch {
@@ -329,6 +410,7 @@ export class DispatchExecutor {
         projects: [],
         maxMode: policy.maxMode,
         viewT3: policy.viewT3,
+        remoteDesktop,
         ...rolePart,
       };
     }
@@ -344,6 +426,7 @@ export class DispatchExecutor {
     this.#started = false;
     if (this.#timer !== null) clearTimeout(this.#timer);
     this.#timer = null;
+    this.closeRemoteDesktop("执行器已停止");
   }
 
   /** 读一次账本内会话的状态。第一次只建立基线；之后 status 变化才发 thread.status 或 agent.status。 */
@@ -456,10 +539,25 @@ export class DispatchExecutor {
         return this.#tasksAction(command.args, policy);
       case "tasks.review":
         return this.#tasksReview(command.args.id, policy);
+      case "rd.open":
+        return this.#rdCall(() => this.#remoteDesktop!.openSession(frame.from, command.args));
+      case "rd.ice":
+        return this.#rdCall(() => this.#remoteDesktop!.addIceCandidates(frame.from, command.args));
+      case "rd.close":
+        return this.#rdCall(() => this.#remoteDesktop!.closeSession(frame.from, command.args));
       default: {
         const unreachable: never = command;
         return unreachable;
       }
+    }
+  }
+
+  async #rdCall<T>(fn: () => Promise<T>): Promise<T> {
+    if (!this.#remoteDesktop?.supported) throw new DispatchFailure(RD_CLOSED);
+    try {
+      return await fn();
+    } catch (error) {
+      throw new DispatchFailure(error instanceof Error ? error.message : "远程桌面会话操作失败");
     }
   }
 

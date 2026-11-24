@@ -718,6 +718,78 @@ export async function handleApi(
       return json(await port.trustDevice(body));
     });
   }
+  if (path === "/api/dispatch/turn") {
+    return method(request, "GET", async () => {
+      const port = dispatchPort(context);
+      if (!port.turn) notSupported();
+      return json(await port.turn());
+    });
+  }
+  if (path === "/api/dispatch/rd/events") {
+    return method(request, "GET", async () => {
+      const port = dispatchPort(context);
+      if (!port.subscribeRdEvents) notSupported();
+      const subscribe = port.subscribeRdEvents.bind(port);
+      const encoder = new TextEncoder();
+      let unsubscribe = (): void => undefined;
+      let heartbeat: ReturnType<typeof setInterval> | undefined;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          let closed = false;
+          const finish = (): void => {
+            if (closed) return;
+            closed = true;
+            unsubscribe();
+            if (heartbeat !== undefined) clearInterval(heartbeat);
+            try {
+              controller.close();
+            } catch {
+              // Consumer already disconnected.
+            }
+          };
+          const push = (payload: unknown): void => {
+            try {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+            } catch {
+              finish();
+            }
+          };
+          unsubscribe = subscribe((ev) => push(ev));
+          try {
+            controller.enqueue(encoder.encode(": ready\n\n"));
+          } catch {
+            finish();
+            return;
+          }
+          heartbeat = setInterval(() => {
+            try {
+              controller.enqueue(encoder.encode(": ping\n\n"));
+            } catch {
+              finish();
+            }
+          }, 20_000);
+          heartbeat.unref?.();
+          if (request.signal.aborted) {
+            finish();
+            return;
+          }
+          request.signal.addEventListener("abort", finish, { once: true });
+        },
+        cancel() {
+          unsubscribe();
+          if (heartbeat !== undefined) clearInterval(heartbeat);
+        },
+      });
+      return new Response(stream, {
+        headers: {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache, no-transform",
+          connection: "keep-alive",
+          "x-accel-buffering": "no",
+        },
+      });
+    });
+  }
   if (path === "/api/deck/muse/stream") {
     return method(request, "GET", async () => {
       const port = deck(context);
@@ -1798,7 +1870,8 @@ export interface DispatchHttpPortOptions {
   hub: Pick<
     DispatchHub,
     "devices" | "startThread" | "followup" | "outbox" | "getOutbox" | "read" | "dispatch" | "refreshHello"
-  >;
+  > &
+    Partial<Pick<DispatchHub, "turnCredentials" | "subscribeRemoteDesktopEvents">>;
   executor: Pick<DispatchExecutor, "policy" | "updatePolicy"> | null;
   deviceId: string;
   selfName(): string;
@@ -1902,6 +1975,7 @@ export function createDispatchHttpPort(options: DispatchHttpPortOptions): Dispat
       const patch: Partial<DispatchPolicy> = {};
       if (body.enabled !== undefined) patch.enabled = body.enabled;
       if (body.viewT3 !== undefined) patch.viewT3 = body.viewT3;
+      if (body.remoteDesktop !== undefined) patch.remoteDesktop = body.remoteDesktop;
       if (body.trustEnrolled !== undefined) patch.trustEnrolled = body.trustEnrolled;
       if (body.allProjects !== undefined) patch.allProjects = body.allProjects;
       if (body.notify !== undefined) patch.notify = body.notify;
@@ -1949,6 +2023,16 @@ export function createDispatchHttpPort(options: DispatchHttpPortOptions): Dispat
             await options.trustDevice!(body.deviceId);
             return readPolicyView();
           },
+        }
+      : {}),
+    ...(options.hub.turnCredentials
+      ? {
+          turn: () => options.hub.turnCredentials!(),
+        }
+      : {}),
+    ...(options.hub.subscribeRemoteDesktopEvents
+      ? {
+          subscribeRdEvents: (listener) => options.hub.subscribeRemoteDesktopEvents!(listener),
         }
       : {}),
   };

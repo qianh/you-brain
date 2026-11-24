@@ -112,11 +112,13 @@ import type {
   DispatchOutboxResponse,
   DispatchPolicyPutBody,
   DispatchPolicyResponse,
+  DispatchRdStreamEvent,
   DispatchSendBody,
   DispatchSendResponse,
   DispatchStartThreadBody,
   DispatchStartThreadResponse,
   DispatchTrustDeviceBody,
+  DispatchTurnResponse,
   TopicReorganizeApplyBody,
   TopicReorganizeResult,
   TopicReorganizeStatus,
@@ -290,4 +292,6 @@ export interface DispatchHttpPort {
   policy(): Promise<DispatchPolicyResponse>;
   updatePolicy(body: DispatchPolicyPutBody): Promise<DispatchPolicyResponse>;
   trustDevice?(body: DispatchTrustDeviceBody): Promise<DispatchPolicyResponse>;
+  turn?(): Promise<DispatchTurnResponse>;
+  subscribeRdEvents?(listener: (event: DispatchRdStreamEvent) => void): () => void;
 }

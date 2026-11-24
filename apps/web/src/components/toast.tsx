@@ -91,3 +91,8 @@ export function useToast(): ToastApi {
   if (!value) throw new Error("useToast must be used inside ToastProvider");
   return value;
 }
+
+export function useOptionalToast(): ToastApi | null {
+  return useContext(ToastContext);
+}
+

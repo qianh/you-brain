@@ -95,11 +95,13 @@ import {
   type DispatchOutboxResponse,
   type DispatchPolicyPutBody,
   type DispatchPolicyResponse,
+  type DispatchRdStreamEvent,
   type DispatchSendBody,
   type DispatchSendResponse,
   type DispatchStartThreadBody,
   type DispatchStartThreadResponse,
   type DispatchTrustDeviceBody,
+  type DispatchTurnResponse,
 } from "./types.js";
 import type { Roles, SharedConfig } from "@you-brain/protocol";
 import type { UiPrefs, UiPrefsPatch } from "../ui-prefs/store.js";
@@ -225,6 +227,11 @@ export interface DaemonClient {
   dispatchPolicy?(): Promise<DispatchPolicyResponse>;
   updateDispatchPolicy?(body: DispatchPolicyPutBody): Promise<DispatchPolicyResponse>;
   dispatchTrustDevice?(body: DispatchTrustDeviceBody): Promise<DispatchPolicyResponse>;
+  dispatchTurn?(): Promise<DispatchTurnResponse>;
+  dispatchRdEvents?(
+    listener: (event: DispatchRdStreamEvent) => void,
+    options?: { signal?: AbortSignal },
+  ): Promise<void>;
   events(
     listener: (event: DaemonEvent) => void,
     options?: { signal?: AbortSignal },
@@ -398,6 +405,9 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
     dispatchPolicy: () => request("GET", "/api/dispatch/policy"),
     updateDispatchPolicy: (body) => request("PUT", "/api/dispatch/policy", body),
     dispatchTrustDevice: (body) => request("POST", "/api/dispatch/trust-device", body),
+    dispatchTurn: () => request("GET", "/api/dispatch/turn"),
+    dispatchRdEvents: (listener, rdOptions) =>
+      readRdEvents(fetchImpl, baseUrl, options.token, listener, rdOptions?.signal),
     events: (listener, eventOptions) =>
       readEvents(fetchImpl, baseUrl, options.token, listener, eventOptions?.signal),
   };
@@ -540,5 +550,69 @@ function safeParse(text: string): unknown {
     return JSON.parse(text) as unknown;
   } catch {
     return null;
+  }
+}
+
+async function readRdEvents(
+  fetchImpl: typeof fetch,
+  baseUrl: string,
+  token: string,
+  listener: (event: DispatchRdStreamEvent) => void,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  const response = await fetchImpl(`${baseUrl}/api/dispatch/rd/events`, {
+    headers: { authorization: `Bearer ${token}`, accept: "text/event-stream" },
+    ...(signal ? { signal } : {}),
+  });
+  if (!response.ok || !response.body) {
+    const text = await response.text();
+    const parsed = text === "" ? null : safeParse(text);
+    const errorBody = asError(parsed);
+    throw new DaemonClientError(
+      response.status,
+      errorBody?.code ?? "HTTP_ERROR",
+      errorBody?.message ?? response.statusText,
+    );
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let rest = "";
+  try {
+    while (!signal?.aborted) {
+      const chunk = await reader.read();
+      if (chunk.done) return;
+      rest = (rest + decoder.decode(chunk.value, { stream: true })).replaceAll("\r\n", "\n");
+      while (true) {
+        const split = rest.indexOf("\n\n");
+        if (split < 0) break;
+        const raw = rest.slice(0, split);
+        rest = rest.slice(split + 2);
+        const data = raw
+          .split("\n")
+          .filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trimStart())
+          .join("\n");
+        if (data === "") continue;
+        const value = safeParse(data);
+        if (
+          value !== null &&
+          typeof value === "object" &&
+          "from" in value &&
+          typeof value.from === "string" &&
+          "kind" in value &&
+          (value.kind === "rd.ice" || value.kind === "rd.state") &&
+          "data" in value &&
+          value.data !== null &&
+          typeof value.data === "object"
+        ) {
+          listener(value as DispatchRdStreamEvent);
+        }
+      }
+    }
+  } catch (error) {
+    if (signal?.aborted) return;
+    throw error;
+  } finally {
+    await reader.cancel().catch(() => undefined);
   }
 }

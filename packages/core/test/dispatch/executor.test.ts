@@ -461,6 +461,7 @@ describe("目标端执行器", () => {
       projects: [{ id: "p1", name: "you-brain" }],
       maxMode: "auto",
       viewT3: false,
+      remoteDesktop: false,
     });
     const listed = await h.executor.handle(h.frame({ cmdId: "c-projects", cmd: { kind: "t3.projects", args: {} } }));
     expect(listed).toEqual({ ok: true, result: { projects: [{ id: "p1", name: "you-brain" }] } });

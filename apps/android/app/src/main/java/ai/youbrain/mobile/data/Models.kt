@@ -21,6 +21,7 @@ data class HelloDispatch(
     val projects: List<DispatchProject> = emptyList(),
     val maxMode: String = "auto",
     val viewT3: Boolean? = null,
+    val remoteDesktop: Boolean? = null,
     val role: String? = null,
 )
 
@@ -275,4 +276,88 @@ data class TaskReview(
     val diff: String = "",
     val truncated: Boolean = false,
 )
+
+@Serializable
+data class RdIceServer(
+    val urls: List<String> = emptyList(),
+    val username: String? = null,
+    val credential: String? = null,
+)
+
+@Serializable
+data class RdTurnResponse(
+    val iceServers: List<RdIceServer> = emptyList(),
+    val ttl: Int = 3600,
+)
+
+@Serializable
+data class RdIceCandidate(
+    val candidate: String,
+    val sdpMid: String? = null,
+    val sdpMLineIndex: Int? = null,
+    val usernameFragment: String? = null,
+)
+
+@Serializable
+data class RdDisplayInfo(
+    val id: Int,
+    val name: String,
+    val width: Int,
+    val height: Int,
+    val scaleFactor: Double = 2.0,
+    val primary: Boolean = false,
+)
+
+@Serializable
+data class RdPermissions(
+    val screenRecording: Boolean = true,
+    val accessibility: Boolean = true,
+)
+
+@Serializable
+data class RdOpenResult(
+    val sessionId: String,
+    val answerSdp: String,
+    val displays: List<RdDisplayInfo> = emptyList(),
+    val activeDisplayId: Int = 0,
+    val permissions: RdPermissions = RdPermissions(),
+)
+
+@Serializable
+data class RdIceEventPayload(
+    val sessionId: String,
+    val candidates: List<RdIceCandidate> = emptyList(),
+)
+
+@Serializable
+data class RdStateEventPayload(
+    val sessionId: String,
+    val state: String,
+    val displays: List<RdDisplayInfo>? = null,
+    val activeDisplayId: Int? = null,
+    val permissions: RdPermissions? = null,
+    val error: String? = null,
+)
+
+sealed interface RdPeerEvent {
+    val from: String
+    val sessionId: String
+
+    data class Ice(
+        override val from: String,
+        override val sessionId: String,
+        val candidates: List<RdIceCandidate>,
+    ) : RdPeerEvent
+
+    data class State(
+        override val from: String,
+        override val sessionId: String,
+        val state: String,
+        val displays: List<RdDisplayInfo>? = null,
+        val activeDisplayId: Int? = null,
+        val permissions: RdPermissions? = null,
+        val error: String? = null,
+    ) : RdPeerEvent
+}
+
 

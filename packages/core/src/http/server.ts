@@ -77,7 +77,12 @@ export async function startDaemonHttp(
       const trace = options.trace;
       // The event stream stays open for the whole session; as a traced span it would
       // overlap everything.
-      if (trace === undefined || url.pathname === "/api/events" || url.pathname === "/api/deck/muse/stream") {
+      if (
+        trace === undefined ||
+        url.pathname === "/api/events" ||
+        url.pathname === "/api/deck/muse/stream" ||
+        url.pathname === "/api/dispatch/rd/events"
+      ) {
         return dispatch(request, token, options.staticDir, context);
       }
       return trace(`http ${url.pathname}`, async () => dispatch(request, token, options.staticDir, context));
@@ -161,7 +166,7 @@ async function dispatch(
 function authorized(request: Request, url: URL, token: string): boolean {
   const header = bearerToken(request);
   if (header !== null && tokensEqual(header, token)) return true;
-  if (url.pathname === "/api/events" && header === null) {
+  if ((url.pathname === "/api/events" || url.pathname === "/api/dispatch/rd/events") && header === null) {
     const query = url.searchParams.get("token");
     if (query !== null && tokensEqual(query, token)) return true;
   }

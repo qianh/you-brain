@@ -223,7 +223,12 @@ import {
 import { UploadService } from "../upload/upload-service.js";
 import type { UploadIndex } from "../upload/types.js";
 import { NotionService } from "../notion/service.js";
-import { DeckService, type DeckServiceOptions } from "../deck/index.js";
+import {
+  DEFAULT_CLIENT_ICE_SERVERS,
+  DeckService,
+  RemoteDesktopHostManager,
+  type DeckServiceOptions,
+} from "../deck/index.js";
 import {
   dispatchIdentityStore,
   telegramRelayKeyStore,
@@ -3103,6 +3108,7 @@ export class YouBrainDaemon {
     await executor.updatePolicy({
       enabled: true,
       viewT3: true,
+      remoteDesktop: this.#platform === "darwin" && this.#local.role !== "server",
       trustEnrolled: true,
       allProjects: true,
       maxMode: "full-access",
@@ -4167,6 +4173,11 @@ export class YouBrainDaemon {
     });
     this.#dispatchEvents = events;
 
+    const remoteDesktopPort = new RemoteDesktopHostManager({
+      supported: this.#platform === "darwin" && this.#local.role !== "server",
+      getIceServers: async () => (await hub?.turnCredentials())?.iceServers ?? DEFAULT_CLIENT_ICE_SERVERS,
+    });
+
     const executor = automation
       ? new DispatchExecutor({
           dataDir: paths.dataDir,
@@ -4174,6 +4185,7 @@ export class YouBrainDaemon {
           now: () => this.#clock.nowMs(),
           t3: automation,
           ...(tasks ? { tasksPort: tasks } : {}),
+          remoteDesktopPort,
           role: this.#local.role === "server" ? "server" : "desktop",
           outboxPort: {
             list: () => (hub ? hub.outbox() : Promise.resolve([])),

@@ -40,6 +40,7 @@ function makeStubClient(overrides: Partial<BrowserDaemon> = {}): BrowserDaemon {
         enabled: false,
         notify: true,
         viewT3: false,
+        remoteDesktop: false,
         trustEnrolled: true,
         allProjects: true,
         autoConfigured: true,
@@ -55,6 +56,7 @@ function makeStubClient(overrides: Partial<BrowserDaemon> = {}): BrowserDaemon {
         enabled: body.enabled ?? false,
         notify: true,
         viewT3: body.viewT3 ?? false,
+        remoteDesktop: body.remoteDesktop ?? false,
         trustEnrolled: true,
         allProjects: true,
         autoConfigured: true,
@@ -89,7 +91,7 @@ describe("DispatchSection 精简后渲染与交互", () => {
     expect(html).not.toContain("跨设备派活");
   });
 
-  test("仅渲染两个核心开关（允许派活、允许查看 T3 与终端会话），不再渲染权限档位、白名单与已发派活列表", () => {
+  test("渲染核心开关（允许派活、允许查看 T3 与终端会话、允许桌面画面协同），不渲染权限档位、白名单与已发派活列表", () => {
     const devices: DispatchDevicesResponse = {
       self: { deviceId: "dev-self", name: "工作室 Mac" },
       connected: true,
@@ -101,6 +103,7 @@ describe("DispatchSection 精简后渲染与交互", () => {
         enabled: true,
         notify: true,
         viewT3: true,
+        remoteDesktop: true,
         trustEnrolled: true,
         allProjects: true,
         autoConfigured: true,
@@ -120,6 +123,7 @@ describe("DispatchSection 精简后渲染与交互", () => {
 
     expect(html).toContain("允许其他设备向本机派活");
     expect(html).toContain("允许查看本机 T3 与终端会话");
+    expect(html).toContain("允许桌面画面协同（WebRTC）");
     expect(html).not.toContain('name="dispatch-max-mode"');
     expect(html).not.toContain("you-brain");
     expect(html).not.toContain("我发出的派活");
@@ -152,6 +156,7 @@ describe("DispatchSection 精简后渲染与交互", () => {
         enabled: false,
         notify: true,
         viewT3: false,
+        remoteDesktop: false,
         trustEnrolled: true,
         allProjects: true,
         autoConfigured: false,

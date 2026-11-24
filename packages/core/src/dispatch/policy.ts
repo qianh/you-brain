@@ -16,6 +16,8 @@ export interface DispatchPolicy {
   enabled: boolean;
   /** 允许「允许的发起设备」在它们的指挥台里查看并操作本机 T3（经加密隧道）。与 enabled（接收派活）各自独立。 */
   viewT3: boolean;
+  /** 允许「允许的发起设备」通过 WebRTC 查看并操作本机图形桌面。与 enabled、viewT3 各自独立。 */
+  remoteDesktop: boolean;
   /** 信任所有入网设备：云盘 you-brain/relay/members 里登记的设备都算允许的发起设备（公钥取自云盘）。 */
   trustEnrolled: boolean;
   /** 全部项目可派（含以后新加的），不看 allowedProjects。 */
@@ -32,6 +34,7 @@ export function defaultDispatchPolicy(): DispatchPolicy {
   return {
     enabled: false,
     viewT3: false,
+    remoteDesktop: false,
     trustEnrolled: false,
     allProjects: false,
     autoConfigured: false,
@@ -79,6 +82,7 @@ export function normalizeDispatchPolicy(value: unknown): DispatchPolicy {
   return {
     enabled: value.enabled === true,
     viewT3: value.viewT3 === true,
+    remoteDesktop: value.remoteDesktop === true,
     trustEnrolled: value.trustEnrolled === true,
     allProjects: value.allProjects === true,
     autoConfigured: value.autoConfigured === true,
@@ -112,6 +116,7 @@ export class PolicyStore {
       const next = normalizeDispatchPolicy({
         enabled: patch.enabled ?? current.enabled,
         viewT3: patch.viewT3 ?? current.viewT3,
+        remoteDesktop: patch.remoteDesktop ?? current.remoteDesktop,
         trustEnrolled: patch.trustEnrolled ?? current.trustEnrolled,
         allProjects: patch.allProjects ?? current.allProjects,
         autoConfigured: patch.autoConfigured ?? current.autoConfigured,

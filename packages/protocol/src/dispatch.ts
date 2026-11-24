@@ -45,6 +45,9 @@ export const DISPATCH_KINDS = [
   "tasks.update",
   "tasks.action",
   "tasks.review",
+  "rd.open",
+  "rd.ice",
+  "rd.close",
 ] as const;
 
 export type DispatchKind = (typeof DISPATCH_KINDS)[number];
@@ -189,6 +192,79 @@ export const TasksReviewArgsSchema = z.strictObject({
   id: z.string().min(1).max(200),
 });
 
+export const RD_QUALITIES = ["smooth", "hd", "ultra"] as const;
+export type RdQuality = (typeof RD_QUALITIES)[number];
+export const RdQualitySchema = z.enum(RD_QUALITIES);
+
+const RD_SESSION_ID_RE = /^[A-Za-z0-9_-]{8,64}$/u;
+
+export const RdOpenArgsSchema = z.strictObject({
+  sessionId: z.string().regex(RD_SESSION_ID_RE),
+  offerSdp: z.string().min(1).max(48_000),
+  quality: RdQualitySchema.optional(),
+  displayId: z.number().int().nonnegative().optional(),
+});
+
+export type RdOpenArgs = z.infer<typeof RdOpenArgsSchema>;
+
+export const RdIceCandidateSchema = z.strictObject({
+  candidate: z.string().max(2048),
+  sdpMid: z.string().max(64).nullable().optional(),
+  sdpMLineIndex: z.number().int().min(0).max(32).nullable().optional(),
+  usernameFragment: z.string().max(128).nullable().optional(),
+});
+
+export type RdIceCandidate = z.infer<typeof RdIceCandidateSchema>;
+
+export const RdIceArgsSchema = z.strictObject({
+  sessionId: z.string().regex(RD_SESSION_ID_RE),
+  candidates: z.array(RdIceCandidateSchema).min(1).max(32),
+});
+
+export type RdIceArgs = z.infer<typeof RdIceArgsSchema>;
+
+export const RdCloseArgsSchema = z.strictObject({
+  sessionId: z.string().regex(RD_SESSION_ID_RE),
+});
+
+export type RdCloseArgs = z.infer<typeof RdCloseArgsSchema>;
+
+export const RdDisplayInfoSchema = z.strictObject({
+  id: z.number().int().nonnegative(),
+  name: z.string().min(1).max(120),
+  width: z.number().int().positive(),
+  height: z.number().int().positive(),
+  scaleFactor: z.number().positive(),
+  primary: z.boolean(),
+});
+
+export type RdDisplayInfo = z.infer<typeof RdDisplayInfoSchema>;
+
+export const RdPermissionsSchema = z.strictObject({
+  screenRecording: z.boolean(),
+  accessibility: z.boolean(),
+});
+
+export type RdPermissions = z.infer<typeof RdPermissionsSchema>;
+
+export const RdOpenResultSchema = z.strictObject({
+  sessionId: z.string().regex(RD_SESSION_ID_RE),
+  answerSdp: z.string().min(1),
+  displays: z.array(RdDisplayInfoSchema),
+  activeDisplayId: z.number().int().nonnegative(),
+  permissions: RdPermissionsSchema,
+});
+
+export type RdOpenResult = z.infer<typeof RdOpenResultSchema>;
+
+export const IceServerEntrySchema = z.strictObject({
+  urls: z.array(z.string().min(1)).min(1),
+  username: z.string().optional(),
+  credential: z.string().optional(),
+});
+
+export type IceServerEntry = z.infer<typeof IceServerEntrySchema>;
+
 export const DispatchCommandSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("t3.projects"), args: T3ProjectsArgsSchema }),
   z.strictObject({ kind: z.literal("t3.start"), args: T3StartArgsSchema }),
@@ -207,6 +283,9 @@ export const DispatchCommandSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("tasks.update"), args: TasksUpdateArgsSchema }),
   z.strictObject({ kind: z.literal("tasks.action"), args: TasksActionArgsSchema }),
   z.strictObject({ kind: z.literal("tasks.review"), args: TasksReviewArgsSchema }),
+  z.strictObject({ kind: z.literal("rd.open"), args: RdOpenArgsSchema }),
+  z.strictObject({ kind: z.literal("rd.ice"), args: RdIceArgsSchema }),
+  z.strictObject({ kind: z.literal("rd.close"), args: RdCloseArgsSchema }),
 ]);
 
 export type DispatchCommand = z.infer<typeof DispatchCommandSchema>;
@@ -284,6 +363,24 @@ export const OutboxUpdatedDataSchema = z.strictObject({
   threadUrl: z.string().optional(),
 });
 
+export const RdIceEventDataSchema = z.strictObject({
+  sessionId: z.string().regex(RD_SESSION_ID_RE),
+  candidates: z.array(RdIceCandidateSchema).min(1).max(32),
+});
+
+export type RdIceEventData = z.infer<typeof RdIceEventDataSchema>;
+
+export const RdStateEventDataSchema = z.strictObject({
+  sessionId: z.string().regex(RD_SESSION_ID_RE),
+  state: z.enum(["ready", "closed", "error"]),
+  displays: z.array(RdDisplayInfoSchema).optional(),
+  activeDisplayId: z.number().int().nonnegative().optional(),
+  permissions: RdPermissionsSchema.optional(),
+  error: z.string().optional(),
+});
+
+export type RdStateEventData = z.infer<typeof RdStateEventDataSchema>;
+
 export const EventFrameSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     t: z.literal("event"),
@@ -305,6 +402,20 @@ export const EventFrameSchema = z.discriminatedUnion("kind", [
     dispatchId: z.string().min(1),
     kind: z.literal("outbox.updated"),
     data: OutboxUpdatedDataSchema,
+  }),
+  z.strictObject({
+    t: z.literal("event"),
+    from: z.string().min(1),
+    dispatchId: z.string().min(1),
+    kind: z.literal("rd.ice"),
+    data: RdIceEventDataSchema,
+  }),
+  z.strictObject({
+    t: z.literal("event"),
+    from: z.string().min(1),
+    dispatchId: z.string().min(1),
+    kind: z.literal("rd.state"),
+    data: RdStateEventDataSchema,
   }),
 ]);
 
@@ -342,6 +453,8 @@ export const HelloDispatchSchema = z.strictObject({
   maxMode: RuntimeModeSchema,
   /** 本机允许被同账号的已授权设备在指挥台里查看 T3（隧道）。旧版本不带这个字段，按 false 处理。 */
   viewT3: z.boolean().optional(),
+  /** 本机允许被同账号的已授权设备发起远程桌面操作（WebRTC）。旧版本不带这个字段，按 false 处理。 */
+  remoteDesktop: z.boolean().optional(),
   /** 设备运行角色（server 通常是 VPS 主控节点）。 */
   role: z.enum(["desktop", "server"]).optional(),
 });

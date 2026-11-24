@@ -3,16 +3,23 @@ import { join } from "node:path";
 
 import {
   DISPATCH_PROTOCOL_VERSION,
+  IceServerEntrySchema,
+  RdIceEventDataSchema,
+  RdStateEventDataSchema,
   T3ReadResultSchema,
   T3StartResultSchema,
   newNonce,
   ulid,
   type CmdFrame,
   type HelloDispatch,
+  type IceServerEntry,
   type LaunchModeName,
+  type RdIceEventData,
+  type RdStateEventData,
   TUNNEL_OPEN_KIND,
 } from "@you-brain/protocol";
 
+import { DEFAULT_CLIENT_ICE_SERVERS } from "../deck/remote-desktop/types.js";
 import type { DispatchRelayFrame, TelegramRelayState } from "../deck/telegram/relay.js";
 import { writeFileAtomic } from "../domain/atomic.js";
 import type { DispatchEmitEvent, DispatchExecutor } from "./executor.js";
@@ -100,6 +107,15 @@ export type DispatchReadResult =
       entry: OutboxEntry;
     }
   | { ok: false; dispatchId: string; error: string };
+
+export type DispatchRdStreamEvent =
+  | { from: string; kind: "rd.ice"; data: RdIceEventData }
+  | { from: string; kind: "rd.state"; data: RdStateEventData };
+
+export interface DispatchTurnResponse {
+  iceServers: IceServerEntry[];
+  ttl: number;
+}
 
 export interface DispatchHubOptions {
   dataDir: string;
@@ -256,6 +272,7 @@ export class DispatchHub {
   #devices: DispatchDeviceInfo[] = [];
   readonly #waiters = new Map<string, PendingWaiter>();
   readonly #inFlight = new Map<string, Promise<CommandOutcome>>();
+  readonly #rdListeners = new Set<(event: DispatchRdStreamEvent) => void>();
   #outboxQueue: Promise<unknown> = Promise.resolve();
   #outbox: Map<string, OutboxEntry> | null = null;
 
@@ -304,6 +321,41 @@ export class DispatchHub {
     if (!this.#tunnelClient) throw new Error("本机没有启用 T3 隧道");
     if (!this.#link) throw new Error(NOT_CONNECTED_ERROR);
     return this.#tunnelClient.session(deviceId);
+  }
+
+  /** 向中转申请 STUN / TURN 凭据；中转不可达或旧版不支持时回落到公共 STUN 节点。 */
+  async turnCredentials(): Promise<DispatchTurnResponse> {
+    const link = this.#link;
+    if (!link) {
+      return { iceServers: DEFAULT_CLIENT_ICE_SERVERS, ttl: 3_600 };
+    }
+    try {
+      const raw = await link.request<unknown>("turn");
+      if (isRecord(raw) && Array.isArray(raw.iceServers)) {
+        const servers: IceServerEntry[] = [];
+        for (const item of raw.iceServers) {
+          const parsed = IceServerEntrySchema.safeParse(item);
+          if (parsed.success) servers.push(parsed.data);
+        }
+        const ttl = typeof raw.ttl === "number" && Number.isFinite(raw.ttl) && raw.ttl > 0
+          ? Math.trunc(raw.ttl)
+          : 43_200;
+        if (servers.length > 0) {
+          return { iceServers: servers, ttl };
+        }
+      }
+    } catch {
+      // 旧版中转或网络瞬断时回落公共 STUN
+    }
+    return { iceServers: DEFAULT_CLIENT_ICE_SERVERS, ttl: 3_600 };
+  }
+
+  /** 订阅目标端发回的远程桌面增量 ICE 与状态事件（供 Web / HTTP SSE 使用）。 */
+  subscribeRemoteDesktopEvents(listener: (event: DispatchRdStreamEvent) => void): () => void {
+    this.#rdListeners.add(listener);
+    return () => {
+      this.#rdListeners.delete(listener);
+    };
   }
 
   /** 连上或断开中转时由桥调用；连上自动发 hello，断开立即让等待中的请求失败。 */
@@ -405,6 +457,7 @@ export class DispatchHub {
   #closeTunnels(): void {
     this.#tunnelHost?.closeAll();
     this.#tunnelClient?.closeAll();
+    this.#executor?.closeRemoteDesktop(DISCONNECTED_ERROR);
   }
 
   /** 发送一条签名指令并等待目标端回传 `cmdres`。 */
@@ -754,8 +807,36 @@ export class DispatchHub {
   }
 
   async #handleEvent(frame: DispatchRelayFrame): Promise<void> {
-    if (frame.kind !== "thread.status") return;
     const from = typeof frame.from === "string" ? frame.from : "";
+    if (from && (frame.kind === "rd.ice" || frame.kind === "rd.state")) {
+      if (this.#rdListeners.size === 0) return;
+      if (frame.kind === "rd.ice") {
+        const parsed = RdIceEventDataSchema.safeParse(frame.data);
+        if (!parsed.success) return;
+        const event: DispatchRdStreamEvent = { from, kind: "rd.ice", data: parsed.data };
+        for (const listener of this.#rdListeners) {
+          try {
+            listener(event);
+          } catch {
+            // 监听器异常不影响中枢。
+          }
+        }
+        return;
+      }
+      const parsed = RdStateEventDataSchema.safeParse(frame.data);
+      if (!parsed.success) return;
+      const event: DispatchRdStreamEvent = { from, kind: "rd.state", data: parsed.data };
+      for (const listener of this.#rdListeners) {
+        try {
+          listener(event);
+        } catch {
+          // 监听器异常不影响中枢。
+        }
+      }
+      return;
+    }
+
+    if (frame.kind !== "thread.status") return;
     const dispatchId = typeof frame.dispatchId === "string" ? frame.dispatchId : "";
     if (!from || !dispatchId || !isRecord(frame.data)) return;
     const rawStatus = typeof frame.data.status === "string" ? frame.data.status : "";

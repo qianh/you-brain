@@ -22,6 +22,13 @@ import ai.youbrain.mobile.data.MobilePushItem
 import ai.youbrain.mobile.data.NoticeReplyResponse
 import ai.youbrain.mobile.data.OutboxEntry
 import ai.youbrain.mobile.data.PeerPinStore
+import ai.youbrain.mobile.data.RdIceCandidate
+import ai.youbrain.mobile.data.RdIceEventPayload
+import ai.youbrain.mobile.data.RdIceServer
+import ai.youbrain.mobile.data.RdOpenResult
+import ai.youbrain.mobile.data.RdPeerEvent
+import ai.youbrain.mobile.data.RdStateEventPayload
+import ai.youbrain.mobile.data.RdTurnResponse
 import ai.youbrain.mobile.data.RelayDevice
 import ai.youbrain.mobile.data.RelayState
 import ai.youbrain.mobile.data.T3StartResponse
@@ -31,8 +38,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -133,6 +143,9 @@ class UBrainRepository(context: Context) {
 
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState: StateFlow<AppUiState> = _uiState.asStateFlow()
+
+    private val _rdEvents = MutableSharedFlow<RdPeerEvent>(extraBufferCapacity = 64)
+    val rdEvents: SharedFlow<RdPeerEvent> = _rdEvents.asSharedFlow()
 
     var onNewLivePush: ((MobilePushItem) -> Unit)? = null
 
@@ -1031,6 +1044,41 @@ class UBrainRepository(context: Context) {
     }
 
     private fun handleDispatchEvent(event: DispatchEventMsg) {
+        if (event.kind == "rd.ice") {
+            val payload = runCatching {
+                json.decodeFromJsonElement(RdIceEventPayload.serializer(), event.data)
+            }.getOrNull()
+            if (payload != null && payload.candidates.isNotEmpty()) {
+                _rdEvents.tryEmit(
+                    RdPeerEvent.Ice(
+                        from = event.from,
+                        sessionId = payload.sessionId,
+                        candidates = payload.candidates,
+                    ),
+                )
+            }
+            return
+        }
+        if (event.kind == "rd.state") {
+            val payload = runCatching {
+                json.decodeFromJsonElement(RdStateEventPayload.serializer(), event.data)
+            }.getOrNull()
+            if (payload != null) {
+                _rdEvents.tryEmit(
+                    RdPeerEvent.State(
+                        from = event.from,
+                        sessionId = payload.sessionId,
+                        state = payload.state,
+                        displays = payload.displays,
+                        activeDisplayId = payload.activeDisplayId,
+                        permissions = payload.permissions,
+                        error = payload.error,
+                    ),
+                )
+            }
+            return
+        }
+
         val masterId = _uiState.value.agent.masterDeviceId
         if (event.from != masterId) return
         val dataObj = event.data as? JsonObject ?: return
@@ -1096,8 +1144,98 @@ class UBrainRepository(context: Context) {
 
     fun viewT3Devices(): List<RelayDevice> =
         _uiState.value.relayState.devices.filter {
-            it.id != _uiState.value.deviceId && it.enrolled == true && it.dispatch?.viewT3 == true
+            it.id != _uiState.value.deviceId &&
+                it.enrolled == true &&
+                (it.dispatch?.viewT3 == true || it.dispatch?.remoteDesktop == true)
         }
+
+    suspend fun fetchTurnIceServers(): List<RdIceServer> {
+        val fallback = listOf(
+            RdIceServer(
+                urls = listOf(
+                    "stun:stun.cloudflare.com:3478",
+                    "stun:stun.miwifi.com:3478",
+                    "stun:stun.l.google.com:19302",
+                ),
+            ),
+        )
+        val el = runCatching { relayClient.request("turn", timeoutMs = 6_000L) }.getOrNull() ?: return fallback
+        val parsed = runCatching { json.decodeFromJsonElement(RdTurnResponse.serializer(), el) }.getOrNull()
+        return parsed?.iceServers?.takeIf { it.isNotEmpty() } ?: fallback
+    }
+
+    suspend fun openRemoteDesktop(
+        toDeviceId: String,
+        offerSdp: String,
+        quality: String = "hd",
+        displayId: Int? = null,
+    ): Result<RdOpenResult> {
+        if (!_uiState.value.enrolled) {
+            return Result.failure(IllegalStateException("设备尚未入网"))
+        }
+        if (!relayClient.awaitConnected(8_000L)) {
+            return Result.failure(IllegalStateException("连不上中转，请检查手机网络"))
+        }
+        val args = buildJsonObject {
+            put("offerSdp", offerSdp)
+            put("quality", quality)
+            if (displayId != null && displayId >= 0) {
+                put("displayId", displayId)
+            }
+        }
+        return when (val outcome = relayClient.dispatchCommand(toDeviceId, "rd.open", args, timeoutMs = 20_000L)) {
+            is CommandOutcome.Err -> Result.failure(IllegalStateException(outcome.error))
+            is CommandOutcome.Ok -> {
+                val el = outcome.result ?: return Result.failure(IllegalStateException("对端未返回桌面会话信息"))
+                val parsed = runCatching { json.decodeFromJsonElement(RdOpenResult.serializer(), el) }.getOrNull()
+                if (parsed == null) Result.failure(IllegalStateException("桌面会话响应格式不兼容"))
+                else Result.success(parsed)
+            }
+        }
+    }
+
+    suspend fun sendRemoteDesktopIce(
+        toDeviceId: String,
+        sessionId: String,
+        candidates: List<RdIceCandidate>,
+    ): Result<Unit> {
+        val batch = candidates.take(32)
+        if (batch.isEmpty()) return Result.success(Unit)
+        val args = buildJsonObject {
+            put("sessionId", sessionId)
+            put(
+                "candidates",
+                JsonArray(
+                    batch.map { cand ->
+                        buildJsonObject {
+                            put("candidate", cand.candidate)
+                            cand.sdpMid?.let { put("sdpMid", it) }
+                            cand.sdpMLineIndex?.let { put("sdpMLineIndex", it) }
+                            cand.usernameFragment?.let { put("usernameFragment", it) }
+                        }
+                    },
+                ),
+            )
+        }
+        return when (val outcome = relayClient.dispatchCommand(toDeviceId, "rd.ice", args, timeoutMs = 8_000L)) {
+            is CommandOutcome.Err -> Result.failure(IllegalStateException(outcome.error))
+            is CommandOutcome.Ok -> Result.success(Unit)
+        }
+    }
+
+    fun closeRemoteDesktopAsync(toDeviceId: String, sessionId: String) {
+        if (sessionId.isBlank()) return
+        scope.launch {
+            runCatching {
+                relayClient.dispatchCommand(
+                    to = toDeviceId,
+                    kind = "rd.close",
+                    args = buildJsonObject { put("sessionId", sessionId) },
+                    timeoutMs = 5_000L,
+                )
+            }
+        }
+    }
 
     fun todoDevices(): List<RelayDevice> =
         _uiState.value.relayState.devices

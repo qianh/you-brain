@@ -1514,6 +1514,7 @@ export const DispatchPolicyPutBodySchema = z
   .object({
     enabled: z.boolean().optional(),
     viewT3: z.boolean().optional(),
+    remoteDesktop: z.boolean().optional(),
     trustEnrolled: z.boolean().optional(),
     allProjects: z.boolean().optional(),
     notify: z.boolean().optional(),
@@ -1524,5 +1525,8 @@ export const DispatchPolicyPutBodySchema = z
   .strict();
 
 export type DispatchPolicyPutBody = z.infer<typeof DispatchPolicyPutBodySchema>;
+
+export type DispatchTurnResponse = import("../dispatch/hub.js").DispatchTurnResponse;
+export type DispatchRdStreamEvent = import("../dispatch/hub.js").DispatchRdStreamEvent;
 
 export type { QuotaAccount, QuotaTokens, QuotaTokenUsage, QuotaView, QuotaWindow } from "../quota/types.js";

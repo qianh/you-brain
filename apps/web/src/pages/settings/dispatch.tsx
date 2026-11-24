@@ -200,6 +200,18 @@ export function DispatchSection(props: DispatchSectionProps = {}) {
                 onChange={(checked) => void savePolicy({ viewT3: checked })}
               />
             </SettingRow>
+            <SettingRow
+              title={t("dispatchPolicyRemoteDesktop")}
+              hint={t("dispatchPolicyRemoteDesktopHint")}
+              control="toggle"
+            >
+              <Toggle
+                checked={policy.remoteDesktop}
+                label={t("dispatchPolicyRemoteDesktop")}
+                disabled={savingPolicy}
+                onChange={(checked) => void savePolicy({ remoteDesktop: checked })}
+              />
+            </SettingRow>
           </>
         ) : null}
       </Card>

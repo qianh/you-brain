@@ -88,6 +88,7 @@ fun T3DeckScreen(
     preferredThreadUrl: String?,
     onFileChooser: (ValueCallback<Array<Uri>>, Intent) -> Unit,
     onJumpSettings: () -> Unit,
+    onOpenRemoteDesktop: (RelayDevice) -> Unit = {},
 ) {
     val context = LocalContext.current
     val c = IosTheme.colors
@@ -163,10 +164,18 @@ fun T3DeckScreen(
 
     val activeId = selectedId
     val activeDevice = devices.firstOrNull { it.id == activeId }
+    val activeHasViewT3 = activeDevice?.dispatch?.viewT3 == true
+    val activeHasRd = activeDevice?.dispatch?.remoteDesktop == true
 
-    LaunchedEffect(activeId, activeDevice?.online, state.connectionState) {
+    LaunchedEffect(activeId, activeDevice?.online, activeHasViewT3, state.connectionState) {
         val devId = activeId ?: return@LaunchedEffect
         if (refreshingIds[devId] == true) return@LaunchedEffect
+
+        if (!activeHasViewT3 && activeHasRd) {
+            loadingIds[devId] = false
+            errorByDevice[devId] = if (activeDevice?.online == true) null else "该设备当前离线"
+            return@LaunchedEffect
+        }
 
         if (state.connectionState == ConnectionState.CONNECTING) {
             if (webViews[devId] == null) {
@@ -282,47 +291,74 @@ fun T3DeckScreen(
                                     else -> c.secondaryLabel
                                 }
                                 Row(
-                                    modifier = Modifier
-                                        .height(28.dp)
-                                        .widthIn(max = 172.dp)
-                                        .clip(CircleShape)
-                                        .background(pillBg)
-                                        .clickable {
-                                            if (isSelected) renameDevice = dev else selectedId = dev.id
-                                        }
-                                        .padding(horizontal = 10.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(3.dp),
                                 ) {
-                                    Box(
+                                    Row(
                                         modifier = Modifier
-                                            .size(6.dp)
+                                            .height(28.dp)
+                                            .widthIn(max = 172.dp)
                                             .clip(CircleShape)
-                                            .background(dotColor),
-                                    )
-                                    Text(
-                                        text = state.displayName(dev),
-                                        fontSize = 12.5.sp,
-                                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
-                                        color = textColor,
-                                        maxLines = 1,
-                                        softWrap = false,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f, fill = false),
-                                    )
-                                    if (isSelected) {
-                                        Icon(
-                                            imageVector = IosIcons.Pencil,
-                                            contentDescription = "改名",
-                                            tint = Color.White.copy(alpha = 0.85f),
-                                            modifier = Modifier.size(11.dp),
+                                            .background(pillBg)
+                                            .clickable {
+                                                if (isSelected) renameDevice = dev else selectedId = dev.id
+                                            }
+                                            .padding(horizontal = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp),
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(6.dp)
+                                                .clip(CircleShape)
+                                                .background(dotColor),
                                         )
+                                        Text(
+                                            text = state.displayName(dev),
+                                            fontSize = 12.5.sp,
+                                            fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                                            color = textColor,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false),
+                                        )
+                                        if (isSelected) {
+                                            Icon(
+                                                imageVector = IosIcons.Pencil,
+                                                contentDescription = "改名",
+                                                tint = Color.White.copy(alpha = 0.85f),
+                                                modifier = Modifier.size(11.dp),
+                                            )
+                                        }
+                                    }
+                                    if (dev.online && dev.dispatch?.remoteDesktop == true) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(28.dp)
+                                                .clip(CircleShape)
+                                                .background(
+                                                    if (isSelected) c.blue.copy(alpha = 0.16f) else c.tertiaryFill,
+                                                )
+                                                .clickable {
+                                                    selectedId = dev.id
+                                                    onOpenRemoteDesktop(dev)
+                                                },
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            Icon(
+                                                imageVector = IosIcons.ScreenShare,
+                                                contentDescription = "桌面画面协同：${state.displayName(dev)}",
+                                                tint = c.blue,
+                                                modifier = Modifier.size(14.dp),
+                                            )
+                                        }
                                     }
                                 }
                             }
                         }
 
-                        if (activeId != null) {
+                        if (activeId != null && activeHasViewT3) {
                             Box(
                                 modifier = Modifier
                                     .size(28.dp)
@@ -381,7 +417,7 @@ fun T3DeckScreen(
                 update = { container ->
                     container.visibility = if (isVisibleTab) View.VISIBLE else View.GONE
                     val currentId = activeId
-                    val readyUrl = currentId?.let { proxyUrls[it] }
+                    val readyUrl = if (activeHasViewT3) currentId?.let { proxyUrls[it] } else null
                     if (currentId != null && readyUrl != null && !webViews.containsKey(currentId)) {
                         if (webViews.size >= MAX_WEBVIEW_POOL) {
                             val oldestKey = webViews.keys.firstOrNull()
@@ -543,14 +579,61 @@ fun T3DeckScreen(
                             verticalArrangement = Arrangement.spacedBy(10.dp),
                         ) {
                             IosIconBadge(icon = IosIcons.TerminalWindow, background = c.indigo)
-                            Text("暂无开放 T3 的设备", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = c.label)
+                            Text("暂无开放 T3 或桌面协同的设备", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = c.label)
                             Text(
-                                text = "请在电脑端 U-Brain「设置 → 接入 → 跨设备派活」开启「允许查看本机 T3」，并点击该手机的「信任此设备」。",
+                                text = "请在电脑端 U-Brain「设置 → 接入 → 跨设备派活」开启「允许查看本机 T3」或「允许桌面画面协同」，并点击该手机的「信任此设备」。",
                                 fontSize = 13.5.sp,
                                 lineHeight = 19.sp,
                                 color = c.secondaryLabel,
                                 textAlign = TextAlign.Center,
                             )
+                        }
+                    }
+                }
+                activeDevice != null && activeDevice.online && !activeHasViewT3 && activeHasRd -> {
+                    Box(
+                        modifier = Modifier.fillMaxSize().padding(24.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(c.cardBg)
+                                .padding(22.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                        ) {
+                            IosIconBadge(icon = IosIcons.ScreenShare, background = c.blue)
+                            Text(
+                                text = state.displayName(activeDevice),
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = c.label,
+                            )
+                            Text(
+                                text = "该设备已开启 60fps 桌面画面协同（未开启 T3 网页查看）。点击下方按钮进入触控板 / 直触双模式全屏桌面。",
+                                fontSize = 13.5.sp,
+                                lineHeight = 19.sp,
+                                color = c.secondaryLabel,
+                                textAlign = TextAlign.Center,
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(42.dp)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(c.blue)
+                                    .clickable { onOpenRemoteDesktop(activeDevice) },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text = "进入桌面画面协同",
+                                    color = Color.White,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
                         }
                     }
                 }

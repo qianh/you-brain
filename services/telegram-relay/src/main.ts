@@ -31,6 +31,12 @@ if (legacyText !== "true" && legacyText !== "false" && legacyText !== "1" && leg
 }
 const acceptLegacyKey = legacyText === "true" || legacyText === "1";
 
+const turnUrls = optional("RELAY_TURN_URLS", "")
+  .split(",")
+  .map((item) => item.trim())
+  .filter((item) => item.length > 0);
+const turnSecret = optional("RELAY_TURN_SECRET", "").trim();
+
 const server = await startRelayServer({
   port,
   host,
@@ -40,6 +46,14 @@ const server = await startRelayServer({
   acceptLegacyKey,
   publicOrigin: optional("RELAY_PUBLIC_ORIGIN", ""),
   routerDeviceId: optional("RELAY_ROUTER_DEVICE", ""),
+  ...(turnUrls.length > 0
+    ? {
+        turn: {
+          urls: turnUrls,
+          ...(turnSecret.length > 0 ? { secret: turnSecret } : {}),
+        },
+      }
+    : {}),
 });
 
 console.log(`U-Brain Telegram relay 监听 http://${host}:${server.port}`);

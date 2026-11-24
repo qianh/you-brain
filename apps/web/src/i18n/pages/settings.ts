@@ -112,6 +112,8 @@ export const zh = {
   dispatchPolicyEnabledHint: "关闭后拒绝其他设备向本机发来的派活请求。",
   dispatchPolicyViewT3: "允许查看本机 T3 与终端会话",
   dispatchPolicyViewT3Hint: "已互信设备在指挥台里能看到并操作本机 T3 和终端会话（端到端加密，经自有中转，不暴露端口）。",
+  dispatchPolicyRemoteDesktop: "允许桌面画面协同（WebRTC）",
+  dispatchPolicyRemoteDesktopHint: "已互信设备可在指挥台或手机端实时查看并操控本机桌面画面（macOS 60fps 硬件编码，DTLS-SRTP 端到端加密，默认局域网 P2P 直连）。",
   dispatchPolicySaveFailed: "保存派活策略失败，已恢复原设置",
   dispatchLoadError: "跨设备派活信息加载失败",
 } as const;
@@ -230,6 +232,8 @@ export const en = {
   dispatchPolicyEnabledHint: "When off, incoming dispatches from other devices are rejected.",
   dispatchPolicyViewT3: "Allow viewing this device's T3 and terminal sessions",
   dispatchPolicyViewT3Hint: "Trusted devices can see and operate this device's T3 and terminal sessions from their command deck (end-to-end encrypted over your own relay; no port is exposed).",
+  dispatchPolicyRemoteDesktop: "Allow remote desktop collaboration (WebRTC)",
+  dispatchPolicyRemoteDesktopHint: "Trusted devices can view and control this desktop in real time from the command deck or mobile app (macOS 60fps hardware encoding, DTLS-SRTP end-to-end encrypted, LAN P2P direct by default).",
   dispatchPolicySaveFailed: "Failed to save dispatch policy; reverted",
   dispatchLoadError: "Failed to load cross-device dispatch state",
 } as const;

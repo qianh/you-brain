@@ -12,6 +12,8 @@ export {
   type DispatchOutboxPort,
   type DispatchT3Port,
   type OutboxUpdatedEvent,
+  type RdIceEmitEvent,
+  type RdStateEmitEvent,
   type ThreadStatusEvent,
 } from "./executor.js";
 export {
@@ -20,9 +22,11 @@ export {
   type DispatchFollowupResult,
   type DispatchHubOptions,
   type DispatchLink,
+  type DispatchRdStreamEvent,
   type DispatchReadResult,
   type DispatchStartInput,
   type DispatchStartResult,
+  type DispatchTurnResponse,
   type OutboxEntry,
   type OutboxStatus,
 } from "./hub.js";

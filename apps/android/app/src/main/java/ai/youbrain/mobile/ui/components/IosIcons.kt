@@ -359,6 +359,64 @@ object IosIcons {
         }
     }
 
+    val ScreenShare: ImageVector by lazy {
+        strokeIcon("ScreenShare", strokeWidth = 1.8f) {
+            // Monitor frame
+            moveTo(3.5f, 6f)
+            curveTo(3.5f, 4.9f, 4.4f, 4f, 5.5f, 4f)
+            lineTo(18.5f, 4f)
+            curveTo(19.6f, 4f, 20.5f, 4.9f, 20.5f, 6f)
+            lineTo(20.5f, 15f)
+            curveTo(20.5f, 16.1f, 19.6f, 17f, 18.5f, 17f)
+            lineTo(5.5f, 17f)
+            curveTo(4.4f, 17f, 3.5f, 16.1f, 3.5f, 15f)
+            close()
+            // Stand
+            moveTo(8.5f, 20f)
+            lineTo(15.5f, 20f)
+            moveTo(12f, 17f)
+            lineTo(12f, 20f)
+            // Share arrow inside screen
+            moveTo(9.5f, 12.5f)
+            lineTo(14.5f, 8f)
+            moveTo(11f, 8f)
+            lineTo(14.5f, 8f)
+            lineTo(14.5f, 11.5f)
+        }
+    }
+
+    val Keyboard: ImageVector by lazy {
+        strokeIcon("Keyboard", strokeWidth = 1.75f) {
+            moveTo(3f, 7.5f)
+            curveTo(3f, 6.4f, 3.9f, 5.5f, 5f, 5.5f)
+            lineTo(19f, 5.5f)
+            curveTo(20.1f, 5.5f, 21f, 6.4f, 21f, 7.5f)
+            lineTo(21f, 16.5f)
+            curveTo(21f, 17.6f, 20.1f, 18.5f, 19f, 18.5f)
+            lineTo(5f, 18.5f)
+            curveTo(3.9f, 18.5f, 3f, 17.6f, 3f, 16.5f)
+            close()
+            moveTo(6.5f, 9.5f)
+            lineTo(7.5f, 9.5f)
+            moveTo(10f, 9.5f)
+            lineTo(11f, 9.5f)
+            moveTo(13.5f, 9.5f)
+            lineTo(14.5f, 9.5f)
+            moveTo(17f, 9.5f)
+            lineTo(17.5f, 9.5f)
+            moveTo(6.5f, 12.5f)
+            lineTo(7.5f, 12.5f)
+            moveTo(10f, 12.5f)
+            lineTo(11f, 12.5f)
+            moveTo(13.5f, 12.5f)
+            lineTo(14.5f, 12.5f)
+            moveTo(17f, 12.5f)
+            lineTo(17.5f, 12.5f)
+            moveTo(8f, 15.5f)
+            lineTo(16f, 15.5f)
+        }
+    }
+
     private inline fun strokeIcon(
         name: String,
         strokeWidth: Float = 1.8f,

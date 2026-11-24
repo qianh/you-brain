@@ -97,11 +97,13 @@ import type {
   DispatchOutboxResponse,
   DispatchPolicyPutBody,
   DispatchPolicyResponse,
+  DispatchRdStreamEvent,
   DispatchSendBody,
   DispatchSendResponse,
   DispatchStartThreadBody,
   DispatchStartThreadResponse,
   DispatchTrustDeviceBody,
+  DispatchTurnResponse,
   DeckTty7PasteImageResponse,
   DeckTty7ScreenResponse,
   DeckTty7SendBody,
@@ -253,6 +255,11 @@ export interface BrowserDaemon
   deckTelegramAction(body: DeckTelegramActionBody): Promise<DeckTelegramStatusResponse>;
   deckTelegramEnrollInvite?(): Promise<DeckTelegramEnrollInviteResponse>;
   dispatchTrustDevice?(body: DispatchTrustDeviceBody): Promise<DispatchPolicyResponse>;
+  dispatchTurn?(): Promise<DispatchTurnResponse>;
+  dispatchRdEvents?(
+    listener: (event: DispatchRdStreamEvent) => void,
+    options?: { signal?: AbortSignal },
+  ): Promise<void>;
   deckNoticeDismiss(body: DeckNoticeDismissBody): Promise<{ ok: true }>;
   deckTty7Screen(pane: number, lines?: number, deviceId?: string | null): Promise<DeckTty7ScreenResponse>;
   deckTty7Send(body: DeckTty7SendBody, deviceId?: string | null): Promise<{ ok: true }>;
@@ -482,6 +489,9 @@ export function createBrowserDaemon(options?: {
       request<DispatchPolicyResponse>("PUT", "/api/dispatch/policy", body),
     dispatchTrustDevice: (body: DispatchTrustDeviceBody) =>
       request<DispatchPolicyResponse>("POST", "/api/dispatch/trust-device", body),
+    dispatchTurn: () => request<DispatchTurnResponse>("GET", "/api/dispatch/turn"),
+    dispatchRdEvents: (listener, rdOptions) =>
+      readRdEvents(fetchImpl, token, listener, rdOptions?.signal),
     deckNoticeDismiss: (body: DeckNoticeDismissBody) =>
       request<{ ok: true }>("POST", "/api/deck/notices/dismiss", body),
     deckTty7Screen: (pane: number, lines?: number, deviceId?: string | null) =>
@@ -776,6 +786,65 @@ async function readMuseEvents(
           (value.type === "overview" || value.type === "session")
         ) {
           listener(value as DeckMuseStreamEvent);
+        }
+      }
+    }
+  } catch (error) {
+    if (signal?.aborted) return;
+    throw error;
+  } finally {
+    await reader.cancel().catch(() => undefined);
+  }
+}
+
+async function readRdEvents(
+  fetchImpl: typeof fetch,
+  token: string,
+  listener: (event: DispatchRdStreamEvent) => void,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  const response = await fetchImpl(`/api/dispatch/rd/events?token=${encodeURIComponent(token)}`, {
+    credentials: "omit",
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: "text/event-stream",
+    },
+    ...(signal ? { signal } : {}),
+  });
+  if (!response.ok || !response.body) {
+    const text = await response.text();
+    const parsed = text === "" ? null : safeParse(text);
+    const errorBody = asError(parsed);
+    throw new BrowserDaemonError(
+      response.status,
+      errorBody?.code ?? "HTTP_ERROR",
+      errorBody?.message ?? (response.statusText || "桌面协同实时通道失败"),
+    );
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (!signal?.aborted) {
+      const chunk = await reader.read();
+      if (chunk.done) return;
+      buffer += decoder.decode(chunk.value, { stream: true });
+      const parsed = drainSse(buffer);
+      buffer = parsed.rest;
+      for (const frame of parsed.frames) {
+        const value = safeParse(frame.data);
+        if (
+          value !== null &&
+          typeof value === "object" &&
+          "from" in value &&
+          typeof value.from === "string" &&
+          "kind" in value &&
+          (value.kind === "rd.ice" || value.kind === "rd.state") &&
+          "data" in value &&
+          value.data !== null &&
+          typeof value.data === "object"
+        ) {
+          listener(value as DispatchRdStreamEvent);
         }
       }
     }

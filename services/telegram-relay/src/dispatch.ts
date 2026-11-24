@@ -23,8 +23,31 @@ export interface HelloDispatch {
   projects: Array<{ id: string; name: string }>;
   maxMode: "approval-required" | "auto-accept-edits" | "auto" | "full-access";
   viewT3?: boolean;
+  remoteDesktop?: boolean;
   role?: "desktop" | "server";
 }
+
+export interface RelayTurnConfig {
+  /** 逗号分隔或数组形式的 turn:/turns: URL 列表。 */
+  urls: string[];
+  /** coturn static-auth-secret，用于动态签发临时 TURN 凭据。 */
+  secret?: string;
+  /** 凭据有效秒数，默认 43200（12 小时）。 */
+  ttlSeconds?: number;
+}
+
+export interface RelayIceServer {
+  urls: string[];
+  username?: string;
+  credential?: string;
+}
+
+export const DEFAULT_STUN_URLS = [
+  "stun:stun.cloudflare.com:3478",
+  "stun:stun.miwifi.com:3478",
+  "stun:stun.qq.com:3478",
+  "stun:stun.l.google.com:19302",
+] as const;
 
 export type DispatchTimer = ReturnType<typeof globalThis.setTimeout>;
 
@@ -40,6 +63,8 @@ export interface DispatchPorts {
   enqueue?(task: () => Promise<void> | void): void;
   /** 待结果超时毫秒数，默认 5 分钟。 */
   pendingTimeoutMs?: number;
+  /** 可选 TURN 中继配置（未配置时仅下发默认公共 STUN 节点）。 */
+  turn?: RelayTurnConfig;
   /** 可选定时器注入，方便测试。 */
   setTimer?: (fn: () => void, ms: number) => DispatchTimer;
   clearTimer?: (timer: DispatchTimer) => void;
@@ -66,9 +91,17 @@ const TUN_FRAME_MAX_BYTES = 160 * 1024;
 const TUN_RATE_LIMIT = 12_000;
 const TUN_SID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 const DEFAULT_PENDING_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_TURN_TTL_SECONDS = 12 * 3600;
 
 const ALLOWED_MODES = new Set(["approval-required", "auto-accept-edits", "auto", "full-access"]);
 const SAFE_KIND_RE = /^[A-Za-z0-9._:-]{1,64}$/;
+
+async function hmacSha1Base64(secret: string, message: string): Promise<string> {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+  const sig = await crypto.subtle.sign("HMAC", key, enc.encode(message));
+  return Buffer.from(sig).toString("base64");
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -111,6 +144,9 @@ function validateHelloDispatch(value: unknown): { ok: true; dispatch: HelloDispa
   if (value.viewT3 !== undefined && typeof value.viewT3 !== "boolean") {
     return { ok: false, error: "hello.dispatch.viewT3 必须是布尔值" };
   }
+  if (value.remoteDesktop !== undefined && typeof value.remoteDesktop !== "boolean") {
+    return { ok: false, error: "hello.dispatch.remoteDesktop 必须是布尔值" };
+  }
   if (value.role !== undefined && value.role !== "desktop" && value.role !== "server") {
     return { ok: false, error: "hello.dispatch.role 不合法" };
   }
@@ -123,6 +159,7 @@ function validateHelloDispatch(value: unknown): { ok: true; dispatch: HelloDispa
     projects,
     maxMode: value.maxMode as HelloDispatch["maxMode"],
     ...(value.viewT3 !== undefined ? { viewT3: value.viewT3 } : {}),
+    ...(value.remoteDesktop !== undefined ? { remoteDesktop: value.remoteDesktop } : {}),
     ...(value.role !== undefined ? { role: value.role } : {}),
   };
   if (Buffer.byteLength(JSON.stringify(normalized), "utf8") > HELLO_DISPATCH_MAX_BYTES) {
@@ -187,7 +224,7 @@ export class DispatchRouter {
     }
     if (!isPlainObject(parsed) || parsed.t !== "req" || typeof parsed.id !== "string") return false;
     const op = parsed.op;
-    if (op !== "hello" && op !== "cmd" && op !== "result" && op !== "event" && op !== "tun") return false;
+    if (op !== "hello" && op !== "cmd" && op !== "result" && op !== "event" && op !== "tun" && op !== "turn") return false;
 
     const id = parsed.id;
     const byteLength = Buffer.byteLength(raw, "utf8");
@@ -207,7 +244,37 @@ export class DispatchRouter {
       case "tun":
         await this.#handleTun(socket, id, parsed, byteLength);
         return true;
+      case "turn":
+        await this.#handleTurn(socket, id);
+        return true;
     }
+  }
+
+  /**
+   * 为已入网设备下发 STUN + 可选动态 TURN 临时凭据（coturn static-auth-secret HMAC-SHA1）。
+   */
+  async #handleTurn(socket: DispatchSocket, id: string): Promise<void> {
+    const now = this.#ports.now();
+    if (socket.auth !== "enrolled") {
+      await this.#ports.audit({ ts: now, from: socket.deviceId, to: null, kind: "turn", outcome: "rejected:not_enrolled" });
+      sendJson(socket, { t: "res", id, ok: false, error: "请先入网" });
+      return;
+    }
+    const iceServers: RelayIceServer[] = [{ urls: [...DEFAULT_STUN_URLS] }];
+    const turn = this.#ports.turn;
+    const ttl = turn?.ttlSeconds && turn.ttlSeconds > 0 ? Math.floor(turn.ttlSeconds) : DEFAULT_TURN_TTL_SECONDS;
+    const cleanUrls = (turn?.urls ?? []).map((u) => u.trim()).filter((u) => /^turns?:/iu.test(u));
+    if (cleanUrls.length > 0) {
+      if (turn?.secret && turn.secret.length > 0) {
+        const expiry = Math.floor(now / 1000) + ttl;
+        const username = `${expiry}:${socket.deviceId}`;
+        const credential = await hmacSha1Base64(turn.secret, username);
+        iceServers.push({ urls: cleanUrls, username, credential });
+      } else {
+        iceServers.push({ urls: cleanUrls });
+      }
+    }
+    sendJson(socket, { t: "res", id, ok: true, result: { iceServers, ttl } });
   }
 
   /**

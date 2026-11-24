@@ -37,6 +37,7 @@ import ai.youbrain.mobile.service.RelayForegroundService
 import ai.youbrain.mobile.ui.AgentScreen
 import ai.youbrain.mobile.ui.OnboardingScreen
 import ai.youbrain.mobile.ui.PushCenterScreen
+import ai.youbrain.mobile.ui.RemoteDesktopScreen
 import ai.youbrain.mobile.ui.SettingsScreen
 import ai.youbrain.mobile.ui.T3DeckScreen
 import ai.youbrain.mobile.ui.TodoLogic
@@ -189,6 +190,7 @@ private fun MainTabsShell(
     var targetT3DeviceId by remember { mutableStateOf<String?>(null) }
     var targetT3ThreadUrl by remember { mutableStateOf<String?>(null) }
     var everOpenedT3 by remember { mutableStateOf(false) }
+    var remoteDesktopDeviceId by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(state.navTarget) {
         val nav = state.navTarget ?: return@LaunchedEffect
@@ -207,7 +209,8 @@ private fun MainTabsShell(
 
     val hasOnlineViewT3 = state.connectionState == ConnectionState.OK &&
         state.relayState.devices.any {
-            it.id != state.deviceId && it.online && it.enrolled == true && it.dispatch?.viewT3 == true
+            it.id != state.deviceId && it.online && it.enrolled == true &&
+                (it.dispatch?.viewT3 == true || it.dispatch?.remoteDesktop == true)
         }
     LaunchedEffect(hasOnlineViewT3) {
         if (hasOnlineViewT3 && !everOpenedT3) {
@@ -220,94 +223,113 @@ private fun MainTabsShell(
         TodoLogic.totalReviewCount(state.todoBoards.mapValues { it.value.board })
     }
 
+    val activeRdDevice = remember(remoteDesktopDeviceId, state.relayState.devices) {
+        val id = remoteDesktopDeviceId ?: return@remember null
+        state.relayState.devices.firstOrNull { it.id == id }
+    }
+
     val c = IosTheme.colors
 
-    Scaffold(
-        containerColor = c.groupedBg,
-        contentWindowInsets = WindowInsets(0, 0, 0, 0),
-        topBar = {
-            IosNavigationBar(
-                title = when (currentTab) {
-                    AppTab.AGENT -> "主控"
-                    AppTab.T3 -> "设备 T3"
-                    AppTab.TODOS -> "设备 TODO"
-                    AppTab.PUSHES -> "消息"
-                    AppTab.SETTINGS -> "设置"
-                },
-                connectionState = state.connectionState,
-                onReconnect = { repository.reconnectNow() },
-            )
-        },
-        bottomBar = {
-            IosTabBar(
-                currentTab = currentTab,
-                unreadCount = state.unreadPushCount,
-                todoReviewCount = todoReviewCount,
-                onSelectTab = { nextTab ->
-                    currentTab = nextTab
-                    if (nextTab == AppTab.PUSHES) {
-                        repository.markPushesRead()
-                    }
-                },
-            )
-        },
-    ) { padding ->
-        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
-            if (everOpenedT3) {
-                T3DeckScreen(
-                    state = state,
-                    repository = repository,
-                    isVisibleTab = (currentTab == AppTab.T3),
-                    preferredDeviceId = targetT3DeviceId,
-                    preferredThreadUrl = targetT3ThreadUrl,
-                    onFileChooser = onFileChooser,
-                    onJumpSettings = { currentTab = AppTab.SETTINGS },
+    Box(modifier = Modifier.fillMaxSize()) {
+        Scaffold(
+            containerColor = c.groupedBg,
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
+            topBar = {
+                IosNavigationBar(
+                    title = when (currentTab) {
+                        AppTab.AGENT -> "主控"
+                        AppTab.T3 -> "设备 T3"
+                        AppTab.TODOS -> "设备 TODO"
+                        AppTab.PUSHES -> "消息"
+                        AppTab.SETTINGS -> "设置"
+                    },
+                    connectionState = state.connectionState,
+                    onReconnect = { repository.reconnectNow() },
                 )
-            }
-            if (currentTab != AppTab.T3) {
-                Surface(
-                    color = c.groupedBg,
-                    modifier = Modifier.fillMaxSize(),
-                ) {
-                    when (currentTab) {
-                        AppTab.AGENT -> AgentScreen(
-                            state = state,
-                            repository = repository,
-                            onOpenDeviceT3 = { devId, threadUrl ->
-                                targetT3DeviceId = devId
-                                targetT3ThreadUrl = threadUrl
-                                currentTab = AppTab.T3
-                            },
-                        )
-                        AppTab.TODOS -> TodoScreen(
-                            state = state,
-                            repository = repository,
-                            isVisibleTab = true,
-                            onOpenDeviceT3 = { devId, threadUrl ->
-                                targetT3DeviceId = devId
-                                targetT3ThreadUrl = threadUrl
-                                currentTab = AppTab.T3
-                            },
-                        )
-                        AppTab.PUSHES -> PushCenterScreen(
-                            state = state,
-                            repository = repository,
-                            onOpenDeviceT3 = { devId, threadUrl ->
-                                targetT3DeviceId = devId
-                                targetT3ThreadUrl = threadUrl
-                                currentTab = AppTab.T3
-                            },
-                        )
-                        AppTab.SETTINGS -> SettingsScreen(
-                            state = state,
-                            repository = repository,
-                            onToggleBackgroundService = onToggleBackgroundService,
-                            onUnenroll = onUnenroll,
-                        )
-                        AppTab.T3 -> Unit
+            },
+            bottomBar = {
+                IosTabBar(
+                    currentTab = currentTab,
+                    unreadCount = state.unreadPushCount,
+                    todoReviewCount = todoReviewCount,
+                    onSelectTab = { nextTab ->
+                        currentTab = nextTab
+                        if (nextTab == AppTab.PUSHES) {
+                            repository.markPushesRead()
+                        }
+                    },
+                )
+            },
+        ) { padding ->
+            Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+                if (everOpenedT3) {
+                    T3DeckScreen(
+                        state = state,
+                        repository = repository,
+                        isVisibleTab = (currentTab == AppTab.T3 && activeRdDevice == null),
+                        preferredDeviceId = targetT3DeviceId,
+                        preferredThreadUrl = targetT3ThreadUrl,
+                        onFileChooser = onFileChooser,
+                        onJumpSettings = { currentTab = AppTab.SETTINGS },
+                        onOpenRemoteDesktop = { dev ->
+                            remoteDesktopDeviceId = dev.id
+                        },
+                    )
+                }
+                if (currentTab != AppTab.T3) {
+                    Surface(
+                        color = c.groupedBg,
+                        modifier = Modifier.fillMaxSize(),
+                    ) {
+                        when (currentTab) {
+                            AppTab.AGENT -> AgentScreen(
+                                state = state,
+                                repository = repository,
+                                onOpenDeviceT3 = { devId, threadUrl ->
+                                    targetT3DeviceId = devId
+                                    targetT3ThreadUrl = threadUrl
+                                    currentTab = AppTab.T3
+                                },
+                            )
+                            AppTab.TODOS -> TodoScreen(
+                                state = state,
+                                repository = repository,
+                                isVisibleTab = true,
+                                onOpenDeviceT3 = { devId, threadUrl ->
+                                    targetT3DeviceId = devId
+                                    targetT3ThreadUrl = threadUrl
+                                    currentTab = AppTab.T3
+                                },
+                            )
+                            AppTab.PUSHES -> PushCenterScreen(
+                                state = state,
+                                repository = repository,
+                                onOpenDeviceT3 = { devId, threadUrl ->
+                                    targetT3DeviceId = devId
+                                    targetT3ThreadUrl = threadUrl
+                                    currentTab = AppTab.T3
+                                },
+                            )
+                            AppTab.SETTINGS -> SettingsScreen(
+                                state = state,
+                                repository = repository,
+                                onToggleBackgroundService = onToggleBackgroundService,
+                                onUnenroll = onUnenroll,
+                            )
+                            AppTab.T3 -> Unit
+                        }
                     }
                 }
             }
+        }
+
+        if (activeRdDevice != null) {
+            RemoteDesktopScreen(
+                device = activeRdDevice,
+                displayName = state.displayName(activeRdDevice),
+                repository = repository,
+                onClose = { remoteDesktopDeviceId = null },
+            )
         }
     }
 }

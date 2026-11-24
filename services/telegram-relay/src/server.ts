@@ -5,7 +5,7 @@ import type { ServerWebSocket } from "bun";
 
 import { RelayAuditLog } from "./audit.js";
 import { RelayCore, type RelayStorage, type TgUpdate } from "./core.js";
-import { DispatchRouter, type DispatchSocket, type SocketAuth } from "./dispatch.js";
+import { DispatchRouter, type DispatchSocket, type RelayTurnConfig, type SocketAuth } from "./dispatch.js";
 import { cleanText, DEVICE_ID_RE, EnrollStore, sameText, TOKEN_PREFIX } from "./enroll.js";
 
 /**
@@ -35,6 +35,8 @@ export interface RelayServerOptions {
   publicOrigin?: string;
   /** 路由设备（VPS 的 deviceId）：不引用的 Telegram 消息交给它按内容判断是回哪条推送。 */
   routerDeviceId?: string;
+  /** 可选 WebRTC TURN 服务器配置（RELAY_TURN_URLS / RELAY_TURN_SECRET）。 */
+  turn?: RelayTurnConfig;
   now?: () => number;
   randomInt?: (max: number) => number;
 }
@@ -239,6 +241,7 @@ export async function startRelayServer(options: RelayServerOptions): Promise<Rel
       }).catch(() => undefined);
     },
     ...(options.pendingTimeoutMs !== undefined ? { pendingTimeoutMs: options.pendingTimeoutMs } : {}),
+    ...(options.turn !== undefined ? { turn: options.turn } : {}),
   });
 
   const core: RelayCore = new RelayCore({
