@@ -138,6 +138,28 @@ function isBlockedWeriftCandidate(
   return false;
 }
 
+/** 读取发送端 remote-inbound-rtp 统计，返回自上次读取以来新增 RTT 样本的平均值（毫秒）。 */
+function takeNewRttSampleMs(
+  sender: { collectStats(timestamp: number): unknown[] },
+  tracker: { total: number; count: number },
+): number | null {
+  let remote: { totalRoundTripTime?: unknown; roundTripTimeMeasurements?: unknown } | undefined;
+  try {
+    remote = sender
+      .collectStats(Date.now())
+      .find((entry) => (entry as { type?: unknown }).type === "remote-inbound-rtp") as typeof remote;
+  } catch {
+    return null;
+  }
+  const total = remote?.totalRoundTripTime;
+  const count = remote?.roundTripTimeMeasurements;
+  if (typeof total !== "number" || typeof count !== "number" || count <= tracker.count) return null;
+  const avgSeconds = (total - tracker.total) / (count - tracker.count);
+  tracker.total = total;
+  tracker.count = count;
+  return avgSeconds > 0 ? avgSeconds * 1000 : null;
+}
+
 function isPeerConnectionUsingRelay(pc: RTCPeerConnection): boolean {
   const transports = (
     pc as unknown as {
@@ -435,13 +457,19 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       remoteIceChain: Promise.resolve(),
     };
 
+    const rttTracker = { total: 0, count: 0 };
     sender.onRtcp.subscribe((packet) => {
       if (session.closed) return;
       const reports = (packet as { reports?: Array<{ ssrc: number; fractionLost: number }> }).reports;
       if (!Array.isArray(reports)) return;
       for (const report of reports) {
         if (report.ssrc === sender.ssrc) {
-          session.bitrate.onReceiverReport(report.fractionLost, Date.now());
+          const now = Date.now();
+          // 先判排队再按丢包加速：同一份报告不丢包但 RTT 已在涨时，不能先把码率加上去。
+          // werift 在触发 onRtcp 前已按 LSR/DLSR 记下 RTT；取两次报告间新增样本的均值。
+          const rttMs = takeNewRttSampleMs(sender, rttTracker);
+          if (rttMs !== null) session.bitrate.onRoundTripTime(rttMs, now);
+          session.bitrate.onReceiverReport(report.fractionLost, now);
         }
       }
     });
@@ -947,7 +975,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
         t: "stats",
         bitrateBps: this.#appliedBitrate ?? session.bitrate.targetBps,
         lossPct: Math.round(session.bitrate.lastLoss * 1000) / 10,
-        rttMs: null,
+        rttMs: session.bitrate.lastRttMs === null ? null : Math.round(session.bitrate.lastRttMs),
       });
     }, STATS_INTERVAL_MS);
     session.statsTimer.unref?.();

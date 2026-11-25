@@ -956,3 +956,51 @@ describe("RemoteDesktopHostManager 远端候选投递", () => {
     await clientPc.close();
   }, 20_000);
 });
+
+describe("LossBasedBitrateController 排队时延感知", () => {
+  /** 简单瓶颈模型：码率超过容量时多出的比特进入队列，RTT = 基线 + 排队时延；全程不丢包（代理隧道/中继的典型表现）。 */
+  function simulateQueueingLink(bc: LossBasedBitrateController, opts: { capacityBps: number; baseRttMs: number; seconds: number }) {
+    let queueBits = 0;
+    let maxRtt = 0;
+    const rtts: number[] = [];
+    const stepMs = 500;
+    for (let t = 0; t <= opts.seconds * 1000; t += stepMs) {
+      // 报告反映上一段时间积累的排队；控制器调整后，新码率作用于下一段时间
+      const rtt = opts.baseRttMs + (queueBits / opts.capacityBps) * 1000;
+      maxRtt = Math.max(maxRtt, rtt);
+      rtts.push(rtt);
+      bc.onRoundTripTime(rtt, t);
+      bc.onReceiverReport(0, t);
+      queueBits = Math.max(0, queueBits + ((bc.targetBps - opts.capacityBps) * stepMs) / 1000);
+    }
+    return { maxRtt, rtts };
+  }
+
+  test("不丢包但排队时按 RTT 降码率，不会排出秒级延迟", () => {
+    const bc = new LossBasedBitrateController({ maxBps: 8_500_000 });
+    bc.setRelayMode(true);
+    const { maxRtt, rtts } = simulateQueueingLink(bc, { capacityBps: 1_500_000, baseRttMs: 340, seconds: 60 });
+    // 只看丢包时这条链路会一路排到数十秒；现在起步过冲的峰值也应压在 1.5 秒以内，稳定后回到基线附近
+    expect(maxRtt).toBeLessThan(1_500);
+    const tail = rtts.slice(-20);
+    expect(Math.max(...tail)).toBeLessThan(340 + 250);
+    // 容量低于按比例算的下限（8.5M×20%=1.7M）时，也要能降到容量附近（允许围绕容量小幅探测）
+    expect(bc.targetBps).toBeLessThanOrEqual(1_500_000 * 1.15);
+    expect(bc.lastRttMs).not.toBeNull();
+  });
+
+  test("RTT 平稳时不误降，可升回上限；切换链路后重新学习基线", () => {
+    const bc = new LossBasedBitrateController({ maxBps: 8_500_000 });
+    bc.setRelayMode(true);
+    simulateQueueingLink(bc, { capacityBps: 50_000_000, baseRttMs: 340, seconds: 60 });
+    expect(bc.targetBps).toBe(8_500_000);
+
+    // 直连基线 20ms 学习一段后切到中继（基线 340ms）：不能把新链路的高基线误判为排队
+    const direct = new LossBasedBitrateController({ maxBps: 8_500_000 });
+    for (let t = 0; t < 5_000; t += 500) direct.onRoundTripTime(20, t);
+    direct.setRelayMode(true);
+    const before = direct.targetBps;
+    for (let t = 5_000; t < 8_000; t += 500) direct.onRoundTripTime(340, t);
+    expect(direct.targetBps).toBe(before);
+  });
+});
