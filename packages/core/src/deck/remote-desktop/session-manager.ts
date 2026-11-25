@@ -52,6 +52,7 @@ const STATS_INTERVAL_MS = 2_000;
 const FILE_DRAIN_LOW_WATER = 1024 * 1024;
 const MAX_DOWNLOAD_ALLOW = 200;
 const MDNS_LOOKUP_TIMEOUT_MS = 500;
+const ICE_FAILED_MESSAGE = "远程桌面连接失败：P2P 直连与 TURN 中继均未打通";
 
 export type MdnsHostLookup = (hostname: string) => Promise<string | null>;
 
@@ -469,7 +470,14 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
           activeDisplayId: cur.activeDisplayId,
           permissions: cur.permissions,
         });
-      } else if (state === "failed" || state === "closed") {
+      } else if (state === "failed") {
+        // 建连失败要带原因上报，否则控制端只能显示“已断开”，看不出是 ICE 没打通。
+        this.#events?.onState(session.peerDeviceId, session.sessionId, {
+          state: "error",
+          error: ICE_FAILED_MESSAGE,
+        });
+        void this.#disposeSession(session, false);
+      } else if (state === "closed") {
         void this.#disposeSession(session, true);
       }
     });

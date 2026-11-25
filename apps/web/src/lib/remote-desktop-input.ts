@@ -594,6 +594,7 @@ export function applyZeroPlayoutDelay(receiver: RTCRtpReceiver): void {
 
 const BROWSER_CANDIDATE_RE = /^(?:a=)?candidate:\S+\s+\d+\s+\S+\s+\d+\s+([^\s]+)\s+\d+\s+typ\s+\S+(.*)$/iu;
 const BROWSER_RADDR_RE = /\braddr\s+([^\s]+)/iu;
+const UNSPECIFIED_RADDR_RE = /^(?:0\.0\.0\.0|::|\[::\])$/u;
 
 /**
  * 判断浏览器收集或收到的 IP 是否属于代理 Fake-IP / TUN 虚拟网段（`198.18.0.0/15` 等）或链路本地伪地址，
@@ -639,7 +640,8 @@ export function isBlockedBrowserIceCandidate(candidateLine: string): boolean {
   const rest = match[2] ?? "";
   if (isBlockedBrowserIceIp(addr)) return true;
   const raddr = BROWSER_RADDR_RE.exec(rest)?.[1];
-  if (raddr && isBlockedBrowserIceIp(raddr)) return true;
+  // mDNS 隐私保护下 srflx / relay 的 raddr 固定为 `0.0.0.0` / `::`，属于占位地址，不能据此丢弃候选。
+  if (raddr && !UNSPECIFIED_RADDR_RE.test(raddr) && isBlockedBrowserIceIp(raddr)) return true;
   return false;
 }
 

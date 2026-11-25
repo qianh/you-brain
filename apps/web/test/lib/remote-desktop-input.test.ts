@@ -299,6 +299,20 @@ describe("RemoteFileClient", () => {
     ).toBe(true);
     expect(isBlockedBrowserIceCandidate("candidate:5 1 UDP 2122260223 100.88.1.9 50003 typ host")).toBe(false);
     expect(isBlockedBrowserIceCandidate("candidate:6 1 UDP 2122260223 abcd-1234.local 50004 typ host")).toBe(false);
+    // mDNS 隐私保护下浏览器 srflx / relay 的 raddr 固定为 0.0.0.0 / ::，不能当伪地址丢弃
+    expect(
+      isBlockedBrowserIceCandidate(
+        "candidate:7 1 udp 1677729535 61.174.30.194 40159 typ srflx raddr 0.0.0.0 rport 0 generation 0",
+      ),
+    ).toBe(false);
+    expect(
+      isBlockedBrowserIceCandidate(
+        "candidate:8 1 udp 41885439 107.174.154.253 50000 typ relay raddr 0.0.0.0 rport 0 generation 0",
+      ),
+    ).toBe(false);
+    expect(
+      isBlockedBrowserIceCandidate("candidate:9 1 udp 1677729535 2409:8a00:1234::99 40160 typ srflx raddr :: rport 0"),
+    ).toBe(false);
 
     const inputSdp = [
       "v=0",

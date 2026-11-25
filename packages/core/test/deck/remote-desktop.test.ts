@@ -742,6 +742,25 @@ describe("RemoteDesktopHostManager WebRTC end-to-end loopback", () => {
         inspected.blockedIps,
       ),
     ).toBe(false);
+    // 浏览器 mDNS 隐私保护下 srflx / relay 的 raddr 是 0.0.0.0 / :: 占位，必须保留，否则跨网 P2P 与 TURN 全断
+    expect(
+      isBlockedIceCandidateLine(
+        "candidate:6 1 udp 1677729535 61.174.30.194 40159 typ srflx raddr 0.0.0.0 rport 0 generation 0",
+        inspected.blockedIps,
+      ),
+    ).toBe(false);
+    expect(
+      isBlockedIceCandidateLine(
+        "candidate:7 1 udp 41885439 107.174.154.253 50000 typ relay raddr 0.0.0.0 rport 0 generation 0",
+        inspected.blockedIps,
+      ),
+    ).toBe(false);
+    expect(
+      isBlockedIceCandidateLine(
+        "candidate:8 1 udp 1677729535 2409:8a00:1234::99 40160 typ srflx raddr :: rport 0",
+        inspected.blockedIps,
+      ),
+    ).toBe(false);
 
     const rawSdp = [
       "v=0",

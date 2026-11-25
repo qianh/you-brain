@@ -177,6 +177,12 @@ export function inspectLocalIceInterfaces(
   return { preferredHostAddresses, blockedIps };
 }
 
+/** `0.0.0.0` / `::`：浏览器隐藏真实内网地址时 `raddr` 使用的占位地址。 */
+function isUnspecifiedIp(ip: string): boolean {
+  const clean = normalizeIpLiteral(ip);
+  return clean === "0.0.0.0" || clean === "::";
+}
+
 /**
  * 检查单条 ICE candidate 字符串（支持带或不带 `a=` 前缀）是否包含代理 Fake-IP / TUN 地址，
  * 同时拦截以代理虚拟网卡为底座（`raddr 198.18.x.x`）派生出的 `srflx` / `relay` 候选。
@@ -195,7 +201,12 @@ export function isBlockedIceCandidateLine(
     return true;
   }
   const raddrMatch = RADDR_RE.exec(rest);
-  if (raddrMatch?.[1] && isProxyFakeOrBogusIp(raddrMatch[1], extraBlocked)) {
+  // 浏览器开启 mDNS 隐私保护时会把 srflx / relay 的 raddr 改写成 `0.0.0.0` / `::`，这是占位而非伪地址，不能据此拦截。
+  if (
+    raddrMatch?.[1] &&
+    !isUnspecifiedIp(raddrMatch[1]) &&
+    isProxyFakeOrBogusIp(raddrMatch[1], extraBlocked)
+  ) {
     return true;
   }
   return false;
