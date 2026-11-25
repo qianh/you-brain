@@ -351,12 +351,65 @@ describe("TelegramBridge", () => {
     await until(() => ctx.telegram.sent.some((item) => item.text.includes("已经关闭")), "reused pane");
 
     ctx.telegram.say(OWNER, "go", 9999);
-    await until(() => ctx.telegram.sent.some((item) => item.text.includes("提醒已失效")), "unknown");
+    await until(() => ctx.telegram.sent.some((item) => item.text.includes("不是可回复的提醒")), "unknown");
 
     ctx.telegram.say(OWNER, "/help");
     await until(() => ctx.telegram.sent.some((item) => item.text.includes("dir3 在等你回复")), "help lists waiting");
     expect(ctx.sends).toEqual([]);
     ctx.bridge.stop();
+  });
+
+  it("accepts replies to a pushed notice for 1 hour, even after a restart", async () => {
+    const ctx = await paired();
+    ctx.setSessions([session(3, "waiting")]);
+    push(ctx, notice(1, 3));
+    await ctx.bridge.flush();
+    const pushedId = 500 + ctx.telegram.nextId - 1;
+    ctx.bridge.stop();
+
+    // 可回复的提醒落盘在 telegram-replies.json，重启后读回。
+    const repliesPath = join(ctx.dir, "deck", "telegram-replies.json");
+    let saved: { sent?: Array<{ messageId: number }> } = {};
+    for (let index = 0; index < 200 && !saved.sent?.some((item) => item.messageId === pushedId); index += 1) {
+      saved = await readFile(repliesPath, "utf8").then((text) => JSON.parse(text)).catch(() => ({}));
+      if (!saved.sent?.some((item) => item.messageId === pushedId)) await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(saved.sent?.some((item) => item.messageId === pushedId)).toBe(true);
+
+    const sends: Tty7SendInput[] = [];
+    const again = new TelegramBridge({
+      configPath: join(ctx.dir, "deck", "telegram.json"),
+      token: ctx.store,
+      notices: () => ctx.list,
+      sessions: async () => ({
+        available: true,
+        detail: "",
+        workspaces: [],
+        sessions: [session(3, "waiting")],
+        harnesses: [],
+        appearance: null,
+      }),
+      send: async (input) => {
+        sends.push(input);
+      },
+      dismiss: () => undefined,
+      fetch: ctx.telegram.fetch,
+      now: () => ctx.clock.now,
+      pollTimeoutSec: 0,
+      retryMs: [5],
+    });
+    await again.start();
+
+    ctx.clock.now += 59 * 60_000;
+    ctx.telegram.say(OWNER, "重启后也能回", pushedId);
+    await until(() => sends.length === 1, "delivered within 1 hour after restart");
+    expect(sends[0]).toEqual({ pane: 3, text: "重启后也能回", enter: true });
+
+    ctx.clock.now += 2 * 60_000;
+    ctx.telegram.say(OWNER, "太晚了", pushedId);
+    await until(() => ctx.telegram.sent.some((item) => item.text.includes("已超过 1 小时")), "expired after 1 hour");
+    expect(sends).toHaveLength(1);
+    again.stop();
   });
 
   it("sends a plain message to the most recently pushed session", async () => {

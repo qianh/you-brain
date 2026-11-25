@@ -143,7 +143,10 @@ function relayError(error: unknown): Error {
 const PAIR_TTL_MS = 10 * 60_000;
 const PAIR_MAX_FAILURES = 5;
 const PAIR_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const SENT_KEPT = 200;
+/** 推送过的提醒在这段时间内都可以回复（手机快捷回复和 Telegram 引用回复都算）；记录落盘，重启后仍有效。 */
+export const REPLY_TTL_MS = 60 * 60_000;
+/** 1 小时内保留的可回复提醒上限，防止异常刷屏时记录无限增长。 */
+const REPLIES_KEPT = 500;
 const BODY_MAX = 3_000;
 const DEFAULT_RETRY_MS = [3_000, 10_000, 30_000, 60_000] as const;
 /** 直接发消息时，最近会话超过这么久就不再默认发给它，免得打进早已无关的会话。 */
@@ -155,6 +158,31 @@ type SentNotice =
   | { kind: "t3"; threadId: string; name: string }
   /** 跨设备派活出去的会话：回复经派活中枢追加给目标设备上的那个会话。 */
   | { kind: "dispatch"; dispatchId: string; name: string };
+
+const SentNoticeSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("tty7"), pane: z.number().int(), cwd: z.string(), name: z.string() }),
+  z.object({ kind: z.literal("t3"), threadId: z.string(), name: z.string() }),
+  z.object({ kind: z.literal("dispatch"), dispatchId: z.string(), name: z.string() }),
+]);
+
+/** `<dataDir>/deck/telegram-replies.json`：1 小时内可回复的提醒与其会话。 */
+const RepliesSchema = z.object({
+  mobile: z
+    .array(z.object({ token: z.string(), at: z.number(), target: SentNoticeSchema }))
+    .catch([])
+    .default([]),
+  sent: z
+    .array(z.object({ messageId: z.number().int(), at: z.number(), target: SentNoticeSchema }))
+    .catch([])
+    .default([]),
+});
+
+interface ReplyEntry {
+  target: SentNotice;
+  at: number;
+}
+
+const REPLY_EXPIRED = "这条提醒已超过 1 小时，不能再回复；请到对应会话处理。";
 
 /** T3 会话的读写（daemon 在 T3 适配器就绪后挂上）。 */
 export interface TelegramT3Port {
@@ -259,8 +287,9 @@ export class TelegramBridge {
   #loop: AbortController | null = null;
   #started = false;
   #cursor: { epoch: string; seq: number } | null = null;
-  readonly #sent = new Map<number, SentNotice>();
-  readonly #mobileReplies = new Map<string, SentNotice>();
+  readonly #sent = new Map<number, ReplyEntry>();
+  readonly #mobileReplies = new Map<string, ReplyEntry>();
+  #repliesChain: Promise<void> = Promise.resolve();
   /** 直接发的消息（没回复某条提醒）发给它：最近推送过、或最近回复过的会话。 */
   #recent: { target: SentNotice; at: number } | null = null;
   /** 路由设备问过用户「是哪一条」之后，等用户回序号。 */
@@ -295,6 +324,7 @@ export class TelegramBridge {
     const list = this.#options.notices();
     this.#cursor = { epoch: list.epoch, seq: list.latest };
     this.#stored = await readJsonFile(this.#options.configPath, (value) => StoredSchema.parse(value), { ...EMPTY });
+    await this.#loadReplies();
     const relay = this.#stored.relay;
     if (relay) {
       const relayToken = (await this.#options.relayToken?.get().catch(() => null))?.trim() ?? "";
@@ -417,7 +447,7 @@ export class TelegramBridge {
       case "unbind":
         this.#pair = null;
         await this.#save({ chatId: null, chatName: null });
-        this.#sent.clear();
+        this.#clearSent();
         this.#recent = null;
         break;
       case "test": {
@@ -454,7 +484,7 @@ export class TelegramBridge {
     } else if (action === "unbind") {
       this.#relayPair = null;
       await relay.request("unbind");
-      this.#sent.clear();
+      this.#clearSent();
       this.#recent = null;
     } else {
       if (!this.#relayState?.bound) throw new YouBrainError("INVALID_INPUT", "还没有绑定 Telegram");
@@ -503,7 +533,7 @@ export class TelegramBridge {
     this.#loop = null;
     this.#api = null;
     this.#pair = null;
-    this.#sent.clear();
+    this.#clearSent();
     this.#recent = null;
     await this.#save({ chatId: null, chatName: null, relay });
     if (this.#started) this.#runRelay(relay, { token });
@@ -518,7 +548,7 @@ export class TelegramBridge {
     this.#relayPair = null;
     this.#connection = "off";
     this.#error = null;
-    this.#sent.clear();
+    this.#clearSent();
     this.#recent = null;
     await this.#options.relayKey?.delete();
     await this.#options.relayToken?.delete();
@@ -547,7 +577,7 @@ export class TelegramBridge {
         this.#relayState = state;
         if (state.bound) this.#relayPair = null;
         else {
-          this.#sent.clear();
+          this.#clearSent();
           this.#recent = null;
         }
         this.#options.dispatch?.setState(state);
@@ -715,12 +745,16 @@ export class TelegramBridge {
       await this.#deliver(message, recent.target, text);
       return;
     }
-    const target = this.#sent.get(replyTo);
-    if (!target) {
-      await this.#reply(message, "这条消息不是可回复的提醒，或提醒已失效（U-Brain 重启过）。请回复最新的提醒，或到电脑上处理。");
+    const entry = this.#sent.get(replyTo);
+    if (!entry) {
+      await this.#reply(message, "这条消息不是可回复的提醒，或提醒已超过 1 小时。请回复最新的提醒，或到电脑上处理。");
       return;
     }
-    await this.#deliver(message, target, text);
+    if (this.#now() - entry.at > REPLY_TTL_MS) {
+      await this.#reply(message, REPLY_EXPIRED);
+      return;
+    }
+    await this.#deliver(message, entry.target, text);
   }
 
   /**
@@ -809,11 +843,11 @@ export class TelegramBridge {
 
   /** 手机端通过签名指令 notice.reply 回复带 replyToken 的推送。 */
   async deliverMobileReply(replyToken: string, text: string): Promise<{ ok: true; targetName: string } | { ok: false; error: string }> {
-    const target = this.#mobileReplies.get(replyToken);
-    if (!target) {
-      return { ok: false, error: "这条提醒已过期或设备已重启，请前往对应会话处理" };
+    const entry = this.#mobileReplies.get(replyToken);
+    if (!entry || this.#now() - entry.at > REPLY_TTL_MS) {
+      return { ok: false, error: REPLY_EXPIRED };
     }
-    const result = await this.#deliverTarget(target, text, `mobile-${replyToken}-${this.#now()}`);
+    const result = await this.#deliverTarget(entry.target, text, `mobile-${replyToken}-${this.#now()}`);
     return result.ok ? { ok: true, targetName: result.targetName } : { ok: false, error: result.error };
   }
 
@@ -880,17 +914,59 @@ export class TelegramBridge {
 
   #registerMobileReply(target: SentNotice): string {
     const token = randomUUID();
-    this.#mobileReplies.set(token, target);
-    if (this.#mobileReplies.size > SENT_KEPT) {
-      this.#mobileReplies.delete(this.#mobileReplies.keys().next().value!);
-    }
+    this.#mobileReplies.set(token, { target, at: this.#now() });
+    this.#persistReplies();
     return token;
   }
 
   #rememberSent(messageId: number, target: SentNotice): void {
-    this.#sent.set(messageId, target);
-    this.#recent = { target, at: this.#now() };
-    if (this.#sent.size > SENT_KEPT) this.#sent.delete(this.#sent.keys().next().value!);
+    const at = this.#now();
+    this.#sent.set(messageId, { target, at });
+    this.#recent = { target, at };
+    this.#persistReplies();
+  }
+
+  #clearSent(): void {
+    this.#sent.clear();
+    this.#persistReplies();
+  }
+
+  get #repliesPath(): string {
+    return this.#options.configPath.replace(/\.json$/u, "") + "-replies.json";
+  }
+
+  /** 去掉超过 1 小时的记录；仍超出上限时丢最早的（Map 按插入顺序）。 */
+  #pruneReplies(): void {
+    const cutoff = this.#now() - REPLY_TTL_MS;
+    for (const map of [this.#mobileReplies, this.#sent] as Map<unknown, ReplyEntry>[]) {
+      for (const [key, entry] of map) if (entry.at < cutoff) map.delete(key);
+      while (map.size > REPLIES_KEPT) map.delete(map.keys().next().value);
+    }
+  }
+
+  async #loadReplies(): Promise<void> {
+    const stored = await readJsonFile(this.#repliesPath, (value) => RepliesSchema.parse(value), { mobile: [], sent: [] }).catch(
+      () => ({ mobile: [], sent: [] }),
+    );
+    for (const item of [...stored.mobile].sort((a, b) => a.at - b.at)) {
+      this.#mobileReplies.set(item.token, { target: item.target, at: item.at });
+    }
+    for (const item of [...stored.sent].sort((a, b) => a.at - b.at)) {
+      this.#sent.set(item.messageId, { target: item.target, at: item.at });
+    }
+    this.#pruneReplies();
+  }
+
+  /** 写回磁盘（串行，失败不影响推送本身）。 */
+  #persistReplies(): void {
+    this.#pruneReplies();
+    const snapshot = {
+      mobile: [...this.#mobileReplies].map(([token, entry]) => ({ token, at: entry.at, target: entry.target })),
+      sent: [...this.#sent].map(([messageId, entry]) => ({ messageId, at: entry.at, target: entry.target })),
+    };
+    this.#repliesChain = this.#repliesChain
+      .then(() => writeJsonFile(this.#repliesPath, snapshot))
+      .catch(() => undefined);
   }
 
   /** 已入网（有设备令牌）时返回中转地址和令牌，没入网返回 null。同账号设备自动入网时用。 */

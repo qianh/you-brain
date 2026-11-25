@@ -504,6 +504,10 @@ describe("移动端主控会话、派活看板、快捷回复与全量推送", (
     expect(r2.ok).toBe(true);
     expect(t3Sends).toEqual([{ threadId: "th-1", text: "继续优化" }]);
 
+    // 不认识（或已超过 1 小时）的回复凭证给出明确提示
+    const r3 = await bridge.deliverMobileReply("no-such-token", "还在吗");
+    expect(r3).toEqual({ ok: false, error: expect.stringContaining("已超过 1 小时") });
+
     bridge.stop();
   });
 
