@@ -25,6 +25,7 @@ import {
   inspectLocalIceInterfaces,
   isBlockedIceCandidateLine,
   isProxyFakeOrBogusIp,
+  isUnspecifiedIp,
   resolveDirectStunIceServers,
   stripBlockedIceCandidatesFromSdp,
 } from "./net-ice.js";
@@ -126,7 +127,12 @@ function isBlockedWeriftCandidate(
   if (candidate.host && !candidate.host.toLowerCase().endsWith(".local") && isProxyFakeOrBogusIp(candidate.host, blockedIps)) {
     return true;
   }
-  if (candidate.relatedAddress && isProxyFakeOrBogusIp(candidate.relatedAddress, blockedIps)) {
+  // 浏览器 srflx / relay 候选的 relatedAddress 是 0.0.0.0 / :: 隐私占位，不能据此过滤候选对。
+  if (
+    candidate.relatedAddress &&
+    !isUnspecifiedIp(candidate.relatedAddress) &&
+    isProxyFakeOrBogusIp(candidate.relatedAddress, blockedIps)
+  ) {
     return true;
   }
   return false;
@@ -187,6 +193,8 @@ interface ActiveRdSession {
   lastMoveSeq: number;
   mdnsCache: Map<string, Promise<string | null>>;
   blockedIps: ReadonlySet<string>;
+  /** 串行投递远端候选，保证结束标记不会越过尚在 mDNS 解析中的真实候选。 */
+  remoteIceChain: Promise<void>;
 }
 
 function acceptMoveSeq(session: ActiveRdSession, seq: number | undefined): boolean {
@@ -424,6 +432,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       lastMoveSeq: -1,
       mdnsCache,
       blockedIps: localIce.blockedIps,
+      remoteIceChain: Promise.resolve(),
     };
 
     sender.onRtcp.subscribe((packet) => {
@@ -521,15 +530,22 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       throw new Error("无权操作其他设备的远程桌面会话");
     }
     session.lastActiveAt = Date.now();
-    await Promise.all(
-      args.candidates.map(async (item) => {
+    // mDNS 解析可以并发，但交给 werift 时必须保持到达顺序（跨批次也一样）：
+    // 结束标记（空候选）一旦先于真实候选送达，werift 会在本地收集结束时以空检查表直接判定 ICE 失败。
+    const resolving = args.candidates.map((item) =>
+      item.candidate
+        ? resolveMdnsIceCandidate(item.candidate, session.mdnsCache, this.#mdnsLookup)
+        : Promise.resolve(null),
+    );
+    const run = session.remoteIceChain.then(async () => {
+      for (const [idx, item] of args.candidates.entries()) {
         if (session.closed) return;
         if (!item.candidate) {
           await session.pc.addIceCandidate(null).catch(() => {});
-          return;
+          continue;
         }
-        const resolved = await resolveMdnsIceCandidate(item.candidate, session.mdnsCache, this.#mdnsLookup);
-        if (!resolved || session.closed || isBlockedIceCandidateLine(resolved, session.blockedIps)) return;
+        const resolved = await resolving[idx];
+        if (!resolved || session.closed || isBlockedIceCandidateLine(resolved, session.blockedIps)) continue;
         await session.pc
           .addIceCandidate({
             candidate: resolved,
@@ -538,8 +554,10 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
             usernameFragment: item.usernameFragment ?? null,
           })
           .catch(() => {});
-      }),
-    );
+      }
+    });
+    session.remoteIceChain = run.catch(() => {});
+    await run;
     return { ok: true };
   }
 

@@ -178,7 +178,7 @@ export function inspectLocalIceInterfaces(
 }
 
 /** `0.0.0.0` / `::`：浏览器隐藏真实内网地址时 `raddr` 使用的占位地址。 */
-function isUnspecifiedIp(ip: string): boolean {
+export function isUnspecifiedIp(ip: string): boolean {
   const clean = normalizeIpLiteral(ip);
   return clean === "0.0.0.0" || clean === "::";
 }

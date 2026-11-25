@@ -848,3 +848,111 @@ describe("RemoteDesktopHostManager WebRTC end-to-end loopback", () => {
     expect(bitrates.at(-1)).toBe(8_500_000);
   });
 });
+
+describe("RemoteDesktopHostManager 远端候选投递", () => {
+  test("同批到达的结束标记不抢跑，且 raddr 0.0.0.0 的浏览器候选仍能配对建连", async () => {
+    const snapshot: HostStateSnapshot = {
+      displays: [{ id: 1, name: "Main", width: 1280, height: 800, scaleFactor: 2, primary: true }],
+      activeDisplayId: 1,
+      permissions: { screenRecording: true, accessibility: true },
+    };
+    const mockBridge: RemoteDesktopHostBridge = {
+      async ensureStarted() {
+        return snapshot;
+      },
+      async configure() {
+        return snapshot;
+      },
+      getStateSnapshot() {
+        return snapshot;
+      },
+      requestKeyframe() {},
+      requestPermissionsPrompt() {},
+      handleFastInput() {},
+      handleControlInput() {},
+      releaseInputs() {},
+      subscribeVideo() {
+        return () => {};
+      },
+      subscribeState() {
+        return () => {};
+      },
+      subscribeClipboard() {
+        return () => {};
+      },
+      subscribeError() {
+        return () => {};
+      },
+      async close() {},
+    };
+    const manager = new RemoteDesktopHostManager({
+      supported: true,
+      bridge: mockBridge,
+      getIceServers: () => [],
+      helperIdleGraceMs: 0,
+      // 模拟系统 mDNS 解析耗时：旧实现里结束标记会趁这段时间先送进 werift。
+      mdnsLookup: () => new Promise((resolve) => setTimeout(() => resolve("127.0.0.1"), 50)),
+    });
+
+    const states: string[] = [];
+    const ready = new Promise<void>((resolve, reject) => {
+      manager.setSignalingEvents({
+        onIce() {},
+        onState(_to, _sid, payload) {
+          states.push(payload.state);
+          if (payload.state === "ready") resolve();
+          if (payload.state === "error" || payload.state === "closed") reject(new Error(payload.error ?? payload.state));
+        },
+      });
+    });
+
+    const clientPc = new RTCPeerConnection({ iceAdditionalHostAddresses: ["127.0.0.1"] });
+    clientPc.addTransceiver("video", { direction: "recvonly" });
+    clientPc.createDataChannel("control", { ordered: true });
+    const gathered: string[] = [];
+    clientPc.onIceCandidate.subscribe((cand) => {
+      if (cand?.candidate) gathered.push(cand.candidate);
+    });
+    const gatherDone = new Promise<void>((resolve) => {
+      if (clientPc.iceGatheringState === "complete") resolve();
+      clientPc.iceGatheringStateChange.subscribe((st) => {
+        if (st === "complete") resolve();
+      });
+    });
+    const offer = await clientPc.createOffer();
+    await clientPc.setLocalDescription(offer);
+    await gatherDone;
+
+    const openRes = await manager.openSession("peer-web", {
+      sessionId: "rd_ice_order_test",
+      offerSdp: offer.sdp,
+      quality: "hd",
+    });
+    // 去掉宿主候选，让客户端无法先发检查、宿主也就学不到对端反射候选，只能靠投递来的远端候选配对
+    //（对应真实场景里浏览器检查要绕 TURN、到得比宿主判定失败更晚）。
+    const answerWithoutCandidates = openRes.answerSdp
+      .split(/\r?\n/u)
+      .filter((line) => !line.startsWith("a=candidate:") && line !== "a=end-of-candidates")
+      .join("\r\n");
+    await clientPc.setRemoteDescription({ type: "answer", sdp: answerWithoutCandidates });
+
+    // 浏览器隐私模式：127.0.0.1 换成 .local 主机名，raddr 一律为 0.0.0.0；结束标记与候选同批到达。
+    const browserLike = gathered
+      .filter((c) => / 127\.0\.0\.1 /u.test(c))
+      .map((c) => `${c.replace(" 127.0.0.1 ", " 0d2c7f1e-1111-2222-3333-444455556666.local ")} raddr 0.0.0.0 rport 0`);
+    expect(browserLike.length).toBeGreaterThan(0);
+    await manager.addIceCandidates("peer-web", {
+      sessionId: openRes.sessionId,
+      candidates: [...browserLike.map((candidate) => ({ candidate, sdpMid: "0", sdpMLineIndex: 0 })), { candidate: "" }],
+    });
+
+    await Promise.race([
+      ready,
+      new Promise((_, reject) => setTimeout(() => reject(new Error(`未建连：${states.join(",")}`)), 10_000)),
+    ]);
+    expect(states).toContain("ready");
+
+    await manager.closeAll();
+    await clientPc.close();
+  }, 20_000);
+});
