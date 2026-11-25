@@ -7,6 +7,7 @@ import {
   TUNNEL_CHUNK_BYTES,
   TUNNEL_RELAY_FRAME_MAX,
   TUNNEL_OPEN_KIND,
+  TUNNEL_RESET_FRAME,
   TUNNEL_WS_GZIP_CAP,
   decodeTunnelMessage,
   deriveTunnelCipher,
@@ -64,6 +65,8 @@ export class TunnelChannel {
   #expected = 0;
   readonly #ahead = new Map<number, Buffer>();
   lastUsed = Date.now();
+  /** 最近一次收到对端合法帧的时间（0 表示还没收到过）；请求超时时据此判断对端是否已经不认这条会话。 */
+  lastReceived = 0;
 
   constructor(cipher: TunnelCipher, send: (data: string) => Promise<void>, onMessage: (message: TunnelMessage) => void, onBroken: () => void) {
     this.#cipher = cipher;
@@ -81,6 +84,7 @@ export class TunnelChannel {
       return;
     }
     this.lastUsed = Date.now();
+    this.lastReceived = this.lastUsed;
     if (opened.counter < this.#expected || this.#ahead.has(opened.counter)) return;
     this.#ahead.set(opened.counter, opened.plaintext);
     if (this.#ahead.size > MAX_AHEAD) {
@@ -343,9 +347,13 @@ export class TunnelHost {
     };
   }
 
-  /** 中转转来的加密帧。找不到会话的丢弃（可能是已关闭的会话）。 */
-  onFrame(from: string, sid: string, data: string): void {
-    this.#sessions.get(`${from}\0${sid}`)?.channel.receive(data);
+  /** 中转转来的加密帧；返回本机是否有这条会话（没有的由 hub 决定是否回 reset）。收到 reset 就关闭会话。 */
+  onFrame(from: string, sid: string, data: string): boolean {
+    const session = this.#sessions.get(`${from}\0${sid}`);
+    if (!session) return false;
+    if (data === TUNNEL_RESET_FRAME) this.#close(session);
+    else session.channel.receive(data);
+    return true;
   }
 
   closeAll(): void {
@@ -920,13 +928,29 @@ export class TunnelSession {
   readonly #channel: TunnelChannel;
   readonly #streams = new Map<string, PendingStream>();
   readonly #onClosed: () => void;
+  readonly #headTimeoutMs: number;
   #nextId = 1;
 
-  constructor(deviceId: string, makeChannel: (session: TunnelSession) => TunnelChannel, onClosed: () => void, wsGzip = false) {
+  constructor(
+    deviceId: string,
+    makeChannel: (session: TunnelSession) => TunnelChannel,
+    onClosed: () => void,
+    wsGzip = false,
+    headTimeoutMs = HEAD_TIMEOUT_MS,
+  ) {
     this.deviceId = deviceId;
     this.wsGzip = wsGzip;
     this.#channel = makeChannel(this);
     this.#onClosed = onClosed;
+    this.#headTimeoutMs = headTimeoutMs;
+  }
+
+  /**
+   * 请求超时后调用：发出请求以来对端一帧都没回，说明对端多半已经不认这条会话（重启过、会话被回收，旧版本不会回 reset），
+   * 关掉它让下次请求重新握手；否则对端只是慢，保留会话。
+   */
+  #closeIfSilentSince(sentAt: number): void {
+    if (this.#channel.lastReceived < sentAt) this.close(false);
   }
 
   get channel(): TunnelChannel {
@@ -945,7 +969,11 @@ export class TunnelSession {
       let controller!: ReadableStreamDefaultController<Uint8Array>;
       let started = false;
       const timeoutMsg = init.target === "tty7" ? "对端终端服务响应超时" : "对端 T3 响应超时";
-      const timer = setTimeout(() => fail(timeoutMsg), HEAD_TIMEOUT_MS);
+      const sentAt = Date.now();
+      const timer = setTimeout(() => {
+        fail(timeoutMsg);
+        this.#closeIfSilentSince(sentAt);
+      }, this.#headTimeoutMs);
       const fail = (message: string): void => {
         clearTimeout(timer);
         this.#streams.delete(id);
@@ -1041,9 +1069,11 @@ export class TunnelSession {
     if (this.closed) return null;
     const id = String(this.#nextId++);
     return new Promise<string | null>((resolve) => {
+      const sentAt = Date.now();
       const timer = setTimeout(() => {
         this.#streams.delete(id);
         resolve(null);
+        this.#closeIfSilentSince(sentAt);
       }, 15_000);
       this.#streams.set(id, {
         onError: () => {
@@ -1118,6 +1148,8 @@ export interface TunnelClientOptions {
   peerKey(deviceId: string): string | undefined;
   pins: PeerPins;
   deviceId: string;
+  /** 请求等响应头的超时，默认 60 秒；测试用。 */
+  headTimeoutMs?: number;
 }
 
 export class TunnelClient {
@@ -1142,9 +1174,13 @@ export class TunnelClient {
     return opening;
   }
 
-  onFrame(from: string, sid: string, data: string): void {
+  /** 中转转来的加密帧；返回本机是否有这条会话。对端回 reset（它已不认这条会话）就关闭，下次请求重新握手。 */
+  onFrame(from: string, sid: string, data: string): boolean {
     const session = this.#bySid.get(`${from}\0${sid}`);
-    session?.channel.receive(data);
+    if (!session) return false;
+    if (data === TUNNEL_RESET_FRAME) session.close(false);
+    else session.channel.receive(data);
+    return true;
   }
 
   closeAll(): void {
@@ -1190,6 +1226,7 @@ export class TunnelClient {
         this.#bySid.delete(key);
       },
       wsGzip,
+      this.#options.headTimeoutMs,
     );
     this.#sessions.set(deviceId, session);
     this.#bySid.set(key, session);

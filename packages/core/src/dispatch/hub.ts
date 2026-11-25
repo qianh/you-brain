@@ -17,6 +17,7 @@ import {
   type RdIceEventData,
   type RdStateEventData,
   TUNNEL_OPEN_KIND,
+  TUNNEL_RESET_FRAME,
 } from "@you-brain/protocol";
 
 import { resolveDirectStunIceServers } from "../deck/remote-desktop/net-ice.js";
@@ -35,6 +36,9 @@ const WAIT_TIMEOUT_ERROR = "等待目标设备结果超时";
 const DISCONNECTED_ERROR = "和中转的连接断开了";
 const NOT_CONNECTED_ERROR = "还没连上中转";
 const DEFAULT_VERSION = "0.0.0";
+/** 同一条不认识的隧道会话，回 reset 的最小间隔。 */
+const TUNNEL_RESET_INTERVAL_MS = 5_000;
+const TUNNEL_RESET_TRACK_MAX = 256;
 
 export interface DispatchLink {
   request<T>(op: string, params?: Record<string, unknown>): Promise<T>;
@@ -268,6 +272,9 @@ export class DispatchHub {
   readonly #newId: () => string;
   readonly #tunnelHost: TunnelHost | null;
   readonly #tunnelClient: TunnelClient | null;
+  readonly #sendTun: (to: string, sid: string, d: string) => Promise<void>;
+  /** 每条不认识的会话最近一次回 reset 的时间，限频用。 */
+  readonly #tunResets = new Map<string, number>();
 
   #link: DispatchLink | null = null;
   #devices: DispatchDeviceInfo[] = [];
@@ -294,6 +301,7 @@ export class DispatchHub {
       if (!link) throw new Error(NOT_CONNECTED_ERROR);
       await link.request("tun", { to, sid, d });
     };
+    this.#sendTun = sendTun;
     this.#tunnelHost =
       tunnel && this.#executor
         ? new TunnelHost({
@@ -455,10 +463,26 @@ export class DispatchHub {
       const sid = typeof frame.sid === "string" ? frame.sid : "";
       const data = typeof frame.d === "string" ? frame.d : "";
       if (from === "" || sid === "" || data === "") return;
-      // 会话 id 只属于其中一边：目标端查自己的会话表，发起端查自己的，另一边找不到就丢弃。
-      this.#tunnelHost?.onFrame(from, sid, data);
-      this.#tunnelClient?.onFrame(from, sid, data);
+      // 会话 id 只属于其中一边：目标端查自己的会话表，发起端查自己的；两边都不认识才回 reset。
+      const known =
+        (this.#tunnelHost?.onFrame(from, sid, data) ?? false) || (this.#tunnelClient?.onFrame(from, sid, data) ?? false);
+      if (!known) this.#replyTunnelReset(from, sid, data);
     }
+  }
+
+  /**
+   * 对端还在用本机已不认识的隧道会话（多半是本机重启过、会话被回收）：回一个 reset，让它关掉会话、下次请求重新握手，
+   * 而不是一直等到超时。收到的本身是 reset 时不回，避免来回弹；每条会话限频。
+   */
+  #replyTunnelReset(from: string, sid: string, data: string): void {
+    if (data === TUNNEL_RESET_FRAME || (!this.#tunnelHost && !this.#tunnelClient)) return;
+    const key = `${from}\0${sid}`;
+    const now = this.#now();
+    const last = this.#tunResets.get(key);
+    if (last !== undefined && now - last < TUNNEL_RESET_INTERVAL_MS) return;
+    if (this.#tunResets.size >= TUNNEL_RESET_TRACK_MAX) this.#tunResets.clear();
+    this.#tunResets.set(key, now);
+    void this.#sendTun(from, sid, TUNNEL_RESET_FRAME).catch(() => undefined);
   }
 
   #closeTunnels(): void {

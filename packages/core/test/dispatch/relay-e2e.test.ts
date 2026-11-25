@@ -138,16 +138,27 @@ async function tmp(): Promise<string> {
   return dir;
 }
 
-async function makeDevice(relayUrl: string, deviceId: string, name: string, withExecutor: boolean, t3Url?: string) {
-  const dir = await tmp();
-  const identity = new DeviceIdentity({ store: new MemorySecretStore(null) });
+async function makeDevice(
+  relayUrl: string,
+  deviceId: string,
+  name: string,
+  withExecutor: boolean,
+  t3Url?: string,
+  /** 复用已入网设备的数据目录、身份与令牌，模拟这台设备的 daemon 重启。 */
+  restart?: { dir: string; identity: DeviceIdentity; token: string },
+) {
+  const dir = restart?.dir ?? (await tmp());
+  const identity = restart?.identity ?? new DeviceIdentity({ store: new MemorySecretStore(null) });
   const { publicKey } = await identity.ensure();
-  const invite = await fetch(`${relayUrl}/admin/invite`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${RELAY_KEY}` },
-  });
-  const { code } = (await invite.json()) as { code: string };
-  const { token } = await enrollRelay(relayUrl, { code, deviceId, name, publicKey });
+  let token = restart?.token;
+  if (!token) {
+    const invite = await fetch(`${relayUrl}/admin/invite`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${RELAY_KEY}` },
+    });
+    const { code } = (await invite.json()) as { code: string };
+    token = (await enrollRelay(relayUrl, { code, deviceId, name, publicKey })).token;
+  }
 
   const t3 = new FakeT3();
   let hub!: DispatchHub;
@@ -176,7 +187,7 @@ async function makeDevice(relayUrl: string, deviceId: string, name: string, with
   });
   client.start();
   cleanups.push(() => client.stop());
-  return { hub, executor, t3, publicKey, token, client };
+  return { hub, executor, t3, publicKey, token, client, identity, dir };
 }
 
 const BIG_BODY = crypto.getRandomValues(new Uint8Array(700 * 1024 + 123));
@@ -303,6 +314,22 @@ describe("真实中转 + 真实设备端：派活全链路", () => {
     expect(await (await session.fetch("/after", { method: "GET", headers: [] })).text()).toBe("B 的 T3：/after");
     // 会话复用
     expect(await a.hub.t3Tunnel("device-bbb-0002")).toBe(session);
+
+    // B 的 daemon 重启：会话表丢了。A 还拿着旧会话，下次请求由 B 回 reset 立即失败（不是等 60 秒超时），再取会话重新握手
+    b.client.stop();
+    await until(() => a.hub.devices().find((d) => d.id === "device-bbb-0002")?.online === false, "B 下线");
+    await makeDevice(url, "device-bbb-0002", "Mac B", true, `http://127.0.0.1:${t3.port}/`, {
+      dir: b.dir,
+      identity: b.identity,
+      token: b.token,
+    });
+    await until(() => a.hub.devices().find((d) => d.id === "device-bbb-0002")?.online === true, "B 重启后上线");
+    const staleStarted = Date.now();
+    await expect(session.fetch("/stale", { method: "GET", headers: [] })).rejects.toThrow("隧道已关闭");
+    expect(Date.now() - staleStarted).toBeLessThan(5_000);
+    const fresh = await a.hub.t3Tunnel("device-bbb-0002");
+    expect(fresh).not.toBe(session);
+    expect(await (await fresh.fetch("/again", { method: "GET", headers: [] })).text()).toBe("B 的 T3：/again");
 
     // 吊销 B 后，会话上的请求失败
     await fetch(`${url}/admin/revoke`, {

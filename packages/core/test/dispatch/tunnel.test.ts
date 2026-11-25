@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "bun:test";
 import type { Server } from "bun";
 
-import { TUNNEL_RELAY_FRAME_MAX, generateKeyPair, signTunnelTranscript, type CmdFrame } from "@you-brain/protocol";
+import { TUNNEL_RELAY_FRAME_MAX, TUNNEL_RESET_FRAME, generateKeyPair, signTunnelTranscript, type CmdFrame } from "@you-brain/protocol";
 
 import { PeerPins, TUNNEL_VIRTUAL_ORIGIN, TunnelClient, TunnelHost } from "../../src/dispatch/tunnel.js";
 
@@ -21,7 +21,17 @@ describe("T3 隧道（内存里的假中转 + 假的本机 T3）", () => {
     dir = "";
   });
 
-  async function setup(options: { allow?: boolean; tamper?: boolean; bKey?: ReturnType<typeof generateKeyPair>; offeredKey?: string } = {}) {
+  async function setup(
+    options: {
+      allow?: boolean;
+      tamper?: boolean;
+      bKey?: ReturnType<typeof generateKeyPair>;
+      offeredKey?: string;
+      /** B 收到帧一律不理也不回（模拟不会回 reset 的旧版本对端已丢了会话）。 */
+      silentHost?: boolean;
+      headTimeoutMs?: number;
+    } = {},
+  ) {
     dir = await mkdtemp(join(tmpdir(), "ub-tunnel-"));
     const seen: Array<{ method: string; path: string; origin: string | null; cookie: string | null; body: string }> = [];
     t3 = Bun.serve<undefined, never>({
@@ -32,6 +42,7 @@ describe("T3 隧道（内存里的假中转 + 假的本机 T3）", () => {
         if (url.pathname === "/ws") return server.upgrade(request) ? undefined : new Response("bad", { status: 400 });
         const body = await request.text();
         seen.push({ method: request.method, path: url.pathname + url.search, origin: request.headers.get("origin"), cookie: request.headers.get("cookie"), body });
+        if (url.pathname === "/slow") await Bun.sleep(400);
         if (url.pathname === "/big") return new Response(new Uint8Array(300_000).fill(7), { headers: { "content-type": "application/octet-stream" } });
         if (url.pathname === "/redirect") return new Response(null, { status: 302, headers: { location: `${url.origin}/next` } });
         if (url.pathname === "/cookie") return new Response("ok", { headers: { "set-cookie": "t3_session=abc; Path=/; HttpOnly" } });
@@ -64,8 +75,12 @@ describe("T3 隧道（内存里的假中转 + 假的本机 T3）", () => {
         return fetch(input, init);
       }) as typeof fetch,
       pairCredential: async () => "one-time-credential",
+      // 和 hub 一样：收方两边都不认识这条会话、且不是 reset 本身时回 reset。
       send: async (_to, sid, data) => {
-        queueMicrotask(() => client.onFrame(B, sid, options.tamper ? `${data.slice(0, -2)}AA` : data));
+        queueMicrotask(() => {
+          const known = client.onFrame(B, sid, options.tamper ? `${data.slice(0, -2)}AA` : data);
+          if (!known && data !== TUNNEL_RESET_FRAME) host.onFrame(A, sid, TUNNEL_RESET_FRAME);
+        });
       },
     });
     client = new TunnelClient({
@@ -76,10 +91,15 @@ describe("T3 隧道（内存里的假中转 + 假的本机 T3）", () => {
       },
       send: async (_to, sid, data) => {
         frames.push(data);
-        queueMicrotask(() => host.onFrame(A, sid, data));
+        if (options.silentHost) return;
+        queueMicrotask(() => {
+          const known = host.onFrame(A, sid, data);
+          if (!known && data !== TUNNEL_RESET_FRAME) client.onFrame(B, sid, TUNNEL_RESET_FRAME);
+        });
       },
       peerKey: () => options.offeredKey ?? bKey.publicKey,
       pins: new PeerPins(dir),
+      ...(options.headTimeoutMs !== undefined ? { headTimeoutMs: options.headTimeoutMs } : {}),
     });
     return { host, client, seen, frames, bKey };
   }
@@ -179,6 +199,42 @@ describe("T3 隧道（内存里的假中转 + 假的本机 T3）", () => {
     expect(reply).toBe(`ws:${bigSnapshot}`);
     expect(frames.length).toBeGreaterThan(2);
     expect(frames.every((frame) => frame.length <= TUNNEL_RELAY_FRAME_MAX)).toBe(true);
+  });
+
+  it("对端重启丢了会话：本端发帧后收到 reset 立即关闭会话，下次重新握手且请求恢复", async () => {
+    const { host, client } = await setup();
+    const session = await client.session(B);
+    expect(await (await session.fetch("/a", { method: "GET", headers: [] })).text()).toBe("echo:GET:");
+
+    host.closeAll(); // B 重启：会话表清空，不发 bye
+    const started = Date.now();
+    await expect(session.fetch("/b", { method: "GET", headers: [] })).rejects.toThrow("隧道已关闭");
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(session.closed).toBe(true);
+
+    const fresh = await client.session(B);
+    expect(fresh).not.toBe(session);
+    expect(await (await fresh.fetch("/c", { method: "GET", headers: [] })).text()).toBe("echo:GET:");
+  });
+
+  it("对端一帧都不回（旧版本不会回 reset）：请求超时后关闭会话，下次重新握手", async () => {
+    const { client } = await setup({ silentHost: true, headTimeoutMs: 100 });
+    const session = await client.session(B);
+    await expect(session.fetch("/x", { method: "GET", headers: [] })).rejects.toThrow("对端 T3 响应超时");
+    expect(session.closed).toBe(true);
+    const fresh = await client.session(B);
+    expect(fresh).not.toBe(session);
+  });
+
+  it("对端只是慢（超时期间收到过帧）：请求超时但会话保留", async () => {
+    const { client } = await setup({ headTimeoutMs: 100 });
+    const session = await client.session(B);
+    // 一条慢请求与一条快请求并发：快请求的响应帧证明对端还认这条会话。
+    const slow = session.fetch("/slow", { method: "GET", headers: [] }).catch((error: Error) => error.message);
+    expect(await (await session.fetch("/fast", { method: "GET", headers: [] })).text()).toBe("echo:GET:");
+    expect(await slow).toBe("对端 T3 响应超时");
+    expect(session.closed).toBe(false);
+    expect(await client.session(B)).toBe(session);
   });
 
   it("peers.json 损坏当作没记录", async () => {

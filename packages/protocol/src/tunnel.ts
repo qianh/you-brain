@@ -23,6 +23,11 @@ import {
 export const TUNNEL_OPEN_KIND = "t3.tunnel.open";
 export const TUNNEL_CLOSE_KIND = "t3.tunnel.close";
 /**
+ * 收到本机不认识的会话帧（多半是本机重启过、会话已回收）时回给对端的明文帧，不是合法的 base64url 密文。
+ * 对端据此关闭这条会话，下次请求重新握手；旧版本对端收到后解密失败，同样会关闭会话。
+ */
+export const TUNNEL_RESET_FRAME = "!reset";
+/**
  * 单个隧道帧里正文字节数的上限。正文先 base64 进 JSON，整条消息加密后再 base64url，
  * 两次 4/3 膨胀（64 KB → 约 117 KB），要小于中转的帧上限（160 KB）；超限的帧会被中转丢弃，
  * 接收端按计数器保序，会永远等那一帧，整条隧道卡死。
