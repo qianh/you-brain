@@ -81,7 +81,7 @@ export class LossBasedBitrateController {
     return this.#maxBps;
   }
 
-  /** 最近一次报告的丢包率（0~1）。 */
+  /** 最近一次报告的有效丢包率（0~1，RR 丢包与重传比例取大）。 */
   get lastLoss(): number {
     return this.#lastLoss;
   }
@@ -132,9 +132,13 @@ export class LossBasedBitrateController {
 
   /**
    * @param fractionLost RTCP RR 里的 8 位丢包分数（0~255）。
+   * @param retransmitRatio 同一报告周期内被 NACK 的包占发出包的比例（0~1）。
+   *   RR 统计的是重传补齐后仍缺的包，高 RTT 下重传总能补上，RR 常年接近 0，链路实际在大量丢包；
+   *   取两者较大值作为有效丢包率，否则码率永远不会因丢包下调。
    */
-  onReceiverReport(fractionLost: number, nowMs: number): void {
-    const loss = Math.min(1, Math.max(0, fractionLost / 256));
+  onReceiverReport(fractionLost: number, nowMs: number, retransmitRatio = 0): void {
+    const reported = Math.min(1, Math.max(0, fractionLost / 256));
+    const loss = Math.max(reported, Number.isFinite(retransmitRatio) ? Math.min(1, Math.max(0, retransmitRatio)) : 0);
     this.#lastLoss = loss;
     const floor = this.#minBps;
     if (loss > HEAVY_LOSS) {

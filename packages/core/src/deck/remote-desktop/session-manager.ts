@@ -8,6 +8,7 @@ import {
   type RtpPacket,
   type RTCDataChannel,
   type RTCIceServer,
+  type RTCRtpSender,
 } from "werift";
 
 import type {
@@ -32,6 +33,8 @@ import {
   resolveDirectStunIceServers,
   stripBlockedIceCandidatesFromSdp,
 } from "./net-ice.js";
+import { KeyframeGate } from "./keyframe-gate.js";
+import { NackRateMeter, RtpSendHistory } from "./retransmit.js";
 import { LowLatencyH264RtpStreamer, type FecSenderPort } from "./rtp-h264.js";
 import {
   CLIPBOARD_CHUNK_CHARS,
@@ -392,6 +395,8 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
   #lastCursor: HostCursorShape | null = null;
   #appliedStreamOptions: string | null = null;
   #appliedBitrate: number | null = null;
+  /** 多会话共用一路编码，关键帧请求统一限频（见 keyframe-gate.ts）。 */
+  readonly #keyframes = new KeyframeGate({ send: () => this.#bridge?.requestKeyframe() });
   /** 共用编码当前所处的链路档位与切换时间（见 stream-profile.ts）。 */
   #streamTier: StreamTier = "direct";
   #streamTierAt = 0;
@@ -499,15 +504,20 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     const sender = transceiver.sender;
     // FlexFEC：协商成功后（见 answer 处理）才启用；修复流用独立 SSRC 与序号。
     let fecPort: FecSenderPort | undefined;
+    const sendHistory = new RtpSendHistory<RtpPacket>();
+    const nackMeter = new NackRateMeter();
+    /** werift 按 seq % 128（RTP_HISTORY_SIZE）缓存已发包；序号不符说明已被覆盖。 */
+    const weriftCached = (sequenceNumber: number): RtpPacket | undefined => {
+      const cache = (sender as unknown as { rtpCache?: Array<RtpPacket | undefined> }).rtpCache;
+      const packet = cache?.[sequenceNumber % 128];
+      return packet && packet.header.sequenceNumber === sequenceNumber ? packet : undefined;
+    };
     const fecSsrc = randomBytes(4).readUInt32BE(0) || 1;
     let fecSeq = randomBytes(2).readUInt16BE(0);
     const enableFlexfec = (payloadType: number) => {
       fecPort = {
         sentPacket(sequenceNumber) {
-          const cache = (sender as unknown as { rtpCache?: Array<RtpPacket | undefined> }).rtpCache;
-          // werift 按 seq % 128（RTP_HISTORY_SIZE）缓存已发包；取不到或被覆盖时校验序号后放弃
-          const packet = cache?.[sequenceNumber % 128];
-          return packet && packet.header.sequenceNumber === sequenceNumber ? packet.serialize() : null;
+          return weriftCached(sequenceNumber)?.serialize() ?? null;
         },
         async sendRepair(payload, timestamp) {
           const header = new RtpHeader({ payloadType, sequenceNumber: fecSeq, timestamp, ssrc: fecSsrc, marker: false });
@@ -525,8 +535,12 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
         get payloadType() {
           return sender.codec?.payloadType ?? 96;
         },
-        sendRtp(packet) {
-          return sender.sendRtp(packet);
+        async sendRtp(packet) {
+          await sender.sendRtp(packet);
+          nackMeter.noteSent();
+          // 存 werift 实际发出的那个对象（序号、时间戳已按其连续性映射），重传时原样发
+          const sent = weriftCached(packet.header.sequenceNumber);
+          if (sent) sendHistory.put(sent.header.sequenceNumber, sent);
         },
         get fec() {
           return fecPort;
@@ -534,7 +548,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       },
       {
         onDropNeedKeyframe: () => {
-          this.#bridge?.requestKeyframe();
+          this.#keyframes.request("drop", session.bitrate.lastRttMs);
         },
       },
     );
@@ -581,14 +595,26 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
           // werift 在触发 onRtcp 前已按 LSR/DLSR 记下 RTT；取两次报告间新增样本的均值。
           const rttMs = takeNewRttSampleMs(sender, rttTracker);
           if (rttMs !== null) session.bitrate.onRoundTripTime(rttMs, now);
-          session.bitrate.onReceiverReport(report.fractionLost, now);
+          session.bitrate.onReceiverReport(report.fractionLost, now, nackMeter.take());
+          session.streamer.setLossHint(session.bitrate.lastLoss);
         }
       }
     });
 
     sender.onKeyFrameRequest.subscribe(() => {
       if (!session.closed) {
-        this.#bridge?.requestKeyframe();
+        this.#keyframes.request("pli", session.bitrate.lastRttMs);
+      }
+    });
+
+    sender.onGenericNack.subscribe((feedback) => {
+      if (session.closed) return;
+      nackMeter.noteNack(feedback.lost);
+      // werift 已处理仍在其 128 包缓存里的序号；被挤出的从更长的历史里补发
+      for (const seq of feedback.lost) {
+        if (weriftCached(seq)) continue;
+        const packet = sendHistory.get(seq);
+        if (packet) void this.#retransmit(sender, packet);
       }
     });
 
@@ -613,7 +639,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
         session.bitrate.setRelayMode(session.relay);
         this.#applyStreamProfile();
         this.#startStats(session);
-        this.#bridge?.requestKeyframe();
+        this.#keyframes.force();
         const cur = this.#bridge?.getStateSnapshot() ?? snapshot;
         this.#events?.onState(session.peerDeviceId, session.sessionId, {
           state: "ready",
@@ -652,7 +678,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       this.#sessions.set(session.sessionId, session);
       this.#applyStreamOptions();
       this.#ensureIdleSweep();
-      this.#bridge.requestKeyframe();
+      this.#keyframes.force();
       return {
         sessionId: session.sessionId,
         answerSdp,
@@ -736,6 +762,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     this.#appliedBitrate = null;
     this.#appliedProfileKey = null;
     this.#streamTier = "direct";
+    this.#keyframes.close();
     this.#lastCursor = null;
     if (this.#bridge) {
       this.#bridge.releaseInputs();
@@ -745,6 +772,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
 
   #bindBridge(bridge: RemoteDesktopHostBridge): void {
     this.#unsubVideo = bridge.subscribeVideo((frame) => {
+      if (frame.keyframe) this.#keyframes.noteKeyframe();
       for (const session of this.#sessions.values()) {
         if (!session.closed) {
           session.streamer.enqueue(frame);
@@ -848,7 +876,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
         if (this.#lastCursor) {
           this.#sendControlMessage(session, { t: "cursor", ...this.#lastCursor });
         }
-        this.#bridge.requestKeyframe();
+        this.#keyframes.force();
       };
       if (dc.readyState === "open") {
         sendInitialState();
@@ -941,7 +969,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       this.#applyStreamProfile();
       if (!session.closed) {
         this.#sendControlMessage(session, this.#stateMessage(session, snap));
-        this.#bridge.requestKeyframe();
+        this.#keyframes.force();
       }
     } catch {
       // ignore transient reconfigure error
@@ -1067,6 +1095,27 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     if (key === this.#appliedStreamOptions) return;
     this.#appliedStreamOptions = key;
     this.#bridge.setStreamOptions(options);
+  }
+
+  /** 按 NACK 补发已被挤出 werift 缓存的包；走其内部发送路径以计入重传统计，私有接口缺失时直接写 DTLS。 */
+  async #retransmit(sender: RTCRtpSender, packet: RtpPacket): Promise<void> {
+    const internal = sender as unknown as {
+      sendRtpInternal?: (rtp: RtpPacket, opts: { injectProbePadding: boolean; isRetransmission: boolean }) => Promise<void>;
+      dispatchOutgoing?: (task: () => Promise<void>, meta: { kind: string; bytes: number }) => Promise<void>;
+    };
+    try {
+      if (typeof internal.sendRtpInternal === "function" && typeof internal.dispatchOutgoing === "function") {
+        await internal.dispatchOutgoing.call(
+          sender,
+          () => internal.sendRtpInternal!.call(sender, packet, { injectProbePadding: false, isRetransmission: true }),
+          { kind: "rtx", bytes: packet.header.serializeSize + packet.payload.length },
+        );
+      } else {
+        await sender.dtlsTransport?.sendRtp(packet.payload, packet.header);
+      }
+    } catch {
+      // 连接关闭期间写包异常安全忽略
+    }
   }
 
   /** 多会话共用一路编码，取各会话自适应码率的最小值。 */

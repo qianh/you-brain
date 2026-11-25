@@ -1,6 +1,6 @@
 import { RtpHeader, RtpPacket } from "werift";
 
-import { buildFlexfecPayload } from "./fec.js";
+import { buildFlexfecPayload, FLEXFEC_MAX_GROUP } from "./fec.js";
 import type { EncodedVideoFrame } from "./types.js";
 
 /**
@@ -12,8 +12,36 @@ const BURST_PACKETS_LIMIT = 20;
 const BURST_PACE_MS = 1;
 /** 发送队列积压超过此非关键帧数时丢弃旧中间帧并请求新关键帧，杜绝弱网画面延迟堆积。 */
 const MAX_QUEUED_FRAMES = 3;
-/** 每多少个媒体包生成 1 个 FlexFEC 修复包（帧尾不足一组也补 1 个）；组内丢 1 包可就地恢复，免等重传往返。 */
-const FEC_GROUP_PACKETS = 4;
+/**
+ * FlexFEC 每组保护的媒体包数（1 个修复包对应一组，组内丢 1 包可就地恢复，免等重传往返）。
+ * 丢包越多组越小；关键帧又大又关键（丢了就要整帧重来），比普通帧保护得更密。
+ */
+export function fecGroupSize(loss: number, keyframe: boolean): number {
+  if (keyframe) {
+    if (loss < 0.01) return 4;
+    if (loss < 0.03) return 3;
+    return 2;
+  }
+  if (loss < 0.01) return 8;
+  if (loss < 0.03) return 6;
+  if (loss < 0.08) return 4;
+  return 3;
+}
+
+/**
+ * 把一段连续发出的包交织分组：组数 = ⌈n / 组大小⌉，第 g 组取第 g、g+组数、g+2×组数… 个包。
+ * 连续丢包（突发）会落在不同组里，每组仍只丢 1 个，都能恢复；跨度不超过 FlexFEC 掩码的 15 个序号。
+ */
+export function interleaveFecGroups<T>(packets: readonly T[], groupSize: number): T[][] {
+  const groups = Math.ceil(packets.length / Math.max(1, groupSize));
+  const out: T[][] = [];
+  for (let g = 0; g < groups; g += 1) {
+    const members: T[] = [];
+    for (let index = g; index < packets.length; index += groups) members.push(packets[index]!);
+    out.push(members);
+  }
+  return out;
+}
 
 /**
  * 从 VideoToolbox 输出的 4 字节大端长度前缀 AVCC 缓冲区零拷贝切分 NALU（跳过 AUD=9 与空单元）。
@@ -138,9 +166,16 @@ export class LowLatencyH264RtpStreamer {
   #framesSent = 0;
   #framesDropped = 0;
   #fecPacketsSent = 0;
+  /** 最近测得的链路丢包率（含重传补上的），决定 FEC 保护强度。 */
+  #loss = 0;
 
   get counters(): { sent: number; dropped: number; fecSent: number } {
     return { sent: this.#framesSent, dropped: this.#framesDropped, fecSent: this.#fecPacketsSent };
+  }
+
+  /** 更新链路丢包率（0~1），从下一帧起按它调整 FEC 分组。 */
+  setLossHint(loss: number): void {
+    if (Number.isFinite(loss)) this.#loss = Math.min(1, Math.max(0, loss));
   }
 
   constructor(
@@ -210,13 +245,18 @@ export class LowLatencyH264RtpStreamer {
         const pt = this.#sender.payloadType;
         const ssrc = this.#sender.ssrc;
         const fec = this.#sender.fec;
-        let group: Buffer[] = [];
+        const groupSize = fecGroupSize(this.#loss, frame.keyframe);
+        // 每攒满一块（组大小 × 交织步长，≤15 个序号）就交织分组发修复包；帧尾不足一块也照发
+        const blockLen = groupSize * Math.max(1, Math.floor(FLEXFEC_MAX_GROUP / groupSize));
+        let block: Buffer[] = [];
         const flushFec = async () => {
-          if (!fec || group.length === 0) return;
-          const repair = buildFlexfecPayload(group, ssrc);
-          group = [];
-          await fec.sendRepair(repair, rtpTs);
-          this.#fecPacketsSent += 1;
+          if (!fec || block.length === 0) return;
+          const packets = block;
+          block = [];
+          for (const members of interleaveFecGroups(packets, groupSize)) {
+            await fec.sendRepair(buildFlexfecPayload(members, ssrc), rtpTs);
+            this.#fecPacketsSent += 1;
+          }
         };
 
         for (let index = 0; index < payloads.length; index += 1) {
@@ -233,9 +273,9 @@ export class LowLatencyH264RtpStreamer {
           await this.#sender.sendRtp(new RtpPacket(header, payloads[index]!));
           if (fec) {
             const sent = fec.sentPacket(sequenceNumber);
-            if (sent) group.push(sent);
-            // 取不到字节时先结掉当前组，保证每组序号连续、不超出掩码范围
-            if (!sent || group.length >= FEC_GROUP_PACKETS) await flushFec();
+            if (sent) block.push(sent);
+            // 取不到字节时先结掉当前块，保证块内序号连续、不超出掩码范围
+            if (!sent || block.length >= blockLen) await flushFec();
           }
           if (payloads.length > BURST_PACKETS_LIMIT && (index + 1) % BURST_PACKETS_LIMIT === 0 && index + 1 < payloads.length) {
             await this.#sleep(BURST_PACE_MS);

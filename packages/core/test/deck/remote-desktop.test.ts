@@ -9,7 +9,13 @@ import {
   recoverFlexfecPacket,
   computePipelineStats,
   extractAvccNalus,
+  fecGroupSize,
   inspectLocalIceInterfaces,
+  interleaveFecGroups,
+  KeyframeGate,
+  keyframeMinIntervalMs,
+  NackRateMeter,
+  RtpSendHistory,
   isBlockedIceCandidateLine,
   LossBasedBitrateController,
   nextStreamTier,
@@ -181,7 +187,7 @@ describe("RTP H.264 packetizer & low-latency streamer", () => {
     expect(recoverFlexfecPacket(fec, packets.slice(2), ssrc)).toBeNull();
   });
 
-  test("LowLatencyH264RtpStreamer 每 4 个媒体包及帧尾各发 1 个修复包", async () => {
+  test("LowLatencyH264RtpStreamer 按丢包率调整 FEC 分组并交织，连续丢 2 包也能恢复", async () => {
     const sentBytes = new Map<number, Buffer>();
     const repairs: Array<{ payload: Buffer; timestamp: number }> = [];
     const streamer = new LowLatencyH264RtpStreamer(
@@ -202,16 +208,113 @@ describe("RTP H.264 packetizer & low-latency streamer", () => {
     );
     const bigSlice = Buffer.alloc(1180 * 5, 0x5a);
     bigSlice[0] = 0x41;
-    streamer.enqueue({ keyframe: false, ptsUs: 0, sps: null, pps: null, avcc: makeAvcc([bigSlice]) });
+    const frame = (ptsUs: number) => ({ keyframe: false, ptsUs, sps: null, pps: null, avcc: makeAvcc([bigSlice]) });
+    // 无丢包：6 个 FU-A 一组（组大小 8）→ 1 个修复包
+    streamer.enqueue(frame(0));
     await new Promise((res) => setTimeout(res, 20));
-    // 5900 字节切成 6 个 FU-A：4 + 2 → 2 个修复包
     expect(sentBytes.size).toBe(6);
+    expect(repairs).toHaveLength(1);
+
+    // 5% 丢包：组大小 4 → 6 包交织成 2 组：[0,2,4]、[1,3,5]
+    streamer.setLossHint(0.05);
+    sentBytes.clear();
+    repairs.length = 0;
+    streamer.enqueue(frame(33_333));
+    await new Promise((res) => setTimeout(res, 20));
     expect(repairs).toHaveLength(2);
-    expect(streamer.counters.fecSent).toBe(2);
+    expect(streamer.counters.fecSent).toBe(3);
     const all = [...sentBytes.values()];
-    const restored = recoverFlexfecPacket(repairs[1]!.payload, [all[5]!], 0x01020304);
-    expect(restored?.equals(all[4]!)).toBe(true);
+    // 连续丢第 4、5 个包：分别落在两组里，各自恢复
+    expect(recoverFlexfecPacket(repairs[0]!.payload, [all[0]!, all[2]!], 0x01020304)?.equals(all[4]!)).toBe(true);
+    expect(recoverFlexfecPacket(repairs[1]!.payload, [all[1]!, all[3]!], 0x01020304)?.equals(all[5]!)).toBe(true);
     streamer.close();
+  });
+
+  test("FEC 分组：丢包越多组越小，关键帧更密；交织跨度不超过 15 个序号", () => {
+    expect(fecGroupSize(0, false)).toBe(8);
+    expect(fecGroupSize(0.05, false)).toBe(4);
+    expect(fecGroupSize(0.2, false)).toBe(3);
+    expect(fecGroupSize(0, true)).toBe(4);
+    expect(fecGroupSize(0.05, true)).toBe(2);
+    const idx = Array.from({ length: 14 }, (_, i) => i);
+    const groups = interleaveFecGroups(idx, 2);
+    expect(groups).toHaveLength(7);
+    expect(groups[0]).toEqual([0, 7]);
+    for (const g of groups) expect(g[g.length - 1]! - g[0]!).toBeLessThan(15);
+    expect(interleaveFecGroups([0, 1, 2], 4)).toEqual([[0, 1, 2]]);
+  });
+
+  test("KeyframeGate 忽略在途关键帧期间的 PLI，合并重复请求", () => {
+    let now = 0;
+    let sent = 0;
+    const timers: Array<{ at: number; fn: () => void } | null> = [];
+    const gate = new KeyframeGate({
+      send: () => (sent += 1),
+      now: () => now,
+      setTimer: (fn, ms) => timers.push({ at: now + ms, fn }) - 1,
+      clearTimer: (h) => {
+        timers[h as number] = null;
+      },
+    });
+    const advance = (ms: number) => {
+      now += ms;
+      for (const [i, t] of timers.entries()) {
+        if (t && t.at <= now) {
+          timers[i] = null;
+          t.fn();
+        }
+      }
+    };
+    gate.force();
+    expect(sent).toBe(1);
+    // 关键帧还没出：PLI 忽略
+    advance(100);
+    gate.request("pli", 300);
+    expect(sent).toBe(1);
+    // 关键帧出了，RTT 内到达的 PLI 是针对旧丢包的，忽略
+    gate.noteKeyframe();
+    advance(200);
+    gate.request("pli", 300);
+    expect(sent).toBe(1);
+    // RTT 之后仍 PLI：延后到最小间隔（3×RTT+200=1100ms）再发，期间的重复请求合并
+    advance(300);
+    gate.request("pli", 300);
+    gate.request("drop", 300);
+    expect(sent).toBe(1);
+    advance(599);
+    expect(sent).toBe(1);
+    advance(1);
+    expect(sent).toBe(2);
+    expect(gate.counters).toEqual({ sent: 2, ignored: 3, deferred: 1 });
+    // 延后期间编码器自己出了关键帧：取消延后请求
+    gate.noteKeyframe();
+    advance(500);
+    gate.request("drop", 300);
+    gate.noteKeyframe();
+    advance(2_000);
+    expect(sent).toBe(2);
+    expect(keyframeMinIntervalMs(null)).toBe(1_100);
+    expect(keyframeMinIntervalMs(2_000)).toBe(3_000);
+  });
+
+  test("RtpSendHistory 按序号取回，被覆盖后返回 undefined；NackRateMeter 去重计比例", () => {
+    const history = new RtpSendHistory<string>(4);
+    history.put(65_535, "a");
+    history.put(0, "b");
+    expect(history.get(65_535)).toBe("a");
+    history.put(65_535 + 4 - 65_536, "c"); // 序号 3 与 65535 同槽（65535 % 4 = 3）
+    expect(history.get(65_535)).toBeUndefined();
+    expect(history.get(3)).toBe("c");
+
+    const meter = new NackRateMeter();
+    meter.noteSent(10);
+    meter.noteNack([1, 2]);
+    expect(meter.take()).toBe(0); // 样本不足，继续累积
+    meter.noteSent(30);
+    meter.noteNack([2, 3, 4, 5]);
+    expect(meter.take()).toBeCloseTo(5 / 40);
+    meter.noteSent(25);
+    expect(meter.take()).toBe(0);
   });
 
   test("addFlexfecSsrcToSdp 为修复流声明独立 SSRC 并分组", () => {
@@ -1087,6 +1190,17 @@ describe("LossBasedBitrateController 排队时延感知", () => {
     }
     return { maxRtt, rtts };
   }
+
+  test("RR 丢包为 0 但重传比例高时同样降码率（重传补洞掩盖了真实丢包）", () => {
+    const bc = new LossBasedBitrateController({ maxBps: 4_000_000 });
+    for (let t = 0; t <= 3_000; t += 1_000) bc.onReceiverReport(0, t, 0.08);
+    expect(bc.targetBps).toBeLessThan(4_000_000 * 0.88 * 0.88);
+    expect(bc.lastLoss).toBeCloseTo(0.08);
+    // 只看 RR 时不会降
+    const rrOnly = new LossBasedBitrateController({ maxBps: 4_000_000 });
+    for (let t = 0; t <= 3_000; t += 1_000) rrOnly.onReceiverReport(0, t);
+    expect(rrOnly.targetBps).toBe(4_000_000);
+  });
 
   test("不丢包但排队时按 RTT 降码率，不会排出秒级延迟", () => {
     const bc = new LossBasedBitrateController({ maxBps: 8_500_000 });
