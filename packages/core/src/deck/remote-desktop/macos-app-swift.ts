@@ -246,8 +246,19 @@ final class RemoteHostAppDelegate: NSObject, NSApplicationDelegate {
             onMain { self.cursorMonitor.resend() }
         case "cb.get":
             var text = ""
-            onMain { text = self.ui.readClipboard() }
-            emitCtrl(["ev": "cb", "text": text])
+            var image: (Int, Int)? = nil
+            onMain {
+                text = self.ui.readClipboard()
+                if text.isEmpty { image = DesktopUiBridge.clipboardImageInfo() }
+            }
+            var payload: [String: Any] = ["ev": "cb", "text": text]
+            if let (w, h) = image { payload["image"] = ["w": w, "h": h] }
+            emitCtrl(payload)
+        case "cb.img.get":
+            let reqId = (cmd["id"] as? String) ?? ""
+            var png: Data? = nil
+            onMain { png = self.ui.readClipboardImagePng() }
+            emitCtrl(["ev": "cbimg", "id": reqId, "png": png?.base64EncodedString() ?? ""])
         case "cb.set":
             // 同步写入：控制端紧随其后的 ⌘V 必须读到新内容。
             if let text = cmd["text"] as? String {

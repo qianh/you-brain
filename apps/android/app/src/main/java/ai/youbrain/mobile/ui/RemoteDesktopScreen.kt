@@ -6,13 +6,16 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.ActivityInfo
+import android.graphics.BitmapFactory
 import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Base64
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebMessage
@@ -22,6 +25,8 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -72,7 +77,10 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
@@ -87,6 +95,8 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -108,9 +118,11 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -118,6 +130,8 @@ import kotlinx.serialization.json.put
 import java.util.Locale
 import java.util.UUID
 import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.roundToInt
 
 private sealed interface MobileRdStatus {
     data class Connecting(val stageText: String = "正在获取穿透配置…") : MobileRdStatus
@@ -126,8 +140,20 @@ private sealed interface MobileRdStatus {
     data class Failed(val reason: String) : MobileRdStatus
 }
 
+private class RdCursorShape(val image: ImageBitmap, val hx: Float, val hy: Float, val w: Float, val h: Float)
+
+/** 剪贴板同步的去重状态，不参与重组。 */
+private class RdClipState {
+    val assembler = ClipboardChunkAssembler()
+    /** 最近一次与远端一致的文字（双向同步时用于跳过回声）。 */
+    var lastSyncedText: String? = null
+    /** 最近一次上传到远端剪贴板的本机图片 URI。 */
+    var lastUploadedImage: String? = null
+}
+
 private class RdWebBridge(
     private val mainHandler: Handler,
+    private val files: RdFileTransfers,
     private val onOffer: (String) -> Unit,
     private val onLocalIce: (RdIceCandidate) -> Unit,
     private val onTrackReady: () -> Unit,
@@ -135,7 +161,45 @@ private class RdWebBridge(
     private val onControlMessage: (String) -> Unit,
     private val onConnState: (String) -> Unit,
     private val onError: (String) -> Unit,
+    private val onControlOpen: () -> Unit,
+    private val onStats: (Int, Int, Double, Int) -> Unit,
+    private val onFileOpen: () -> Unit,
+    private val onFileClosed: () -> Unit,
 ) {
+    @JavascriptInterface
+    fun postControlOpen() {
+        mainHandler.post { onControlOpen() }
+    }
+
+    @JavascriptInterface
+    fun postStats(fps: Int, kbps: Int, lossPct: Double, rttMs: Int) {
+        mainHandler.post { onStats(fps, kbps, lossPct, rttMs) }
+    }
+
+    @JavascriptInterface
+    fun postFileOpen() {
+        mainHandler.post { onFileOpen() }
+    }
+
+    @JavascriptInterface
+    fun postFileClosed() {
+        mainHandler.post { onFileClosed() }
+    }
+
+    /** 以下三个在 JavaBridge 线程同步执行，保证帧与分片的先后顺序。 */
+    @JavascriptInterface
+    fun postFile(frame: String) {
+        files.onFileFrame(frame)
+    }
+
+    @JavascriptInterface
+    fun postFileChunk(id: String, b64: String) {
+        files.onDownloadChunk(id, b64)
+    }
+
+    @JavascriptInterface
+    fun upRead(id: String): String = files.readUploadChunk(id)
+
     @JavascriptInterface
     fun postOffer(sdp: String) {
         mainHandler.post { onOffer(sdp) }
@@ -230,6 +294,31 @@ fun RemoteDesktopScreen(
     // 触控板虚拟光标位置（归一化 0..1）与按住状态
     var cursor by remember { mutableStateOf(NormPoint(0.5f, 0.5f)) }
     var pointerDownVisual by remember { mutableStateOf(false) }
+
+    // 剪贴板、光标形状、统计、文件传输
+    val prefs = remember { context.getSharedPreferences("rd_prefs", Context.MODE_PRIVATE) }
+    var clipboardSync by remember { mutableStateOf(prefs.getBoolean("clipboardSync", true)) }
+    val clipState = remember { RdClipState() }
+    val clipboardManager = remember { context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager }
+    var cursorShape by remember { mutableStateOf<RdCursorShape?>(null) }
+    var showStats by remember { mutableStateOf(false) }
+    var statsText by remember { mutableStateOf("") }
+    var combosOpen by remember { mutableStateOf(false) }
+    var autoReconnects by remember { mutableIntStateOf(0) }
+    var remoteFiles by remember { mutableStateOf<List<RdRemoteFile>>(emptyList()) }
+    var transferItems by remember { mutableStateOf<List<RdTransferItem>>(emptyList()) }
+    val uiHandler = remember { Handler(Looper.getMainLooper()) }
+    val transfers = remember {
+        RdFileTransfers(
+            context = context.applicationContext,
+            mainHandler = uiHandler,
+            onItems = { transferItems = it },
+            onMessage = { msg -> uiHandler.post { Toast.makeText(context, msg, Toast.LENGTH_SHORT).show() } },
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose { transfers.shutdown() }
+    }
 
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var fastPortRef by remember { mutableStateOf<WebMessagePort?>(null) }
@@ -339,10 +428,134 @@ fun RemoteDesktopScreen(
         val upObj = buildJsonObject {
             put("t", "ku")
             put("code", code)
+            put("meta", modMeta)
+            put("ctrl", modCtrl)
+            put("alt", modAlt)
+            put("shift", modShift || forceShift)
         }
         sendToEngine("c", downObj.toString())
         sendToEngine("c", upObj.toString())
         clearStickyModifiers()
+    }
+
+    fun sendCombo(codes: List<String>) {
+        for (ev in expandKeyCombo(codes)) {
+            val obj = buildJsonObject {
+                put("t", if (ev.down) "kd" else "ku")
+                put("code", ev.code)
+                put("meta", ev.meta)
+                put("ctrl", ev.ctrl)
+                put("alt", ev.alt)
+                put("shift", ev.shift)
+            }
+            sendToEngine("c", obj.toString())
+        }
+        clearStickyModifiers()
+    }
+
+    fun toast(message: String) {
+        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+    }
+
+    fun sendCfg() {
+        sendToEngine("c", "{\"t\":\"cfg\",\"localCursor\":true,\"clipboardSync\":$clipboardSync}")
+    }
+
+    fun sendClipboardTextToRemote(text: String) {
+        val clipped = if (text.length > RD_CLIPBOARD_MAX_CHARS) text.substring(0, RD_CLIPBOARD_MAX_CHARS) else text
+        clipState.lastSyncedText = clipped
+        val parts = chunkClipboardText(clipped)
+        if (parts.size == 1) {
+            sendToEngine("c", buildJsonObject { put("t", "cb.set"); put("text", clipped) }.toString())
+            return
+        }
+        val batch = UUID.randomUUID().toString().replace("-", "").take(12)
+        parts.forEachIndexed { i, part ->
+            val obj = buildJsonObject {
+                put("t", "cb.set")
+                put("text", part)
+                put("chunk", buildJsonObject { put("id", batch); put("i", i); put("n", parts.size) })
+            }
+            sendToEngine("c", obj.toString())
+        }
+    }
+
+    /** 本机剪贴板里的图片（没有文字时）。 */
+    fun localClipboardImage(): Uri? {
+        val clip = runCatching { clipboardManager?.primaryClip }.getOrNull() ?: return null
+        if (clip.itemCount == 0) return null
+        val item = clip.getItemAt(0)
+        val uri = item.uri ?: return null
+        if (!item.text.isNullOrEmpty()) return null
+        val mime = runCatching { context.contentResolver.getType(uri) }.getOrNull()
+        val isImage = mime?.startsWith("image/") == true || clip.description.hasMimeType("image/*")
+        return if (isImage) uri else null
+    }
+
+    /**
+     * 把本机剪贴板同步到远端。[manual] 为用户点按「发送剪贴板」，[thenPaste] 为「粘贴」：
+     * 同步完成后在远端按下 ⌘V。自动同步时内容未变就跳过。
+     */
+    fun syncLocalClipboardToRemote(manual: Boolean, thenPaste: Boolean) {
+        if (status != MobileRdStatus.Ready) return
+        val pasteKeys = listOf("MetaLeft", "KeyV")
+        val image = localClipboardImage()
+        if (image != null) {
+            val key = image.toString()
+            val alreadyRemote = image == transfers.lastClipboardImageUri ||
+                (!manual && key == clipState.lastUploadedImage)
+            if (alreadyRemote) {
+                if (thenPaste) sendCombo(pasteKeys) else if (manual) toast("远端剪贴板已是这张图片")
+                return
+            }
+            if (manual || thenPaste) toast("正在把图片发送到远端剪贴板…")
+            transfers.uploadClipboardImage(image) { err ->
+                if (err == null) {
+                    clipState.lastUploadedImage = key
+                    clipState.lastSyncedText = ""
+                    if (thenPaste) sendCombo(pasteKeys) else if (manual) toast("图片已写入远端剪贴板")
+                } else if (manual || thenPaste) {
+                    toast("图片同步失败：$err")
+                }
+            }
+            return
+        }
+        val text = runCatching {
+            clipboardManager?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
+        }.getOrNull().orEmpty()
+        if (text.isEmpty()) {
+            if (thenPaste) sendCombo(pasteKeys) else if (manual) toast("本机剪贴板为空")
+            return
+        }
+        if (manual || text != clipState.lastSyncedText) sendClipboardTextToRemote(text)
+        if (thenPaste) sendCombo(pasteKeys) else if (manual) toast("已发送到远端剪贴板")
+    }
+
+    val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isNotEmpty()) {
+            transfers.uploadUris(uris)
+            toast("正在把 ${uris.size} 个文件发送到远端「下载」文件夹")
+        }
+    }
+
+    // 本机剪贴板变化（应用在前台时）与回到前台：自动同步到远端
+    val latestSync by rememberUpdatedState(clipboardSync)
+    DisposableEffect(clipboardManager) {
+        val listener = ClipboardManager.OnPrimaryClipChangedListener {
+            if (latestSync) syncLocalClipboardToRemote(manual = false, thenPaste = false)
+        }
+        clipboardManager?.addPrimaryClipChangedListener(listener)
+        val focusListener = ViewTreeObserver.OnWindowFocusChangeListener { hasFocus ->
+            // Android 10+ 只有获得焦点后才能读剪贴板
+            if (hasFocus && latestSync) {
+                uiHandler.postDelayed({ syncLocalClipboardToRemote(manual = false, thenPaste = false) }, 150L)
+            }
+        }
+        view.viewTreeObserver.addOnWindowFocusChangeListener(focusListener)
+        onDispose {
+            clipboardManager?.removePrimaryClipChangedListener(listener)
+            if (view.viewTreeObserver.isAlive) view.viewTreeObserver.removeOnWindowFocusChangeListener(focusListener)
+        }
     }
 
     fun sendTextCommit(text: String) {
@@ -391,10 +604,19 @@ fun RemoteDesktopScreen(
         val remoteIceBuffer = ArrayList<RdIceCandidate>()
         var iceFlushJob: Job? = null
         var iceTimeoutJob: Job? = null
+        var disconnectJob: Job? = null
+        var reconnectJob: Job? = null
+        var hostClosed = false
 
-        status = MobileRdStatus.Connecting("正在获取穿透配置…")
+        status = if (autoReconnects > 0) {
+            MobileRdStatus.Connecting("连接中断，正在重连（第 $autoReconnects 次）…")
+        } else {
+            MobileRdStatus.Connecting("正在获取穿透配置…")
+        }
         rttMs = null
         activeSessionId = ""
+        cursorShape = null
+        statsText = ""
 
         fun evalJs(script: String) {
             if (disposed) return
@@ -411,9 +633,23 @@ fun RemoteDesktopScreen(
             if (disposed || settled) return
             settled = true
             everReady = true
+            autoReconnects = 0
             iceTimeoutJob?.cancel()
             iceTimeoutJob = null
             status = MobileRdStatus.Ready
+        }
+
+        /** 用过的连接意外断开时自动重连（指数退避，最多 [RD_MAX_AUTO_RECONNECTS] 次）。 */
+        fun scheduleReconnect(): Boolean {
+            if (!(everReady || autoReconnects > 0) || autoReconnects >= RD_MAX_AUTO_RECONNECTS) return false
+            autoReconnects += 1
+            val attempt = autoReconnects
+            status = MobileRdStatus.Connecting("连接中断，正在重连（第 $attempt 次）…")
+            reconnectJob = scope.launch {
+                delay(rdReconnectDelayMs(attempt))
+                if (!disposed) reconnectNonce += 1
+            }
+            return true
         }
 
         fun failWith(reason: String) {
@@ -421,12 +657,20 @@ fun RemoteDesktopScreen(
             settled = true
             iceTimeoutJob?.cancel()
             iceTimeoutJob = null
-            status = MobileRdStatus.Failed(reason)
+            disconnectJob?.cancel()
             evalJs("window.__rdClose && window.__rdClose();")
             if (rdOpenReady) {
                 rdOpenReady = false
                 repository.closeRemoteDesktopAsync(device.id, sessionId)
             }
+            if (!scheduleReconnect()) status = MobileRdStatus.Failed(reason)
+        }
+
+        /** 已建立的连接掉线（宿主主动结束的不算）。 */
+        fun dropConnection(reason: String) {
+            if (disposed || hostClosed) return
+            settled = false
+            failWith(reason)
         }
 
         fun flushLocalIce() {
@@ -473,6 +717,7 @@ fun RemoteDesktopScreen(
                         ev.activeDisplayId?.let { activeDisplayId = it }
                         ev.permissions?.let { permissions = it }
                         if (ev.state == "closed") {
+                            hostClosed = true
                             settled = true
                             iceTimeoutJob?.cancel()
                             iceTimeoutJob = null
@@ -488,6 +733,7 @@ fun RemoteDesktopScreen(
 
         val bridge = RdWebBridge(
             mainHandler = mainHandler,
+            files = transfers,
             onOffer = { offerSdp ->
                 if (disposed) return@RdWebBridge
                 if (!settled) status = MobileRdStatus.Connecting("正在请求远端桌面会话…")
@@ -587,28 +833,106 @@ fun RemoteDesktopScreen(
                         obj["quality"]?.jsonPrimitive?.contentOrNull?.let { quality = it }
                     }
                     "cb" -> {
-                        val text = obj["text"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                        cm?.setPrimaryClip(ClipData.newPlainText("U-Brain Remote Desktop", text))
-                        Toast.makeText(context, "已同步远端剪贴板", Toast.LENGTH_SHORT).show()
+                        val raw = obj["text"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                        val chunk = runCatching { obj["chunk"]?.jsonObject }.getOrNull()
+                        val text = clipState.assembler.push(
+                            raw,
+                            chunk?.get("id")?.jsonPrimitive?.contentOrNull,
+                            chunk?.get("i")?.jsonPrimitive?.intOrNull,
+                            chunk?.get("n")?.jsonPrimitive?.intOrNull,
+                        ) ?: return@RdWebBridge
+                        val auto = obj["auto"]?.jsonPrimitive?.booleanOrNull == true
+                        if (auto && (!clipboardSync || text.isEmpty() || text == clipState.lastSyncedText)) {
+                            return@RdWebBridge
+                        }
+                        if (text.isEmpty()) {
+                            toast("远端剪贴板为空")
+                            return@RdWebBridge
+                        }
+                        clipState.lastSyncedText = text
+                        clipboardManager?.setPrimaryClip(ClipData.newPlainText("U-Brain Remote Desktop", text))
+                        if (!auto) toast("已复制远端剪贴板内容")
+                    }
+                    "cb.image" -> {
+                        val auto = obj["auto"]?.jsonPrimitive?.booleanOrNull == true
+                        if (auto && !clipboardSync) return@RdWebBridge
+                        transfers.fetchClipboardImage { err ->
+                            if (err == null) {
+                                clipState.lastSyncedText = ""
+                                if (!auto) toast("已复制远端剪贴板里的图片")
+                            } else if (!auto) {
+                                toast("图片剪贴板同步失败：$err")
+                            }
+                        }
+                    }
+                    "cb.files" -> {
+                        remoteFiles = runCatching {
+                            obj["files"]?.jsonArray?.mapNotNull { el ->
+                                val f = el.jsonObject
+                                val path = f["path"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                                RdRemoteFile(
+                                    path = path,
+                                    name = f["name"]?.jsonPrimitive?.contentOrNull ?: path.substringAfterLast('/'),
+                                    size = f["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                                )
+                            }
+                        }.getOrNull().orEmpty()
+                    }
+                    "cursor" -> {
+                        val png = obj["png"]?.jsonPrimitive?.contentOrNull ?: return@RdWebBridge
+                        val bitmap = runCatching {
+                            val bytes = Base64.decode(png, Base64.DEFAULT)
+                            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        }.getOrNull() ?: return@RdWebBridge
+                        fun num(key: String): Float =
+                            obj[key]?.jsonPrimitive?.contentOrNull?.toFloatOrNull() ?: 0f
+                        val w = num("w").takeIf { it > 0f } ?: bitmap.width.toFloat()
+                        val h = num("h").takeIf { it > 0f } ?: bitmap.height.toFloat()
+                        cursorShape = RdCursorShape(bitmap.asImageBitmap(), num("hx"), num("hy"), w, h)
                     }
                 }
             },
             onConnState = { st ->
                 if (disposed) return@RdWebBridge
                 when (st) {
-                    "connected", "completed" -> markReady()
-                    "failed" -> failWith(iceFailedReason())
-                    "closed" -> if (everReady) {
-                        settled = true
-                        iceTimeoutJob?.cancel()
-                        iceTimeoutJob = null
-                        status = MobileRdStatus.Closed
+                    "connected", "completed" -> {
+                        disconnectJob?.cancel()
+                        disconnectJob = null
+                        markReady()
                     }
+                    "failed" -> if (everReady) dropConnection("网络中断") else failWith(iceFailedReason())
+                    // 短暂断网会先进入 disconnected：给 4 秒自愈，否则按断线重连
+                    "disconnected" -> if (everReady && disconnectJob == null) {
+                        disconnectJob = scope.launch {
+                            delay(4_000L)
+                            disconnectJob = null
+                            dropConnection("网络中断")
+                        }
+                    }
+                    "closed" -> if (everReady) dropConnection("连接已关闭")
                 }
             },
             onError = { reason ->
                 failWith(reason)
+            },
+            onControlOpen = {
+                if (!disposed) sendCfg()
+            },
+            onStats = { fps, kbps, loss, rtt ->
+                if (!disposed) {
+                    statsText = buildString {
+                        append("${fps}fps · ")
+                        append(if (kbps >= 1000) String.format(Locale.US, "%.1fMbps", kbps / 1000.0) else "${kbps}kbps")
+                        if (loss >= 0.1) append(String.format(Locale.US, " · 丢包%.1f%%", loss))
+                        if (rtt >= 0) append(" · RTT ${rtt}ms")
+                    }
+                }
+            },
+            onFileOpen = {
+                if (!disposed) transfers.attach { script -> evalJs(script) }
+            },
+            onFileClosed = {
+                transfers.detach("文件通道已关闭")
             },
         )
 
@@ -666,6 +990,9 @@ fun RemoteDesktopScreen(
             eventsJob.cancel()
             iceFlushJob?.cancel()
             iceTimeoutJob?.cancel()
+            disconnectJob?.cancel()
+            reconnectJob?.cancel()
+            transfers.detach("连接已断开")
             runCatching { fastPortRef?.close() }
             fastPortRef = null
             if (rdOpenReady) {
@@ -947,8 +1274,9 @@ fun RemoteDesktopScreen(
                 )
             }
 
-            // 触控板模式下绘制高对比度 macOS 风格虚拟光标
-            if (status == MobileRdStatus.Ready && inputMode == RdInputMode.TOUCHPAD) {
+            // 远端光标：有形状时按远端真实形状绘制（两种模式都画），否则触控板模式画默认箭头
+            val shape = cursorShape
+            if (status == MobileRdStatus.Ready && (shape != null || inputMode == RdInputMode.TOUCHPAD)) {
                 val (cx, cy) = RemoteDesktopMath.normalizedToScreen(
                     normX = cursor.x,
                     normY = cursor.y,
@@ -978,8 +1306,25 @@ fun RemoteDesktopScreen(
                             center = Offset(cx, cy),
                         )
                     }
-                    drawPath(arrow, color = Color(0xEE111827))
-                    drawPath(arrow, color = Color.White, style = Stroke(width = 1.4f * s))
+                    if (shape != null) {
+                        val displayWidth = displays.firstOrNull { it.id == activeDisplayId }?.width
+                            ?: displays.firstOrNull()?.width ?: videoWidth
+                        // 按画面缩放还原真实大小，手机上至少按 0.9dp/pt 显示，避免光标太小看不清
+                        val k = max(videoBox.width * scale / displayWidth.coerceAtLeast(1), 0.9f * s)
+                        val dw = (shape.w * k).roundToInt().coerceAtLeast(1)
+                        val dh = (shape.h * k).roundToInt().coerceAtLeast(1)
+                        drawImage(
+                            image = shape.image,
+                            srcOffset = IntOffset.Zero,
+                            srcSize = IntSize(shape.image.width, shape.image.height),
+                            dstOffset = IntOffset((cx - shape.hx * k).roundToInt(), (cy - shape.hy * k).roundToInt()),
+                            dstSize = IntSize(dw, dh),
+                            filterQuality = FilterQuality.High,
+                        )
+                    } else {
+                        drawPath(arrow, color = Color(0xEE111827))
+                        drawPath(arrow, color = Color.White, style = Stroke(width = 1.4f * s))
+                    }
                 }
             }
         }
@@ -1021,7 +1366,10 @@ fun RemoteDesktopScreen(
                                 HudChip(
                                     text = "重新连接",
                                     active = true,
-                                    onClick = { reconnectNonce += 1 },
+                                    onClick = {
+                                        autoReconnects = 0
+                                        reconnectNonce += 1
+                                    },
                                 )
                                 HudChip(text = "返回", active = false, onClick = onClose)
                             }
@@ -1037,7 +1385,10 @@ fun RemoteDesktopScreen(
                                 HudChip(
                                     text = "重试连接",
                                     active = true,
-                                    onClick = { reconnectNonce += 1 },
+                                    onClick = {
+                                        autoReconnects = 0
+                                        reconnectNonce += 1
+                                    },
                                 )
                                 HudChip(text = "退出", active = false, onClick = onClose)
                             }
@@ -1087,7 +1438,8 @@ fun RemoteDesktopScreen(
                     Text(
                         text = buildString {
                             append(displayName)
-                            rttMs?.let { append(" · ${it}ms") }
+                            if (showStats && statsText.isNotEmpty()) append(" · $statsText")
+                            else rttMs?.let { append(" · ${it}ms") }
                         },
                         color = Color.White.copy(alpha = 0.9f),
                         fontSize = 12.sp,
@@ -1176,21 +1528,25 @@ fun RemoteDesktopScreen(
                     HudChip(
                         text = "发送剪贴板",
                         active = false,
+                        onClick = { syncLocalClipboardToRemote(manual = true, thenPaste = false) },
+                    )
+                    HudChip(
+                        text = if (clipboardSync) "自动剪贴板 开" else "自动剪贴板 关",
+                        active = clipboardSync,
                         onClick = {
-                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                            val clipText = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
-                            if (clipText.isEmpty()) {
-                                Toast.makeText(context, "本机剪贴板为空", Toast.LENGTH_SHORT).show()
-                            } else {
-                                val payload = buildJsonObject {
-                                    put("t", "cb.set")
-                                    put("text", clipText)
-                                }
-                                sendToEngine("c", payload.toString())
-                                Toast.makeText(context, "已发送到远端剪贴板", Toast.LENGTH_SHORT).show()
-                            }
+                            val next = !clipboardSync
+                            clipboardSync = next
+                            prefs.edit().putBoolean("clipboardSync", next).apply()
+                            sendCfg()
+                            toast(if (next) "已开启双向自动同步剪贴板（文字与图片）" else "已关闭自动同步剪贴板")
                         },
                     )
+                    HudChip(
+                        text = "上传文件",
+                        active = false,
+                        onClick = { runCatching { pickFiles.launch(arrayOf("*/*")) } },
+                    )
+                    HudChip(text = "统计", active = showStats, onClick = { showStats = !showStats })
 
                     HudChip(text = "收起 ▴", active = false, onClick = { hudExpanded = false })
                 }
@@ -1304,6 +1660,40 @@ fun RemoteDesktopScreen(
                     }
                 }
 
+                if (remoteFiles.isNotEmpty() || transferItems.isNotEmpty()) {
+                    RdTransfersPanel(
+                        remoteFiles = remoteFiles,
+                        items = transferItems,
+                        onDownload = { transfers.download(it) },
+                        onDownloadAll = { remoteFiles.forEach { transfers.download(it) } },
+                        onDismissRemote = { remoteFiles = emptyList() },
+                        onCancel = { transfers.cancel(it) },
+                        onClear = { transfers.clearFinished() },
+                    )
+                }
+
+                if (combosOpen) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(Color(0xCC141821))
+                            .border(0.5.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(14.dp))
+                            .horizontalScroll(rememberScrollState())
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RD_KEY_COMBOS.forEach { combo ->
+                            HudChip(text = combo.label, active = false, onClick = { sendCombo(combo.codes) })
+                        }
+                        listOf("F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12",
+                            "Home", "End", "PageUp", "PageDown", "Delete").forEach { code ->
+                            HudChip(text = if (code == "Delete") "⌦" else code, active = false, onClick = { sendKeyTap(code) })
+                        }
+                    }
+                }
+
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1363,6 +1753,13 @@ fun RemoteDesktopScreen(
                         },
                     )
 
+                    HudChip(
+                        text = "粘贴",
+                        active = false,
+                        onClick = { syncLocalClipboardToRemote(manual = false, thenPaste = true) },
+                    )
+                    HudChip(text = "快捷键", active = combosOpen, onClick = { combosOpen = !combosOpen })
+
                     HudChip(text = "⌘ Cmd", active = modMeta, onClick = { modMeta = !modMeta })
                     HudChip(text = "⌃ Ctrl", active = modCtrl, onClick = { modCtrl = !modCtrl })
                     HudChip(text = "⌥ Opt", active = modAlt, onClick = { modAlt = !modAlt })
@@ -1377,6 +1774,91 @@ fun RemoteDesktopScreen(
                     HudChip(text = "↓", active = false, onClick = { sendKeyTap("ArrowDown") })
                     HudChip(text = "↑", active = false, onClick = { sendKeyTap("ArrowUp") })
                     HudChip(text = "→", active = false, onClick = { sendKeyTap("ArrowRight") })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RdTransfersPanel(
+    remoteFiles: List<RdRemoteFile>,
+    items: List<RdTransferItem>,
+    onDownload: (RdRemoteFile) -> Unit,
+    onDownloadAll: () -> Unit,
+    onDismissRemote: () -> Unit,
+    onCancel: (String) -> Unit,
+    onClear: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xE6141821))
+            .border(0.5.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        if (remoteFiles.isNotEmpty()) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = "远端复制了 ${remoteFiles.size} 个文件",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                if (remoteFiles.size > 1) HudChip(text = "全部下载", active = true, onClick = onDownloadAll)
+                HudChip(text = "忽略", active = false, onClick = onDismissRemote)
+            }
+            remoteFiles.take(4).forEach { file ->
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "${file.name} · ${formatTransferBytes(file.size)}",
+                        color = Color.White.copy(alpha = 0.86f),
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f),
+                    )
+                    HudChip(text = "下载", active = false, onClick = { onDownload(file) })
+                }
+            }
+        }
+        if (items.isNotEmpty()) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "文件传输",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                HudChip(text = "清除已完成", active = false, onClick = onClear)
+            }
+            items.takeLast(4).forEach { item ->
+                val arrow = if (item.upload) "↑" else "↓"
+                val progress = when (item.status) {
+                    "queued" -> "排队中"
+                    "active" -> if (item.size > 0) {
+                        "${formatTransferBytes(item.transferred)} / ${formatTransferBytes(item.size)}"
+                    } else {
+                        formatTransferBytes(item.transferred)
+                    }
+                    "done" -> if (item.upload) "已保存到远端下载文件夹" else "已保存到${item.message ?: "下载"}"
+                    "cancelled" -> "已取消"
+                    else -> "失败：${item.message ?: "未知错误"}"
+                }
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "$arrow ${item.name} · $progress",
+                        color = if (item.status == "error") Color(0xFFFCA5A5) else Color.White.copy(alpha = 0.86f),
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (item.status == "queued" || item.status == "active") {
+                        HudChip(text = "取消", active = false, onClick = { onCancel(item.id) })
+                    }
                 }
             }
         }
@@ -1442,7 +1924,138 @@ private const val RD_WEBVIEW_HTML = """
   var pc = null;
   var fastDc = null;
   var ctrlDc = null;
+  var fileDc = null;
   var msgPort = null;
+  var upId = null;
+  var dlWant = null;
+  var dlId = null;
+  var dlParts = [];
+  var dlBytes = 0;
+  var statsTimer = null;
+  var lastStats = null;
+
+  function b64FromBytes(u8) {
+    var s = '';
+    for (var i = 0; i < u8.length; i += 0x8000) {
+      s += String.fromCharCode.apply(null, u8.subarray(i, Math.min(u8.length, i + 0x8000)));
+    }
+    return btoa(s);
+  }
+
+  function bytesFromB64(b64) {
+    var bin = atob(b64);
+    var out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  function flushDownload() {
+    if (!dlId || dlBytes === 0) return;
+    var all = new Uint8Array(dlBytes);
+    var off = 0;
+    for (var i = 0; i < dlParts.length; i++) {
+      all.set(dlParts[i], off);
+      off += dlParts[i].length;
+    }
+    dlParts = [];
+    dlBytes = 0;
+    window.RdNative.postFileChunk(dlId, b64FromBytes(all));
+  }
+
+  // 上传：按需向原生拉取 256KB 数据，切成 16KB 发出；缓冲超过 4MB 时等待排空。
+  function pumpUpload() {
+    while (upId && fileDc && fileDc.readyState === 'open' && fileDc.bufferedAmount < 4194304) {
+      var id = upId;
+      var b64 = window.RdNative.upRead(id);
+      if (upId !== id) return;
+      if (b64 === '') {
+        upId = null;
+        try { fileDc.send(JSON.stringify({ t: 'end', id: id })); } catch (e) {}
+        return;
+      }
+      if (b64.charAt(0) === '!') {
+        upId = null;
+        try { fileDc.send(JSON.stringify({ t: 'cancel', id: id })); } catch (e) {}
+        window.RdNative.postFile(JSON.stringify({ t: 'error', id: id, message: b64.slice(1) }));
+        return;
+      }
+      var bytes = bytesFromB64(b64);
+      for (var p = 0; p < bytes.length; p += 16384) {
+        fileDc.send(bytes.subarray(p, Math.min(bytes.length, p + 16384)));
+      }
+    }
+  }
+
+  function fileReady(id) {
+    if (fileDc && fileDc.readyState === 'open') return true;
+    if (window.RdNative) window.RdNative.postFile(JSON.stringify({ t: 'error', id: id, message: '文件通道未就绪' }));
+    return false;
+  }
+
+  window.__rdFilePut = function(id, name, size, dest) {
+    if (!fileReady(id)) return;
+    var msg = { t: 'put', id: id, name: name, size: size };
+    if (dest) msg.dest = dest;
+    fileDc.send(JSON.stringify(msg));
+    upId = id;
+    setTimeout(pumpUpload, 0);
+  };
+
+  window.__rdFileGet = function(id, path) {
+    if (!fileReady(id)) return;
+    dlWant = id;
+    dlId = null;
+    dlParts = [];
+    dlBytes = 0;
+    fileDc.send(JSON.stringify({ t: 'get', id: id, path: path }));
+  };
+
+  window.__rdFileCancel = function(id) {
+    if (upId === id) upId = null;
+    if (dlWant === id || dlId === id) {
+      dlWant = null;
+      dlId = null;
+      dlParts = [];
+      dlBytes = 0;
+    }
+    if (fileDc && fileDc.readyState === 'open') {
+      try { fileDc.send(JSON.stringify({ t: 'cancel', id: id })); } catch (e) {}
+    }
+  };
+
+  function sampleStats() {
+    if (!pc || !window.RdNative) return;
+    pc.getStats().then(function(report) {
+      var inbound = null;
+      var pair = null;
+      report.forEach(function(st) {
+        if (st.type === 'inbound-rtp' && (st.kind === 'video' || st.mediaType === 'video')) inbound = st;
+        if (st.type === 'candidate-pair' && st.state === 'succeeded' && (st.nominated || st.selected)) pair = st;
+      });
+      if (!inbound) return;
+      var cur = {
+        t: performance.now(),
+        bytes: inbound.bytesReceived || 0,
+        frames: inbound.framesDecoded || 0,
+        lost: inbound.packetsLost || 0,
+        recv: inbound.packetsReceived || 0
+      };
+      var prev = lastStats;
+      lastStats = cur;
+      if (!prev) return;
+      var dt = (cur.t - prev.t) / 1000;
+      if (dt <= 0) return;
+      var dl = Math.max(0, cur.lost - prev.lost);
+      var dr = Math.max(0, cur.recv - prev.recv);
+      var rtt = pair && typeof pair.currentRoundTripTime === 'number' ? Math.round(pair.currentRoundTripTime * 1000) : -1;
+      window.RdNative.postStats(
+        Math.max(0, Math.round((cur.frames - prev.frames) / dt)),
+        Math.max(0, Math.round((cur.bytes - prev.bytes) * 8 / dt / 1000)),
+        dl + dr > 0 ? dl * 100 / (dl + dr) : 0,
+        rtt
+      );
+    }).catch(function() {});
+  }
 
   function applyZeroDelay(receiver) {
     if (!receiver) return;
@@ -1518,11 +2131,21 @@ private const val RD_WEBVIEW_HTML = """
   });
 
   window.__rdClose = function() {
+    if (statsTimer) clearInterval(statsTimer);
+    statsTimer = null;
+    lastStats = null;
+    upId = null;
+    dlWant = null;
+    dlId = null;
+    dlParts = [];
+    dlBytes = 0;
     try { if (fastDc) fastDc.close(); } catch (e) {}
     try { if (ctrlDc) ctrlDc.close(); } catch (e) {}
+    try { if (fileDc) fileDc.close(); } catch (e) {}
     try { if (pc) pc.close(); } catch (e) {}
     fastDc = null;
     ctrlDc = null;
+    fileDc = null;
     pc = null;
     video.srcObject = null;
   };
@@ -1544,8 +2167,57 @@ private const val RD_WEBVIEW_HTML = """
     fastDc = pc.createDataChannel('input-fast', { ordered: false, maxRetransmits: 0 });
     ctrlDc = pc.createDataChannel('control', { ordered: true });
     ctrlDc.onopen = function() {
-      if (window.RdNative) window.RdNative.postTrackReady();
+      if (window.RdNative) {
+        window.RdNative.postControlOpen();
+        window.RdNative.postTrackReady();
+      }
     };
+
+    var dc = pc.createDataChannel('file', { ordered: true });
+    fileDc = dc;
+    dc.binaryType = 'arraybuffer';
+    dc.bufferedAmountLowThreshold = 1048576;
+    dc.onbufferedamountlow = pumpUpload;
+    dc.onopen = function() {
+      if (window.RdNative && fileDc === dc) window.RdNative.postFileOpen();
+    };
+    dc.onclose = function() {
+      if (fileDc !== dc) return;
+      upId = null;
+      dlWant = null;
+      dlId = null;
+      if (window.RdNative) window.RdNative.postFileClosed();
+    };
+    dc.onmessage = function(ev) {
+      if (fileDc !== dc || !window.RdNative) return;
+      if (typeof ev.data === 'string') {
+        var f = null;
+        try { f = JSON.parse(ev.data); } catch (e) { return; }
+        if (!f || typeof f.id !== 'string') return;
+        if (f.t === 'meta' && f.id === dlWant) {
+          dlId = f.id;
+          dlParts = [];
+          dlBytes = 0;
+        } else if ((f.t === 'done' || f.t === 'error') && f.id === dlId) {
+          flushDownload();
+          dlId = null;
+          dlWant = null;
+        } else if (f.t === 'error' && f.id === dlWant) {
+          dlWant = null;
+        } else if (f.t === 'error' && f.id === upId) {
+          upId = null;
+        }
+        window.RdNative.postFile(ev.data);
+        return;
+      }
+      if (!dlId || !(ev.data instanceof ArrayBuffer)) return;
+      var u8 = new Uint8Array(ev.data);
+      dlParts.push(u8);
+      dlBytes += u8.length;
+      if (dlBytes >= 262144) flushDownload();
+    };
+
+    statsTimer = setInterval(sampleStats, 1000);
     ctrlDc.onmessage = function(ev) {
       if (typeof ev.data === 'string' && window.RdNative) {
         window.RdNative.postControl(ev.data);

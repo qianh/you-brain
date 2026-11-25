@@ -31,6 +31,7 @@ const exec = promisify(execFile);
 const VIDEO_MAGIC = 0x55425244; // "UBRD"
 const VIDEO_HEADER_BYTES = 24;
 const MAX_VIDEO_FRAME_BYTES = 16 * 1024 * 1024;
+const CLIPBOARD_IMAGE_TIMEOUT_MS = 10_000;
 
 export interface RemoteDesktopHostBridge {
   warmup?(): Promise<void>;
@@ -58,6 +59,8 @@ export interface RemoteDesktopHostBridge {
   requestCursor?(): void;
   /** 把 PNG 图片写入远端剪贴板。 */
   writeClipboardImage?(pngBase64: string): void;
+  /** 读取远端剪贴板里的图片（PNG）；没有图片时为 null。 */
+  readClipboardImage?(): Promise<Buffer | null>;
   subscribeVideo(listener: (frame: EncodedVideoFrame) => void): () => void;
   subscribeState(listener: (state: HostStateSnapshot) => void): () => void;
   subscribeClipboard(listener: (text: string, meta?: HostClipboardEvent) => void): () => void;
@@ -126,6 +129,9 @@ export class BinaryVideoFrameDecoder {
 
 let inFlightHelperBuild: Promise<string> | null = null;
 
+const HELPER_BUNDLE_ID = "app.you-brain.remote-host";
+const HELPER_DESIGNATED_REQUIREMENT = `designated => identifier "${HELPER_BUNDLE_ID}"`;
+
 export async function buildMacOsRemoteHostHelper(home = homedir()): Promise<string> {
   if (process.platform !== "darwin") {
     throw new Error("当前平台不支持 macOS 远程桌面宿主");
@@ -137,6 +143,7 @@ export async function buildMacOsRemoteHostHelper(home = homedir()): Promise<stri
       .update(MACOS_UI_BRIDGE_SWIFT)
       .update(MACOS_REMOTE_HOST_APP_SWIFT)
       .update(MACOS_REMOTE_HOST_PLIST)
+      .update(HELPER_DESIGNATED_REQUIREMENT)
       .update(process.arch)
       .digest("hex")
       .slice(0, 20);
@@ -202,7 +209,13 @@ export async function buildMacOsRemoteHostHelper(home = homedir()): Promise<stri
       await rm(videoSwift, { force: true });
       await rm(uiSwift, { force: true });
       await rm(mainSwift, { force: true });
-      await exec("codesign", ["--force", "--sign", "-", app], { timeout: 15_000 });
+      // 临时签名默认按内容哈希认证，每次重编译后系统隐私授权（屏幕录制、辅助功能）都会失效；
+      // 固定为按 Bundle ID 认证，更新助手后沿用已有授权。
+      await exec(
+        "codesign",
+        ["--force", "--sign", "-", "--identifier", HELPER_BUNDLE_ID, `-r=${HELPER_DESIGNATED_REQUIREMENT}`, app],
+        { timeout: 15_000 },
+      );
       try {
         await rename(temporary, destination);
       } catch (error) {
@@ -272,6 +285,13 @@ function parseStatePayload(raw: Record<string, unknown>, fallback: HostStateSnap
   return { displays, activeDisplayId, permissions, ...(doubleClickMs !== undefined ? { doubleClickMs } : {}) };
 }
 
+function parseClipboardImage(raw: unknown): { w: number; h: number } | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const { w, h } = raw as { w?: unknown; h?: unknown };
+  if (typeof w !== "number" || typeof h !== "number" || w <= 0 || h <= 0) return undefined;
+  return { w: Math.round(w), h: Math.round(h) };
+}
+
 function parseClipboardFiles(raw: unknown): HostClipboardFile[] | undefined {
   if (!Array.isArray(raw)) return undefined;
   const files: HostClipboardFile[] = [];
@@ -320,6 +340,8 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
   readonly #videoListeners = new Set<(frame: EncodedVideoFrame) => void>();
   readonly #stateListeners = new Set<(state: HostStateSnapshot) => void>();
   readonly #clipboardListeners = new Set<(text: string, meta?: HostClipboardEvent) => void>();
+  readonly #imageWaiters = new Map<string, (data: Buffer | null) => void>();
+  #imageSeq = 0;
   readonly #cursorListeners = new Set<(cursor: HostCursorShape) => void>();
   readonly #errorListeners = new Set<(error: string) => void>();
   #closed = false;
@@ -487,6 +509,21 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
     this.#sendCtrl({ op: "cb.img", png: pngBase64 });
   }
 
+  readClipboardImage(): Promise<Buffer | null> {
+    if (!this.#ctrlSocket) return Promise.resolve(null);
+    const id = `i${++this.#imageSeq}`;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        if (this.#imageWaiters.delete(id)) resolve(null);
+      }, CLIPBOARD_IMAGE_TIMEOUT_MS);
+      this.#imageWaiters.set(id, (data) => {
+        clearTimeout(timer);
+        resolve(data);
+      });
+      this.#sendCtrl({ op: "cb.img.get", id });
+    });
+  }
+
   subscribeVideo(listener: (frame: EncodedVideoFrame) => void): () => void {
     this.#videoListeners.add(listener);
     return () => {
@@ -571,14 +608,21 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
       socket.setNoDelay?.(true);
       this.#ctrlSocket = socket;
       ctrlConnected = true;
-      let lineBuf = "";
+      // 剪贴板图片以单行 base64 传回（可达数十 MB）：只在新到的分片里找换行，避免反复扫描整行。
+      let lineParts: string[] = [];
       socket.setEncoding("utf8");
       socket.on("data", (chunk: string) => {
-        lineBuf += chunk;
-        let nl = lineBuf.indexOf("\n");
+        let rest = chunk;
+        let nl = rest.indexOf("\n");
+        if (nl === -1) {
+          lineParts.push(rest);
+          return;
+        }
         while (nl !== -1) {
-          const line = lineBuf.slice(0, nl).trim();
-          lineBuf = lineBuf.slice(nl + 1);
+          lineParts.push(rest.slice(0, nl));
+          const line = (lineParts.length === 1 ? lineParts[0]! : lineParts.join("")).trim();
+          lineParts = [];
+          rest = rest.slice(nl + 1);
           if (line) {
             try {
               const msg = JSON.parse(line) as Record<string, unknown>;
@@ -594,11 +638,19 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
                 for (const listener of this.#stateListeners) listener(this.#state);
               } else if (ev === "cb" && typeof msg.text === "string") {
                 const files = parseClipboardFiles(msg.files);
+                const image = parseClipboardImage(msg.image);
                 const meta: HostClipboardEvent = {
                   ...(msg.auto === true ? { auto: true } : {}),
                   ...(files ? { files } : {}),
+                  ...(image ? { image } : {}),
                 };
                 for (const listener of this.#clipboardListeners) listener(msg.text, meta);
+              } else if (ev === "cbimg" && typeof msg.id === "string") {
+                const waiter = this.#imageWaiters.get(msg.id);
+                if (waiter) {
+                  this.#imageWaiters.delete(msg.id);
+                  waiter(typeof msg.png === "string" && msg.png ? Buffer.from(msg.png, "base64") : null);
+                }
               } else if (ev === "cursor") {
                 const cursor = parseCursor(msg);
                 if (cursor) {
@@ -611,8 +663,9 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
               // 忽略单行解析异常
             }
           }
-          nl = lineBuf.indexOf("\n");
+          nl = rest.indexOf("\n");
         }
+        if (rest) lineParts.push(rest);
       });
       socket.on("close", () => {
         if (this.#ctrlSocket === socket) {
@@ -710,6 +763,8 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
   }
 
   async #teardownSockets(): Promise<void> {
+    for (const waiter of this.#imageWaiters.values()) waiter(null);
+    this.#imageWaiters.clear();
     this.#decoder.reset();
     const waiters = this.#pendingStateWaiters.splice(0);
     for (const w of waiters) w(this.#state);

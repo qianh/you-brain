@@ -11,6 +11,8 @@ import {
 
 import {
   CLIPBOARD_CHUNK_CHARS,
+  CLIPBOARD_IMAGE_MAX_BYTES,
+  CLIPBOARD_IMAGE_PATH,
   CLIPBOARD_MAX_CHARS,
   type ControlClientMessage,
   type ControlServerMessage,
@@ -356,6 +358,8 @@ export function DeckRemoteDesktopPane({
   const cursorReceivedRef = useRef(false);
   const pendingCopyRef = useRef<{ deferred: Deferred<string>; timer: ReturnType<typeof setTimeout> } | null>(null);
   const pendingRemoteClipRef = useRef<string | null>(null);
+  /** 远端复制的图片：不在手势里时写本机剪贴板会失败，留到下一次点击/按键。 */
+  const pendingRemoteImageRef = useRef<Blob | null>(null);
   const pendingPasteRef = useRef<{
     code: string;
     mods: ReturnType<typeof extractModifiers>;
@@ -434,11 +438,89 @@ export function DeckRemoteDesktopPane({
 
   /** 在用户手势里写本机剪贴板（Safari/WKWebView 只允许手势内写入）。 */
   const flushPendingRemoteClipboard = useCallback(() => {
+    const image = pendingRemoteImageRef.current;
+    if (image) {
+      pendingRemoteImageRef.current = null;
+      try {
+        void navigator.clipboard?.write([new ClipboardItem({ "image/png": image })]).catch(() => undefined);
+      } catch {
+        // 不支持 ClipboardItem
+      }
+    }
     const text = pendingRemoteClipRef.current;
     if (text === null) return;
     pendingRemoteClipRef.current = null;
     void navigator.clipboard?.writeText(text).catch(() => undefined);
   }, []);
+
+  /** 拉取远端剪贴板图片并写进本机剪贴板。 */
+  const pullRemoteImage = useCallback(
+    async (notify: boolean) => {
+      const client = fileClientRef.current;
+      // ⌘C 预留的是文字写入，类型不符，放弃它再写图片。
+      const pendingCopy = pendingCopyRef.current;
+      if (pendingCopy) {
+        clearTimeout(pendingCopy.timer);
+        pendingCopyRef.current = null;
+        pendingCopy.deferred.reject(new Error("image"));
+      }
+      if (!client) return;
+      let blob: Blob;
+      try {
+        blob = await client.fetchClipboardImage(CLIPBOARD_IMAGE_PATH);
+      } catch (error) {
+        if (notify) {
+          push({
+            message: t("deckRdClipboardImageFailed", { message: error instanceof Error ? error.message : String(error) }),
+            tone: "danger",
+          });
+        }
+        return;
+      }
+      lastSyncedClipRef.current = "";
+      pendingRemoteClipRef.current = null;
+      const canWrite = typeof ClipboardItem !== "undefined" && typeof navigator.clipboard?.write === "function";
+      if (!canWrite) {
+        if (notify) push({ message: t("deckRdClipboardFailed"), tone: "danger" });
+        return;
+      }
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+        pendingRemoteImageRef.current = null;
+        if (notify) push({ message: t("deckRdClipboardImagePulled") });
+      } catch {
+        const first = pendingRemoteImageRef.current === null;
+        pendingRemoteImageRef.current = blob;
+        if (notify || first) push({ message: t("deckRdClipboardImagePending") });
+      }
+    },
+    [push, t],
+  );
+
+  /** 把本机图片写入远端剪贴板；成功后可选按下远端粘贴键。 */
+  const sendClipboardImage = useCallback(
+    async (blob: Blob, afterSaved?: () => void): Promise<boolean> => {
+      const client = fileClientRef.current;
+      if (!client) return false;
+      if (blob.size > CLIPBOARD_IMAGE_MAX_BYTES) {
+        push({ message: t("deckRdClipboardImageTooLarge"), tone: "danger" });
+        return false;
+      }
+      try {
+        await client.uploadClipboardImage(blob, blob.type === "image/png" ? "clipboard.png" : "clipboard");
+        lastSyncedClipRef.current = "";
+        afterSaved?.();
+        return true;
+      } catch (error) {
+        push({
+          message: t("deckRdClipboardImageFailed", { message: error instanceof Error ? error.message : String(error) }),
+          tone: "danger",
+        });
+        return false;
+      }
+    },
+    [push, t],
+  );
 
   const writeLocalClipboard = useCallback(
     (text: string, notify: boolean) => {
@@ -451,6 +533,7 @@ export function DeckRemoteDesktopPane({
         if (notify) push({ message: t("deckRdClipboardPulled") });
         return;
       }
+      pendingRemoteImageRef.current = null;
       const writer = navigator.clipboard?.writeText?.bind(navigator.clipboard);
       if (!writer) {
         push({ message: t("deckRdClipboardFailed"), tone: "danger" });
@@ -506,6 +589,8 @@ export function DeckRemoteDesktopPane({
   cursorInVideoRef.current = cursorInVideo;
   const writeLocalClipboardRef = useRef(writeLocalClipboard);
   writeLocalClipboardRef.current = writeLocalClipboard;
+  const pullRemoteImageRef = useRef(pullRemoteImage);
+  pullRemoteImageRef.current = pullRemoteImage;
 
   // 偏好持久化
   useEffect(() => writePref("clipboardSync", clipboardSync), [clipboardSync]);
@@ -781,6 +866,10 @@ export function DeckRemoteDesktopPane({
         }
         case "cb.files":
           setRemoteFiles(msg.files);
+          return;
+        case "cb.image":
+          if (msg.auto && !clipboardSyncRef.current) return;
+          void pullRemoteImageRef.current(!msg.auto);
           return;
         case "cursor": {
           cursorReceivedRef.current = true;
@@ -1351,6 +1440,15 @@ export function DeckRemoteDesktopPane({
     if (statusRef.current.kind !== "ready") return;
     const data = event.clipboardData;
     const files = data ? [...data.files] : [];
+    // 截图、网页里复制的图片：写进远端剪贴板再粘贴，而不是当文件存到下载目录。
+    const image = files.length === 1 && files[0]!.type.startsWith("image/") ? files[0]! : null;
+    if (image && fileClientRef.current) {
+      void sendClipboardImage(image, () => {
+        if (pending) sendPasteKeystroke(pending.code, pending.mods);
+        else push({ message: t("deckRdClipboardImageSent") });
+      });
+      return;
+    }
     if (files.length > 0 && fileClientRef.current) {
       fileClientRef.current.upload(files);
       push({ message: t("deckRdUploadPasted", { count: files.length }) });
@@ -1382,6 +1480,17 @@ export function DeckRemoteDesktopPane({
 
   const pushClipboard = async () => {
     try {
+      if (typeof navigator.clipboard.read === "function") {
+        const items = await navigator.clipboard.read().catch(() => null);
+        for (const item of items ?? []) {
+          if (item.types.includes("text/plain")) break;
+          const type = item.types.find((entry) => entry.startsWith("image/"));
+          if (!type) continue;
+          const blob = await item.getType(type);
+          if (await sendClipboardImage(blob)) push({ message: t("deckRdClipboardImageSent") });
+          return;
+        }
+      }
       const text = await navigator.clipboard.readText();
       if (sendClipboardText(text)) {
         push({ message: t("deckRdClipboardSent") });

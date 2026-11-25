@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
 
 import {
+  CLIPBOARD_IMAGE_MAX_BYTES,
+  CLIPBOARD_IMAGE_PATH,
   FILE_CHUNK_BYTES,
   FILE_MAX_BYTES,
   type FileClientMessage,
@@ -24,6 +26,10 @@ export interface HostFileTransferOptions {
   downloadsDir?: string;
   /** 仅允许下载宿主主动通告过的文件（远端剪贴板里复制的文件）。 */
   isDownloadAllowed: (path: string) => boolean;
+  /** 读取宿主剪贴板图片，供控制端以 {@link CLIPBOARD_IMAGE_PATH} 下载。 */
+  readClipboardImage?: () => Promise<Buffer | null>;
+  /** 控制端以 `dest: "clipboard"` 上传的图片写入宿主剪贴板。 */
+  writeClipboardImage?: (data: Buffer) => void | Promise<void>;
 }
 
 const ACK_EVERY_BYTES = 1024 * 1024;
@@ -65,7 +71,9 @@ interface UploadState {
   size: number;
   received: number;
   lastAck: number;
-  handle: FileHandle;
+  /** 写入下载目录时的文件句柄；写剪贴板时为 null，数据攒在 `chunks`。 */
+  handle: FileHandle | null;
+  chunks: Buffer[] | null;
   path: string;
   name: string;
 }
@@ -78,6 +86,8 @@ export class HostFileTransfer {
   readonly #port: FileChannelPort;
   readonly #dir: string;
   readonly #isDownloadAllowed: (path: string) => boolean;
+  readonly #readClipboardImage: (() => Promise<Buffer | null>) | undefined;
+  readonly #writeClipboardImage: ((data: Buffer) => void | Promise<void>) | undefined;
   #chain: Promise<void> = Promise.resolve();
   #upload: UploadState | null = null;
   #uploadFailed: string | null = null;
@@ -90,6 +100,8 @@ export class HostFileTransfer {
     this.#port = port;
     this.#dir = options.downloadsDir ?? join(homedir(), "Downloads");
     this.#isDownloadAllowed = options.isDownloadAllowed;
+    this.#readClipboardImage = options.readClipboardImage;
+    this.#writeClipboardImage = options.writeClipboardImage;
   }
 
   handleMessage(raw: string | Buffer): void {
@@ -145,6 +157,29 @@ export class HostFileTransfer {
           this.#send({ t: "error", id: msg.id, message: "文件过大或大小无效" });
           return;
         }
+        if (msg.dest === "clipboard") {
+          if (!this.#writeClipboardImage) {
+            this.#uploadFailed = msg.id;
+            this.#send({ t: "error", id: msg.id, message: "远端不支持写入剪贴板图片" });
+            return;
+          }
+          if (size === 0 || size > CLIPBOARD_IMAGE_MAX_BYTES) {
+            this.#uploadFailed = msg.id;
+            this.#send({ t: "error", id: msg.id, message: "剪贴板图片过大（上限 20MB）" });
+            return;
+          }
+          this.#upload = {
+            id: msg.id,
+            size,
+            received: 0,
+            lastAck: 0,
+            handle: null,
+            chunks: [],
+            path: "clipboard",
+            name: sanitizeFileName(msg.name),
+          };
+          return;
+        }
         try {
           await mkdir(this.#dir, { recursive: true });
           const opened = await openUnique(this.#dir, sanitizeFileName(msg.name));
@@ -154,6 +189,7 @@ export class HostFileTransfer {
             received: 0,
             lastAck: 0,
             handle: opened.handle,
+            chunks: null,
             path: opened.path,
             name: opened.name,
           };
@@ -172,7 +208,21 @@ export class HostFileTransfer {
           return;
         }
         this.#upload = null;
-        await up.handle.close().catch(() => undefined);
+        if (up.chunks) {
+          if (up.received !== up.size) {
+            this.#send({ t: "error", id: up.id, message: `图片不完整（${up.received}/${up.size}）` });
+            return;
+          }
+          try {
+            await this.#writeClipboardImage?.(Buffer.concat(up.chunks));
+          } catch (error) {
+            this.#send({ t: "error", id: up.id, message: error instanceof Error ? error.message : String(error) });
+            return;
+          }
+          this.#send({ t: "saved", id: up.id, path: "clipboard", name: up.name });
+          return;
+        }
+        await up.handle?.close().catch(() => undefined);
         if (up.received !== up.size) {
           await rm(up.path, { force: true }).catch(() => undefined);
           this.#send({ t: "error", id: up.id, message: `文件不完整（${up.received}/${up.size}）` });
@@ -200,7 +250,8 @@ export class HostFileTransfer {
       return;
     }
     try {
-      await up.handle.write(chunk);
+      if (up.chunks) up.chunks.push(Buffer.from(chunk));
+      else await up.handle?.write(chunk);
     } catch (error) {
       await this.#abortUpload();
       this.#uploadFailed = up.id;
@@ -218,6 +269,7 @@ export class HostFileTransfer {
     const up = this.#upload;
     if (!up) return;
     this.#upload = null;
+    if (!up.handle) return;
     await up.handle.close().catch(() => undefined);
     await rm(up.path, { force: true }).catch(() => undefined);
   }
@@ -244,6 +296,10 @@ export class HostFileTransfer {
   }
 
   async #runDownload(id: string, path: string): Promise<void> {
+    if (path === CLIPBOARD_IMAGE_PATH) {
+      await this.#sendClipboardImage(id);
+      return;
+    }
     if (typeof path !== "string" || !path.startsWith("/") || !this.#isDownloadAllowed(path)) {
       this.#send({ t: "error", id, message: "只能下载远端剪贴板中复制的文件" });
       return;
@@ -266,6 +322,27 @@ export class HostFileTransfer {
         if (this.#port.bufferedAmount > SEND_HIGH_WATER) {
           await this.#port.waitDrain();
         }
+      }
+      this.#send({ t: "done", id });
+    } catch (error) {
+      this.#send({ t: "error", id, message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      this.#downloadId = null;
+      this.#cancelledDownloads.delete(id);
+    }
+  }
+
+  async #sendClipboardImage(id: string): Promise<void> {
+    this.#downloadId = id;
+    try {
+      const data = this.#readClipboardImage ? await this.#readClipboardImage() : null;
+      if (!data || data.length === 0) throw new Error("远端剪贴板里没有图片");
+      if (data.length > CLIPBOARD_IMAGE_MAX_BYTES) throw new Error("剪贴板图片过大（上限 20MB）");
+      this.#send({ t: "meta", id, name: "clipboard.png", size: data.length });
+      for (let offset = 0; offset < data.length; offset += FILE_CHUNK_BYTES) {
+        if (this.#cancelledDownloads.has(id) || !this.#port.isOpen) return;
+        this.#port.send(data.subarray(offset, Math.min(data.length, offset + FILE_CHUNK_BYTES)));
+        if (this.#port.bufferedAmount > SEND_HIGH_WATER) await this.#port.waitDrain();
       }
       this.#send({ t: "done", id });
     } catch (error) {

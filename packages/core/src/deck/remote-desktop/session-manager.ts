@@ -158,6 +158,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
   #unsubError: (() => void) | null = null;
   #unsubCursor: (() => void) | null = null;
   #latestClipboardRecipient: ActiveRdSession | null = null;
+  #clipboardImageSeq = 0;
   #lastCursor: HostCursorShape | null = null;
   #appliedStreamOptions: string | null = null;
   #appliedBitrate: number | null = null;
@@ -492,6 +493,11 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     if (dc.label === "file") {
       const transfer = new HostFileTransfer(fileChannelPort(dc), {
         isDownloadAllowed: (path) => session.allowedDownloads.has(path),
+        readClipboardImage: async () => (await this.#bridge?.readClipboardImage?.()) ?? null,
+        writeClipboardImage: (data) => {
+          if (!this.#bridge?.writeClipboardImage) throw new Error("远端不支持写入剪贴板图片");
+          this.#bridge.writeClipboardImage(data.toString("base64"));
+        },
       });
       void session.fileTransfer?.dispose();
       session.fileTransfer = transfer;
@@ -623,6 +629,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       const target = this.#latestClipboardRecipient;
       targets = target && !target.closed ? [target] : live;
     }
+    const imageId = meta?.image && !text ? `img${++this.#clipboardImageSeq}` : "";
     for (const session of targets) {
       if (meta?.files && meta.files.length > 0) {
         for (const file of meta.files) {
@@ -634,6 +641,16 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
           session.allowedDownloads.delete(first);
         }
         this.#sendControlMessage(session, { t: "cb.files", files: meta.files });
+      }
+      if (meta?.image && imageId) {
+        this.#sendControlMessage(session, {
+          t: "cb.image",
+          id: imageId,
+          w: meta.image.w,
+          h: meta.image.h,
+          ...(meta.auto ? { auto: true } : {}),
+        });
+        continue;
       }
       if (text || !meta?.files?.length) {
         this.#sendClipboardText(session, text, Boolean(meta?.auto));

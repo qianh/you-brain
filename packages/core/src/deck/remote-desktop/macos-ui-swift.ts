@@ -267,14 +267,43 @@ final class DesktopUiBridge {
         ownPasteboardChangeCount = pb.changeCount
     }
 
-    func writeClipboardImage(_ png: Data) {
+    /** 写入任意格式图片（PNG/JPEG/GIF/HEIC 等），统一转成 PNG + TIFF，各类应用都能粘贴。 */
+    func writeClipboardImage(_ data: Data) {
+        guard let png = DesktopUiBridge.pngData(from: data) else { return }
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setData(png, forType: .png)
-        if let image = NSImage(data: png), let tiff = image.tiffRepresentation {
+        if let rep = NSBitmapImageRep(data: png), let tiff = rep.tiffRepresentation {
             pb.setData(tiff, forType: .tiff)
         }
         ownPasteboardChangeCount = pb.changeCount
+    }
+
+    static func pngData(from data: Data) -> Data? {
+        if data.count >= 8, data.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) { return data }
+        if let rep = NSBitmapImageRep(data: data), let png = rep.representation(using: .png, properties: [:]) {
+            return png
+        }
+        guard let image = NSImage(data: data), let tiff = image.tiffRepresentation,
+              let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        return rep.representation(using: .png, properties: [:])
+    }
+
+    /** 剪贴板只有图片（没有文字和文件）时返回像素尺寸。 */
+    static func clipboardImageInfo(_ pb: NSPasteboard = .general) -> (Int, Int)? {
+        guard pb.availableType(from: [.png, .tiff]) != nil else { return nil }
+        if let data = pb.data(forType: .png) ?? pb.data(forType: .tiff), let rep = NSBitmapImageRep(data: data) {
+            return (rep.pixelsWide, rep.pixelsHigh)
+        }
+        guard let image = NSImage(pasteboard: pb) else { return nil }
+        return (Int(image.size.width), Int(image.size.height))
+    }
+
+    func readClipboardImagePng() -> Data? {
+        let pb = NSPasteboard.general
+        if let png = pb.data(forType: .png) { return png }
+        guard let tiff = pb.data(forType: .tiff), let rep = NSBitmapImageRep(data: tiff) else { return nil }
+        return rep.representation(using: .png, properties: [:])
     }
 
     func releaseAll() {
@@ -338,12 +367,16 @@ final class ClipboardWatcher {
             }
             if !files.isEmpty { payload["files"] = files }
         }
-        if let text = pb.string(forType: .string) {
+        if let text = pb.string(forType: .string), !text.isEmpty {
             payload["text"] = text
-        } else if payload["files"] == nil {
-            return
-        } else {
+        } else if payload["files"] != nil {
             payload["text"] = ""
+        } else if let (w, h) = DesktopUiBridge.clipboardImageInfo(pb) {
+            // 只上报尺寸，图片数据由控制端按需拉取，避免每次复制都搬运整张图。
+            payload["text"] = ""
+            payload["image"] = ["w": w, "h": h]
+        } else {
+            return
         }
         onChange?(payload)
     }

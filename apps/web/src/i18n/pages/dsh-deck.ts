@@ -248,6 +248,11 @@ export const zh = {
   deckRdRemoteFiles: "远端复制了 {count} 个文件",
   deckRdDownload: "下载",
   deckRdUploadPasted: "已把粘贴的 {count} 个文件发送到远端「下载」文件夹",
+  deckRdClipboardImagePulled: "已复制远端剪贴板里的图片",
+  deckRdClipboardImagePending: "远端已复制图片，点击画面或按任意键后写入本机剪贴板",
+  deckRdClipboardImageSent: "图片已写入远端剪贴板",
+  deckRdClipboardImageFailed: "图片剪贴板同步失败：{message}",
+  deckRdClipboardImageTooLarge: "图片超过 20MB，无法写入远端剪贴板",
   deckRdImeComposing: "输入中",
 };
 
@@ -501,5 +506,10 @@ export const en: { [K in keyof typeof zh]: string } = {
   deckRdRemoteFiles: "{count} file(s) copied on remote",
   deckRdDownload: "Download",
   deckRdUploadPasted: "Sent {count} pasted file(s) to the remote Downloads folder",
+  deckRdClipboardImagePulled: "Copied the image from the remote clipboard",
+  deckRdClipboardImagePending: "Remote copied an image. Click the canvas or press a key to copy it locally",
+  deckRdClipboardImageSent: "Image placed on the remote clipboard",
+  deckRdClipboardImageFailed: "Image clipboard sync failed: {message}",
+  deckRdClipboardImageTooLarge: "Image is larger than 20MB and can't be placed on the remote clipboard",
   deckRdImeComposing: "Composing",
 };

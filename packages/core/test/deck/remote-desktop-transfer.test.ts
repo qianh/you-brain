@@ -108,6 +108,56 @@ describe("HostFileTransfer", () => {
     expect(Math.max(...bytes.map((b) => b.length))).toBeLessThanOrEqual(16 * 1024);
     await transfer.dispose();
   });
+
+  test("dest=clipboard 的上传收在内存并写入剪贴板，不落盘", async () => {
+    const dir = await tempDir();
+    const port = new FakePort();
+    const written: Buffer[] = [];
+    const transfer = new HostFileTransfer(port, {
+      downloadsDir: dir,
+      isDownloadAllowed: () => false,
+      writeClipboardImage: (data) => {
+        written.push(data);
+      },
+    });
+    const png = Buffer.alloc(20_000, 3);
+    transfer.handleMessage(JSON.stringify({ t: "put", id: "c1", name: "shot.png", size: png.length, dest: "clipboard" }));
+    transfer.handleMessage(png.subarray(0, 16_384));
+    transfer.handleMessage(png.subarray(16_384));
+    transfer.handleMessage(JSON.stringify({ t: "end", id: "c1" }));
+    await waitFor(() => port.json().some((m) => m.t === "saved"));
+    expect(port.json().find((m) => m.t === "saved")).toMatchObject({ id: "c1", path: "clipboard" });
+    expect(written).toHaveLength(1);
+    expect(written[0]!.equals(png)).toBe(true);
+    expect(await readdir(dir)).toEqual([]);
+
+    transfer.handleMessage(JSON.stringify({ t: "put", id: "c2", name: "big.png", size: 21 * 1024 * 1024, dest: "clipboard" }));
+    await waitFor(() => port.json().some((m) => m.id === "c2"));
+    expect(port.json().find((m) => m.id === "c2")!.t).toBe("error");
+    await transfer.dispose();
+  });
+
+  test("clipboard:image 虚拟路径下载宿主剪贴板图片；没有图片时报错", async () => {
+    const dir = await tempDir();
+    const port = new FakePort();
+    let image: Buffer | null = Buffer.alloc(30_000, 5);
+    const transfer = new HostFileTransfer(port, {
+      downloadsDir: dir,
+      isDownloadAllowed: () => false,
+      readClipboardImage: async () => image,
+    });
+    transfer.handleMessage(JSON.stringify({ t: "get", id: "g1", path: "clipboard:image" }));
+    await waitFor(() => port.json().some((m) => m.t === "done"));
+    expect(port.json().find((m) => m.t === "meta")).toMatchObject({ id: "g1", name: "clipboard.png", size: 30_000 });
+    const bytes = port.sent.filter((s): s is Buffer => typeof s !== "string");
+    expect(Buffer.concat(bytes).equals(image)).toBe(true);
+
+    image = null;
+    transfer.handleMessage(JSON.stringify({ t: "get", id: "g2", path: "clipboard:image" }));
+    await waitFor(() => port.json().some((m) => m.id === "g2"));
+    expect(port.json().find((m) => m.id === "g2")!.t).toBe("error");
+    await transfer.dispose();
+  });
 });
 
 describe("RemoteDownloadSink", () => {

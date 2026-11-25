@@ -44,6 +44,17 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 
+        <!-- 远程桌面：远端剪贴板图片经此对外提供，供其他应用粘贴。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.rdfiles"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/rd_file_paths" />
+        </provider>
+
         <receiver
             android:name=".service.PushReplyReceiver"
             android:exported="false" />

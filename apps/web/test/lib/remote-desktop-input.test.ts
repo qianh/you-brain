@@ -208,4 +208,32 @@ describe("RemoteFileClient", () => {
     expect(chunks).toEqual([{ offset: 0, size: 6, final: true }]);
     expect(items[0]).toMatchObject({ status: "done", transferred: 6, savedAt: "/local/b.txt" });
   });
+  test("剪贴板图片：上传带 dest=clipboard、取回为 PNG Blob，且不出现在传输列表", async () => {
+    const dc = new FakeChannel();
+    let items: unknown[] = [];
+    const client = new RemoteFileClient(dc, { onUpdate: (next) => (items = next), sink: async () => undefined });
+    const uploaded = client.uploadClipboardImage(new Blob([new Uint8Array(100)], { type: "image/png" }));
+    for (let i = 0; i < 20 && !dc.json().some((m) => m.t === "end"); i += 1) await tick();
+    const put = dc.json().find((m) => m.t === "put")!;
+    expect(put).toMatchObject({ dest: "clipboard", size: 100 });
+    dc.emit(JSON.stringify({ t: "saved", id: put.id, path: "clipboard", name: "clipboard.png" }));
+    await uploaded;
+    expect(items).toEqual([]);
+
+    const fetched = client.fetchClipboardImage("clipboard:image");
+    const get = dc.json().find((m) => m.t === "get")!;
+    expect(get.path).toBe("clipboard:image");
+    dc.emit(JSON.stringify({ t: "meta", id: get.id, name: "clipboard.png", size: 4 }));
+    dc.emit(new Uint8Array([1, 2, 3, 4]).buffer);
+    dc.emit(JSON.stringify({ t: "done", id: get.id }));
+    const blob = await fetched;
+    expect(blob.type).toBe("image/png");
+    expect([...new Uint8Array(await blob.arrayBuffer())]).toEqual([1, 2, 3, 4]);
+    expect(items).toEqual([]);
+
+    const failed = client.fetchClipboardImage("clipboard:image");
+    const get2 = dc.json().filter((m) => m.t === "get")[1]!;
+    dc.emit(JSON.stringify({ t: "error", id: get2.id, message: "没有图片" }));
+    await expect(failed).rejects.toThrow("没有图片");
+  });
 });

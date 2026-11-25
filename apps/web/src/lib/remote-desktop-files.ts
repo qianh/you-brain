@@ -32,6 +32,8 @@ export interface TransferItem {
   error?: string;
   /** 上传：远端保存路径；下载：本机保存位置描述。 */
   savedAt?: string;
+  /** 剪贴板图片等内部传输，不在传输面板里显示。 */
+  hidden?: boolean;
 }
 
 /** 下载落盘：分片依次交付，`final` 为最后一片。返回保存位置描述。 */
@@ -53,6 +55,8 @@ type ServerFrame =
 interface UploadJob {
   item: TransferItem;
   file: Blob;
+  dest?: "clipboard";
+  onDone?: ((error: string | null) => void) | undefined;
   settle?: (result: { ok: true; path: string } | { ok: false; message: string }) => void;
 }
 
@@ -65,6 +69,9 @@ interface DownloadJob {
   bufferedBytes: number;
   flushedBytes: number;
   sinkChain: Promise<string | undefined>;
+  /** 覆盖默认落盘方式（剪贴板图片收在内存里）。 */
+  sink?: DownloadSink;
+  onDone?: ((error: string | null) => void) | undefined;
   settle?: () => void;
 }
 
@@ -116,6 +123,61 @@ export class RemoteFileClient {
     }
     this.#emit();
     void this.#pumpUploads();
+  }
+
+  /** 把图片写进远端剪贴板，完成（远端已写入）后 resolve。 */
+  uploadClipboardImage(blob: Blob, name = "clipboard.png"): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const item: TransferItem = {
+        id: transferId(),
+        direction: "up",
+        name,
+        size: blob.size,
+        transferred: 0,
+        status: "queued",
+        hidden: true,
+      };
+      this.#items.push(item);
+      this.#uploads.push({
+        item,
+        file: blob,
+        dest: "clipboard",
+        onDone: (error) => (error === null ? resolve() : reject(new Error(error))),
+      });
+      void this.#pumpUploads();
+    });
+  }
+
+  /** 取回远端剪贴板里的图片（PNG）。 */
+  fetchClipboardImage(path: string): Promise<Blob> {
+    return new Promise((resolve, reject) => {
+      const parts: Blob[] = [];
+      const item: TransferItem = {
+        id: transferId(),
+        direction: "down",
+        name: "clipboard.png",
+        size: 0,
+        transferred: 0,
+        status: "queued",
+        hidden: true,
+      };
+      this.#items.push(item);
+      this.#downloads.push({
+        item,
+        path,
+        started: false,
+        buffered: [],
+        bufferedBytes: 0,
+        flushedBytes: 0,
+        sinkChain: Promise.resolve(undefined),
+        sink: async ({ chunk }) => {
+          parts.push(chunk);
+          return undefined;
+        },
+        onDone: (error) => (error === null ? resolve(new Blob(parts, { type: "image/png" })) : reject(new Error(error))),
+      });
+      this.#pumpDownloads();
+    });
   }
 
   download(file: { path: string; name: string; size: number }): void {
@@ -177,13 +239,21 @@ export class RemoteFileClient {
     }
     this.#uploading?.settle?.({ ok: false, message: reason });
     this.#downloading?.settle?.();
+    for (const job of this.#uploads) job.onDone?.(reason);
+    for (const job of this.#downloads) job.onDone?.(reason);
+    if (this.#downloading) this.#downloading.onDone?.(reason);
     this.#uploads.length = 0;
     this.#downloads.length = 0;
     this.#emit();
   }
 
   #emit(): void {
-    this.#onUpdate(this.#items.map((item) => ({ ...item })));
+    // 内部传输结束后直接移除，不占用列表。
+    for (let i = this.#items.length - 1; i >= 0; i -= 1) {
+      const item = this.#items[i]!;
+      if (item.hidden && item.status !== "queued" && item.status !== "active") this.#items.splice(i, 1);
+    }
+    this.#onUpdate(this.#items.filter((item) => !item.hidden).map((item) => ({ ...item })));
   }
 
   #isOpen(): boolean {
@@ -224,7 +294,7 @@ export class RemoteFileClient {
     });
     try {
       if (!this.#isOpen()) throw new Error("文件通道未就绪");
-      this.#sendJson({ t: "put", id: item.id, name: item.name, size: item.size });
+      this.#sendJson({ t: "put", id: item.id, name: item.name, size: item.size, ...(job.dest ? { dest: job.dest } : {}) });
       let offset = 0;
       let lastEmit = 0;
       while (offset < file.size) {
@@ -264,6 +334,11 @@ export class RemoteFileClient {
       }
     } finally {
       this.#uploading = null;
+      if (job.onDone) {
+        const status = item.status as TransferItem["status"];
+        job.onDone(status === "done" ? null : (item.error ?? (status === "cancelled" ? "已取消" : "上传失败")));
+        job.onDone = undefined;
+      }
       this.#emit();
       void this.#pumpUploads();
     }
@@ -280,6 +355,7 @@ export class RemoteFileClient {
     if (!this.#isOpen()) {
       job.item.status = "error";
       job.item.error = "文件通道未就绪";
+      job.onDone?.(job.item.error);
       this.#emit();
       return;
     }
@@ -288,6 +364,11 @@ export class RemoteFileClient {
     job.settle = () => {
       if (this.#downloading === job) {
         this.#downloading = null;
+        if (job.onDone) {
+          const st = job.item.status;
+          job.onDone(st === "done" ? null : (job.item.error ?? (st === "cancelled" ? "已取消" : "下载失败")));
+          job.onDone = undefined;
+        }
         this.#emit();
         this.#pumpDownloads();
       }
@@ -303,9 +384,8 @@ export class RemoteFileClient {
     job.flushedBytes += job.bufferedBytes;
     job.buffered = [];
     job.bufferedBytes = 0;
-    job.sinkChain = job.sinkChain.then(() =>
-      this.#sink({ token: job.item.id, name: job.item.name, offset, chunk, final }),
-    );
+    const sink = job.sink ?? this.#sink;
+    job.sinkChain = job.sinkChain.then(() => sink({ token: job.item.id, name: job.item.name, offset, chunk, final }));
   }
 
   #onMessage(data: unknown): void {

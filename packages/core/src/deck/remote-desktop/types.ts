@@ -47,6 +47,10 @@ export const CLIPBOARD_MAX_CHARS = 4_000_000;
 export const FILE_CHUNK_BYTES = 16 * 1024;
 /** 单个传输文件上限。 */
 export const FILE_MAX_BYTES = 4 * 1024 * 1024 * 1024;
+/** 远端剪贴板图片的虚拟下载路径。 */
+export const CLIPBOARD_IMAGE_PATH = "clipboard:image";
+/** 剪贴板图片上限：经助手控制套接字以 base64 单行传递，需低于其 32MB 行缓冲。 */
+export const CLIPBOARD_IMAGE_MAX_BYTES = 20 * 1024 * 1024;
 
 export interface EncodedVideoFrame {
   keyframe: boolean;
@@ -86,6 +90,8 @@ export interface HostClipboardEvent {
   /** 剪贴板变化由宿主监听自动发现（而非控制端主动拉取）。 */
   auto?: boolean;
   files?: HostClipboardFile[];
+  /** 剪贴板里是图片（无文字、无文件）时的像素尺寸；图片数据按需经 `file` 通道下载。 */
+  image?: { w: number; h: number };
 }
 
 /** 宿主侧需要按会话汇总后下发给原生助手的流选项。 */
@@ -150,12 +156,15 @@ export type ControlServerMessage =
     }
   | { t: "cb"; text: string; auto?: boolean; chunk?: ClipboardChunkInfo }
   | { t: "cb.files"; files: Array<{ path: string; name: string; size: number }> }
+  /** 远端剪贴板是图片：控制端用 `file` 通道 `get` 路径 {@link CLIPBOARD_IMAGE_PATH} 取回 PNG。 */
+  | { t: "cb.image"; id: string; w: number; h: number; auto?: boolean }
   | ({ t: "cursor" } & HostCursorShape)
   | { t: "stats"; bitrateBps: number; lossPct: number; rttMs: number | null };
 
 /** `file` 通道上的 JSON 帧（二进制帧为当前传输的数据分片）。 */
 export type FileClientMessage =
-  | { t: "put"; id: string; name: string; size: number }
+  /** `dest: "clipboard"` 表示这是一张图片，写入远端剪贴板而不是存进下载目录。 */
+  | { t: "put"; id: string; name: string; size: number; dest?: "downloads" | "clipboard" }
   | { t: "end"; id: string }
   | { t: "cancel"; id: string }
   | { t: "get"; id: string; path: string };
