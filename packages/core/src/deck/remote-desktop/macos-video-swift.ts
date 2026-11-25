@@ -166,7 +166,7 @@ final class HardwareH264Encoder {
         guard let session else { return }
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: fps as CFNumber)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitrateBps as CFNumber)
-        let bytesPerSec = Int(Double(bitrateBps) / 8.0 * 1.35)
+        let bytesPerSec = Int(Double(bitrateBps) / 8.0 * 1.15)
         let limits = [bytesPerSec, 1] as CFArray
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits)
     }
@@ -365,7 +365,7 @@ final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStreamDelegate {
             config.width = targetW
             config.height = targetH
             config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(max(1, fps)))
-            config.queueDepth = 4
+            config.queueDepth = 3
             config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
             config.colorSpaceName = CGColorSpace.sRGB
             config.showsCursor = self.showsCursor

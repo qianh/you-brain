@@ -5,11 +5,20 @@ import {
   ClipboardAssembler,
   REMOTE_KEY_COMBOS,
   TrailingThrottle,
+  ZOOM_MAX,
+  ZOOM_MIN,
   chunkText,
+  clampZoom,
+  computeAnchoredZoomScroll,
+  computeZoomedSurfaceSize,
   expandKeyCombo,
+  isBlockedBrowserIceCandidate,
   isImeKeyEvent,
   isMacPlatform,
   mapKeyForRemote,
+  prepareSdpForDirectP2p,
+  roundNormalizedCoord,
+  stepZoom,
   summarizeRtcStats,
 } from "../../src/lib/remote-desktop-input.js";
 import { RemoteFileClient, type FileChannelLike } from "../../src/lib/remote-desktop-files.js";
@@ -85,7 +94,7 @@ describe("远程桌面输入工具", () => {
     expect(new Set(REMOTE_KEY_COMBOS.map((c) => c.id)).size).toBe(REMOTE_KEY_COMBOS.length);
   });
 
-  test("TrailingThrottle 间隔内只发最新值，flush 补发尾帧", () => {
+  test("TrailingThrottle 间隔内只发最新值，支持动态调整间隔与 flush", () => {
     let now = 0;
     const sent: number[] = [];
     const throttle = new TrailingThrottle<number>(4, (v) => sent.push(v), () => now);
@@ -98,10 +107,52 @@ describe("远程桌面输入工具", () => {
     expect(sent).toEqual([1, 3]);
     throttle.flush();
     expect(sent).toEqual([1, 3]);
+    throttle.setIntervalMs(16);
     now = 10;
+    // 距离上次 flush(now=1) 仅过 9ms < 16ms，不会立即发，进入尾帧等待
     throttle.push(4);
-    expect(sent).toEqual([1, 3, 4]);
+    expect(sent).toEqual([1, 3]);
+    now = 20;
+    throttle.push(5);
+    expect(sent).toEqual([1, 3, 5]);
     throttle.cancel();
+  });
+
+  test("画面缩放计算：支持缩小(<100%)、放大(>100%)、1:1 与鼠标锚点保位滚动", () => {
+    expect(clampZoom(0.1)).toBe(ZOOM_MIN);
+    expect(clampZoom(9)).toBe(ZOOM_MAX);
+    expect(clampZoom(1.008)).toBe(1);
+    expect(stepZoom(1, 1)).toBe(1.25);
+    expect(stepZoom(1, -1)).toBe(0.9);
+    expect(roundNormalizedCoord(0.123456789)).toBe(0.12346);
+
+    // 默认 fit 100%：不设自定义像素尺寸，不产生滚动条
+    const fit100 = computeZoomedSurfaceSize(1200, 800, 1920, 1080, "fit", 1);
+    expect(fit100).toEqual({ width: 1200, height: 800, isCustomSize: false, overflows: false });
+
+    // 缩小到 50%：1920x1080 在 1200x800 内 fit 盒为 1200x675，再乘 0.5 -> 600x338，居中无溢出
+    const fit50 = computeZoomedSurfaceSize(1200, 800, 1920, 1080, "fit", 0.5);
+    expect(fit50).toEqual({ width: 600, height: 338, isCustomSize: true, overflows: false });
+
+    // 放大到 200%：2400x1350 超出 1200x800 视口，启用滚动与平移
+    const fit200 = computeZoomedSurfaceSize(1200, 800, 1920, 1080, "fit", 2);
+    expect(fit200).toEqual({ width: 2400, height: 1350, isCustomSize: true, overflows: true });
+
+    // 锚点滚动：在 1200x675 画面（视口 1200x800，上下各留白 62.5px）上鼠标指在 (900, 400)，即水平 75%、垂直 50% 处放大到 2400x1350
+    const scroll = computeAnchoredZoomScroll({
+      viewportWidth: 1200,
+      viewportHeight: 800,
+      oldWidth: 1200,
+      oldHeight: 675,
+      newWidth: 2400,
+      newHeight: 1350,
+      scrollLeft: 0,
+      scrollTop: 0,
+      anchorX: 900,
+      anchorY: 400,
+    });
+    // 水平：0.75 * 2400 - 900 = 900；垂直：0.5 * 1350 - 400 = 275
+    expect(scroll).toEqual({ scrollLeft: 900, scrollTop: 275 });
   });
 
   test("summarizeRtcStats 计算帧率、码率、丢包与链路", () => {
@@ -235,5 +286,36 @@ describe("RemoteFileClient", () => {
     const get2 = dc.json().filter((m) => m.t === "get")[1]!;
     dc.emit(JSON.stringify({ t: "error", id: get2.id, message: "没有图片" }));
     await expect(failed).rejects.toThrow("没有图片");
+  });
+
+  test("浏览器侧过滤代理 Fake-IP 候选并在 SDP 协商中注入 renomination", () => {
+    expect(isBlockedBrowserIceCandidate("candidate:1 1 UDP 2122260223 198.18.0.1 50000 typ host")).toBe(true);
+    expect(isBlockedBrowserIceCandidate("candidate:2 1 UDP 2122260223 198.19.12.8 50001 typ host")).toBe(true);
+    expect(isBlockedBrowserIceCandidate("candidate:3 1 UDP 2122260223 fd00:1234:ffff::10 50002 typ host")).toBe(true);
+    expect(
+      isBlockedBrowserIceCandidate(
+        "candidate:4 1 UDP 1686052607 216.167.74.66 41000 typ srflx raddr 198.18.0.1 rport 50000",
+      ),
+    ).toBe(true);
+    expect(isBlockedBrowserIceCandidate("candidate:5 1 UDP 2122260223 100.88.1.9 50003 typ host")).toBe(false);
+    expect(isBlockedBrowserIceCandidate("candidate:6 1 UDP 2122260223 abcd-1234.local 50004 typ host")).toBe(false);
+
+    const inputSdp = [
+      "v=0",
+      "m=video 9 UDP/TLS/RTP/SAVPF 96",
+      "a=ice-ufrag:abcd",
+      "a=ice-pwd:123456789012345678901234",
+      "a=ice-options:trickle",
+      "a=candidate:1 1 UDP 2122260223 198.18.0.1 50000 typ host",
+      "a=candidate:2 1 UDP 2122260223 172.16.202.20 50005 typ host",
+      "",
+    ].join("\r\n");
+
+    const outputSdp = prepareSdpForDirectP2p(inputSdp);
+    expect(outputSdp).toContain("a=ice-options:trickle renomination");
+    expect(outputSdp).not.toContain("198.18.0.1");
+    expect(outputSdp).toContain("172.16.202.20");
+    // 幂等性：重复调用不会重复追加 renomination
+    expect(prepareSdpForDirectP2p(outputSdp)).toBe(outputSdp);
   });
 });

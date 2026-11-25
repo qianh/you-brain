@@ -58,11 +58,20 @@ async function run(args: string[], cwd = root): Promise<void> {
 }
 
 const INSTALL_SH = `#!/bin/sh
-# you-brain 服务器端安装。解压后执行：./install.sh
+# you-brain 服务器端安装与一键升级。解压后执行：./install.sh
 # 自定义前缀：PREFIX=/opt/you-brain ./install.sh
+# 若当前机器同时部署了 u-brain-relay（或传入 WITH_RELAY=1），会自动同步中转源码、清理旧 BOT_TOKEN、按需补齐 coturn 并重启中转；
+# 若当前用户已启用 you-brain.service（systemd 用户单元），装完后也会自动重启 daemon。
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
+if [ -z "\${PREFIX:-}" ]; then
+  unit_probe="\${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/you-brain.service"
+  if [ -f "$unit_probe" ]; then
+    detected=$(sed -E -n 's|^ExecStart="?([^" ]*)/bin/you-brain"? .*|\\1|p' "$unit_probe" | head -n 1)
+    [ -n "$detected" ] && PREFIX="$detected"
+  fi
+fi
 PREFIX=\${PREFIX:-$HOME/.local}
 bindir="$PREFIX/bin"
 libdir="$PREFIX/lib/you-brain"
@@ -92,13 +101,42 @@ if ! command -v systemctl >/dev/null 2>&1; then
   exit 0
 fi
 
+# 如果本机已部署 u-brain-relay（或显式指定 WITH_RELAY=1），一并自动升级中转并清理旧 Telegram 绑定
+if [ -f "$here/relay/install-local.sh" ]; then
+  has_relay=0
+  if [ "\${WITH_RELAY:-0}" = "1" ] || [ -f /etc/u-brain-relay.env ] || [ -d /opt/u-brain-relay ] || [ -f /etc/systemd/system/u-brain-relay.service ]; then
+    has_relay=1
+  fi
+  if [ "$has_relay" -eq 1 ]; then
+    if [ "$(id -u)" -eq 0 ]; then
+      bash "$here/relay/install-local.sh" --auto-turn
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+      sudo bash "$here/relay/install-local.sh" --auto-turn
+    else
+      echo "检测到本机装有 u-brain-relay，但当前不是 root 且无免密 sudo；如需一并更新中转请用 sudo bash $here/relay/install-local.sh --auto-turn"
+    fi
+  fi
+fi
+
+# 如果当前用户的 you-brain systemd 用户服务已在运行或已安装，自动重启使新版本立即生效
+uid=$(id -u)
+runtime_dir=\${XDG_RUNTIME_DIR:-/run/user/$uid}
+unit_file="\${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/you-brain.service"
+if [ -d "$runtime_dir" ] && [ -f "$unit_file" ]; then
+  if XDG_RUNTIME_DIR="$runtime_dir" systemctl --user daemon-reload >/dev/null 2>&1 \\
+    && XDG_RUNTIME_DIR="$runtime_dir" systemctl --user restart you-brain >/dev/null 2>&1; then
+    echo "已自动重启 you-brain 服务"
+    exit 0
+  fi
+fi
+
 cat <<'NEXT'
 
-下一步：
+下一步（首次部署时执行；已配置过的升级无需重复设置）：
   1. 首次设置（无界面，会打印 SSH 隧道命令用于 Google 登录）
        you-brain setup --server --yes
      走自己的 Google Cloud 项目（不依赖内置凭据，不受测试用户数限制）：
-       you-brain setup --server --oauth custom \
+       you-brain setup --server --oauth custom \\
          --client-id <xxx.apps.googleusercontent.com> --client-secret <secret>
      也可以先跑上面的 --yes 把服务装起来，再在设置页「账户与 Drive → OAuth 凭据」里填。
   2. 安装开机自启（systemd 用户单元）
@@ -107,10 +145,6 @@ cat <<'NEXT'
        loginctl enable-linger $USER
   3. 设为主设备
        you-brain devices --set-main <这台设备的 id>
-
-自己的 OAuth 项目：Google Cloud Console 建项目 → 启用 Google Drive API →
-创建「桌面应用」类型的 OAuth 客户端。User type 选 Internal（同 Workspace 域名）
-或发布到 Production；停在 Testing 时授权每 7 天过期。
 
 Web 界面只监听 127.0.0.1。远程查看请用 SSH 端口转发或 Tailscale，
 不要把端口直接对外。端口在 setup 后由 you-brain status 打印。
@@ -141,6 +175,7 @@ const tarball = join(root, "dist", "server", `${name}.tar.gz`);
 await rm(staging, { recursive: true, force: true });
 await mkdir(join(staging, "bin"), { recursive: true });
 await mkdir(join(staging, "lib"), { recursive: true });
+await mkdir(join(staging, "relay"), { recursive: true });
 
 await copyFile(join(built, "you-brain"), join(staging, "bin", "you-brain"));
 await chmod(join(staging, "bin", "you-brain"), 0o755);
@@ -152,6 +187,22 @@ await cp(join(built, "vendor"), join(staging, "lib", "you-brain", "vendor"), {
   recursive: true,
   dereference: true,
 });
+
+const relayRoot = join(root, "services", "telegram-relay");
+await cp(join(relayRoot, "src"), join(staging, "relay", "src"), {
+  recursive: true,
+  dereference: true,
+});
+for (const file of [
+  "u-brain-relay.service",
+  "u-brain-relay.env.example",
+  "setup-turn.sh",
+  "install-local.sh",
+]) {
+  const target = join(staging, "relay", file);
+  await copyFile(join(relayRoot, "deploy", file), target);
+  if (file.endsWith(".sh")) await chmod(target, 0o755);
+}
 
 await Bun.write(join(staging, "install.sh"), INSTALL_SH);
 await chmod(join(staging, "install.sh"), 0o755);

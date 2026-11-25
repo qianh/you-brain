@@ -9,11 +9,13 @@ function optional(name: string, fallback: string): string {
   return value === "" ? fallback : value;
 }
 
-const missing = ["BOT_TOKEN", "RELAY_KEY"].filter((name) => (process.env[name] ?? "") === "");
+const missing = ["RELAY_KEY"].filter((name) => (process.env[name] ?? "").trim() === "");
 if (missing.length > 0) {
   console.error(`缺少环境变量 ${missing.join("、")}。请写进权限为 0600 的环境文件，不要通过命令行参数传入。`);
   process.exit(1);
 }
+
+const botToken = optional("BOT_TOKEN", "").trim();
 
 const portText = optional("RELAY_PORT", "8787");
 const port = Number(portText);
@@ -40,8 +42,8 @@ const turnSecret = optional("RELAY_TURN_SECRET", "").trim();
 const server = await startRelayServer({
   port,
   host,
-  botToken: process.env.BOT_TOKEN ?? "",
-  relayKey: process.env.RELAY_KEY ?? "",
+  botToken,
+  relayKey: (process.env.RELAY_KEY ?? "").trim(),
   dataDir,
   acceptLegacyKey,
   publicOrigin: optional("RELAY_PUBLIC_ORIGIN", ""),
@@ -56,7 +58,8 @@ const server = await startRelayServer({
     : {}),
 });
 
-console.log(`U-Brain Telegram relay 监听 http://${host}:${server.port}`);
+const modeLabel = botToken ? "已启用 Telegram" : "纯设备中枢模式（未启用 Telegram）";
+console.log(`U-Brain relay 监听 http://${host}:${server.port} — ${modeLabel}`);
 
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {

@@ -125,11 +125,13 @@ final class RemoteHostAppDelegate: NSObject, NSApplicationDelegate {
             ],
             "doubleClickMs": Int(NSEvent.doubleClickInterval * 1000),
         ])
+        // 启动即抓取一次系统光标缓存给宿主，控制端建连后无需多等一个 RTT 即可启用本地零延迟光标。
+        cursorMonitor.resend()
 
         let fd = ctrlFD
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             var buffer = Data()
-            var scratch = [UInt8](repeating: 0, count: 8192)
+            var scratch = [UInt8](repeating: 0, count: 16384)
             while true {
                 let n = Darwin.read(fd, &scratch, scratch.count)
                 if n <= 0 {
@@ -142,14 +144,54 @@ final class RemoteHostAppDelegate: NSObject, NSApplicationDelegate {
                     DispatchQueue.main.async { self?.shutdown() }
                     return
                 }
+                // 批量解析同一批到达的指令：连续 mm 只保留最新一帧、连续 wh 累加增量，避免网络抖动突发造成 WindowServer CGEvent 排队卡顿。
+                var batch: [[String: Any]] = []
                 while let nl = buffer.firstIndex(of: 10) {
                     let line = Data(buffer[..<nl])
                     buffer.removeSubrange(...nl)
                     if line.isEmpty { continue }
                     if let obj = try? JSONSerialization.jsonObject(with: line) as? [String: Any] {
+                        batch.append(obj)
+                    }
+                }
+                guard !batch.isEmpty else { continue }
+                var pendingMove: [String: Any]? = nil
+                var pendingWheelDx = 0.0
+                var pendingWheelDy = 0.0
+                var pendingWheelCmd: [String: Any]? = nil
+                let flushPending = {
+                    if let move = pendingMove {
+                        pendingMove = nil
+                        self?.handleCommand(move)
+                    }
+                    if var wh = pendingWheelCmd {
+                        pendingWheelCmd = nil
+                        wh["dx"] = pendingWheelDx
+                        wh["dy"] = pendingWheelDy
+                        pendingWheelDx = 0.0
+                        pendingWheelDy = 0.0
+                        self?.handleCommand(wh)
+                    }
+                }
+                for obj in batch {
+                    let op = obj["op"] as? String
+                    if op == "mm" {
+                        if pendingWheelCmd != nil { flushPending() }
+                        pendingMove = obj
+                    } else if op == "wh" {
+                        if let move = pendingMove {
+                            pendingMove = nil
+                            self?.handleCommand(move)
+                        }
+                        pendingWheelDx += (obj["dx"] as? Double) ?? 0.0
+                        pendingWheelDy += (obj["dy"] as? Double) ?? 0.0
+                        pendingWheelCmd = obj
+                    } else {
+                        flushPending()
                         self?.handleCommand(obj)
                     }
                 }
+                flushPending()
             }
         }
     }

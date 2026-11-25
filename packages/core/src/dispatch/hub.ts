@@ -19,6 +19,7 @@ import {
   TUNNEL_OPEN_KIND,
 } from "@you-brain/protocol";
 
+import { resolveDirectStunIceServers } from "../deck/remote-desktop/net-ice.js";
 import { DEFAULT_CLIENT_ICE_SERVERS } from "../deck/remote-desktop/types.js";
 import type { DispatchRelayFrame, TelegramRelayState } from "../deck/telegram/relay.js";
 import { writeFileAtomic } from "../domain/atomic.js";
@@ -323,11 +324,14 @@ export class DispatchHub {
     return this.#tunnelClient.session(deviceId);
   }
 
-  /** 向中转申请 STUN / TURN 凭据；中转不可达或旧版不支持时回落到公共 STUN 节点。 */
+  /** 向中转申请 STUN / TURN 凭据；自动绕过本机 Fake-IP 代理劫持解析真实国内 STUN 节点。 */
   async turnCredentials(): Promise<DispatchTurnResponse> {
     const link = this.#link;
     if (!link) {
-      return { iceServers: DEFAULT_CLIENT_ICE_SERVERS, ttl: 3_600 };
+      return {
+        iceServers: await resolveDirectStunIceServers(DEFAULT_CLIENT_ICE_SERVERS),
+        ttl: 3_600,
+      };
     }
     try {
       const raw = await link.request<unknown>("turn");
@@ -341,13 +345,16 @@ export class DispatchHub {
           ? Math.trunc(raw.ttl)
           : 43_200;
         if (servers.length > 0) {
-          return { iceServers: servers, ttl };
+          return { iceServers: await resolveDirectStunIceServers(servers), ttl };
         }
       }
     } catch {
       // 旧版中转或网络瞬断时回落公共 STUN
     }
-    return { iceServers: DEFAULT_CLIENT_ICE_SERVERS, ttl: 3_600 };
+    return {
+      iceServers: await resolveDirectStunIceServers(DEFAULT_CLIENT_ICE_SERVERS),
+      ttl: 3_600,
+    };
   }
 
   /** 订阅目标端发回的远程桌面增量 ICE 与状态事件（供 Web / HTTP SSE 使用）。 */

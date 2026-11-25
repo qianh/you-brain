@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
 import {
   MediaStreamTrack,
   RTCPeerConnection,
@@ -20,6 +21,13 @@ import type {
 import { LossBasedBitrateController } from "./bitrate.js";
 import { HostFileTransfer, type FileChannelPort } from "./file-transfer.js";
 import { MacOsRemoteDesktopBridge, type RemoteDesktopHostBridge } from "./host-macos.js";
+import {
+  inspectLocalIceInterfaces,
+  isBlockedIceCandidateLine,
+  isProxyFakeOrBogusIp,
+  resolveDirectStunIceServers,
+  stripBlockedIceCandidatesFromSdp,
+} from "./net-ice.js";
 import { LowLatencyH264RtpStreamer } from "./rtp-h264.js";
 import {
   CLIPBOARD_CHUNK_CHARS,
@@ -43,6 +51,103 @@ const MAX_ICE_BATCH = 32;
 const STATS_INTERVAL_MS = 2_000;
 const FILE_DRAIN_LOW_WATER = 1024 * 1024;
 const MAX_DOWNLOAD_ALLOW = 200;
+const MDNS_LOOKUP_TIMEOUT_MS = 500;
+
+export type MdnsHostLookup = (hostname: string) => Promise<string | null>;
+
+const CANDIDATE_ADDR_RE = /^((?:a=)?candidate:\S+\s+\d+\s+\S+\s+\d+\s+)([^\s]+)(\s+\d+\s+typ\s+\S+.*)$/iu;
+
+function defaultMdnsLookup(hostname: string): Promise<string | null> {
+  return new Promise<string | null>((resolve) => {
+    const timer = setTimeout(() => resolve(null), MDNS_LOOKUP_TIMEOUT_MS);
+    timer.unref?.();
+    dnsLookup(hostname, { family: 4 })
+      .then((res) => {
+        clearTimeout(timer);
+        resolve(res.address || null);
+      })
+      .catch(() => {
+        clearTimeout(timer);
+        resolve(null);
+      });
+  });
+}
+
+/**
+ * 浏览器常将局域网 host 候选隐藏为 `<uuid>.local`。
+ * `werift` 内置 mDNS 解析器只检查 `answers[0]`，在 macOS 返回 AAAA/NSEC 首记录时会超时失败并被迫回落到高延迟跨国 TURN。
+ * 这里直接通过系统 mDNSResponder 解析成局域网 IPv4，使同网段设备优先走 <2ms P2P 直连。
+ */
+export async function resolveMdnsIceCandidate(
+  candidate: string,
+  cache: Map<string, Promise<string | null>>,
+  lookupFn: MdnsHostLookup = defaultMdnsLookup,
+): Promise<string | null> {
+  const match = CANDIDATE_ADDR_RE.exec(candidate.trim());
+  if (!match) return candidate;
+  const [, prefix, host, suffix] = match;
+  if (!host || !host.toLowerCase().endsWith(".local")) return candidate;
+  let pending = cache.get(host.toLowerCase());
+  if (!pending) {
+    pending = lookupFn(host);
+    cache.set(host.toLowerCase(), pending);
+  }
+  const resolved = await pending;
+  if (!resolved || isProxyFakeOrBogusIp(resolved)) return null;
+  return `${prefix}${resolved}${suffix}`;
+}
+
+async function rewriteMdnsInSdp(
+  sdp: string,
+  cache: Map<string, Promise<string | null>>,
+  lookupFn: MdnsHostLookup,
+  blockedIps?: ReadonlySet<string>,
+): Promise<string> {
+  const cleaned = stripBlockedIceCandidatesFromSdp(sdp, blockedIps);
+  if (!cleaned.includes(".local")) return cleaned;
+  const lines = cleaned.split(/\r?\n/);
+  const out = await Promise.all(
+    lines.map(async (line) => {
+      if (!line.startsWith("a=candidate:") || !line.includes(".local")) return line;
+      const resolved = await resolveMdnsIceCandidate(line, cache, lookupFn);
+      if (!resolved || isBlockedIceCandidateLine(resolved, blockedIps)) return "";
+      return resolved;
+    }),
+  );
+  return out.filter((line, idx) => line !== "" || lines[idx] === "").join("\r\n");
+}
+
+function isBlockedWeriftCandidate(
+  candidate: { host?: string | undefined; relatedAddress?: string | undefined } | undefined,
+  blockedIps: ReadonlySet<string>,
+): boolean {
+  if (!candidate) return false;
+  if (candidate.host && !candidate.host.toLowerCase().endsWith(".local") && isProxyFakeOrBogusIp(candidate.host, blockedIps)) {
+    return true;
+  }
+  if (candidate.relatedAddress && isProxyFakeOrBogusIp(candidate.relatedAddress, blockedIps)) {
+    return true;
+  }
+  return false;
+}
+
+function isPeerConnectionUsingRelay(pc: RTCPeerConnection): boolean {
+  const transports = (
+    pc as unknown as {
+      iceTransports?: Array<{
+        connection?: {
+          nominated?: {
+            localCandidate?: { type?: string };
+            remoteCandidate?: { type?: string };
+          };
+        };
+      }>;
+    }
+  ).iceTransports;
+  const nominated = transports?.[0]?.connection?.nominated;
+  if (!nominated) return false;
+  return nominated.localCandidate?.type === "relay" || nominated.remoteCandidate?.type === "relay";
+}
 
 export interface RemoteDesktopPort {
   readonly supported: boolean;
@@ -77,6 +182,17 @@ interface ActiveRdSession {
   bitrate: LossBasedBitrateController;
   statsTimer: ReturnType<typeof setInterval> | null;
   clipboardInbound: { id: string; n: number; parts: string[]; received: number; chars: number } | null;
+  /** 最近一次应用的鼠标移动序号，丢弃无序通道上晚到的旧坐标。 */
+  lastMoveSeq: number;
+  mdnsCache: Map<string, Promise<string | null>>;
+  blockedIps: ReadonlySet<string>;
+}
+
+function acceptMoveSeq(session: ActiveRdSession, seq: number | undefined): boolean {
+  if (typeof seq !== "number" || !Number.isFinite(seq)) return true;
+  if (seq <= session.lastMoveSeq) return false;
+  session.lastMoveSeq = seq;
+  return true;
 }
 
 function chunkId(): string {
@@ -140,6 +256,7 @@ export interface RemoteDesktopHostManagerOptions {
   getIceServers?: () => Promise<IceServerEntry[]> | IceServerEntry[];
   helperIdleGraceMs?: number;
   iceStunGatherTimeoutSec?: number;
+  mdnsLookup?: MdnsHostLookup;
 }
 
 export class RemoteDesktopHostManager implements RemoteDesktopPort {
@@ -148,6 +265,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
   readonly #getIceServers: () => Promise<IceServerEntry[]> | IceServerEntry[];
   readonly #helperIdleGraceMs: number;
   readonly #iceStunGatherTimeoutSec: number;
+  readonly #mdnsLookup: MdnsHostLookup;
   readonly #sessions = new Map<string, ActiveRdSession>();
   #events: RemoteDesktopSignalingEvents | null = null;
   #idleTimer: ReturnType<typeof setInterval> | null = null;
@@ -170,6 +288,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     this.#getIceServers = options?.getIceServers ?? (() => DEFAULT_CLIENT_ICE_SERVERS);
     this.#helperIdleGraceMs = options?.helperIdleGraceMs ?? 2_000;
     this.#iceStunGatherTimeoutSec = options?.iceStunGatherTimeoutSec ?? 1.5;
+    this.#mdnsLookup = options?.mdnsLookup ?? defaultMdnsLookup;
 
     if (this.#bridge) {
       this.#bindBridge(this.#bridge);
@@ -217,26 +336,40 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     }
 
     const quality: RdQuality = args.quality ?? "hd";
-    const [snapshot, iceEntries] = await Promise.all([
+    const mdnsCache = new Map<string, Promise<string | null>>();
+    const localIce = inspectLocalIceInterfaces();
+    const [snapshot, iceEntries, rewrittenOfferSdp] = await Promise.all([
       this.#bridge.ensureStarted({
         quality,
         ...(args.displayId !== undefined ? { displayId: args.displayId } : {}),
         promptPermissions: false,
       }),
-      overrideIceServers
+      (overrideIceServers
         ? Promise.resolve(overrideIceServers)
         : Promise.resolve()
             .then(() => this.#getIceServers())
-            .catch(() => DEFAULT_CLIENT_ICE_SERVERS),
+            .catch(() => DEFAULT_CLIENT_ICE_SERVERS)
+      ).then((entries) => resolveDirectStunIceServers(entries)),
+      rewriteMdnsInSdp(args.offerSdp, mdnsCache, this.#mdnsLookup, localIce.blockedIps),
     ]);
     // 新开流以预设码率起步；自适应控制器随后按丢包调整。
     this.#appliedBitrate = null;
 
     const hasIceServers = iceEntries.length > 0;
+    const preferredHostAddresses = !hasIceServers
+      ? ["127.0.0.1"]
+      : localIce.preferredHostAddresses.length > 0
+        ? localIce.preferredHostAddresses
+        : undefined;
     const pc = new RTCPeerConnection({
       iceServers: toWeriftIceServers(iceEntries),
       iceUseDefaultStunServer: false,
-      ...(!hasIceServers ? { iceAdditionalHostAddresses: ["127.0.0.1"] } : {}),
+      iceUseLinkLocalAddress: false,
+      iceRenomination: true,
+      ...(preferredHostAddresses ? { iceAdditionalHostAddresses: preferredHostAddresses } : {}),
+      iceFilterCandidatePair: (pair) =>
+        !isBlockedWeriftCandidate(pair.localCandidate, localIce.blockedIps) &&
+        !isBlockedWeriftCandidate(pair.remoteCandidate, localIce.blockedIps),
       iceStunGatherTimeout: this.#iceStunGatherTimeoutSec,
       codecs: { video: buildH264Codecs() },
       pendingRtp: { enabled: true, maxLength: 96 },
@@ -287,6 +420,9 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       }),
       statsTimer: null,
       clipboardInbound: null,
+      lastMoveSeq: -1,
+      mdnsCache,
+      blockedIps: localIce.blockedIps,
     };
 
     sender.onRtcp.subscribe((packet) => {
@@ -308,6 +444,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
 
     pc.onIceCandidate.subscribe((candidate) => {
       if (session.closed || !candidate || !candidate.candidate) return;
+      if (isBlockedIceCandidateLine(candidate.candidate, session.blockedIps)) return;
       this.#enqueueLocalCandidate(session, {
         candidate: candidate.candidate,
         ...(candidate.sdpMid !== undefined ? { sdpMid: candidate.sdpMid } : {}),
@@ -322,6 +459,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       if (session.closed) return;
       if (state === "connected") {
         session.lastActiveAt = Date.now();
+        session.bitrate.setRelayMode(isPeerConnectionUsingRelay(pc));
         this.#startStats(session);
         this.#bridge?.requestKeyframe();
         const cur = this.#bridge?.getStateSnapshot() ?? snapshot;
@@ -342,10 +480,11 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     });
 
     try {
-      await pc.setRemoteDescription({ type: "offer", sdp: args.offerSdp });
+      await pc.setRemoteDescription({ type: "offer", sdp: rewrittenOfferSdp });
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      const answerSdp = pc.localDescription?.sdp ?? answer.sdp;
+      const rawAnswerSdp = pc.localDescription?.sdp ?? answer.sdp;
+      const answerSdp = stripBlockedIceCandidatesFromSdp(rawAnswerSdp, session.blockedIps);
       this.#sessions.set(session.sessionId, session);
       this.#applyStreamOptions();
       this.#ensureIdleSweep();
@@ -374,20 +513,25 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       throw new Error("无权操作其他设备的远程桌面会话");
     }
     session.lastActiveAt = Date.now();
-    for (const item of args.candidates) {
-      if (!item.candidate) {
-        await session.pc.addIceCandidate(null).catch(() => {});
-        continue;
-      }
-      await session.pc
-        .addIceCandidate({
-          candidate: item.candidate,
-          sdpMid: item.sdpMid ?? null,
-          sdpMLineIndex: item.sdpMLineIndex ?? null,
-          usernameFragment: item.usernameFragment ?? null,
-        })
-        .catch(() => {});
-    }
+    await Promise.all(
+      args.candidates.map(async (item) => {
+        if (session.closed) return;
+        if (!item.candidate) {
+          await session.pc.addIceCandidate(null).catch(() => {});
+          return;
+        }
+        const resolved = await resolveMdnsIceCandidate(item.candidate, session.mdnsCache, this.#mdnsLookup);
+        if (!resolved || session.closed || isBlockedIceCandidateLine(resolved, session.blockedIps)) return;
+        await session.pc
+          .addIceCandidate({
+            candidate: resolved,
+            sdpMid: item.sdpMid ?? null,
+            sdpMLineIndex: item.sdpMLineIndex ?? null,
+            usernameFragment: item.usernameFragment ?? null,
+          })
+          .catch(() => {});
+      }),
+    );
     return { ok: true };
   }
 
@@ -480,7 +624,11 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
         const text = typeof raw === "string" ? raw : raw.toString("utf8");
         try {
           const msg = JSON.parse(text) as FastInputMessage;
-          if (msg && (msg.t === "mm" || msg.t === "wh")) {
+          if (!msg) return;
+          if (msg.t === "mm") {
+            if (!acceptMoveSeq(session, msg.seq)) return;
+            this.#bridge?.handleFastInput(msg);
+          } else if (msg.t === "wh") {
             this.#bridge?.handleFastInput(msg);
           }
         } catch {
@@ -521,6 +669,10 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
         if (session.closed || !this.#bridge) return;
         const snap: HostStateSnapshot = this.#bridge.getStateSnapshot();
         this.#sendControlMessage(session, this.#stateMessage(session, snap));
+        // 主动推送已缓存的系统光标形状，免去控制端等待 cfg 往返（高 RTT TURN 链路可立省 400ms+）。
+        if (this.#lastCursor) {
+          this.#sendControlMessage(session, { t: "cursor", ...this.#lastCursor });
+        }
         this.#bridge.requestKeyframe();
       };
       if (dc.readyState === "open") {
@@ -580,6 +732,17 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
             return;
           case "cb.set":
             this.#onClientClipboard(session, msg);
+            return;
+          case "mm":
+            if (!acceptMoveSeq(session, msg.seq)) return;
+            this.#bridge?.handleControlInput(msg);
+            return;
+          case "md":
+          case "mu":
+            if (typeof msg.seq === "number" && Number.isFinite(msg.seq) && msg.seq > session.lastMoveSeq) {
+              session.lastMoveSeq = msg.seq;
+            }
+            this.#bridge?.handleControlInput(msg);
             return;
           default:
             this.#bridge?.handleControlInput(msg);
@@ -753,6 +916,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     if (session.statsTimer) return;
     session.statsTimer = setInterval(() => {
       if (session.closed) return;
+      session.bitrate.setRelayMode(isPeerConnectionUsingRelay(session.pc));
       this.#sendControlMessage(session, {
         t: "stats",
         bitrateBps: this.#appliedBitrate ?? session.bitrate.targetBps,

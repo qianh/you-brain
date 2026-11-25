@@ -22,7 +22,8 @@ export interface RelayServerOptions {
   port: number;
   /** 默认只听本机，交给反代。 */
   host?: string;
-  botToken: string;
+  /** 可选：留空时以纯设备中转与原生推送模式运行，不调用 Telegram API。 */
+  botToken?: string;
   relayKey: string;
   dataDir: string;
   /** 测试里指向假的 Telegram。默认 https://api.telegram.org。 */
@@ -188,7 +189,7 @@ class FileRelayStorage implements RelayStorage {
 
 export async function startRelayServer(options: RelayServerOptions): Promise<RelayServer> {
   const host = options.host ?? "127.0.0.1";
-  const token = options.botToken;
+  const token = (options.botToken ?? "").trim();
   const relayKey = options.relayKey;
   const acceptLegacyKey = options.acceptLegacyKey ?? true;
   const fixedOrigin = options.publicOrigin?.trim().replace(/\/+$/u, "") || undefined;
@@ -246,6 +247,7 @@ export async function startRelayServer(options: RelayServerOptions): Promise<Rel
 
   const core: RelayCore = new RelayCore({
     storage,
+    botConfigured: token !== "",
     sockets: activeSockets,
     telegram: async <T>(method: string, params: Record<string, unknown>): Promise<T> => {
       if (!token) throw new Error("中转没有配置 BOT_TOKEN");
@@ -329,6 +331,7 @@ export async function startRelayServer(options: RelayServerOptions): Promise<Rel
     fetch(request, bun) {
       const url = new URL(request.url);
       if (url.pathname === "/telegram" && request.method === "POST") {
+        if (!token) return new Response("not found", { status: 404 });
         const header = request.headers.get(WEBHOOK_SECRET_HEADER) ?? "";
         if (!sameText(header, secret)) return new Response("forbidden", { status: 403 });
         return (async () => {
@@ -472,7 +475,9 @@ export async function startRelayServer(options: RelayServerOptions): Promise<Rel
             dropSocket(ws, 4001, "revoked");
             return;
           }
-          await core.ensureWebhook(webhook, secret).catch(() => undefined);
+          if (token) {
+            await core.ensureWebhook(webhook, secret).catch(() => undefined);
+          }
           if (replaced.has(ws) || ws.readyState !== OPEN) return;
           await core.connected(deviceId, name);
         });

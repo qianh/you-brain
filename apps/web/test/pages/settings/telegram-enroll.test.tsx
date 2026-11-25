@@ -136,4 +136,42 @@ describe("TelegramSection 中转邀请码入网", () => {
     expect(html).not.toContain('id="telegram-relay-key"');
     expect(html).not.toContain("u-brain-relay:");
   });
+
+  test("纯设备中转模式（中转未配 BOT_TOKEN）下仅展示中转状态与新设备配对，隐藏全部 Telegram Bot 与绑定项", () => {
+    const html = renderToStaticMarkup(
+      <DaemonProvider>
+        <ToastProvider>
+          <TelegramSection
+            client={({ deckTelegramEnrollInvite: async () => ({}) } as unknown) as BrowserDaemon}
+            initialStatus={{
+              configured: true,
+              bot: null,
+              connection: "ok",
+              error: null,
+              bound: null,
+              notificationsEnabled: false,
+              pairing: null,
+              relay: {
+                url: "https://relay.example.com",
+                name: "工作室 Mac",
+                devices: [
+                  { name: "工作室 Mac", online: true, self: true },
+                  { name: "VPS 主控", online: true, self: false },
+                ],
+              },
+            }}
+            initialEnrolled={true}
+          />
+        </ToastProvider>
+      </DaemonProvider>,
+    );
+
+    expect(html).toContain("设备中转（VPS）");
+    expect(html).toContain("https://relay.example.com");
+    expect(html).toContain("已入网");
+    expect(html).toContain("添加手机 / 新设备");
+    expect(html).not.toContain("生成绑定链接");
+    expect(html).not.toContain("未绑定");
+    expect(html).not.toContain("@BotFather");
+  });
 });

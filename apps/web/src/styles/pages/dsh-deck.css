@@ -300,6 +300,49 @@
   font-weight: 600;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
+.deck-rd-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-ctl, 8px);
+  background: var(--surface-2);
+}
+.deck-rd-zoom-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 5px;
+  border: 0;
+  border-radius: calc(var(--r-ctl, 8px) - 2px);
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.deck-rd-zoom-btn:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--text);
+}
+.deck-rd-zoom-btn:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+.deck-rd-zoom-btn.is-active {
+  background: var(--surface);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+.deck-rd-zoom-pct {
+  min-width: 44px;
+  padding: 0 6px;
+}
 .deck-rd-stage {
   position: relative;
   flex: 1;
@@ -308,6 +351,7 @@
   align-items: center;
   justify-content: center;
   overflow: hidden;
+  contain: layout paint;
   border: 1px solid var(--border);
   border-radius: var(--radius-md, 10px);
   background: #090b10;
@@ -319,20 +363,27 @@
   border-color: var(--accent);
 }
 .deck-rd-video {
+  display: block;
   width: 100%;
   height: 100%;
   object-fit: contain;
   pointer-events: none;
   background: #090b10;
+  transform: translateZ(0);
+  backface-visibility: hidden;
 }
 .deck-rd-viewport {
   position: absolute;
   inset: 0;
   display: flex;
   overflow: hidden;
+  overscroll-behavior: contain;
 }
+.deck-rd-viewport.is-scrollable,
 .deck-rd-viewport.is-actual {
   overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
 }
 .deck-rd-surface {
   position: relative;
@@ -346,7 +397,14 @@
 .deck-rd-surface.is-cursor-hidden {
   cursor: none;
 }
-.deck-rd-viewport.is-actual .deck-rd-video {
+.deck-rd-surface.is-pan-mode {
+  cursor: grab !important;
+}
+.deck-rd-surface.is-panning {
+  cursor: grabbing !important;
+}
+.deck-rd-viewport.is-actual .deck-rd-video,
+.deck-rd-surface.is-custom-size .deck-rd-video {
   object-fit: fill;
 }
 /* 隐藏的输入法承接框：放在最近一次点击处，让候选窗口出现在光标附近。 */

@@ -31,10 +31,8 @@ export const QUALITY_PRESETS: Record<RdQuality, QualityPreset> = {
 export const DEFAULT_CLIENT_ICE_SERVERS: IceServerEntry[] = [
   {
     urls: [
-      "stun:stun.cloudflare.com:3478",
+      "stun:stun.chat.bilibili.com:3478",
       "stun:stun.miwifi.com:3478",
-      "stun:stun.qq.com:3478",
-      "stun:stun.l.google.com:19302",
     ],
   },
 ];
@@ -105,7 +103,7 @@ export interface HostStreamOptions {
 }
 
 export type FastInputMessage =
-  | { t: "mm"; x: number; y: number }
+  | { t: "mm"; x: number; y: number; seq?: number }
   | { t: "wh"; dx: number; dy: number; x?: number; y?: number };
 
 export interface ClipboardChunkInfo {
@@ -118,10 +116,10 @@ export interface ClipboardChunkInfo {
 }
 
 export type ControlClientMessage =
-  | { t: "mm"; x: number; y: number }
+  | { t: "mm"; x: number; y: number; seq?: number }
   | { t: "wh"; dx: number; dy: number; x?: number; y?: number }
-  | { t: "md"; x: number; y: number; b: 0 | 1 | 2; clicks?: number }
-  | { t: "mu"; x: number; y: number; b: 0 | 1 | 2; clicks?: number }
+  | { t: "md"; x: number; y: number; b: 0 | 1 | 2; clicks?: number; seq?: number }
+  | { t: "mu"; x: number; y: number; b: 0 | 1 | 2; clicks?: number; seq?: number }
   | {
       t: "kd";
       code: string;

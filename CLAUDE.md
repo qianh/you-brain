@@ -58,3 +58,16 @@ open -a /Applications/U-Brain.app
 ## 只换 daemon 时
 
 `bun run install:app` 只替换 daemon、`web`、`vendor`、`dsh`，不重建桌面外壳，且要先跑过 `build:daemon`（同样要设镜像）。它会先停掉整个 App（壳活着会用替换到一半的文件重新拉起 daemon），装完若原来开着就自动重新打开。改过 `apps/desktop` 必须走上面的完整流程。
+
+## 各设备拉取代码后一键重装部署（macOS / Linux VPS 通用）
+
+```bash
+git pull --ff-only && bun run redeploy
+```
+
+- **macOS**：自动 `bun install`（镜像优先）→ `build:daemon` → `install:app`（若改过 `apps/desktop` 加 `-- --full` 走完整 `.app` 打包）。
+- **Linux 服务器 / VPS**：自动 `bun install` → `build:server` → 执行产物 `install.sh`：
+  1. 整体更新 `you-brain` 二进制、`web`、`vendor` 并自动重启 `you-brain` 用户服务；
+  2. 若本机装有 `u-brain-relay`，**自动同步 `/opt/u-brain-relay/src`、注销旧 Telegram Webhook 并清空 `/etc/u-brain-relay.env` 中的 `BOT_TOKEN`（切为纯设备中枢模式）、按需检查 coturn 并重启 `u-brain-relay` 自检**，无需任何手工改配置。
+- 若只单独从开发机往 VPS 推中转：`services/telegram-relay/deploy/deploy.sh`（或在 VPS 本机跑 `services/telegram-relay/deploy/deploy.sh --local`）同样会自动完成上述迁移与重启。
+

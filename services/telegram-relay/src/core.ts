@@ -47,6 +47,8 @@ export interface RelayPorts {
   randomInt(max: number): number;
   /** 可选：路由设备的 deviceId。不引用的消息交给它按内容判断是回哪条推送。 */
   routerDeviceId?: string;
+  /** 可选：是否启用了 Telegram Bot（默认 true；显式传 false 时以纯设备中转与原生推送模式运行，不调 Telegram API）。 */
+  botConfigured?: boolean;
   /** 可选：为 state.devices 补充入网状态、公钥与最近一次 hello 的 dispatch 信息。 */
   deviceMeta?: (deviceId: string) => Promise<RelayDeviceMeta | undefined> | RelayDeviceMeta | undefined;
 }
@@ -201,7 +203,12 @@ export class RelayCore {
     return this.#ports.storage.get<T>(key);
   }
 
+  #hasBot(): boolean {
+    return this.#ports.botConfigured !== false;
+  }
+
   async #bot(): Promise<Bot> {
+    if (!this.#hasBot()) throw new Error("中转没有配置 BOT_TOKEN");
     const cached = await this.#get<Bot>("bot");
     if (cached) return cached;
     const me = await this.#ports.telegram<{ id: number; username?: string; first_name?: string }>("getMe", {});
@@ -211,9 +218,10 @@ export class RelayCore {
   }
 
   async state(): Promise<RelayState> {
+    const hasBot = this.#hasBot();
     const [bot, chat, devices] = await Promise.all([
-      this.#get<Bot>("bot"),
-      this.#get<Chat>("chat"),
+      hasBot ? this.#get<Bot>("bot") : Promise.resolve(undefined),
+      hasBot ? this.#get<Chat>("chat") : Promise.resolve(undefined),
       this.#get<Devices>("devices"),
     ]);
     const online = new Set(this.#ports.sockets().map((socket) => socket.deviceId));
@@ -248,7 +256,7 @@ export class RelayCore {
     }
   }
 
-  /** 设备连上（运行时已校验密钥）：登记名字，让 Bot 信息就绪，再把状态发给所有设备。 */
+  /** 设备连上（运行时已校验密钥）：登记名字，如启用了 Bot 则让 Bot 信息就绪，再把状态发给所有设备。 */
   async connected(deviceId: string, name: string): Promise<void> {
     const devices = (await this.#get<Devices>("devices")) ?? {};
     devices[deviceId] = { name, seenAt: this.#ports.now() };
@@ -256,7 +264,9 @@ export class RelayCore {
       .sort((a, b) => b[1].seenAt - a[1].seenAt)
       .slice(0, DEVICES_KEPT);
     await this.#ports.storage.put("devices", Object.fromEntries(kept));
-    await this.#bot().catch(() => undefined);
+    if (this.#hasBot()) {
+      await this.#bot().catch(() => undefined);
+    }
     await this.broadcast();
   }
 
@@ -266,6 +276,7 @@ export class RelayCore {
    * 同一个 url 在 60 秒内比对成功则跳过请求；这个标记只在内存里。
    */
   async ensureWebhook(url: string, secret: string): Promise<void> {
+    if (!this.#hasBot()) return;
     const now = this.#ports.now();
     const until = this.#webhookOk.get(url);
     if (until !== undefined && now < until) return;
@@ -307,7 +318,7 @@ export class RelayCore {
       case "pushes":
         return this.#pushes(socket, request);
       case "send": {
-        const chat = await this.#get<Chat>("chat");
+        const chat = this.#hasBot() ? await this.#get<Chat>("chat") : undefined;
         if (!chat) throw new Error("还没有绑定 Telegram");
         if (typeof request.text !== "string" || request.text.trim() === "") throw new Error("消息为空");
         const push = request.push === true;
@@ -400,7 +411,7 @@ export class RelayCore {
 
     let messageId: number | null = null;
     const telegramText = typeof request.telegramText === "string" ? request.telegramText.trim() : "";
-    if (telegramText !== "") {
+    if (this.#hasBot() && telegramText !== "") {
       const chat = await this.#get<Chat>("chat");
       if (chat) {
         const devices = (await this.#get<Devices>("devices")) ?? {};

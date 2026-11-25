@@ -43,10 +43,8 @@ export interface RelayIceServer {
 }
 
 export const DEFAULT_STUN_URLS = [
-  "stun:stun.cloudflare.com:3478",
+  "stun:stun.chat.bilibili.com:3478",
   "stun:stun.miwifi.com:3478",
-  "stun:stun.qq.com:3478",
-  "stun:stun.l.google.com:19302",
 ] as const;
 
 export type DispatchTimer = ReturnType<typeof globalThis.setTimeout>;

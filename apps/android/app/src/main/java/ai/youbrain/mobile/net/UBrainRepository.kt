@@ -1153,10 +1153,8 @@ class UBrainRepository(context: Context) {
         val fallback = listOf(
             RdIceServer(
                 urls = listOf(
-                    "stun:stun.cloudflare.com:3478",
+                    "stun:stun.chat.bilibili.com:3478",
                     "stun:stun.miwifi.com:3478",
-                    "stun:stun.qq.com:3478",
-                    "stun:stun.l.google.com:19302",
                 ),
             ),
         )

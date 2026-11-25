@@ -6,3 +6,4 @@ export * from "./session-manager.js";
 export * from "./bitrate.js";
 export * from "./file-transfer.js";
 export * from "./host-process.js";
+export * from "./net-ice.js";

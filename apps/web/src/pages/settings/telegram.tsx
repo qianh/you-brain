@@ -197,114 +197,33 @@ export function TelegramSection(props: TelegramSectionProps = {}) {
     }
   };
 
+  const hasRelayBot = relay !== null && Boolean(status?.bot);
+  const hasDirectBot = relay === null && Boolean(status?.configured);
+
   return (
     <Section title={t("telegramTitle")}>
       <Card>
         <div className="notion-form">
-          {relay ? null : (
-            <>
-              <label className="notion-label" htmlFor="telegram-token">
-                {t("telegramTokenLabel")}
-              </label>
-              <div className="notion-token-row">
-                <input
-                  id="telegram-token"
-                  className="notion-input"
-                  type="password"
-                  autoComplete="off"
-                  placeholder={t("telegramTokenPlaceholder")}
-                  value={token}
-                  onChange={(event) => setToken(event.target.value)}
-                />
-                <Button
-                  size="sm"
-                  disabled={busy || token.trim() === ""}
-                  onClick={() =>
-                    void run({ action: "set-token", token: token.trim() }, (next) =>
-                      t("telegramSaved", { name: next.bot?.username ?? "" }),
-                    ).then((ok) => {
-                      if (ok) setToken("");
-                    })
-                  }
-                >
-                  {t("telegramSave")}
-                </Button>
-                {status?.configured ? (
-                  <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run({ action: "clear-token" })}>
-                    {t("telegramClear")}
-                  </Button>
-                ) : null}
-              </div>
-            </>
-          )}
-          {status?.configured ? (
-            <>
-              {relay ? (
-                <div className="notion-status">
-                  <span>
-                    {t("telegramRelayCurrent")}: {relay.url}
-                  </span>
-                  {enrolled ? (
-                    <Chip tone="success" dot>
-                      {t("telegramRelayEnrolled")}
-                    </Chip>
-                  ) : null}
-                  <span>
-                    {t("telegramRelayDevices")}:{" "}
-                    {relay.devices
-                      .map(
-                        (device) =>
-                          `${device.name}${device.self ? `（${t("telegramRelaySelf")}）` : ""}${device.online ? "" : `（${t("telegramRelayOffline")}）`}`,
-                      )
-                      .join("、") || "—"}
-                  </span>
-                </div>
-              ) : null}
-              <div className="notion-status">
-                <span>
-                  {t("telegramBot")}: {status.bot ? `@${status.bot.username}` : "—"}
-                </span>
-                <span>
-                  {t("telegramConnection")}: {connection}
-                </span>
-                <span>{status.bound ? `${t("telegramBound")}: ${status.bound.name}` : t("telegramUnbound")}</span>
-              </div>
-              <div className="notion-status">
-                {status.bound ? (
-                  <>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      disabled={busy}
-                      onClick={() => void run({ action: "test" }, () => t("telegramTestOk"))}
-                    >
-                      {t("telegramTest")}
-                    </Button>
-                    <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run({ action: "unbind" })}>
-                      {t("telegramUnbind")}
-                    </Button>
-                  </>
-                ) : (
-                  <Button size="sm" disabled={busy || !status.bot} onClick={() => void run({ action: "pair" })}>
-                    {t("telegramPair")}
-                  </Button>
-                )}
-              </div>
-              {pairing && !status.bound ? (
-                <div className="notion-status">
-                  <a href={pairing.link} target="_blank" rel="noreferrer">
-                    {pairing.link}
-                  </a>
-                  <span>{t("telegramPairHint", { code: pairing.code })}</span>
-                </div>
-              ) : null}
-            </>
-          ) : null}
-        </div>
-      </Card>
-      <Card>
-        <div className="notion-form">
           <span className="notion-label">{t("telegramRelayTitle")}</span>
+          {relay ? (
+            <div className="notion-status">
+              <span>
+                {t("telegramRelayCurrent")}: {relay.url}
+              </span>
+              <span>
+                {t("telegramConnection")}: {connection}
+              </span>
+              <span>
+                {t("telegramRelayDevices")}:{" "}
+                {relay.devices
+                  .map(
+                    (device) =>
+                      `${device.name}${device.self ? `（${t("telegramRelaySelf")}）` : ""}${device.online ? "" : `（${t("telegramRelayOffline")}）`}`,
+                  )
+                  .join("、") || "—"}
+              </span>
+            </div>
+          ) : null}
           {enrolled ? (
             <>
               <div className="notion-token-row">
@@ -404,8 +323,159 @@ export function TelegramSection(props: TelegramSectionProps = {}) {
           )}
         </div>
       </Card>
+      {hasRelayBot && status ? (
+        <Card>
+          <div className="notion-form">
+            <span className="notion-label">{t("telegramOptionalBotTitle")}</span>
+            <div className="notion-status">
+              <span>
+                {t("telegramBot")}: {status.bot ? `@${status.bot.username}` : "—"}
+              </span>
+              <span>{status.bound ? `${t("telegramBound")}: ${status.bound.name}` : t("telegramUnbound")}</span>
+            </div>
+            <div className="notion-status">
+              {status.bound ? (
+                <>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() => void run({ action: "test" }, () => t("telegramTestOk"))}
+                  >
+                    {t("telegramTest")}
+                  </Button>
+                  <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run({ action: "unbind" })}>
+                    {t("telegramUnbind")}
+                  </Button>
+                </>
+              ) : (
+                <Button size="sm" disabled={busy || !status.bot} onClick={() => void run({ action: "pair" })}>
+                  {t("telegramPair")}
+                </Button>
+              )}
+            </div>
+            {pairing && !status.bound ? (
+              <div className="notion-status">
+                <a href={pairing.link} target="_blank" rel="noreferrer">
+                  {pairing.link}
+                </a>
+                <span>{t("telegramPairHint", { code: pairing.code })}</span>
+              </div>
+            ) : null}
+          </div>
+        </Card>
+      ) : null}
+      {relay === null ? (
+        <Card>
+          {hasDirectBot && status ? (
+            <div className="notion-form">
+              <label className="notion-label" htmlFor="telegram-token">
+                {t("telegramTokenLabel")}
+              </label>
+              <div className="notion-token-row">
+                <input
+                  id="telegram-token"
+                  className="notion-input"
+                  type="password"
+                  autoComplete="off"
+                  placeholder={t("telegramTokenPlaceholder")}
+                  value={token}
+                  onChange={(event) => setToken(event.target.value)}
+                />
+                <Button
+                  size="sm"
+                  disabled={busy || token.trim() === ""}
+                  onClick={() =>
+                    void run({ action: "set-token", token: token.trim() }, (next) =>
+                      t("telegramSaved", { name: next.bot?.username ?? "" }),
+                    ).then((ok) => {
+                      if (ok) setToken("");
+                    })
+                  }
+                >
+                  {t("telegramSave")}
+                </Button>
+                <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run({ action: "clear-token" })}>
+                  {t("telegramClear")}
+                </Button>
+              </div>
+              <div className="notion-status">
+                <span>
+                  {t("telegramBot")}: {status.bot ? `@${status.bot.username}` : "—"}
+                </span>
+                <span>
+                  {t("telegramConnection")}: {connection}
+                </span>
+                <span>{status.bound ? `${t("telegramBound")}: ${status.bound.name}` : t("telegramUnbound")}</span>
+              </div>
+              <div className="notion-status">
+                {status.bound ? (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={busy}
+                      onClick={() => void run({ action: "test" }, () => t("telegramTestOk"))}
+                    >
+                      {t("telegramTest")}
+                    </Button>
+                    <Button size="sm" variant="ghost" disabled={busy} onClick={() => void run({ action: "unbind" })}>
+                      {t("telegramUnbind")}
+                    </Button>
+                  </>
+                ) : (
+                  <Button size="sm" disabled={busy || !status.bot} onClick={() => void run({ action: "pair" })}>
+                    {t("telegramPair")}
+                  </Button>
+                )}
+              </div>
+              {pairing && !status.bound ? (
+                <div className="notion-status">
+                  <a href={pairing.link} target="_blank" rel="noreferrer">
+                    {pairing.link}
+                  </a>
+                  <span>{t("telegramPairHint", { code: pairing.code })}</span>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <details className="notion-form">
+              <summary className="notion-label" style={{ cursor: "pointer" }}>
+                {t("telegramDirectBotSummary")}
+              </summary>
+              <label className="notion-label" htmlFor="telegram-token" style={{ marginTop: 8 }}>
+                {t("telegramTokenLabel")}
+              </label>
+              <div className="notion-token-row">
+                <input
+                  id="telegram-token"
+                  className="notion-input"
+                  type="password"
+                  autoComplete="off"
+                  placeholder={t("telegramTokenPlaceholder")}
+                  value={token}
+                  onChange={(event) => setToken(event.target.value)}
+                />
+                <Button
+                  size="sm"
+                  disabled={busy || token.trim() === ""}
+                  onClick={() =>
+                    void run({ action: "set-token", token: token.trim() }, (next) =>
+                      t("telegramSaved", { name: next.bot?.username ?? "" }),
+                    ).then((ok) => {
+                      if (ok) setToken("");
+                    })
+                  }
+                >
+                  {t("telegramSave")}
+                </Button>
+              </div>
+            </details>
+          )}
+        </Card>
+      ) : null}
       <Banner tone="info">{t("telegramRelayHint")}</Banner>
-      <Banner tone="info">{t("telegramHint")}</Banner>
+      {hasRelayBot || hasDirectBot ? <Banner tone="info">{t("telegramHint")}</Banner> : null}
       {status?.error ? <Banner tone="danger">{status.error}</Banner> : null}
     </Section>
   );

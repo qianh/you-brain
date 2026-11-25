@@ -15,7 +15,8 @@
     "build:dsh": "bun scripts/build-dsh.ts",
     "protocol:schemas": "bun scripts/gen-protocol-schemas.ts",
     "install:app": "bun scripts/install-app.ts",
-    "build:server": "bun scripts/build-server.ts"
+    "build:server": "bun scripts/build-server.ts",
+    "redeploy": "bun scripts/redeploy.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.3.11",

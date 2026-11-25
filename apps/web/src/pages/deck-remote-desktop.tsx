@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -41,18 +42,27 @@ import {
   ClipboardAssembler,
   REMOTE_KEY_COMBOS,
   TrailingThrottle,
+  ZOOM_MAX,
+  ZOOM_MIN,
   applyZeroPlayoutDelay,
   chunkText,
+  clampZoom,
+  computeAnchoredZoomScroll,
   computeVideoContentBox,
+  computeZoomedSurfaceSize,
   expandKeyCombo,
   extractModifiers,
   formatBitrate,
+  isBlockedBrowserIceCandidate,
   isImeKeyEvent,
   isMacPlatform,
   mapDomMouseButton,
   mapKeyForRemote,
   normalizeVideoPoint,
   normalizeWheelDelta,
+  prepareSdpForDirectP2p,
+  roundNormalizedCoord,
+  stepZoom,
   summarizeRtcStats,
   type InboundVideoSample,
   type RemoteDesktopStatsView,
@@ -67,10 +77,8 @@ import {
 const FALLBACK_ICE_SERVERS: IceServerEntry[] = [
   {
     urls: [
-      "stun:stun.cloudflare.com:3478",
+      "stun:stun.chat.bilibili.com:3478",
       "stun:stun.miwifi.com:3478",
-      "stun:stun.qq.com:3478",
-      "stun:stun.l.google.com:19302",
     ],
   },
 ];
@@ -79,11 +87,13 @@ const ICE_CONNECT_TIMEOUT_MS = 15_000;
 /** ICE 断开后等待自愈的时间，超时即自动重连。 */
 const ICE_DISCONNECT_GRACE_MS = 4_000;
 const MAX_AUTO_RECONNECTS = 6;
-/** 鼠标移动最小发送间隔（约 250Hz），间隔内只发最新位置并补发尾帧。 */
-const MOVE_INTERVAL_MS = 4;
-const WHEEL_FLUSH_MS = 8;
-/** 声明本地光标后多久没收到光标形状，就判定远端不支持并回落画面内光标。 */
-const CURSOR_SHAPE_TIMEOUT_MS = 1_500;
+/** P2P 低延迟直连下的鼠标移动发送间隔（约 125Hz），兼顾 ProMotion 跟手度与 SCTP 开销。 */
+const MOVE_INTERVAL_DIRECT_MS = 8;
+/** TURN 中继或高 RTT（>80ms）链路下的鼠标移动发送间隔（约 60Hz），避免 250Hz SCTP SACK 风暴拖垮事件循环与视频发包。 */
+const MOVE_INTERVAL_RELAY_MS = 16;
+const WHEEL_FLUSH_MS = 12;
+/** 声明本地光标后等待光标形状的超时（需兼容跨国 TURN 400ms+ RTT 与首帧 IDR 突发，且后续收到 cursor 仍会自动恢复）。 */
+const CURSOR_SHAPE_TIMEOUT_MS = 5_000;
 const COPY_WAIT_MS = 1_500;
 const PASTE_FALLBACK_MS = 150;
 const DEFAULT_DOUBLE_CLICK_MS = 500;
@@ -180,6 +190,7 @@ function loadImage(src: string): Promise<HTMLImageElement> {
  * 移动零延迟，彻底消除「光标跟手慢一个往返」的拖影感。
  */
 async function buildCursorCss(shape: HostCursorShape, scale: number, dpr: number): Promise<string> {
+  if (!shape.png) return "none";
   const img = await loadImage(`data:image/png;base64,${shape.png}`);
   const fit = Math.min(1, CURSOR_MAX_CSS_PX / Math.max(shape.w * scale, shape.h * scale, 1));
   const effective = scale * fit;
@@ -311,6 +322,10 @@ export function DeckRemoteDesktopPane({
   const [localCursor, setLocalCursor] = useState(() => readPref<boolean>("localCursor", true));
   const [swapCtrlCmd, setSwapCtrlCmd] = useState(() => readPref<boolean>("swapCtrlCmd", !controllerIsMac));
   const [scaleMode, setScaleMode] = useState<ScaleMode>(() => readPref<ScaleMode>("scale", "fit"));
+  const [zoom, setZoom] = useState<number>(1);
+  const [panMode, setPanMode] = useState(false);
+  const [panning, setPanning] = useState(false);
+  const [viewportSize, setViewportSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
   const [transfers, setTransfers] = useState<TransferItem[]>([]);
   const [remoteFiles, setRemoteFiles] = useState<HostClipboardFile[]>([]);
   const [dragOver, setDragOver] = useState(false);
@@ -329,6 +344,7 @@ export function DeckRemoteDesktopPane({
 
   const rootRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const imeRef = useRef<HTMLTextAreaElement | null>(null);
@@ -340,6 +356,30 @@ export function DeckRemoteDesktopPane({
   const pressedButtonsRef = useRef(new Set<0 | 1 | 2>());
   const pressedKeysRef = useRef(new Set<string>());
   const composingRef = useRef(false);
+  /** 缓存 surface 几何矩形：避免在 250~1000Hz pointerrawupdate 热路径上触发同步回流（getBoundingClientRect）。 */
+  const surfaceRectRef = useRef<{ left: number; top: number; width: number; height: number }>({
+    left: 0,
+    top: 0,
+    width: 0,
+    height: 0,
+  });
+  const moveSeqRef = useRef(0);
+  const moveThrottleRef = useRef<TrailingThrottle<{ x: number; y: number }> | null>(null);
+  const scaleModeRef = useRef<ScaleMode>(scaleMode);
+  scaleModeRef.current = scaleMode;
+  const zoomRef = useRef<number>(zoom);
+  zoomRef.current = zoom;
+  const panModeRef = useRef<boolean>(panMode);
+  panModeRef.current = panMode;
+  const zoomOverflowsRef = useRef(false);
+  const pendingZoomAnchorRef = useRef<{
+    oldWidth: number;
+    oldHeight: number;
+    scrollLeft: number;
+    scrollTop: number;
+    anchorX: number;
+    anchorY: number;
+  } | null>(null);
   const statusRef = useRef<SessionStatus>(status);
   statusRef.current = status;
   const qualityRef = useRef<RdQuality>(quality);
@@ -372,6 +412,51 @@ export function DeckRemoteDesktopPane({
   displaysRef.current = displays;
   const activeDisplayIdRef = useRef(activeDisplayId);
   activeDisplayIdRef.current = activeDisplayId;
+
+  const syncSurfaceRect = useCallback(() => {
+    const surface = surfaceRef.current;
+    if (!surface) return surfaceRectRef.current;
+    const rect = surface.getBoundingClientRect();
+    surfaceRectRef.current = {
+      left: rect.left,
+      top: rect.top,
+      width: rect.width,
+      height: rect.height,
+    };
+    return surfaceRectRef.current;
+  }, []);
+
+  const applyZoom = useCallback((nextScaleMode: ScaleMode, nextZoom: number, clientX?: number, clientY?: number) => {
+    const clamped = clampZoom(nextZoom);
+    if (nextScaleMode === scaleModeRef.current && clamped === zoomRef.current) return;
+    const viewport = viewportRef.current;
+    const surface = surfaceRef.current;
+    if (viewport && surface) {
+      const vpRect = viewport.getBoundingClientRect();
+      const surfRect = surface.getBoundingClientRect();
+      const anchorX =
+        clientX !== undefined ? Math.max(0, Math.min(vpRect.width, clientX - vpRect.left)) : vpRect.width / 2;
+      const anchorY =
+        clientY !== undefined ? Math.max(0, Math.min(vpRect.height, clientY - vpRect.top)) : vpRect.height / 2;
+      pendingZoomAnchorRef.current = {
+        oldWidth: surfRect.width,
+        oldHeight: surfRect.height,
+        scrollLeft: viewport.scrollLeft,
+        scrollTop: viewport.scrollTop,
+        anchorX,
+        anchorY,
+      };
+    }
+    scaleModeRef.current = nextScaleMode;
+    zoomRef.current = clamped;
+    setScaleMode(nextScaleMode);
+    setZoom(clamped);
+    if (nextScaleMode === "fit" && clamped <= 1) {
+      setPanMode(false);
+    }
+  }, []);
+  const applyZoomRef = useRef(applyZoom);
+  applyZoomRef.current = applyZoom;
 
   const sendFast = useCallback((msg: FastInputMessage) => {
     const dc = fastDcRef.current;
@@ -427,7 +512,7 @@ export function DeckRemoteDesktopPane({
       sendControl({ t: "ku", code, meta: false, ctrl: false, alt: false, shift: false });
     }
     for (const btn of [...pressedButtonsRef.current]) {
-      sendControl({ t: "mu", x: 0.5, y: 0.5, b: btn });
+      sendControl({ t: "mu", x: 0.5, y: 0.5, b: btn, seq: ++moveSeqRef.current });
     }
     pressedButtonsRef.current.clear();
     if (pendingPasteRef.current) {
@@ -558,7 +643,7 @@ export function DeckRemoteDesktopPane({
   const refreshCursor = useCallback(() => {
     const surface = surfaceRef.current;
     if (!surface) return;
-    if (cursorInVideoRef.current) {
+    if (cursorInVideoRef.current || (panModeRef.current && zoomOverflowsRef.current)) {
       surface.style.cursor = "";
       return;
     }
@@ -568,7 +653,7 @@ export function DeckRemoteDesktopPane({
       return;
     }
     const video = videoRef.current;
-    const rect = surface.getBoundingClientRect();
+    const rect = syncSurfaceRect();
     const box = computeVideoContentBox(rect.width, rect.height, video?.videoWidth ?? 0, video?.videoHeight ?? 0);
     const display =
       displaysRef.current.find((item) => item.id === activeDisplayIdRef.current) ?? displaysRef.current[0];
@@ -579,18 +664,21 @@ export function DeckRemoteDesktopPane({
     cursorCssKeyRef.current = key;
     void buildCursorCss(shape, scale, dpr).then(
       (css) => {
-        if (cursorCssKeyRef.current !== key || cursorInVideoRef.current) return;
+        if (cursorCssKeyRef.current !== key || cursorInVideoRef.current || (panModeRef.current && zoomOverflowsRef.current)) {
+          return;
+        }
         applyCursorCss(surface, css);
       },
       () => undefined,
     );
-  }, []);
+  }, [syncSurfaceRect]);
   const cursorInVideoRef = useRef(cursorInVideo);
   cursorInVideoRef.current = cursorInVideo;
   const writeLocalClipboardRef = useRef(writeLocalClipboard);
   writeLocalClipboardRef.current = writeLocalClipboard;
   const pullRemoteImageRef = useRef(pullRemoteImage);
   pullRemoteImageRef.current = pullRemoteImage;
+  const isRelayOrSlowRef = useRef(false);
 
   // 偏好持久化
   useEffect(() => writePref("clipboardSync", clipboardSync), [clipboardSync]);
@@ -598,6 +686,14 @@ export function DeckRemoteDesktopPane({
   useEffect(() => writePref("swapCtrlCmd", swapCtrlCmd), [swapCtrlCmd]);
   useEffect(() => writePref("scale", scaleMode), [scaleMode]);
   useEffect(() => writePref("quality", quality), [quality]);
+
+  // 按当前链路 RTT 与是否走 TURN 中继动态调节鼠标移动发送频率，消除跨国中继下的 SCTP SACK 洪峰。
+  useEffect(() => {
+    const effectiveRtt = stats?.rttMs ?? pingRttMs;
+    const isRelayOrSlow = stats?.relay === true || (effectiveRtt !== null && effectiveRtt > 80);
+    isRelayOrSlowRef.current = isRelayOrSlow;
+    moveThrottleRef.current?.setIntervalMs(isRelayOrSlow ? MOVE_INTERVAL_RELAY_MS : MOVE_INTERVAL_DIRECT_MS);
+  }, [stats?.relay, stats?.rttMs, pingRttMs]);
 
   // 能力声明随偏好变化重新下发
   useEffect(() => {
@@ -610,19 +706,72 @@ export function DeckRemoteDesktopPane({
     sendCfg();
   }, [clipboardSync, localCursor, sendCfg]);
 
+  // 缩放提交后在浏览器绘制前同步修正滚动位置，使指针/视口中心下的远端像素稳稳锚定不跳动。
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    const surface = surfaceRef.current;
+    const anchor = pendingZoomAnchorRef.current;
+    if (viewport && surface && anchor) {
+      pendingZoomAnchorRef.current = null;
+      const newRect = surface.getBoundingClientRect();
+      const nextScroll = computeAnchoredZoomScroll({
+        viewportWidth: viewport.clientWidth,
+        viewportHeight: viewport.clientHeight,
+        oldWidth: anchor.oldWidth,
+        oldHeight: anchor.oldHeight,
+        newWidth: newRect.width,
+        newHeight: newRect.height,
+        scrollLeft: anchor.scrollLeft,
+        scrollTop: anchor.scrollTop,
+        anchorX: anchor.anchorX,
+        anchorY: anchor.anchorY,
+      });
+      viewport.scrollLeft = nextScroll.scrollLeft;
+      viewport.scrollTop = nextScroll.scrollTop;
+    }
+    syncSurfaceRect();
+  }, [zoom, scaleMode, viewportSize.w, viewportSize.h, syncSurfaceRect]);
+
   useEffect(() => {
     cursorCssKeyRef.current = "";
     refreshCursor();
-  }, [cursorInVideo, activeDisplayId, displays, videoSize, scaleMode, fullscreen, refreshCursor]);
+  }, [cursorInVideo, panMode, activeDisplayId, displays, videoSize, scaleMode, zoom, fullscreen, refreshCursor]);
 
-  // 画面区域尺寸变化时按新比例重绘光标
+  // 视口与画面区域尺寸/滚动变化时维护几何缓存并按新比例重绘光标
   useEffect(() => {
     const surface = surfaceRef.current;
-    if (!surface || typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => refreshCursor());
+    const viewport = viewportRef.current;
+    if (!surface || !viewport) return;
+    const updateMetrics = () => {
+      const w = viewport.clientWidth;
+      const h = viewport.clientHeight;
+      setViewportSize((prev) => (prev.w === w && prev.h === h ? prev : { w, h }));
+      syncSurfaceRect();
+    };
+    updateMetrics();
+    const onScroll = () => {
+      syncSurfaceRect();
+    };
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("resize", updateMetrics, { passive: true });
+    if (typeof ResizeObserver === "undefined") {
+      return () => {
+        viewport.removeEventListener("scroll", onScroll);
+        window.removeEventListener("resize", updateMetrics);
+      };
+    }
+    const observer = new ResizeObserver(() => {
+      updateMetrics();
+      refreshCursor();
+    });
+    observer.observe(viewport);
     observer.observe(surface);
-    return () => observer.disconnect();
-  }, [refreshCursor]);
+    return () => {
+      observer.disconnect();
+      viewport.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", updateMetrics);
+    };
+  }, [active, refreshCursor, syncSurfaceRect]);
 
   // 全屏状态同步
   useEffect(() => {
@@ -688,6 +837,9 @@ export function DeckRemoteDesktopPane({
     setHostStats(null);
     setVideoSize(null);
     cursorReceivedRef.current = false;
+    cursorFallbackRef.current = false;
+    moveSeqRef.current = 0;
+    if (localCursorRef.current) setCursorInVideo(false);
     clickCounterRef.current.reset();
 
     let pc: RTCPeerConnection | null = null;
@@ -828,6 +980,7 @@ export function DeckRemoteDesktopPane({
         void pc.addIceCandidate(null).catch(() => undefined);
         return;
       }
+      if (isBlockedBrowserIceCandidate(cand.candidate)) return;
       void pc
         .addIceCandidate({
           candidate: cand.candidate,
@@ -850,7 +1003,7 @@ export function DeckRemoteDesktopPane({
           return;
         case "pong": {
           const delta = Math.max(0, Math.round(performance.now()) - msg.ts);
-          if (delta < 30_000) setPingRttMs(delta);
+          if (delta < 30_000) setPingRttMs((prev) => (prev === delta ? prev : delta));
           return;
         }
         case "cb": {
@@ -877,12 +1030,23 @@ export function DeckRemoteDesktopPane({
             clearTimeout(cursorTimer);
             cursorTimer = null;
           }
+          if (cursorFallbackRef.current) {
+            cursorFallbackRef.current = false;
+            if (localCursorRef.current) {
+              setCursorInVideo(false);
+              sendCfg();
+            }
+          }
           cursorShapeRef.current = { png: msg.png, hx: msg.hx, hy: msg.hy, w: msg.w, h: msg.h };
           refreshCursor();
           return;
         }
         case "stats":
-          setHostStats({ bitrateBps: msg.bitrateBps, lossPct: msg.lossPct });
+          setHostStats((prev) =>
+            prev && prev.bitrateBps === msg.bitrateBps && prev.lossPct === msg.lossPct
+              ? prev
+              : { bitrateBps: msg.bitrateBps, lossPct: msg.lossPct },
+          );
           return;
         default:
           return;
@@ -1061,6 +1225,7 @@ export function DeckRemoteDesktopPane({
           enqueueLocalIce({ candidate: "" });
           return;
         }
+        if (isBlockedBrowserIceCandidate(ev.candidate.candidate)) return;
         enqueueLocalIce({
           candidate: ev.candidate.candidate,
           sdpMid: ev.candidate.sdpMid,
@@ -1102,18 +1267,29 @@ export function DeckRemoteDesktopPane({
 
       const offer = await pc.createOffer();
       if (disposed) return;
-      await pc.setLocalDescription(offer);
+      const optimizedOfferSdp = offer.sdp ? prepareSdpForDirectP2p(offer.sdp) : undefined;
+      try {
+        if (optimizedOfferSdp) {
+          await pc.setLocalDescription({ type: "offer", sdp: optimizedOfferSdp });
+        } else {
+          await pc.setLocalDescription(offer);
+        }
+      } catch {
+        // 部分严格 WebKit 内核禁止修改本地 SDP，安全回退原始 offer。
+        await pc.setLocalDescription(offer);
+      }
       if (disposed) return;
 
       if (autoReconnectRef.current === 0) {
         setStatus({ kind: "connecting", stage: "signaling" });
       }
+      const signaledOfferSdp = prepareSdpForDirectP2p(pc.localDescription?.sdp ?? offer.sdp ?? "");
       const outcome = await client.dispatchSend!({
         to: deviceId,
         kind: "rd.open",
         args: {
           sessionId,
-          offerSdp: pc.localDescription?.sdp ?? offer.sdp ?? "",
+          offerSdp: signaledOfferSdp,
           quality: qualityRef.current,
         },
       });
@@ -1144,10 +1320,18 @@ export function DeckRemoteDesktopPane({
       setActiveDisplayId(outcome.result.activeDisplayId);
       setPermissions(outcome.result.permissions);
 
-      await pc.setRemoteDescription({
-        type: "answer",
-        sdp: outcome.result.answerSdp,
-      });
+      const cleanedAnswerSdp = prepareSdpForDirectP2p(outcome.result.answerSdp);
+      try {
+        await pc.setRemoteDescription({
+          type: "answer",
+          sdp: cleanedAnswerSdp,
+        });
+      } catch {
+        await pc.setRemoteDescription({
+          type: "answer",
+          sdp: outcome.result.answerSdp,
+        });
+      }
       if (disposed) return;
       remoteDescriptionReady = true;
       if (!settled && autoReconnectRef.current === 0) {
@@ -1205,34 +1389,88 @@ export function DeckRemoteDesktopPane({
     if (!active) autoReconnectRef.current = 0;
   }, [active]);
 
-  const pointFromClient = useCallback((clientX: number, clientY: number): { x: number; y: number } => {
-    const surface = surfaceRef.current;
-    const video = videoRef.current;
-    if (!surface) return { x: 0.5, y: 0.5 };
-    const rect = surface.getBoundingClientRect();
-    const box = computeVideoContentBox(rect.width, rect.height, video?.videoWidth ?? 0, video?.videoHeight ?? 0);
-    return normalizeVideoPoint(clientX - rect.left, clientY - rect.top, box);
-  }, []);
+  const pointFromClient = useCallback(
+    (clientX: number, clientY: number): { x: number; y: number } => {
+      const video = videoRef.current;
+      let rect = surfaceRectRef.current;
+      if (rect.width <= 0 || rect.height <= 0) {
+        rect = syncSurfaceRect();
+      }
+      if (rect.width <= 0 || rect.height <= 0) return { x: 0.5, y: 0.5 };
+      const box = computeVideoContentBox(rect.width, rect.height, video?.videoWidth ?? 0, video?.videoHeight ?? 0);
+      const raw = normalizeVideoPoint(clientX - rect.left, clientY - rect.top, box);
+      return {
+        x: roundNormalizedCoord(raw.x),
+        y: roundNormalizedCoord(raw.y),
+      };
+    },
+    [syncSurfaceRect],
+  );
 
   const focusInput = useCallback(() => {
     const ime = imeRef.current;
     if (ime && document.activeElement !== ime) ime.focus({ preventScroll: true });
   }, []);
 
-  // 指针与滚轮：原生监听，优先 pointerrawupdate（不受帧率限制）并做 4ms 节流 + 尾帧补发
+  // 指针、滚轮、触控板双指捏合缩放与视口拖拽平移：
+  // 1. pointerrawupdate 热路径直接读取缓存几何（零同步回流），并附带单调递增 seq 防止乱序回跳；
+  // 2. 按链路自动在 8ms（直连 125Hz）与 16ms（TURN/高延迟 60Hz）之间切换节流，杜绝 SCTP SACK 洪峰；
+  // 3. 支持触控板捏合（WebKit gesture* / ctrl+wheel）与放大后拖拽平移（平移模式、⌥⌘+拖拽、中键拖拽）。
   useEffect(() => {
     const surface = surfaceRef.current;
     const stage = stageRef.current;
     if (!surface || !stage) return;
     const ready = () => statusRef.current.kind === "ready";
 
-    const moveThrottle = new TrailingThrottle<FastInputMessage>(MOVE_INTERVAL_MS, (msg) => sendFast(msg));
+    const initialInterval = isRelayOrSlowRef.current ? MOVE_INTERVAL_RELAY_MS : MOVE_INTERVAL_DIRECT_MS;
+    const moveThrottle = new TrailingThrottle<{ x: number; y: number }>(initialInterval, (pt) => {
+      sendFast({ t: "mm", x: pt.x, y: pt.y, seq: ++moveSeqRef.current });
+    });
+    moveThrottleRef.current = moveThrottle;
     const supportsRaw = "onpointerrawupdate" in surface;
 
+    let physicalCtrlDown = false;
+    const onWinKeyDown = (event: KeyboardEvent) => {
+      if (event.code === "ControlLeft" || event.code === "ControlRight") physicalCtrlDown = true;
+    };
+    const onWinKeyUp = (event: KeyboardEvent) => {
+      if (event.code === "ControlLeft" || event.code === "ControlRight") physicalCtrlDown = false;
+    };
+    const onWinBlur = () => {
+      physicalCtrlDown = false;
+    };
+
+    let panState: {
+      pointerId: number;
+      startX: number;
+      startY: number;
+      startScrollLeft: number;
+      startScrollTop: number;
+      isMiddleTentative: boolean;
+      moved: boolean;
+    } | null = null;
+
     const onMove = (event: PointerEvent) => {
+      if (panState && event.pointerId === panState.pointerId) {
+        const dx = event.clientX - panState.startX;
+        const dy = event.clientY - panState.startY;
+        if (!panState.moved && Math.hypot(dx, dy) > 4) {
+          panState.moved = true;
+          setPanning(true);
+        }
+        if (panState.moved) {
+          const viewport = viewportRef.current;
+          if (viewport) {
+            viewport.scrollLeft = panState.startScrollLeft - dx;
+            viewport.scrollTop = panState.startScrollTop - dy;
+            syncSurfaceRect();
+          }
+        }
+        return;
+      }
       if (!ready()) return;
       const pt = pointFromClient(event.clientX, event.clientY);
-      moveThrottle.push({ t: "mm", x: pt.x, y: pt.y });
+      moveThrottle.push(pt);
     };
 
     const onDown = (event: PointerEvent) => {
@@ -1243,6 +1481,35 @@ export function DeckRemoteDesktopPane({
         x: Math.max(4, Math.min(stageRect.width - 8, event.clientX - stageRect.left)),
         y: Math.max(24, Math.min(stageRect.height - 4, event.clientY - stageRect.top)),
       });
+      syncSurfaceRect();
+
+      const viewport = viewportRef.current;
+      const directPan =
+        zoomOverflowsRef.current &&
+        viewport !== null &&
+        event.button === 0 &&
+        (panModeRef.current || (event.altKey && (event.metaKey || event.ctrlKey)));
+      const tentativeMiddlePan = zoomOverflowsRef.current && viewport !== null && event.button === 1;
+      if ((directPan || tentativeMiddlePan) && viewport) {
+        event.preventDefault();
+        try {
+          surface.setPointerCapture(event.pointerId);
+        } catch {
+          // ignore
+        }
+        panState = {
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          startScrollLeft: viewport.scrollLeft,
+          startScrollTop: viewport.scrollTop,
+          isMiddleTentative: tentativeMiddlePan,
+          moved: directPan,
+        };
+        if (directPan) setPanning(true);
+        return;
+      }
+
       if (!ready()) return;
       const btn = mapDomMouseButton(event.button);
       if (btn === null) return;
@@ -1252,7 +1519,7 @@ export function DeckRemoteDesktopPane({
       } catch {
         // ignore
       }
-      moveThrottle.flush();
+      moveThrottle.cancel();
       const pt = pointFromClient(event.clientX, event.clientY);
       const clicks = clickCounterRef.current.register(
         btn,
@@ -1262,10 +1529,36 @@ export function DeckRemoteDesktopPane({
         doubleClickMsRef.current,
       );
       pressedButtonsRef.current.add(btn);
-      sendControl({ t: "md", x: pt.x, y: pt.y, b: btn, clicks });
+      sendControl({ t: "md", x: pt.x, y: pt.y, b: btn, clicks, seq: ++moveSeqRef.current });
     };
 
     const onUp = (event: PointerEvent) => {
+      if (panState && event.pointerId === panState.pointerId) {
+        event.preventDefault();
+        try {
+          if (surface.hasPointerCapture(event.pointerId)) surface.releasePointerCapture(event.pointerId);
+        } catch {
+          // ignore
+        }
+        const wasMiddleClick = panState.isMiddleTentative && !panState.moved;
+        panState = null;
+        setPanning(false);
+        if (wasMiddleClick && ready()) {
+          moveThrottle.cancel();
+          const pt = pointFromClient(event.clientX, event.clientY);
+          const clicks = clickCounterRef.current.register(
+            1,
+            event.clientX,
+            event.clientY,
+            performance.now(),
+            doubleClickMsRef.current,
+          );
+          sendControl({ t: "md", x: pt.x, y: pt.y, b: 1, clicks, seq: ++moveSeqRef.current });
+          sendControl({ t: "mu", x: pt.x, y: pt.y, b: 1, clicks, seq: ++moveSeqRef.current });
+        }
+        return;
+      }
+
       if (!ready()) return;
       const btn = mapDomMouseButton(event.button);
       if (btn === null || !pressedButtonsRef.current.has(btn)) return;
@@ -1275,18 +1568,45 @@ export function DeckRemoteDesktopPane({
       } catch {
         // ignore
       }
-      moveThrottle.flush();
+      moveThrottle.cancel();
       const pt = pointFromClient(event.clientX, event.clientY);
       pressedButtonsRef.current.delete(btn);
-      sendControl({ t: "mu", x: pt.x, y: pt.y, b: btn, clicks: clickCounterRef.current.current });
+      sendControl({ t: "mu", x: pt.x, y: pt.y, b: btn, clicks: clickCounterRef.current.current, seq: ++moveSeqRef.current });
     };
 
     const onCancel = () => {
+      if (panState) {
+        panState = null;
+        setPanning(false);
+      }
       if (pressedButtonsRef.current.size === 0) return;
+      moveThrottle.cancel();
       for (const btn of [...pressedButtonsRef.current]) {
-        sendControl({ t: "mu", x: 0.5, y: 0.5, b: btn });
+        sendControl({ t: "mu", x: 0.5, y: 0.5, b: btn, seq: ++moveSeqRef.current });
       }
       pressedButtonsRef.current.clear();
+    };
+
+    let gestureActive = false;
+    let gestureBaseZoom = 1;
+    type WebKitGestureEvent = Event & { scale?: number; clientX?: number; clientY?: number };
+    const onGestureStart = (ev: Event) => {
+      const ge = ev as WebKitGestureEvent;
+      if (typeof ge.scale !== "number") return;
+      ev.preventDefault();
+      gestureActive = true;
+      gestureBaseZoom = zoomRef.current;
+    };
+    const onGestureChange = (ev: Event) => {
+      const ge = ev as WebKitGestureEvent;
+      if (!gestureActive || typeof ge.scale !== "number" || !Number.isFinite(ge.scale) || ge.scale <= 0) return;
+      ev.preventDefault();
+      applyZoomRef.current(scaleModeRef.current, gestureBaseZoom * ge.scale, ge.clientX, ge.clientY);
+    };
+    const onGestureEnd = (ev: Event) => {
+      if (!gestureActive) return;
+      ev.preventDefault();
+      gestureActive = false;
     };
 
     let wheelDx = 0;
@@ -1296,11 +1616,37 @@ export function DeckRemoteDesktopPane({
     const flushWheel = () => {
       wheelTimer = null;
       if ((wheelDx === 0 && wheelDy === 0) || !wheelPt) return;
-      sendFast({ t: "wh", x: wheelPt.x, y: wheelPt.y, dx: Math.round(wheelDx * 100) / 100, dy: Math.round(wheelDy * 100) / 100 });
+      sendFast({
+        t: "wh",
+        x: wheelPt.x,
+        y: wheelPt.y,
+        dx: Math.round(wheelDx * 100) / 100,
+        dy: Math.round(wheelDy * 100) / 100,
+      });
       wheelDx = 0;
       wheelDy = 0;
     };
     const onWheel = (event: WheelEvent) => {
+      if (gestureActive) {
+        event.preventDefault();
+        return;
+      }
+      const isTrackpadPinch = event.ctrlKey && !physicalCtrlDown && !event.metaKey && !event.altKey;
+      const isModifierZoom = event.altKey && (event.metaKey || event.ctrlKey);
+      if (isTrackpadPinch || isModifierZoom) {
+        event.preventDefault();
+        const rawDeltaY =
+          event.deltaMode === 1 ? event.deltaY * 16 : event.deltaMode === 2 ? event.deltaY * 120 : event.deltaY;
+        if (rawDeltaY === 0) return;
+        const sensitivity = isTrackpadPinch ? 0.008 : 0.0025;
+        const factor = Math.exp(-rawDeltaY * sensitivity);
+        applyZoomRef.current(scaleModeRef.current, zoomRef.current * factor, event.clientX, event.clientY);
+        return;
+      }
+      // 开启「平移」模式且画面超出视口时，双指滚动直接平滑移动本地放大视口。
+      if (panModeRef.current && zoomOverflowsRef.current) {
+        return;
+      }
       if (!ready()) return;
       event.preventDefault();
       const { dx, dy } = normalizeWheelDelta(event.deltaX, event.deltaY, event.deltaMode);
@@ -1314,25 +1660,38 @@ export function DeckRemoteDesktopPane({
     const onContextMenu = (event: Event) => event.preventDefault();
 
     const moveEvent = supportsRaw ? "pointerrawupdate" : "pointermove";
+    window.addEventListener("keydown", onWinKeyDown, { capture: true, passive: true });
+    window.addEventListener("keyup", onWinKeyUp, { capture: true, passive: true });
+    window.addEventListener("blur", onWinBlur, { passive: true });
     surface.addEventListener(moveEvent, onMove as EventListener);
     surface.addEventListener("pointerdown", onDown);
     surface.addEventListener("pointerup", onUp);
     surface.addEventListener("pointercancel", onCancel);
     surface.addEventListener("lostpointercapture", onCancel);
     surface.addEventListener("wheel", onWheel, { passive: false });
+    surface.addEventListener("gesturestart", onGestureStart, { passive: false } as AddEventListenerOptions);
+    surface.addEventListener("gesturechange", onGestureChange, { passive: false } as AddEventListenerOptions);
+    surface.addEventListener("gestureend", onGestureEnd, { passive: false } as AddEventListenerOptions);
     surface.addEventListener("contextmenu", onContextMenu);
     return () => {
       moveThrottle.cancel();
+      if (moveThrottleRef.current === moveThrottle) moveThrottleRef.current = null;
       if (wheelTimer !== null) clearTimeout(wheelTimer);
+      window.removeEventListener("keydown", onWinKeyDown, { capture: true });
+      window.removeEventListener("keyup", onWinKeyUp, { capture: true });
+      window.removeEventListener("blur", onWinBlur);
       surface.removeEventListener(moveEvent, onMove as EventListener);
       surface.removeEventListener("pointerdown", onDown);
       surface.removeEventListener("pointerup", onUp);
       surface.removeEventListener("pointercancel", onCancel);
       surface.removeEventListener("lostpointercapture", onCancel);
       surface.removeEventListener("wheel", onWheel);
+      surface.removeEventListener("gesturestart", onGestureStart);
+      surface.removeEventListener("gesturechange", onGestureChange);
+      surface.removeEventListener("gestureend", onGestureEnd);
       surface.removeEventListener("contextmenu", onContextMenu);
     };
-  }, [flushPendingRemoteClipboard, focusInput, pointFromClient, sendControl, sendFast]);
+  }, [flushPendingRemoteClipboard, focusInput, pointFromClient, sendControl, sendFast, syncSurfaceRect]);
 
   const localPrimary = (event: { metaKey: boolean; ctrlKey: boolean }) =>
     controllerIsMac ? event.metaKey : event.ctrlKey;
@@ -1358,12 +1717,35 @@ export function DeckRemoteDesktopPane({
   };
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
-    if (statusRef.current.kind !== "ready") return;
-    flushPendingRemoteClipboard();
     const native = event.nativeEvent;
     if (composingRef.current || isImeKeyEvent(native)) return;
     const code = event.code;
     if (!code) return;
+
+    // 本地画面缩放快捷键（macOS: ⌥⌘+ / ⌥⌘- / ⌥⌘0；Windows/Linux: Ctrl+Alt++ / - / 0），不占用远端常用的 ⌘+/⌘-。
+    if (event.altKey && localPrimary(event) && !event.shiftKey) {
+      if (code === "Equal" || code === "NumpadAdd") {
+        event.preventDefault();
+        event.stopPropagation();
+        applyZoom(scaleModeRef.current, stepZoom(zoomRef.current, 1));
+        return;
+      }
+      if (code === "Minus" || code === "NumpadSubtract") {
+        event.preventDefault();
+        event.stopPropagation();
+        applyZoom(scaleModeRef.current, stepZoom(zoomRef.current, -1));
+        return;
+      }
+      if (code === "Digit0" || code === "Numpad0") {
+        event.preventDefault();
+        event.stopPropagation();
+        applyZoom("fit", 1);
+        return;
+      }
+    }
+
+    if (statusRef.current.kind !== "ready") return;
+    flushPendingRemoteClipboard();
     const mapped = mapKeyForRemote(code, extractModifiers(event), swapCtrlCmdRef.current);
 
     // ⌘V / Ctrl+V：放行浏览器粘贴事件，先把本机剪贴板写到远端，再按下远端粘贴键。
@@ -1515,12 +1897,15 @@ export function DeckRemoteDesktopPane({
     }
   }, [sendClipboardText]);
 
-  const sendCombo = (codes: readonly string[]) => {
-    for (const step of expandKeyCombo(codes)) {
-      sendControl(step);
-    }
-    focusInput();
-  };
+  const sendCombo = useCallback(
+    (codes: readonly string[]) => {
+      for (const step of expandKeyCombo(codes)) {
+        sendControl(step);
+      }
+      focusInput();
+    },
+    [focusInput, sendControl],
+  );
 
   const toggleFullscreen = async () => {
     if (fullscreen) {
@@ -1578,19 +1963,38 @@ export function DeckRemoteDesktopPane({
         : "";
 
   const activeDisplay = displays.find((item) => item.id === activeDisplayId) ?? displays[0];
-  const surfaceStyle =
-    scaleMode === "actual" && activeDisplay
-      ? { width: `${activeDisplay.width}px`, height: `${activeDisplay.height}px` }
-      : undefined;
+  const baseDisplayW = activeDisplay?.width ?? videoSize?.w ?? 0;
+  const baseDisplayH = activeDisplay?.height ?? videoSize?.h ?? 0;
+  const zoomSurface = useMemo(
+    () =>
+      computeZoomedSurfaceSize(
+        viewportSize.w,
+        viewportSize.h,
+        baseDisplayW,
+        baseDisplayH,
+        scaleMode,
+        zoom,
+      ),
+    [viewportSize.w, viewportSize.h, baseDisplayW, baseDisplayH, scaleMode, zoom],
+  );
+  zoomOverflowsRef.current = zoomSurface.overflows;
+  const surfaceStyle = zoomSurface.isCustomSize
+    ? { width: `${zoomSurface.width}px`, height: `${zoomSurface.height}px` }
+    : undefined;
+  const zoomPct = Math.round(zoom * 100);
 
   const check = (on: boolean) =>
     on ? <Icon name="check" size={13} /> : <span style={{ display: "inline-block", width: 13 }} />;
 
-  const keyItems: MenuItem[] = REMOTE_KEY_COMBOS.map((combo) => ({
-    id: combo.id,
-    label: t(COMBO_LABEL_KEYS[combo.id as keyof typeof COMBO_LABEL_KEYS]),
-    onSelect: () => sendCombo(combo.codes),
-  }));
+  const keyItems: MenuItem[] = useMemo(
+    () =>
+      REMOTE_KEY_COMBOS.map((combo) => ({
+        id: combo.id,
+        label: t(COMBO_LABEL_KEYS[combo.id as keyof typeof COMBO_LABEL_KEYS]),
+        onSelect: () => sendCombo(combo.codes),
+      })),
+    [sendCombo, t],
+  );
 
   const settingItems: MenuItem[] = [
     {
@@ -1606,8 +2010,24 @@ export function DeckRemoteDesktopPane({
     { id: "localCursor", label: t("deckRdLocalCursor"), icon: check(localCursor), onSelect: () => setLocalCursor(!localCursor) },
     { id: "swapCtrlCmd", label: t("deckRdSwapCtrlCmd"), icon: check(swapCtrlCmd), onSelect: () => setSwapCtrlCmd(!swapCtrlCmd) },
     { id: "sep-1", separator: true },
-    { id: "scaleFit", label: t("deckRdScaleFit"), icon: check(scaleMode === "fit"), onSelect: () => setScaleMode("fit") },
-    { id: "scaleActual", label: t("deckRdScaleActual"), icon: check(scaleMode === "actual"), onSelect: () => setScaleMode("actual") },
+    {
+      id: "scaleFit",
+      label: t("deckRdScaleFit"),
+      icon: check(scaleMode === "fit" && zoom === 1),
+      onSelect: () => applyZoom("fit", 1),
+    },
+    {
+      id: "scaleActual",
+      label: t("deckRdScaleActual"),
+      icon: check(scaleMode === "actual" && zoom === 1),
+      onSelect: () => applyZoom("actual", 1),
+    },
+    ...([75, 125, 150, 200] as const).map((pct) => ({
+      id: `zoom-${pct}`,
+      label: t("deckRdScalePreset", { pct }),
+      icon: check(scaleMode === "fit" && zoomPct === pct),
+      onSelect: () => applyZoom("fit", pct / 100),
+    })),
     { id: "sep-2", separator: true },
     { id: "pull", label: t("deckRdSyncFromRemote"), icon: check(false), onSelect: pullClipboard },
     { id: "push", label: t("deckRdSyncToRemote"), icon: check(false), onSelect: () => void pushClipboard() },
@@ -1695,6 +2115,48 @@ export function DeckRemoteDesktopPane({
             ))}
           </div>
 
+          <div className="deck-rd-zoom" role="group" aria-label={t("deckRdZoomLabel")}>
+            <button
+              type="button"
+              className="deck-rd-zoom-btn"
+              aria-label={t("deckRdZoomOut")}
+              title={t("deckRdZoomOut")}
+              disabled={zoom <= ZOOM_MIN}
+              onClick={() => applyZoom(scaleMode, stepZoom(zoom, -1))}
+            >
+              <Icon name="minus" size={12} />
+            </button>
+            <button
+              type="button"
+              className="deck-rd-zoom-btn deck-rd-zoom-pct"
+              title={t("deckRdZoomReset")}
+              onClick={() => applyZoom("fit", 1)}
+            >
+              {scaleMode === "actual" && zoom === 1 ? "1:1" : `${zoomPct}%`}
+            </button>
+            <button
+              type="button"
+              className="deck-rd-zoom-btn"
+              aria-label={t("deckRdZoomIn")}
+              title={t("deckRdZoomIn")}
+              disabled={zoom >= ZOOM_MAX}
+              onClick={() => applyZoom(scaleMode, stepZoom(zoom, 1))}
+            >
+              <Icon name="plus" size={12} />
+            </button>
+            {zoomSurface.overflows ? (
+              <button
+                type="button"
+                className={["deck-rd-zoom-btn", panMode ? "is-active" : ""].filter(Boolean).join(" ")}
+                title={t("deckRdPanMode")}
+                aria-pressed={panMode}
+                onClick={() => setPanMode((v) => !v)}
+              >
+                {t("deckRdPanShort")}
+              </button>
+            ) : null}
+          </div>
+
           <Menu
             label={t("deckRdKeys")}
             items={keyItems}
@@ -1776,10 +2238,27 @@ export function DeckRemoteDesktopPane({
         onDragLeave={() => setDragOver(false)}
         onDrop={onDrop}
       >
-        <div className={["deck-rd-viewport", scaleMode === "actual" ? "is-actual" : ""].filter(Boolean).join(" ")}>
+        <div
+          ref={viewportRef}
+          className={[
+            "deck-rd-viewport",
+            scaleMode === "actual" ? "is-actual" : "",
+            zoomSurface.overflows ? "is-scrollable" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+        >
           <div
             ref={surfaceRef}
-            className={["deck-rd-surface", cursorInVideo ? "is-cursor-hidden" : ""].filter(Boolean).join(" ")}
+            className={[
+              "deck-rd-surface",
+              surfaceStyle ? "is-custom-size" : "",
+              cursorInVideo && !panMode && !panning ? "is-cursor-hidden" : "",
+              panMode && zoomSurface.overflows ? "is-pan-mode" : "",
+              panning ? "is-panning" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
             style={surfaceStyle}
           >
             <video

@@ -347,6 +347,10 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
   #closed = false;
   /** 最近一次流选项；助手重启后需要补发。 */
   #streamOptions: HostStreamOptions | null = null;
+  /** 同一事件循环 tick 内合并连续鼠标移动，避免 SCTP 突发包向助手套接字灌入陈旧坐标。 */
+  #pendingMove: { x: number; y: number } | null = null;
+  #moveFlushScheduled = false;
+  #lastKeyframeReqAt = 0;
 
   constructor(options?: { homeDir?: string }) {
     this.#home = options?.homeDir ?? homedir();
@@ -393,6 +397,7 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
         resolve(snap);
       });
     });
+    this.#lastKeyframeReqAt = 0;
     this.#sendCtrl({
       op: "configure",
       ...(options.displayId !== undefined ? { displayId: options.displayId } : {}),
@@ -405,6 +410,10 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
   }
 
   requestKeyframe(): void {
+    const now = Date.now();
+    // 建连初期 openSession / ICE connected / control open / PLI 常在数十毫秒内连续触发，合并为一次 IDR 避免突发拥塞。
+    if (now - this.#lastKeyframeReqAt < 120) return;
+    this.#lastKeyframeReqAt = now;
     this.#sendCtrl({ op: "idr" });
   }
 
@@ -412,12 +421,27 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
     this.#sendCtrl({ op: "perm", prompt: true });
   }
 
+  #flushPendingMove(): void {
+    const move = this.#pendingMove;
+    if (!move) return;
+    this.#pendingMove = null;
+    this.#sendCtrl({ op: "mm", x: move.x, y: move.y });
+  }
+
   handleFastInput(msg: FastInputMessage): void {
     if (msg.t === "mm") {
-      this.#sendCtrl({ op: "mm", x: clampUnit(msg.x), y: clampUnit(msg.y) });
+      this.#pendingMove = { x: clampUnit(msg.x), y: clampUnit(msg.y) };
+      if (!this.#moveFlushScheduled) {
+        this.#moveFlushScheduled = true;
+        queueMicrotask(() => {
+          this.#moveFlushScheduled = false;
+          this.#flushPendingMove();
+        });
+      }
       return;
     }
     if (msg.t === "wh") {
+      this.#flushPendingMove();
       this.#sendCtrl({
         op: "wh",
         dx: Number.isFinite(msg.dx) ? msg.dx : 0,
@@ -436,6 +460,8 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
         break;
       case "md":
       case "mu":
+        // 点击本身已携带精确按下/抬起坐标，丢弃尚未刷出的旧移动坐标。
+        this.#pendingMove = null;
         this.#sendCtrl({
           op: msg.t,
           x: clampUnit(msg.x),
@@ -446,6 +472,7 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
         break;
       case "kd":
       case "ku": {
+        this.#flushPendingMove();
         const keyCode = resolveMacKeyCode(msg.code);
         if (keyCode === null) return;
         this.#sendCtrl({
@@ -460,6 +487,7 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
         break;
       }
       case "txt":
+        this.#flushPendingMove();
         if (msg.text) {
           this.#sendCtrl({ op: "txt", text: msg.text.slice(0, 65_536) });
         }
@@ -471,6 +499,7 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
         this.#sendCtrl({ op: "cb.set", text: msg.text.slice(0, CLIPBOARD_MAX_CHARS) });
         break;
       case "idr":
+        this.#lastKeyframeReqAt = 0;
         this.requestKeyframe();
         break;
       case "perm":
@@ -482,11 +511,13 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
   }
 
   releaseInputs(): void {
+    this.#pendingMove = null;
     this.#sendCtrl({ op: "release" });
   }
 
   setStreamOptions(options: HostStreamOptions): void {
     this.#streamOptions = { ...options };
+    this.#lastKeyframeReqAt = 0;
     this.#sendCtrl({
       op: "opts",
       showCursor: options.showCursorInVideo,

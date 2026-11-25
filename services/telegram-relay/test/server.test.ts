@@ -551,8 +551,16 @@ describe("Bun relay server", () => {
     }
   });
 
-  it("已入网设备经 WebSocket 发 notify、收 t:push 与 pushes 增量补拉，并在 state 下发 routerDeviceId", async () => {
+  it("已入网设备经 WebSocket 发 notify、收 t:push 与 pushes 增量补拉，并在未配 BOT_TOKEN 时零 Telegram 请求且屏蔽旧绑定状态", async () => {
     const dir = await mkdtemp(join(tmpdir(), "ub-relay-"));
+    // 模拟之前启用过 Telegram 后留下的旧状态，清空 BOT_TOKEN 重启后应立即隐藏 bot/bound 且不请求 Telegram API。
+    await writeFile(
+      join(dir, "state.json"),
+      JSON.stringify({
+        bot: { id: 77, username: "old_bot", name: "Old" },
+        chat: { id: OWNER, name: "@owner" },
+      }),
+    );
     const telegram = startTelegram(TOKEN);
     const relay = await startRelayServer({
       port: 0,
@@ -566,6 +574,16 @@ describe("Bun relay server", () => {
     const clients: Client[] = [];
     try {
       const base = `http://127.0.0.1:${relay.port}`;
+      const checkRes = await fetch(`${base}/check`, { headers: { Authorization: `Bearer ${KEY}` } });
+      expect(await checkRes.json()).toEqual({ ok: true, botConfigured: false });
+
+      const tgWebhookRes = await fetch(`${base}/telegram`, {
+        method: "POST",
+        headers: { "X-Telegram-Bot-Api-Secret-Token": await webhookSecret(KEY) },
+        body: "{}",
+      });
+      expect(tgWebhookRes.status).toBe(404);
+
       const enroll = async (deviceId: string, name: string) => {
         const inv = (await (await fetch(`${base}/admin/invite`, { method: "POST", headers: { Authorization: `Bearer ${KEY}` } })).json()) as { code: string };
         const { publicKey } = generateKeyPairSync("ed25519");
@@ -588,6 +606,9 @@ describe("Bun relay server", () => {
       clients.push(cA, cB);
 
       await waitFor(() => stateFrames(cB).some((s) => s.routerDeviceId === DEVICE_A), "routerDeviceId in state");
+      const latestState = stateFrames(cB).at(-1)!;
+      expect(latestState.bot).toBeNull();
+      expect(latestState.bound).toBeNull();
 
       const notifyRes = await request(cA, {
         op: "notify",
@@ -610,6 +631,8 @@ describe("Bun relay server", () => {
       expect(pull.ok).toBe(true);
       expect((pull.result as { latestSeq: number; items: unknown[] }).latestSeq).toBe(1);
       expect((pull.result as { items: unknown[] }).items).toHaveLength(1);
+
+      expect(telegram.calls).toEqual([]);
     } finally {
       for (const client of clients) client.ws.close();
       await relay.stop();

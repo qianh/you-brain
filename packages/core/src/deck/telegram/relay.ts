@@ -137,7 +137,6 @@ export async function checkRelay(url: string, key: string, fetchImpl: RelayFetch
   if (!response.ok) throw new Error(`中转返回 HTTP ${response.status}，请确认地址是部署出来的 workers.dev 地址`);
   const body = (await response.json().catch(() => ({}))) as { ok?: boolean; botConfigured?: boolean };
   if (body.ok !== true) throw new Error("这个地址不像 U-Brain 中转");
-  if (body.botConfigured !== true) throw new Error("中转还没设置 BOT_TOKEN（wrangler secret put BOT_TOKEN）");
 }
 
 function redactSecret(text: string, secret: string): string {

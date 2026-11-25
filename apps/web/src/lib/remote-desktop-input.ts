@@ -224,11 +224,142 @@ export class ClipboardAssembler {
   }
 }
 
+/** 高频鼠标坐标保留 5 位小数（5K 屏幕下精度仍达 0.05px），将 JSON 体积压缩约一半。 */
+export function roundNormalizedCoord(value: number): number {
+  if (!Number.isFinite(value)) return 0.5;
+  const clamped = Math.max(0, Math.min(1, value));
+  return Math.round(clamped * 100_000) / 100_000;
+}
+
+export const ZOOM_MIN = 0.5;
+export const ZOOM_MAX = 4;
+export const ZOOM_STEPS: readonly number[] = [0.5, 0.67, 0.75, 0.9, 1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4];
+
+/** 钳制缩放倍率到 `[0.5, 4]`，并在接近 `1.0` 时吸附回标准 100%。 */
+export function clampZoom(zoom: number): number {
+  if (!Number.isFinite(zoom)) return 1;
+  const clamped = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoom));
+  if (Math.abs(clamped - 1) < 0.015) return 1;
+  return Math.round(clamped * 1000) / 1000;
+}
+
+/** 按预设档位步进放大（`1`）或缩小（`-1`）。 */
+export function stepZoom(current: number, direction: 1 | -1): number {
+  const clean = clampZoom(current);
+  if (direction > 0) {
+    for (const step of ZOOM_STEPS) {
+      if (step > clean + 0.01) return step;
+    }
+    return ZOOM_MAX;
+  }
+  for (let i = ZOOM_STEPS.length - 1; i >= 0; i -= 1) {
+    const step = ZOOM_STEPS[i]!;
+    if (step < clean - 0.01) return step;
+  }
+  return ZOOM_MIN;
+}
+
+export interface ZoomedSurfaceSize {
+  width: number;
+  height: number;
+  /** 是否需要显式设置宽高（`fit` 且 `zoom === 1` 时直接用 CSS `100%` 避免亚像素滚动条抖动）。 */
+  isCustomSize: boolean;
+  /** 缩放后画面是否超出可视视口（需要滚动/平移）。 */
+  overflows: boolean;
+}
+
+/**
+ * 计算缩放后 `.deck-rd-surface` 的像素尺寸，同时支持缩小（`< 100%`）与放大（`> 100%`）。
+ */
+export function computeZoomedSurfaceSize(
+  viewportWidth: number,
+  viewportHeight: number,
+  mediaWidth: number,
+  mediaHeight: number,
+  scaleMode: "fit" | "actual",
+  zoom: number,
+): ZoomedSurfaceSize {
+  const z = clampZoom(zoom);
+  const vpW = Math.max(1, viewportWidth);
+  const vpH = Math.max(1, viewportHeight);
+  if (scaleMode === "actual") {
+    const baseW = mediaWidth > 0 ? mediaWidth : vpW;
+    const baseH = mediaHeight > 0 ? mediaHeight : vpH;
+    const width = Math.max(1, Math.round(baseW * z));
+    const height = Math.max(1, Math.round(baseH * z));
+    return {
+      width,
+      height,
+      isCustomSize: true,
+      overflows: width > vpW + 1 || height > vpH + 1,
+    };
+  }
+  if (z === 1) {
+    return {
+      width: vpW,
+      height: vpH,
+      isCustomSize: false,
+      overflows: false,
+    };
+  }
+  const fitBox = computeVideoContentBox(vpW, vpH, mediaWidth, mediaHeight);
+  const width = Math.max(1, Math.round(fitBox.width * z));
+  const height = Math.max(1, Math.round(fitBox.height * z));
+  return {
+    width,
+    height,
+    isCustomSize: true,
+    overflows: width > vpW + 1 || height > vpH + 1,
+  };
+}
+
+/**
+ * 以视口内锚点 `(anchorX, anchorY)`（如鼠标指针或视口中心）为基准计算缩放后的滚动偏移，
+ * 使缩放前后锚点正下方的远端桌面像素保持不动。
+ */
+export function computeAnchoredZoomScroll(params: {
+  viewportWidth: number;
+  viewportHeight: number;
+  oldWidth: number;
+  oldHeight: number;
+  newWidth: number;
+  newHeight: number;
+  scrollLeft: number;
+  scrollTop: number;
+  anchorX: number;
+  anchorY: number;
+}): { scrollLeft: number; scrollTop: number } {
+  const {
+    viewportWidth,
+    viewportHeight,
+    oldWidth,
+    oldHeight,
+    newWidth,
+    newHeight,
+    scrollLeft,
+    scrollTop,
+    anchorX,
+    anchorY,
+  } = params;
+  const oldOffsetX = Math.max(0, (viewportWidth - oldWidth) / 2);
+  const oldOffsetY = Math.max(0, (viewportHeight - oldHeight) / 2);
+  const u = oldWidth > 0 ? Math.max(0, Math.min(1, (scrollLeft + anchorX - oldOffsetX) / oldWidth)) : 0.5;
+  const v = oldHeight > 0 ? Math.max(0, Math.min(1, (scrollTop + anchorY - oldOffsetY) / oldHeight)) : 0.5;
+  const newOffsetX = Math.max(0, (viewportWidth - newWidth) / 2);
+  const newOffsetY = Math.max(0, (viewportHeight - newHeight) / 2);
+  const maxScrollLeft = Math.max(0, newWidth - viewportWidth);
+  const maxScrollTop = Math.max(0, newHeight - viewportHeight);
+  return {
+    scrollLeft: Math.round(Math.max(0, Math.min(maxScrollLeft, u * newWidth + newOffsetX - anchorX))),
+    scrollTop: Math.round(Math.max(0, Math.min(maxScrollTop, v * newHeight + newOffsetY - anchorY))),
+  };
+}
+
 /**
  * 高频输入节流：间隔内只保留最新值，结束时补发尾帧，保证最终位置准确。
  */
 export class TrailingThrottle<T> {
-  readonly #intervalMs: number;
+  #intervalMs: number;
   readonly #send: (value: T) => void;
   readonly #now: () => number;
   #lastAt = Number.NEGATIVE_INFINITY;
@@ -236,14 +367,23 @@ export class TrailingThrottle<T> {
   #timer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(intervalMs: number, send: (value: T) => void, now: () => number = () => performance.now()) {
-    this.#intervalMs = intervalMs;
+    this.#intervalMs = Math.max(1, intervalMs);
     this.#send = send;
     this.#now = now;
   }
 
+  setIntervalMs(intervalMs: number): void {
+    this.#intervalMs = Math.max(1, intervalMs);
+  }
+
   push(value: T): void {
     const now = this.#now();
-    if (now - this.#lastAt >= this.#intervalMs && this.#timer === null) {
+    if (now - this.#lastAt >= this.#intervalMs) {
+      if (this.#timer !== null) {
+        clearTimeout(this.#timer);
+        this.#timer = null;
+      }
+      this.#pending = null;
       this.#lastAt = now;
       this.#send(value);
       return;
@@ -450,4 +590,91 @@ export function applyZeroPlayoutDelay(receiver: RTCRtpReceiver): void {
   } catch {
     // Safari / 旧版 Chromium 不支持 jitterBufferTarget 时忽略。
   }
+}
+
+const BROWSER_CANDIDATE_RE = /^(?:a=)?candidate:\S+\s+\d+\s+\S+\s+\d+\s+([^\s]+)\s+\d+\s+typ\s+\S+(.*)$/iu;
+const BROWSER_RADDR_RE = /\braddr\s+([^\s]+)/iu;
+
+/**
+ * 判断浏览器收集或收到的 IP 是否属于代理 Fake-IP / TUN 虚拟网段（`198.18.0.0/15` 等）或链路本地伪地址，
+ * 保留 `127.0.0.1`、物理内网与 Tailscale `100.64.0.0/10` / `fd7a:115c:a1e0::/48`。
+ */
+export function isBlockedBrowserIceIp(rawIp: string): boolean {
+  let clean = rawIp.trim();
+  if (clean.startsWith("[") && clean.endsWith("]")) {
+    clean = clean.slice(1, -1);
+  }
+  const zone = clean.indexOf("%");
+  if (zone >= 0) clean = clean.slice(0, zone);
+  clean = clean.toLowerCase();
+  if (!clean) return true;
+  if (clean.endsWith(".local")) return false;
+
+  const v4 = clean.split(".");
+  if (v4.length === 4 && v4.every((part) => /^\d{1,3}$/u.test(part))) {
+    const a = Number(v4[0]);
+    const b = Number(v4[1]);
+    if (a === 100 && b >= 64 && b <= 127) return false; // Tailscale CGNAT
+    if (a === 0 || a >= 240) return true;
+    if (a === 169 && b === 254) return true;
+    if (a === 198 && (b === 18 || b === 19)) return true; // Shadowrocket / Clash Fake-IP TUN
+    return false;
+  }
+
+  if (clean.includes(":")) {
+    if (clean.startsWith("fd7a:115c:a1e0:")) return false; // Tailscale IPv6
+    if (clean === "::" || clean.startsWith("fe80:")) return true;
+    if (clean.startsWith("fdfe:dcba:9876:") || clean.startsWith("fd00:1234:ffff:")) return true;
+  }
+  return false;
+}
+
+/** 判断单条 ICE candidate 字符串是否携带代理 Fake-IP / TUN 地址（含 `raddr` 底座地址）。 */
+export function isBlockedBrowserIceCandidate(candidateLine: string): boolean {
+  const trimmed = candidateLine.trim();
+  if (!trimmed) return false;
+  const match = BROWSER_CANDIDATE_RE.exec(trimmed);
+  if (!match) return false;
+  const addr = match[1] ?? "";
+  const rest = match[2] ?? "";
+  if (isBlockedBrowserIceIp(addr)) return true;
+  const raddr = BROWSER_RADDR_RE.exec(rest)?.[1];
+  if (raddr && isBlockedBrowserIceIp(raddr)) return true;
+  return false;
+}
+
+/**
+ * 优化 SDP 以提升 P2P 直连成功率并支持 TURN -> P2P 无感动态重提名（`renomination`）：
+ * 1. 剔除绑定在代理 Fake-IP / TUN 网卡上的 `a=candidate:` 行；
+ * 2. 在每个 `a=ice-options:` 行追加 `renomination`（若无则在 `a=ice-pwd:` 后补上），
+ *    让控制端在 TURN 先连上后一旦打通低延迟 P2P 立即热切换。
+ */
+export function prepareSdpForDirectP2p(sdp: string): string {
+  if (!sdp) return sdp;
+  const eol = sdp.includes("\r\n") ? "\r\n" : "\n";
+  const lines = sdp.split(/\r?\n/);
+  const hasIceOptions = lines.some((line) => line.startsWith("a=ice-options:"));
+  const out: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith("a=candidate:") && isBlockedBrowserIceCandidate(line)) {
+      continue;
+    }
+    if (line.startsWith("a=ice-options:")) {
+      const tokens = line
+        .slice("a=ice-options:".length)
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+      if (!tokens.includes("renomination")) {
+        tokens.push("renomination");
+      }
+      out.push(`a=ice-options:${tokens.join(" ")}`);
+      continue;
+    }
+    out.push(line);
+    if (!hasIceOptions && line.startsWith("a=ice-pwd:")) {
+      out.push("a=ice-options:trickle renomination");
+    }
+  }
+  return out.join(eol);
 }

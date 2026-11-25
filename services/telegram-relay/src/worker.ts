@@ -12,8 +12,8 @@ import { RelayCore, type RelaySocket, type TgUpdate } from "./core.js";
 
 export interface Env {
   RELAY: DurableObjectNamespace;
-  /** @BotFather 给的 Bot Token（wrangler secret）。 */
-  BOT_TOKEN: string;
+  /** 可选：@BotFather 给的 Bot Token（wrangler secret）；留空则仅提供设备中转与原生推送。 */
+  BOT_TOKEN?: string;
   /** 设备连接密钥，至少 16 位（wrangler secret）。 */
   RELAY_KEY: string;
 }
@@ -46,14 +46,16 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     const stub = env.RELAY.get(env.RELAY.idFromName("main"));
+    const hasBot = Boolean((env.BOT_TOKEN ?? "").trim());
     if (url.pathname === "/telegram" && request.method === "POST") {
+      if (!hasBot) return new Response("not found", { status: 404 });
       const secret = request.headers.get(WEBHOOK_SECRET_HEADER) ?? "";
       if (!sameText(secret, await webhookSecret(env.RELAY_KEY ?? ""))) return new Response("forbidden", { status: 403 });
       return stub.fetch(request);
     }
     if (url.pathname === "/check") {
       if (!authorized(request, env)) return Response.json({ ok: false }, { status: 401 });
-      return Response.json({ ok: true, botConfigured: Boolean(env.BOT_TOKEN) });
+      return Response.json({ ok: true, botConfigured: hasBot });
     }
     if (url.pathname === "/connect") {
       if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return new Response("expected websocket", { status: 426 });
@@ -82,9 +84,10 @@ export class Relay extends DurableObject<Env> {
   }
 
   #core(exclude?: WebSocket): RelayCore {
-    const token = this.env.BOT_TOKEN ?? "";
+    const token = (this.env.BOT_TOKEN ?? "").trim();
     return new RelayCore({
       storage: this.ctx.storage,
+      botConfigured: token !== "",
       sockets: () =>
         this.ctx
           .getWebSockets()
@@ -139,9 +142,12 @@ export class Relay extends DurableObject<Env> {
       server.serializeAttachment({ deviceId, name } satisfies Attachment);
       const core = this.#core();
       const webhook = `${url.origin}/telegram`;
+      const hasBot = Boolean((this.env.BOT_TOKEN ?? "").trim());
       this.ctx.waitUntil(
         (async () => {
-          await core.ensureWebhook(webhook, await webhookSecret(this.env.RELAY_KEY ?? "")).catch(() => undefined);
+          if (hasBot) {
+            await core.ensureWebhook(webhook, await webhookSecret(this.env.RELAY_KEY ?? "")).catch(() => undefined);
+          }
           await core.connected(deviceId, name);
         })(),
       );

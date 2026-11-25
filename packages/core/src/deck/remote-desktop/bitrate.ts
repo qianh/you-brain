@@ -19,7 +19,9 @@ const CLEAN_LOSS = 0.01;
 const INCREASE_HOLD_AFTER_DECREASE_MS = 3_000;
 const INCREASE_INTERVAL_MS = 1_000;
 const DECREASE_INTERVAL_MS = 300;
-const APPLY_THRESHOLD = 0.03;
+const APPLY_THRESHOLD = 0.04;
+/** TURN 中继链路初始起步比例：避免静止后首次拖动窗口直接按峰值码率冲爆跨境中继缓冲区，随后在无丢包时平滑爬升。 */
+const RELAY_INITIAL_RATIO = 0.42;
 
 export class LossBasedBitrateController {
   #maxBps: number;
@@ -28,6 +30,7 @@ export class LossBasedBitrateController {
   readonly #onChange: ((bps: number) => void) | undefined;
   #target: number;
   #applied: number;
+  #isRelay = false;
   #lastDecreaseAt = Number.NEGATIVE_INFINITY;
   #lastIncreaseAt = Number.NEGATIVE_INFINITY;
   #lastLoss = 0;
@@ -58,12 +61,34 @@ export class LossBasedBitrateController {
     return Math.min(this.#maxBps, Math.max(this.#minAbs, this.#maxBps * this.#minRatio));
   }
 
-  /** 切换画质时重置上限与目标。 */
+  /** 切换画质时重置上限与目标（若当前走 TURN 中继则从平滑起步值开始爬升）。 */
   setMax(maxBps: number): void {
     this.#maxBps = Math.max(1, maxBps);
-    this.#target = this.#maxBps;
-    this.#applied = this.#maxBps;
+    const initial = this.#isRelay
+      ? Math.max(this.#minBps, Math.round(this.#maxBps * RELAY_INITIAL_RATIO))
+      : this.#maxBps;
+    this.#target = initial;
+    this.#applied = initial;
     this.#lastDecreaseAt = Number.NEGATIVE_INFINITY;
+    this.#onChange?.(Math.round(this.#target));
+  }
+
+  /** 标记当前连接是否经由 TURN 中继转发；首次切入中继时压低初始突发码率，若后续 ICE 动态重提名切回 P2P 直连则立即恢复上限。 */
+  setRelayMode(isRelay: boolean): void {
+    if (this.#isRelay === isRelay) return;
+    this.#isRelay = isRelay;
+    if (isRelay) {
+      const safeStart = Math.max(this.#minBps, Math.round(this.#maxBps * RELAY_INITIAL_RATIO));
+      if (this.#target > safeStart) {
+        this.#target = safeStart;
+        this.#applied = safeStart;
+        this.#onChange?.(Math.round(this.#target));
+      }
+    } else if (this.#lastLoss < CLEAN_LOSS && this.#target < this.#maxBps) {
+      this.#target = this.#maxBps;
+      this.#applied = this.#maxBps;
+      this.#onChange?.(Math.round(this.#target));
+    }
   }
 
   /**
