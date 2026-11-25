@@ -1,5 +1,6 @@
 import { RtpHeader, RtpPacket } from "werift";
 
+import { buildFlexfecPayload } from "./fec.js";
 import type { EncodedVideoFrame } from "./types.js";
 
 /**
@@ -11,6 +12,8 @@ const BURST_PACKETS_LIMIT = 20;
 const BURST_PACE_MS = 1;
 /** 发送队列积压超过此非关键帧数时丢弃旧中间帧并请求新关键帧，杜绝弱网画面延迟堆积。 */
 const MAX_QUEUED_FRAMES = 3;
+/** 每多少个媒体包生成 1 个 FlexFEC 修复包（帧尾不足一组也补 1 个）；组内丢 1 包可就地恢复，免等重传往返。 */
+const FEC_GROUP_PACKETS = 4;
 
 /**
  * 从 VideoToolbox 输出的 4 字节大端长度前缀 AVCC 缓冲区零拷贝切分 NALU（跳过 AUD=9 与空单元）。
@@ -103,6 +106,15 @@ export interface RtpSenderPort {
   readonly ssrc: number;
   readonly payloadType: number;
   sendRtp(packet: RtpPacket): Promise<void> | void;
+  /** 可选：FlexFEC 前向纠错（对端 SDP 协商了 flexfec-03 时才提供）。 */
+  readonly fec?: FecSenderPort | undefined;
+}
+
+export interface FecSenderPort {
+  /** 取回刚发出的媒体包的明文完整字节（序号、扩展头以实际发出为准）；取不到返回 null，该包不受保护。 */
+  sentPacket(sequenceNumber: number): Buffer | null;
+  /** 用独立 SSRC 发出修复包。 */
+  sendRepair(payload: Buffer, timestamp: number): Promise<void> | void;
 }
 
 /**
@@ -125,9 +137,10 @@ export class LowLatencyH264RtpStreamer {
   /** 诊断计数（累计）：完整发出的帧、积压丢弃或等待关键帧期间跳过的帧。 */
   #framesSent = 0;
   #framesDropped = 0;
+  #fecPacketsSent = 0;
 
-  get counters(): { sent: number; dropped: number } {
-    return { sent: this.#framesSent, dropped: this.#framesDropped };
+  get counters(): { sent: number; dropped: number; fecSent: number } {
+    return { sent: this.#framesSent, dropped: this.#framesDropped, fecSent: this.#fecPacketsSent };
   }
 
   constructor(
@@ -196,9 +209,19 @@ export class LowLatencyH264RtpStreamer {
         const rtpTs = this.#computeRtpTimestamp(frame.ptsUs);
         const pt = this.#sender.payloadType;
         const ssrc = this.#sender.ssrc;
+        const fec = this.#sender.fec;
+        let group: Buffer[] = [];
+        const flushFec = async () => {
+          if (!fec || group.length === 0) return;
+          const repair = buildFlexfecPayload(group, ssrc);
+          group = [];
+          await fec.sendRepair(repair, rtpTs);
+          this.#fecPacketsSent += 1;
+        };
 
         for (let index = 0; index < payloads.length; index += 1) {
           if (this.#closed) return;
+          const sequenceNumber = this.#seq;
           const header = new RtpHeader({
             payloadType: pt,
             sequenceNumber: this.#seq,
@@ -208,10 +231,17 @@ export class LowLatencyH264RtpStreamer {
           });
           this.#seq = (this.#seq + 1) & 0xffff;
           await this.#sender.sendRtp(new RtpPacket(header, payloads[index]!));
+          if (fec) {
+            const sent = fec.sentPacket(sequenceNumber);
+            if (sent) group.push(sent);
+            // 取不到字节时先结掉当前组，保证每组序号连续、不超出掩码范围
+            if (!sent || group.length >= FEC_GROUP_PACKETS) await flushFec();
+          }
           if (payloads.length > BURST_PACKETS_LIMIT && (index + 1) % BURST_PACKETS_LIMIT === 0 && index + 1 < payloads.length) {
             await this.#sleep(BURST_PACE_MS);
           }
         }
+        await flushFec();
         this.#framesSent += 1;
       }
     } catch {

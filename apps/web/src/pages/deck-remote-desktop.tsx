@@ -146,7 +146,7 @@ function isRdOpenResult(value: unknown): value is RdOpenResult {
   );
 }
 
-function preferH264Transceiver(transceiver: RTCRtpTransceiver): void {
+function preferH264Transceiver(transceiver: RTCRtpTransceiver, allowFec: boolean): void {
   if (typeof transceiver.setCodecPreferences !== "function") return;
   if (typeof RTCRtpReceiver === "undefined" || typeof RTCRtpReceiver.getCapabilities !== "function") {
     return;
@@ -155,7 +155,11 @@ function preferH264Transceiver(transceiver: RTCRtpTransceiver): void {
   if (!caps?.codecs?.length) return;
   const h264 = caps.codecs.filter((codec) => codec.mimeType.toLowerCase() === "video/h264");
   if (h264.length === 0) return;
-  const rest = caps.codecs.filter((codec) => codec.mimeType.toLowerCase() !== "video/h264");
+  // 关闭抗丢包时不在 offer 里声明 flexfec，宿主据此不发修复包。
+  const rest = caps.codecs.filter((codec) => {
+    const mime = codec.mimeType.toLowerCase();
+    return mime !== "video/h264" && (allowFec || mime !== "video/flexfec-03");
+  });
   try {
     transceiver.setCodecPreferences([...h264, ...rest]);
   } catch {
@@ -327,6 +331,9 @@ export function DeckRemoteDesktopPane({
   const [reconnectNonce, setReconnectNonce] = useState(0);
   const [clipboardSync, setClipboardSync] = useState(() => readPref<boolean>("clipboardSync", true));
   const [localCursor, setLocalCursor] = useState(() => readPref<boolean>("localCursor", true));
+  const [fecEnabled, setFecEnabled] = useState(() => readPref<boolean>("fec", true));
+  const fecEnabledRef = useRef(fecEnabled);
+  fecEnabledRef.current = fecEnabled;
   const [swapCtrlCmd, setSwapCtrlCmd] = useState(() => readPref<boolean>("swapCtrlCmd", !controllerIsMac));
   const [scaleMode, setScaleMode] = useState<ScaleMode>(() => readPref<ScaleMode>("scale", "fit"));
   const [zoom, setZoom] = useState<number>(1);
@@ -690,6 +697,7 @@ export function DeckRemoteDesktopPane({
   // 偏好持久化
   useEffect(() => writePref("clipboardSync", clipboardSync), [clipboardSync]);
   useEffect(() => writePref("localCursor", localCursor), [localCursor]);
+  useEffect(() => writePref("fec", fecEnabled), [fecEnabled]);
   useEffect(() => writePref("swapCtrlCmd", swapCtrlCmd), [swapCtrlCmd]);
   useEffect(() => writePref("scale", scaleMode), [scaleMode]);
   useEffect(() => writePref("quality", quality), [quality]);
@@ -1143,7 +1151,7 @@ export function DeckRemoteDesktopPane({
       });
 
       const transceiver = pc.addTransceiver("video", { direction: "recvonly" });
-      preferH264Transceiver(transceiver);
+      preferH264Transceiver(transceiver, fecEnabledRef.current);
       applyZeroPlayoutDelay(transceiver.receiver);
 
       const fastDc = pc.createDataChannel("input-fast", {
@@ -2018,6 +2026,17 @@ export function DeckRemoteDesktopPane({
     },
     { id: "localCursor", label: t("deckRdLocalCursor"), icon: check(localCursor), onSelect: () => setLocalCursor(!localCursor) },
     { id: "swapCtrlCmd", label: t("deckRdSwapCtrlCmd"), icon: check(swapCtrlCmd), onSelect: () => setSwapCtrlCmd(!swapCtrlCmd) },
+    {
+      id: "fec",
+      label: t("deckRdFec"),
+      icon: check(fecEnabled),
+      onSelect: () => {
+        const next = !fecEnabled;
+        setFecEnabled(next);
+        setReconnectNonce((n) => n + 1);
+        push({ message: next ? t("deckRdFecOn") : t("deckRdFecOff") });
+      },
+    },
     { id: "sep-1", separator: true },
     {
       id: "scaleFit",
@@ -2362,6 +2381,28 @@ export function DeckRemoteDesktopPane({
             <dd>{hostStats ? formatBitrate(hostStats.bitrateBps) : "—"}</dd>
             <dt>{t("deckRdStatsLoss")}</dt>
             <dd>{lossPct !== null ? `${lossPct}%` : "—"}</dd>
+            <dt>{t("deckRdStatsFreezes")}</dt>
+            <dd>
+              {stats?.freezeCount !== null && stats?.freezeCount !== undefined
+                ? `${stats.freezeCount} · ${stats.freezeSec ?? 0} s`
+                : "—"}
+            </dd>
+            <dt>{t("deckRdStatsRecovery")}</dt>
+            <dd>
+              {stats?.nackCount !== null && stats?.nackCount !== undefined
+                ? `${stats.nackCount} / ${stats.pliCount ?? "—"}`
+                : "—"}
+            </dd>
+            <dt>{t("deckRdStatsFramesDropped")}</dt>
+            <dd>{stats?.framesDropped ?? "—"}</dd>
+            <dt>{t("deckRdStatsFec")}</dt>
+            <dd>
+              {stats?.fecReceived !== null && stats?.fecReceived !== undefined
+                ? `${stats.fecReceived} / ${stats.fecDiscarded ?? "—"}`
+                : stats
+                  ? t("deckRdStatsFecOff")
+                  : "—"}
+            </dd>
             <dt>{t("deckRdStatsJitter")}</dt>
             <dd>{stats?.jitterBufferMs !== null && stats?.jitterBufferMs !== undefined ? `${stats.jitterBufferMs} ms` : "—"}</dd>
             <dt>{t("deckRdStatsDecode")}</dt>

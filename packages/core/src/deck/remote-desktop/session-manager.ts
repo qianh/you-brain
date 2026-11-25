@@ -1,9 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns/promises";
 import {
   MediaStreamTrack,
   RTCPeerConnection,
   RTCRtpCodecParameters,
+  RtpHeader,
+  type RtpPacket,
   type RTCDataChannel,
   type RTCIceServer,
 } from "werift";
@@ -30,7 +32,7 @@ import {
   resolveDirectStunIceServers,
   stripBlockedIceCandidatesFromSdp,
 } from "./net-ice.js";
-import { LowLatencyH264RtpStreamer } from "./rtp-h264.js";
+import { LowLatencyH264RtpStreamer, type FecSenderPort } from "./rtp-h264.js";
 import {
   CLIPBOARD_CHUNK_CHARS,
   CLIPBOARD_MAX_CHARS,
@@ -298,7 +300,40 @@ function toWeriftIceServers(entries: IceServerEntry[]): RTCIceServer[] {
   }));
 }
 
-function buildH264Codecs(): RTCRtpCodecParameters[] {
+/** 控制端 offer 里带 flexfec-03（Safari/WKWebView 默认带）时，宿主额外协商它并发送修复包。 */
+const FLEXFEC_MIME = "video/flexfec-03";
+
+function offerHasFlexfec(sdp: string): boolean {
+  return /^a=rtpmap:\d+ flexfec-03\/90000/im.test(sdp);
+}
+
+/** answer 里协商出的 flexfec-03 负载类型；未协商返回 null。 */
+export function flexfecPayloadTypeOf(sdp: string): number | null {
+  const match = /^a=rtpmap:(\d+) flexfec-03\/90000/im.exec(sdp);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * 在 answer 里为修复流声明独立 SSRC：复制媒体 SSRC 的 a=ssrc 行并加 `a=ssrc-group:FEC-FR`，
+ * 接收端据此把修复包关联到被保护的媒体流。
+ */
+export function addFlexfecSsrcToSdp(sdp: string, mediaSsrc: number, fecSsrc: number): string {
+  const prefix = `a=ssrc:${mediaSsrc >>> 0} `;
+  const eol = sdp.includes("\r\n") ? "\r\n" : "\n";
+  const out: string[] = [];
+  let grouped = false;
+  for (const line of sdp.split(eol)) {
+    if (!grouped && line.startsWith(prefix)) {
+      out.push(`a=ssrc-group:FEC-FR ${mediaSsrc >>> 0} ${fecSsrc >>> 0}`);
+      grouped = true;
+    }
+    out.push(line);
+    if (line.startsWith(prefix)) out.push(`a=ssrc:${fecSsrc >>> 0} ${line.slice(prefix.length)}`);
+  }
+  return out.join(eol);
+}
+
+function buildH264Codecs(withFlexfec = false): RTCRtpCodecParameters[] {
   const feedback = [
     { type: "nack" },
     { type: "nack", parameter: "pli" },
@@ -317,6 +352,9 @@ function buildH264Codecs(): RTCRtpCodecParameters[] {
       parameters: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f",
       rtcpFeedback: feedback,
     }),
+    ...(withFlexfec
+      ? [new RTCRtpCodecParameters({ mimeType: FLEXFEC_MIME, clockRate: 90_000, parameters: "repair-window=10000000" })]
+      : []),
   ];
 }
 
@@ -452,13 +490,32 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
         !isBlockedWeriftCandidate(pair.localCandidate, localIce.blockedIps) &&
         !isBlockedWeriftCandidate(pair.remoteCandidate, localIce.blockedIps),
       iceStunGatherTimeout: this.#iceStunGatherTimeoutSec,
-      codecs: { video: buildH264Codecs() },
+      codecs: { video: buildH264Codecs(offerHasFlexfec(rewrittenOfferSdp)) },
       pendingRtp: { enabled: true, maxLength: 96 },
     });
 
     const videoTrack = new MediaStreamTrack({ kind: "video", streamId: "ubrain-rd" });
     const transceiver = pc.addTransceiver(videoTrack, { direction: "sendonly" });
     const sender = transceiver.sender;
+    // FlexFEC：协商成功后（见 answer 处理）才启用；修复流用独立 SSRC 与序号。
+    let fecPort: FecSenderPort | undefined;
+    const fecSsrc = randomBytes(4).readUInt32BE(0) || 1;
+    let fecSeq = randomBytes(2).readUInt16BE(0);
+    const enableFlexfec = (payloadType: number) => {
+      fecPort = {
+        sentPacket(sequenceNumber) {
+          const cache = (sender as unknown as { rtpCache?: Array<RtpPacket | undefined> }).rtpCache;
+          // werift 按 seq % 128（RTP_HISTORY_SIZE）缓存已发包；取不到或被覆盖时校验序号后放弃
+          const packet = cache?.[sequenceNumber % 128];
+          return packet && packet.header.sequenceNumber === sequenceNumber ? packet.serialize() : null;
+        },
+        async sendRepair(payload, timestamp) {
+          const header = new RtpHeader({ payloadType, sequenceNumber: fecSeq, timestamp, ssrc: fecSsrc, marker: false });
+          fecSeq = (fecSeq + 1) & 0xffff;
+          await sender.dtlsTransport?.sendRtp(payload, header);
+        },
+      };
+    };
 
     const streamer = new LowLatencyH264RtpStreamer(
       {
@@ -470,6 +527,9 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
         },
         sendRtp(packet) {
           return sender.sendRtp(packet);
+        },
+        get fec() {
+          return fecPort;
         },
       },
       {
@@ -582,7 +642,12 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       await pc.setRemoteDescription({ type: "offer", sdp: rewrittenOfferSdp });
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      const rawAnswerSdp = pc.localDescription?.sdp ?? answer.sdp;
+      let rawAnswerSdp = pc.localDescription?.sdp ?? answer.sdp;
+      const flexfecPt = flexfecPayloadTypeOf(rawAnswerSdp);
+      if (flexfecPt !== null && sender.codec?.mimeType.toLowerCase() === "video/h264") {
+        rawAnswerSdp = addFlexfecSsrcToSdp(rawAnswerSdp, sender.ssrc, fecSsrc);
+        enableFlexfec(flexfecPt);
+      }
       const answerSdp = stripBlockedIceCandidatesFromSdp(rawAnswerSdp, session.blockedIps);
       this.#sessions.set(session.sessionId, session);
       this.#applyStreamOptions();

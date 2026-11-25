@@ -2,7 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { RTCPeerConnection, RTCRtpCodecParameters, type RtpPacket } from "werift";
 
 import {
+  addFlexfecSsrcToSdp,
   BinaryVideoFrameDecoder,
+  buildFlexfecPayload,
+  flexfecPayloadTypeOf,
+  recoverFlexfecPacket,
   computePipelineStats,
   extractAvccNalus,
   inspectLocalIceInterfaces,
@@ -144,15 +148,88 @@ describe("RTP H.264 packetizer & low-latency streamer", () => {
     expect(sent.length).toBeGreaterThanOrEqual(1);
     expect(sent[0]?.header.marker).toBe(true);
     // 积压时清掉的 3 帧加上触发丢弃的那一帧
-    expect(streamer.counters).toEqual({ sent: 1, dropped: 4 });
+    expect(streamer.counters).toEqual({ sent: 1, dropped: 4, fecSent: 0 });
 
     // 丢帧后等待关键帧期间到达的 P 帧也计入丢弃；关键帧到来后恢复发送
     streamer.enqueue(pFrame(83_333));
     expect(streamer.counters.dropped).toBe(5);
     streamer.enqueue({ ...pFrame(100_000), keyframe: true, avcc: makeAvcc([Buffer.from([0x65, 0x01])]) });
     await new Promise((res) => setTimeout(res, 20));
-    expect(streamer.counters).toEqual({ sent: 2, dropped: 5 });
+    expect(streamer.counters).toEqual({ sent: 2, dropped: 5, fecSent: 0 });
     streamer.close();
+  });
+
+  test("FlexFEC 修复包能恢复组内任意 1 个丢失的媒体包", () => {
+    const ssrc = 0x0a0b0c0d;
+    const packets = [5, 300, 1180, 17].map((len, i) => {
+      const pkt = Buffer.alloc(12 + len);
+      pkt[0] = 0x80;
+      pkt[1] = (i === 3 ? 0x80 : 0) | 98;
+      pkt.writeUInt16BE((65534 + i) & 0xffff, 2); // 跨越序号回绕
+      pkt.writeUInt32BE(123456, 4);
+      pkt.writeUInt32BE(ssrc, 8);
+      for (let j = 12; j < pkt.length; j += 1) pkt[j] = (j * 7 + i) & 0xff;
+      return pkt;
+    });
+    const fec = buildFlexfecPayload(packets, ssrc);
+    expect(fec.length).toBe(20 + 1180);
+    for (let lost = 0; lost < packets.length; lost += 1) {
+      const received = packets.filter((_, i) => i !== lost);
+      expect(recoverFlexfecPacket(fec, received, ssrc)?.equals(packets[lost]!)).toBe(true);
+    }
+    // 丢 2 个无法恢复
+    expect(recoverFlexfecPacket(fec, packets.slice(2), ssrc)).toBeNull();
+  });
+
+  test("LowLatencyH264RtpStreamer 每 4 个媒体包及帧尾各发 1 个修复包", async () => {
+    const sentBytes = new Map<number, Buffer>();
+    const repairs: Array<{ payload: Buffer; timestamp: number }> = [];
+    const streamer = new LowLatencyH264RtpStreamer(
+      {
+        ssrc: 0x01020304,
+        payloadType: 98,
+        sendRtp(pkt) {
+          sentBytes.set(pkt.header.sequenceNumber, pkt.serialize());
+        },
+        fec: {
+          sentPacket: (seq) => sentBytes.get(seq) ?? null,
+          sendRepair(payload, timestamp) {
+            repairs.push({ payload, timestamp });
+          },
+        },
+      },
+      { sleep: async () => {} },
+    );
+    const bigSlice = Buffer.alloc(1180 * 5, 0x5a);
+    bigSlice[0] = 0x41;
+    streamer.enqueue({ keyframe: false, ptsUs: 0, sps: null, pps: null, avcc: makeAvcc([bigSlice]) });
+    await new Promise((res) => setTimeout(res, 20));
+    // 5900 字节切成 6 个 FU-A：4 + 2 → 2 个修复包
+    expect(sentBytes.size).toBe(6);
+    expect(repairs).toHaveLength(2);
+    expect(streamer.counters.fecSent).toBe(2);
+    const all = [...sentBytes.values()];
+    const restored = recoverFlexfecPacket(repairs[1]!.payload, [all[5]!], 0x01020304);
+    expect(restored?.equals(all[4]!)).toBe(true);
+    streamer.close();
+  });
+
+  test("addFlexfecSsrcToSdp 为修复流声明独立 SSRC 并分组", () => {
+    const sdp = ["m=video 9 UDP/TLS/RTP/SAVPF 98 39", "a=rtpmap:98 H264/90000", "a=rtpmap:39 flexfec-03/90000", "a=ssrc:111 cname:abc", "a=ssrc:111 msid:s t", ""].join("\r\n");
+    expect(flexfecPayloadTypeOf(sdp)).toBe(39);
+    const out = addFlexfecSsrcToSdp(sdp, 111, 222).split("\r\n");
+    expect(out).toEqual([
+      "m=video 9 UDP/TLS/RTP/SAVPF 98 39",
+      "a=rtpmap:98 H264/90000",
+      "a=rtpmap:39 flexfec-03/90000",
+      "a=ssrc-group:FEC-FR 111 222",
+      "a=ssrc:111 cname:abc",
+      "a=ssrc:222 cname:abc",
+      "a=ssrc:111 msid:s t",
+      "a=ssrc:222 msid:s t",
+      "",
+    ]);
+    expect(flexfecPayloadTypeOf("a=rtpmap:98 H264/90000")).toBeNull();
   });
 
   test("computePipelineStats converts cumulative counters into per-second rates", () => {

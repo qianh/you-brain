@@ -488,6 +488,17 @@ export interface RemoteDesktopStatsView {
   relay: boolean | null;
   width: number | null;
   height: number | null;
+  /** 以下为本次连接的累计值（诊断用）：画面冻结次数与总时长（秒）。 */
+  freezeCount: number | null;
+  freezeSec: number | null;
+  /** 控制端发出的重传请求（NACK）与关键帧请求（PLI）次数。 */
+  nackCount: number | null;
+  pliCount: number | null;
+  /** 收到但未能解码或显示而丢掉的帧。 */
+  framesDropped: number | null;
+  /** FlexFEC 修复包：收到的与未派上用场被丢弃的（未协商 FEC 时为 null）。 */
+  fecReceived: number | null;
+  fecDiscarded: number | null;
 }
 
 /** 从 `RTCPeerConnection.getStats()` 结果里提炼接收端关键指标。 */
@@ -523,6 +534,13 @@ export function summarizeRtcStats(
     relay: null,
     width: null,
     height: null,
+    freezeCount: null,
+    freezeSec: null,
+    nackCount: null,
+    pliCount: null,
+    framesDropped: null,
+    fecReceived: null,
+    fecDiscarded: null,
   };
   if (pair) {
     const rtt = num(pair.currentRoundTripTime);
@@ -546,6 +564,14 @@ export function summarizeRtcStats(
   };
   view.width = num(inbound.frameWidth);
   view.height = num(inbound.frameHeight);
+  view.freezeCount = num(inbound.freezeCount);
+  const freezeSec = num(inbound.totalFreezesDuration);
+  view.freezeSec = freezeSec === null ? null : Math.round(freezeSec * 10) / 10;
+  view.nackCount = num(inbound.nackCount);
+  view.pliCount = num(inbound.pliCount);
+  view.framesDropped = num(inbound.framesDropped);
+  view.fecReceived = num(inbound.fecPacketsReceived);
+  view.fecDiscarded = num(inbound.fecPacketsDiscarded);
   const fps = num(inbound.framesPerSecond);
   if (previous && nowMs > previous.at) {
     const seconds = (nowMs - previous.at) / 1000;

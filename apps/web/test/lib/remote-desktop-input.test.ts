@@ -174,11 +174,19 @@ describe("远程桌面输入工具", () => {
         totalDecodeTime: frames * 0.002,
         frameWidth: 2560,
         frameHeight: 1600,
+        freezeCount: lost * 2,
+        totalFreezesDuration: lost * 0.678,
+        nackCount: lost * 5,
+        pliCount: lost,
+        framesDropped: lost * 3,
+        fecPacketsReceived: lost * 7,
+        fecPacketsDiscarded: lost * 4,
       },
     ];
     const first = summarizeRtcStats(report(0, 0, 0, 0), null, 0);
     expect(first.view.rttMs).toBe(42);
     expect(first.view.relay).toBe(true);
+    expect(first.view.freezeCount).toBe(0);
     const second = summarizeRtcStats(report(1_000_000, 60, 1, 99), first.sample, 1000);
     expect(second.view.fps).toBe(60);
     expect(second.view.bitrateBps).toBe(8_000_000);
@@ -186,6 +194,14 @@ describe("远程桌面输入工具", () => {
     expect(second.view.jitterBufferMs).toBe(10);
     expect(second.view.decodeMs).toBe(2);
     expect(second.view.width).toBe(2560);
+    // 冻结、NACK、PLI、丢帧为连接累计值，原样透出（冻结时长保留 1 位小数）
+    expect(second.view.freezeCount).toBe(2);
+    expect(second.view.freezeSec).toBe(0.7);
+    expect(second.view.nackCount).toBe(5);
+    expect(second.view.pliCount).toBe(1);
+    expect(second.view.framesDropped).toBe(3);
+    expect(second.view.fecReceived).toBe(7);
+    expect(second.view.fecDiscarded).toBe(4);
   });
 });
 
