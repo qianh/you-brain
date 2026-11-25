@@ -3,6 +3,7 @@ import { RTCPeerConnection, RTCRtpCodecParameters, type RtpPacket } from "werift
 
 import {
   BinaryVideoFrameDecoder,
+  computePipelineStats,
   extractAvccNalus,
   inspectLocalIceInterfaces,
   isBlockedIceCandidateLine,
@@ -142,7 +143,39 @@ describe("RTP H.264 packetizer & low-latency streamer", () => {
     await new Promise((res) => setTimeout(res, 20));
     expect(sent.length).toBeGreaterThanOrEqual(1);
     expect(sent[0]?.header.marker).toBe(true);
+    // 积压时清掉的 3 帧加上触发丢弃的那一帧
+    expect(streamer.counters).toEqual({ sent: 1, dropped: 4 });
+
+    // 丢帧后等待关键帧期间到达的 P 帧也计入丢弃；关键帧到来后恢复发送
+    streamer.enqueue(pFrame(83_333));
+    expect(streamer.counters.dropped).toBe(5);
+    streamer.enqueue({ ...pFrame(100_000), keyframe: true, avcc: makeAvcc([Buffer.from([0x65, 0x01])]) });
+    await new Promise((res) => setTimeout(res, 20));
+    expect(streamer.counters).toEqual({ sent: 2, dropped: 5 });
     streamer.close();
+  });
+
+  test("computePipelineStats converts cumulative counters into per-second rates", () => {
+    const profile = { maxDimension: 1440, fps: 30 };
+    const prev = { at: 0, host: { captured: 10, busy: 0, dropped: 2, encoded: 8 }, sent: 8, dropped: 0 };
+    const cur = { at: 2_000, host: { captured: 70, busy: 4, dropped: 22, encoded: 44 }, sent: 40, dropped: 3 };
+    expect(computePipelineStats(prev, cur, profile)).toEqual({
+      targetFps: 30,
+      maxDimension: 1440,
+      captured: 30,
+      encoderBusy: 2,
+      encoderDropped: 10,
+      encoded: 18,
+      sent: 16,
+      sendDropped: 1.5,
+    });
+    // 助手重启计数归零：宿主侧数据记为 null，不出现负数
+    const restarted = computePipelineStats(cur, { ...cur, at: 4_000, host: { captured: 5, busy: 0, dropped: 0, encoded: 5 } }, profile);
+    expect(restarted?.captured).toBeNull();
+    expect(restarted?.encoded).toBeNull();
+    // 旧版助手没有计数
+    expect(computePipelineStats({ ...prev, host: null }, cur, profile)?.captured).toBeNull();
+    expect(computePipelineStats(prev, { ...cur, at: 0 }, profile)).toBeNull();
   });
 });
 

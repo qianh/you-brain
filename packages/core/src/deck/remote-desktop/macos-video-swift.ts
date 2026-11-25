@@ -47,6 +47,23 @@ final class HardwareH264Encoder {
     private var inFlight = 0
     private let queue = DispatchQueue(label: "app.you-brain.rd.encoder", qos: .userInteractive)
     var onEncodedFrame: ((Bool, UInt64, Data?, Data?, Data) -> Void)?
+    /** 诊断计数（累计）：积压跳过、VideoToolbox 丢帧（多为码率上限所致）、编码输出。 */
+    private let countersLock = NSLock()
+    private var busySkipped = 0
+    private var vtDropped = 0
+    private var encodedCount = 0
+
+    func counters() -> (busy: Int, dropped: Int, encoded: Int) {
+        countersLock.lock()
+        defer { countersLock.unlock() }
+        return (busySkipped, vtDropped, encodedCount)
+    }
+
+    private func bump(_ apply: () -> Void) {
+        countersLock.lock()
+        apply()
+        countersLock.unlock()
+    }
 
     func configure(width: Int32, height: Int32, fps: Int, bitrateBps: Int) {
         queue.sync {
@@ -91,7 +108,10 @@ final class HardwareH264Encoder {
             guard let session = self.session else { return }
             let wantsKeyframe = self.forceNextKeyframe || force
             // 硬件编码器积压时丢弃新帧：宁可少一帧也不让画面延迟累积。关键帧请求不丢。
-            if self.inFlight >= 2 && !wantsKeyframe { return }
+            if self.inFlight >= 2 && !wantsKeyframe {
+                self.bump { self.busySkipped += 1 }
+                return
+            }
             var frameProps: [CFString: Any]? = nil
             if wantsKeyframe {
                 frameProps = [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue as Any]
@@ -106,10 +126,14 @@ final class HardwareH264Encoder {
                 duration: CMTime(value: 1, timescale: CMTimeScale(max(1, self.fps))),
                 frameProperties: frameProps as CFDictionary?,
                 infoFlagsOut: &infoFlags
-            ) { [weak self] status, _, sampleBuffer in
+            ) { [weak self] status, flags, sampleBuffer in
                 guard let self else { return }
                 self.queue.async { self.inFlight = max(0, self.inFlight - 1) }
-                guard status == noErr, let sampleBuffer, CMSampleBufferDataIsReady(sampleBuffer) else { return }
+                guard status == noErr, !flags.contains(.frameDropped), let sampleBuffer, CMSampleBufferDataIsReady(sampleBuffer) else {
+                    if status == noErr { self.bump { self.vtDropped += 1 } }
+                    return
+                }
+                self.bump { self.encodedCount += 1 }
                 self.handleSampleBuffer(sampleBuffer)
             }
             if status != noErr {
@@ -254,6 +278,17 @@ final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStreamDelegate {
     private var latestPixelBuffer: CVPixelBuffer?
     private var lastPts: CMTime = .invalid
     private let bufferLock = NSLock()
+    /** 诊断计数（累计）：ScreenCaptureKit 交付的完整帧（画面不变时不交付）。 */
+    private var capturedCount = 0
+
+    /** 视频管线累计计数，供宿主按时间差换算成每秒帧数。 */
+    func counters() -> [String: Int] {
+        bufferLock.lock()
+        let captured = capturedCount
+        bufferLock.unlock()
+        let enc = encoder.counters()
+        return ["captured": captured, "busy": enc.busy, "dropped": enc.dropped, "encoded": enc.encoded]
+    }
 
     var onEncodedFrame: ((Bool, UInt64, Data?, Data?, Data) -> Void)? {
         didSet { encoder.onEncodedFrame = onEncodedFrame }
@@ -449,6 +484,7 @@ final class ScreenCapturePipeline: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         latestPixelBuffer = pixelBuffer
         lastPts = pts
+        capturedCount += 1
         bufferLock.unlock()
         encoder.encode(pixelBuffer: pixelBuffer, pts: pts)
     }

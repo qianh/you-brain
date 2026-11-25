@@ -122,6 +122,13 @@ export class LowLatencyH264RtpStreamer {
   #draining = false;
   #awaitingKeyframe = false;
   #closed = false;
+  /** 诊断计数（累计）：完整发出的帧、积压丢弃或等待关键帧期间跳过的帧。 */
+  #framesSent = 0;
+  #framesDropped = 0;
+
+  get counters(): { sent: number; dropped: number } {
+    return { sent: this.#framesSent, dropped: this.#framesDropped };
+  }
 
   constructor(
     sender: RtpSenderPort,
@@ -139,12 +146,15 @@ export class LowLatencyH264RtpStreamer {
     if (this.#closed) return;
     if (frame.keyframe) {
       // 新关键帧到达时，尚未发出的旧非关键帧已无参考意义，直接清空并解除等待态
+      this.#framesDropped += this.#queue.length;
       this.#queue.length = 0;
       this.#awaitingKeyframe = false;
     } else if (this.#awaitingKeyframe) {
       // 已丢弃前序参考帧：在新关键帧到达前跳过孤立 P 帧，避免浪费 TURN 带宽并触发解码端花屏/PLI 风暴
+      this.#framesDropped += 1;
       return;
     } else if (this.#queue.length >= MAX_QUEUED_FRAMES) {
+      this.#framesDropped += this.#queue.length + 1;
       this.#queue.length = 0;
       this.#awaitingKeyframe = true;
       this.#onDropNeedKeyframe?.();
@@ -202,6 +212,7 @@ export class LowLatencyH264RtpStreamer {
             await this.#sleep(BURST_PACE_MS);
           }
         }
+        this.#framesSent += 1;
       }
     } catch {
       // 连接关闭期间写包异常安全忽略

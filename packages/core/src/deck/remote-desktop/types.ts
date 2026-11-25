@@ -157,7 +157,37 @@ export type ControlServerMessage =
   /** 远端剪贴板是图片：控制端用 `file` 通道 `get` 路径 {@link CLIPBOARD_IMAGE_PATH} 取回 PNG。 */
   | { t: "cb.image"; id: string; w: number; h: number; auto?: boolean }
   | ({ t: "cursor" } & HostCursorShape)
-  | { t: "stats"; bitrateBps: number; lossPct: number; rttMs: number | null };
+  | { t: "stats"; bitrateBps: number; lossPct: number; rttMs: number | null; pipe?: RdPipelineStats };
+
+/** 宿主原生助手上报的视频管线累计计数。 */
+export interface HostVideoCounters {
+  /** ScreenCaptureKit 交付的完整帧（画面不变时不交付）。 */
+  captured: number;
+  /** 编码器积压时跳过的帧。 */
+  busy: number;
+  /** VideoToolbox 丢弃的帧（多为码率上限所致）。 */
+  dropped: number;
+  /** 编码输出的帧。 */
+  encoded: number;
+}
+
+/**
+ * 宿主视频管线各环节的每秒帧数，用于定位帧率低的原因（诊断用，旧版宿主不发）。
+ * 采集与编码数据来自原生助手，旧版助手为 null。
+ */
+export interface RdPipelineStats {
+  /** 当前档位的帧率上限与分辨率上限。 */
+  targetFps: number;
+  maxDimension: number;
+  captured: number | null;
+  encoderBusy: number | null;
+  encoderDropped: number | null;
+  encoded: number | null;
+  /** 发送端完整发出的帧。 */
+  sent: number;
+  /** 发送队列积压被丢弃、或丢帧后等待关键帧期间跳过的帧。 */
+  sendDropped: number;
+}
 
 /** `file` 通道上的 JSON 帧（二进制帧为当前传输的数据分片）。 */
 export type FileClientMessage =

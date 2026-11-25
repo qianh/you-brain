@@ -24,6 +24,7 @@ import {
   type HostCursorShape,
   type HostStateSnapshot,
   type HostStreamOptions,
+  type HostVideoCounters,
 } from "./types.js";
 
 const exec = promisify(execFile);
@@ -57,6 +58,11 @@ export interface RemoteDesktopHostBridge {
   setBitrate?(bps: number): void;
   /** 按链路收紧采集分辨率上限与帧率（分辨率变化会重建编码会话并出关键帧），同时保持给定码率。 */
   setStreamProfile?(profile: { maxDimension: number; fps: number; bitrateBps: number }): void;
+  /**
+   * 请求助手上报视频管线累计计数，返回上一次收到的值（首次或旧版助手为 null）。
+   * 按统计周期轮询，结果滞后一个周期，诊断用足够。
+   */
+  pollVideoCounters?(): HostVideoCounters | null;
   /** 让助手立即重发当前光标形状。 */
   requestCursor?(): void;
   /** 把 PNG 图片写入远端剪贴板。 */
@@ -353,6 +359,7 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
   #pendingMove: { x: number; y: number } | null = null;
   #moveFlushScheduled = false;
   #lastKeyframeReqAt = 0;
+  #videoCounters: HostVideoCounters | null = null;
 
   constructor(options?: { homeDir?: string }) {
     this.#home = options?.homeDir ?? homedir();
@@ -545,6 +552,11 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
     });
   }
 
+  pollVideoCounters(): HostVideoCounters | null {
+    this.#sendCtrl({ op: "vstats" });
+    return this.#videoCounters;
+  }
+
   requestCursor(): void {
     this.#sendCtrl({ op: "cursor.get" });
   }
@@ -701,6 +713,14 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
                 if (cursor) {
                   for (const listener of this.#cursorListeners) listener(cursor);
                 }
+              } else if (ev === "vstats") {
+                const num = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+                this.#videoCounters = {
+                  captured: num(msg.captured),
+                  busy: num(msg.busy),
+                  dropped: num(msg.dropped),
+                  encoded: num(msg.encoded),
+                };
               } else if (ev === "error" && typeof msg.message === "string") {
                 for (const listener of this.#errorListeners) listener(msg.message);
               }

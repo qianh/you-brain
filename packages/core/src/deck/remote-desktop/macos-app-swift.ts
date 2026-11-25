@@ -271,6 +271,10 @@ final class RemoteHostAppDelegate: NSObject, NSApplicationDelegate {
             }
         case "idr":
             capture.requestKeyframe()
+        case "vstats":
+            var payload: [String: Any] = ["ev": "vstats"]
+            for (key, value) in capture.counters() { payload[key] = value }
+            emitCtrl(payload)
         case "br":
             if let bps = cmd["bps"] as? Int, bps > 0 {
                 capture.setBitrate(bps)

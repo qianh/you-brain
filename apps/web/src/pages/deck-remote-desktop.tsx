@@ -18,6 +18,7 @@ import {
   type ControlClientMessage,
   type ControlServerMessage,
   type FastInputMessage,
+  type RdPipelineStats,
   type HostClipboardFile,
   type HostCursorShape,
 } from "@you-brain/core/deck/remote-desktop/types.js";
@@ -100,6 +101,11 @@ const DEFAULT_DOUBLE_CLICK_MS = 500;
 const CURSOR_MAX_CSS_PX = 128;
 
 const PREF_PREFIX = "you-brain.rd.";
+
+/** 宿主管线各环节的每秒帧数；旧版宿主助手没有该数据时为 null。 */
+function formatFrameRate(value: number | null): string {
+  return value === null ? "—" : `${value} fps`;
+}
 
 export type ConnectStage = "turn" | "signaling" | "ice";
 
@@ -314,6 +320,7 @@ export function DeckRemoteDesktopPane({
   const [pingRttMs, setPingRttMs] = useState<number | null>(null);
   const [stats, setStats] = useState<RemoteDesktopStatsView | null>(null);
   const [hostStats, setHostStats] = useState<{ bitrateBps: number; lossPct: number } | null>(null);
+  const [pipeStats, setPipeStats] = useState<RdPipelineStats | null>(null);
   const [showStats, setShowStats] = useState(false);
   const [focused, setFocused] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
@@ -835,6 +842,7 @@ export function DeckRemoteDesktopPane({
     setPingRttMs(null);
     setStats(null);
     setHostStats(null);
+    setPipeStats(null);
     setVideoSize(null);
     cursorReceivedRef.current = false;
     cursorFallbackRef.current = false;
@@ -1047,6 +1055,7 @@ export function DeckRemoteDesktopPane({
               ? prev
               : { bitrateBps: msg.bitrateBps, lossPct: msg.lossPct },
           );
+          setPipeStats(msg.pipe ?? null);
           return;
         default:
           return;
@@ -2359,6 +2368,26 @@ export function DeckRemoteDesktopPane({
             <dd>{stats?.decodeMs !== null && stats?.decodeMs !== undefined ? `${stats.decodeMs} ms` : "—"}</dd>
             <dt>{t("deckRdStatsResolution")}</dt>
             <dd>{videoSize ? `${videoSize.w}×${videoSize.h}` : "—"}</dd>
+            {pipeStats ? (
+              <>
+                <dt>{t("deckRdStatsTarget")}</dt>
+                <dd>{`${pipeStats.targetFps} fps · ${pipeStats.maxDimension}px`}</dd>
+                <dt>{t("deckRdStatsCaptured")}</dt>
+                <dd>{formatFrameRate(pipeStats.captured)}</dd>
+                <dt>{t("deckRdStatsEncoded")}</dt>
+                <dd>{formatFrameRate(pipeStats.encoded)}</dd>
+                <dt>{t("deckRdStatsEncoderSkip")}</dt>
+                <dd>
+                  {pipeStats.encoderBusy === null || pipeStats.encoderDropped === null
+                    ? "—"
+                    : `${pipeStats.encoderBusy} / ${pipeStats.encoderDropped}`}
+                </dd>
+                <dt>{t("deckRdStatsSent")}</dt>
+                <dd>{formatFrameRate(pipeStats.sent)}</dd>
+                <dt>{t("deckRdStatsSendDropped")}</dt>
+                <dd>{formatFrameRate(pipeStats.sendDropped)}</dd>
+              </>
+            ) : null}
             <dt>{t("deckRdStatsPath")}</dt>
             <dd>
               {stats?.relay === null || stats?.relay === undefined

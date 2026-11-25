@@ -43,6 +43,8 @@ import {
   type HostCursorShape,
   type HostStateSnapshot,
   type HostStreamOptions,
+  type HostVideoCounters,
+  type RdPipelineStats,
   type RemoteDesktopSignalingEvents,
 } from "./types.js";
 
@@ -165,6 +167,38 @@ function profileKey(profile: { maxDimension: number; fps: number }): string {
   return `${profile.maxDimension}x${profile.fps}`;
 }
 
+/** 一次统计时刻的视频管线累计计数。 */
+export interface PipelineSample {
+  at: number;
+  /** 原生助手计数，旧版助手为 null。 */
+  host: HostVideoCounters | null;
+  sent: number;
+  dropped: number;
+}
+
+/** 由前后两次累计计数算出各环节每秒帧数；计数回退（助手重启）的环节记为 null。 */
+export function computePipelineStats(
+  prev: PipelineSample,
+  cur: PipelineSample,
+  profile: { maxDimension: number; fps: number },
+): RdPipelineStats | null {
+  const seconds = (cur.at - prev.at) / 1000;
+  if (!(seconds > 0)) return null;
+  const rate = (before: number, after: number): number | null =>
+    after >= before ? Math.round(((after - before) / seconds) * 10) / 10 : null;
+  const host = prev.host && cur.host ? { prev: prev.host, cur: cur.host } : null;
+  return {
+    targetFps: profile.fps,
+    maxDimension: profile.maxDimension,
+    captured: host ? rate(host.prev.captured, host.cur.captured) : null,
+    encoderBusy: host ? rate(host.prev.busy, host.cur.busy) : null,
+    encoderDropped: host ? rate(host.prev.dropped, host.cur.dropped) : null,
+    encoded: host ? rate(host.prev.encoded, host.cur.encoded) : null,
+    sent: rate(prev.sent, cur.sent) ?? 0,
+    sendDropped: rate(prev.dropped, cur.dropped) ?? 0,
+  };
+}
+
 function isPeerConnectionUsingRelay(pc: RTCPeerConnection): boolean {
   const transports = (
     pc as unknown as {
@@ -215,6 +249,8 @@ interface ActiveRdSession {
   allowedDownloads: Set<string>;
   bitrate: LossBasedBitrateController;
   statsTimer: ReturnType<typeof setInterval> | null;
+  /** 上一次统计时的视频管线计数，用于换算每秒帧数。 */
+  pipeSample: PipelineSample | null;
   clipboardInbound: { id: string; n: number; parts: string[]; received: number; chars: number } | null;
   /** 最近一次应用的鼠标移动序号，丢弃无序通道上晚到的旧坐标。 */
   lastMoveSeq: number;
@@ -464,6 +500,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
         onChange: () => this.#applyBitrate(),
       }),
       statsTimer: null,
+      pipeSample: null,
       clipboardInbound: null,
       lastMoveSeq: -1,
       relay: false,
@@ -1018,6 +1055,14 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     this.#bridge.setStreamProfile({ ...profile, bitrateBps: this.#appliedBitrate ?? targetBps });
   }
 
+  /** 当前下发给编码的分辨率上限与帧率（尚未按链路收紧时为画质预设）。 */
+  #currentProfile(session: ActiveRdSession): { maxDimension: number; fps: number } {
+    const [dim, fps] = (this.#appliedProfileKey ?? "").split("x").map(Number);
+    if (dim !== undefined && fps !== undefined && dim > 0 && fps > 0) return { maxDimension: dim, fps };
+    const preset = QUALITY_PRESETS[session.quality];
+    return { maxDimension: preset.maxDimension, fps: preset.fps };
+  }
+
   #startStats(session: ActiveRdSession): void {
     if (session.statsTimer) return;
     session.statsTimer = setInterval(() => {
@@ -1025,11 +1070,21 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       session.relay = isPeerConnectionUsingRelay(session.pc);
       session.bitrate.setRelayMode(session.relay);
       this.#applyStreamProfile();
+      const sample: PipelineSample = {
+        at: Date.now(),
+        host: this.#bridge?.pollVideoCounters?.() ?? null,
+        ...session.streamer.counters,
+      };
+      const pipe = session.pipeSample
+        ? computePipelineStats(session.pipeSample, sample, this.#currentProfile(session))
+        : null;
+      session.pipeSample = sample;
       this.#sendControlMessage(session, {
         t: "stats",
         bitrateBps: this.#appliedBitrate ?? session.bitrate.targetBps,
         lossPct: Math.round(session.bitrate.lastLoss * 1000) / 10,
         rttMs: session.bitrate.lastRttMs === null ? null : Math.round(session.bitrate.lastRttMs),
+        ...(pipe ? { pipe } : {}),
       });
     }, STATS_INTERVAL_MS);
     session.statsTimer.unref?.();
