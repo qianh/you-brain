@@ -4,6 +4,7 @@ export * from "./rtp-h264.js";
 export * from "./host-macos.js";
 export * from "./session-manager.js";
 export * from "./bitrate.js";
+export * from "./stream-profile.js";
 export * from "./file-transfer.js";
 export * from "./host-process.js";
 export * from "./net-ice.js";

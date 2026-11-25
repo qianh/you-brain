@@ -7,6 +7,8 @@ import {
   inspectLocalIceInterfaces,
   isBlockedIceCandidateLine,
   LossBasedBitrateController,
+  nextStreamTier,
+  streamProfileFor,
   LowLatencyH264RtpStreamer,
   packetizeH264AccessUnit,
   RemoteDesktopHostManager,
@@ -1002,5 +1004,35 @@ describe("LossBasedBitrateController 排队时延感知", () => {
     const before = direct.targetBps;
     for (let t = 5_000; t < 8_000; t += 500) direct.onRoundTripTime(340, t);
     expect(direct.targetBps).toBe(before);
+  });
+});
+
+describe("中继链路降帧率与分辨率档位", () => {
+  test("直连用画质预设；中继收紧到 1440/30；码率很低再降到 1152/24，且不超过所选画质", () => {
+    const hd = { maxDimension: 1920, fps: 60 };
+    const smooth = { maxDimension: 1600, fps: 60 };
+    expect(streamProfileFor("direct", hd)).toEqual({ maxDimension: 1920, fps: 60 });
+    expect(streamProfileFor("relay", hd)).toEqual({ maxDimension: 1440, fps: 30 });
+    expect(streamProfileFor("relay-low", hd)).toEqual({ maxDimension: 1152, fps: 24 });
+    // 所选画质本身更低时不会被放大
+    expect(streamProfileFor("relay", { maxDimension: 1280, fps: 25 })).toEqual({ maxDimension: 1280, fps: 25 });
+    expect(streamProfileFor("relay", smooth)).toEqual({ maxDimension: 1440, fps: 30 });
+  });
+
+  test("档位切换：直连/中继立即切换；中继内的高低档有回差和最短停留时间", () => {
+    const base = { nowMs: 100_000, changedAtMs: 0 };
+    expect(nextStreamTier({ ...base, current: "relay", relay: false, targetBps: 500_000 })).toBe("direct");
+    expect(nextStreamTier({ ...base, current: "direct", relay: true, targetBps: 3_000_000 })).toBe("relay");
+    expect(nextStreamTier({ ...base, current: "direct", relay: true, targetBps: 800_000 })).toBe("relay-low");
+
+    // 码率低于 1M 进入低档，但刚切换过（不足 10 秒）时先保持
+    expect(nextStreamTier({ ...base, current: "relay", relay: true, targetBps: 900_000 })).toBe("relay-low");
+    expect(
+      nextStreamTier({ current: "relay", relay: true, targetBps: 900_000, nowMs: 105_000, changedAtMs: 100_000 }),
+    ).toBe("relay");
+    // 回差：1M~1.6M 之间保持原档，不来回切
+    expect(nextStreamTier({ ...base, current: "relay-low", relay: true, targetBps: 1_300_000 })).toBe("relay-low");
+    expect(nextStreamTier({ ...base, current: "relay", relay: true, targetBps: 1_300_000 })).toBe("relay");
+    expect(nextStreamTier({ ...base, current: "relay-low", relay: true, targetBps: 1_700_000 })).toBe("relay");
   });
 });

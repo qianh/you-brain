@@ -55,6 +55,8 @@ export interface RemoteDesktopHostBridge {
   setStreamOptions?(options: HostStreamOptions): void;
   /** 动态调整编码码率（不触发关键帧）。 */
   setBitrate?(bps: number): void;
+  /** 按链路收紧采集分辨率上限与帧率（分辨率变化会重建编码会话并出关键帧），同时保持给定码率。 */
+  setStreamProfile?(profile: { maxDimension: number; fps: number; bitrateBps: number }): void;
   /** 让助手立即重发当前光标形状。 */
   requestCursor?(): void;
   /** 把 PNG 图片写入远端剪贴板。 */
@@ -529,6 +531,18 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
   setBitrate(bps: number): void {
     if (!Number.isFinite(bps) || bps <= 0) return;
     this.#sendCtrl({ op: "br", bps: Math.round(bps) });
+  }
+
+  setStreamProfile(profile: { maxDimension: number; fps: number; bitrateBps: number }): void {
+    if (!(profile.maxDimension > 0) || !(profile.fps > 0) || !(profile.bitrateBps > 0)) return;
+    // 复用助手的 configure：不带 displayId 时保持当前显示器，帧率在线更新，分辨率变化才重建编码会话。
+    this.#sendCtrl({
+      op: "configure",
+      maxDimension: Math.round(profile.maxDimension),
+      fps: Math.round(profile.fps),
+      bitrateBps: Math.round(profile.bitrateBps),
+      prompt: false,
+    });
   }
 
   requestCursor(): void {

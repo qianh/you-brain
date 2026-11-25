@@ -19,6 +19,7 @@ import type {
 } from "@you-brain/protocol";
 
 import { LossBasedBitrateController } from "./bitrate.js";
+import { nextStreamTier, streamProfileFor, type StreamTier } from "./stream-profile.js";
 import { HostFileTransfer, type FileChannelPort } from "./file-transfer.js";
 import { MacOsRemoteDesktopBridge, type RemoteDesktopHostBridge } from "./host-macos.js";
 import {
@@ -160,6 +161,10 @@ function takeNewRttSampleMs(
   return avgSeconds > 0 ? avgSeconds * 1000 : null;
 }
 
+function profileKey(profile: { maxDimension: number; fps: number }): string {
+  return `${profile.maxDimension}x${profile.fps}`;
+}
+
 function isPeerConnectionUsingRelay(pc: RTCPeerConnection): boolean {
   const transports = (
     pc as unknown as {
@@ -213,6 +218,8 @@ interface ActiveRdSession {
   clipboardInbound: { id: string; n: number; parts: string[]; received: number; chars: number } | null;
   /** 最近一次应用的鼠标移动序号，丢弃无序通道上晚到的旧坐标。 */
   lastMoveSeq: number;
+  /** 当前选中的候选对是否经 TURN 中继。 */
+  relay: boolean;
   mdnsCache: Map<string, Promise<string | null>>;
   blockedIps: ReadonlySet<string>;
   /** 串行投递远端候选，保证结束标记不会越过尚在 mDNS 解析中的真实候选。 */
@@ -311,6 +318,11 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
   #lastCursor: HostCursorShape | null = null;
   #appliedStreamOptions: string | null = null;
   #appliedBitrate: number | null = null;
+  /** 共用编码当前所处的链路档位与切换时间（见 stream-profile.ts）。 */
+  #streamTier: StreamTier = "direct";
+  #streamTierAt = 0;
+  /** 已下发给助手的分辨率上限×帧率；null 表示助手当前为某个画质预设，需要重新比对。 */
+  #appliedProfileKey: string | null = null;
 
   constructor(options?: RemoteDesktopHostManagerOptions) {
     this.supported = options?.supported ?? process.platform === "darwin";
@@ -385,6 +397,8 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     ]);
     // 新开流以预设码率起步；自适应控制器随后按丢包调整。
     this.#appliedBitrate = null;
+    // ensureStarted 按该画质预设配置了助手，档位需重新比对下发。
+    this.#appliedProfileKey = profileKey(QUALITY_PRESETS[quality]);
 
     const hasIceServers = iceEntries.length > 0;
     const preferredHostAddresses = !hasIceServers
@@ -452,6 +466,7 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       statsTimer: null,
       clipboardInbound: null,
       lastMoveSeq: -1,
+      relay: false,
       mdnsCache,
       blockedIps: localIce.blockedIps,
       remoteIceChain: Promise.resolve(),
@@ -497,7 +512,9 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
       if (session.closed) return;
       if (state === "connected") {
         session.lastActiveAt = Date.now();
-        session.bitrate.setRelayMode(isPeerConnectionUsingRelay(pc));
+        session.relay = isPeerConnectionUsingRelay(pc);
+        session.bitrate.setRelayMode(session.relay);
+        this.#applyStreamProfile();
         this.#startStats(session);
         this.#bridge?.requestKeyframe();
         const cur = this.#bridge?.getStateSnapshot() ?? snapshot;
@@ -615,6 +632,8 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     }
     this.#appliedStreamOptions = null;
     this.#appliedBitrate = null;
+    this.#appliedProfileKey = null;
+    this.#streamTier = "direct";
     this.#lastCursor = null;
     if (this.#bridge) {
       this.#bridge.releaseInputs();
@@ -813,9 +832,11 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
         quality: session.quality,
         ...(session.displayId !== undefined ? { displayId: session.displayId } : {}),
       });
-      // 重新配置会把编码码率重置为预设值，之后需重新下发自适应码率。
+      // 重新配置会把编码码率、分辨率和帧率重置为预设值，之后需重新下发自适应码率与链路档位。
       this.#appliedBitrate = null;
       this.#applyBitrate();
+      this.#appliedProfileKey = profileKey(QUALITY_PRESETS[session.quality]);
+      this.#applyStreamProfile();
       if (!session.closed) {
         this.#sendControlMessage(session, this.#stateMessage(session, snap));
         this.#bridge.requestKeyframe();
@@ -966,11 +987,44 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     this.#bridge.setBitrate(target);
   }
 
+  /**
+   * 按链路选择共用编码的分辨率上限与帧率：任一会话走 TURN 中继即降档（见 stream-profile.ts），
+   * 多会话取最保守的画质预设，避免为某个会话把画面推回高分辨率高帧率。
+   */
+  #applyStreamProfile(): void {
+    if (!this.#bridge?.setStreamProfile) return;
+    const live = [...this.#sessions.values()].filter((item) => !item.closed);
+    if (live.length === 0) return;
+    const now = Date.now();
+    const targetBps = Math.min(...live.map((item) => item.bitrate.targetBps));
+    const tier = nextStreamTier({
+      current: this.#streamTier,
+      relay: live.some((item) => item.relay),
+      targetBps,
+      nowMs: now,
+      changedAtMs: this.#streamTierAt,
+    });
+    if (tier !== this.#streamTier) {
+      this.#streamTier = tier;
+      this.#streamTierAt = now;
+    }
+    const profile = streamProfileFor(tier, {
+      maxDimension: Math.min(...live.map((item) => QUALITY_PRESETS[item.quality].maxDimension)),
+      fps: Math.min(...live.map((item) => QUALITY_PRESETS[item.quality].fps)),
+    });
+    const key = profileKey(profile);
+    if (key === this.#appliedProfileKey) return;
+    this.#appliedProfileKey = key;
+    this.#bridge.setStreamProfile({ ...profile, bitrateBps: this.#appliedBitrate ?? targetBps });
+  }
+
   #startStats(session: ActiveRdSession): void {
     if (session.statsTimer) return;
     session.statsTimer = setInterval(() => {
       if (session.closed) return;
-      session.bitrate.setRelayMode(isPeerConnectionUsingRelay(session.pc));
+      session.relay = isPeerConnectionUsingRelay(session.pc);
+      session.bitrate.setRelayMode(session.relay);
+      this.#applyStreamProfile();
       this.#sendControlMessage(session, {
         t: "stats",
         bitrateBps: this.#appliedBitrate ?? session.bitrate.targetBps,
@@ -1051,8 +1105,10 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     if (this.#sessions.size > 0) {
       this.#applyStreamOptions();
       this.#applyBitrate();
+      this.#applyStreamProfile();
     } else {
       this.#appliedStreamOptions = null;
+      this.#streamTier = "direct";
     }
 
     if (notifyPeer) {
