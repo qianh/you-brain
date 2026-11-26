@@ -5,7 +5,7 @@ import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join, resolve } from "node:path";
 
-import type { TaskAutomationPort, TaskImageData } from "../../tasks/types.js";
+import type { TaskAutomationPort, TaskImageData, TaskRequirementKind } from "../../tasks/types.js";
 import { normalizeT3Url } from "./index.js";
 
 /**
@@ -148,6 +148,63 @@ export function resolveProviderRuntimeMode(
   return requested;
 }
 
+const NATIVE_GRILL_ME_TRIGGERS: Record<string, string> = {
+  codex: "/skill:grill-me",
+  antigravity: "/grill-me",
+  claudeAgent: "/grill-me",
+};
+
+const UNSUPPORTED_GRILL_ME_FALLBACK =
+  "补充执行约束：当前会话所选模型或环境未确认支持原生 `/grill-me` 或 `/skill:grill-me` 命令。请先尝试只读查看 `~/.agents/skills/grill-me/SKILL.md` 并严格遵循；若无法读取该文件，请告知用户，并按相同方式执行：能从项目中查证的先自行只读确认，其余按决策树依赖顺序逐项讨论范围、关键取舍和验收标准，每次只问一个问题，给出推荐答案并等待回复。";
+
+const ANTIGRAVITY_UNCERTAIN_HINT =
+  "补充提示：若只读确认或向用户澄清后属于需求型 TODO，可提醒用户在 T3 中直接发送 `/grill-me` 进入内置需求访谈，或由你直接按 `~/.agents/skills/grill-me/SKILL.md` 逐题提问并给出推荐答案。";
+
+function normalizeProviderDriverKind(instanceId: string): string | null {
+  const lower = instanceId.trim().toLowerCase();
+  if (lower === "codex" || lower === "antigravity" || lower === "cursor" || lower === "grok") return lower;
+  if (lower === "claude" || lower === "claudeagent" || lower === "claude-agent") return "claudeAgent";
+  return null;
+}
+
+/** 按 T3 Provider 的 driverKind 返回原生触发 grill-me 的首行指令；未确认原生支持时返回 null。 */
+export function resolveProviderGrillMeTrigger(driverKind: string | null): string | null {
+  return driverKind ? (NATIVE_GRILL_ME_TRIGGERS[driverKind] ?? null) : null;
+}
+
+/** 按任务阶段、前置分类结果和目标 Provider 拼接发往 T3 的首条消息；原生命令必须位于消息第 0 个字符位置。 */
+export function formatTaskLaunchMessage(input: {
+  prompt: string;
+  plan?: boolean | undefined;
+  requirementKind?: TaskRequirementKind | undefined;
+  driverKind: string | null;
+  launchReference?: string | null;
+}): string {
+  const base = `${input.launchReference ?? ""}${input.prompt}`;
+  if (!input.plan) return base;
+  if (input.requirementKind === "requirement") {
+    const trigger = resolveProviderGrillMeTrigger(input.driverKind);
+    if (trigger !== null) return `${trigger}\n\n${base}`;
+    return `${base}\n\n${UNSUPPORTED_GRILL_ME_FALLBACK}`;
+  }
+  if (input.requirementKind === "uncertain" && input.driverKind === "antigravity") {
+    return `${base}\n\n${ANTIGRAVITY_UNCERTAIN_HINT}`;
+  }
+  return base;
+}
+
+/** 兼容旧格式（首行即派发编号）与新格式（首行原生触发指令后紧跟派发编号）。 */
+export function hasLaunchReference(messageText: string | null | undefined, launchReference: string): boolean {
+  if (!messageText) return false;
+  if (messageText.startsWith(launchReference)) return true;
+  const firstBreak = messageText.indexOf("\n");
+  if (firstBreak === -1) return false;
+  const firstLine = messageText.slice(0, firstBreak).trim();
+  if (firstLine !== "/skill:grill-me" && firstLine !== "/grill-me") return false;
+  const rest = messageText.slice(firstBreak).replace(/^\r?\n+/u, "");
+  return rest.startsWith(launchReference);
+}
+
 function runtimeMode(value: unknown): RuntimeMode | undefined {
   return value === "approval-required" || value === "auto-accept-edits" || value === "auto" || value === "full-access" ? value : undefined;
 }
@@ -213,7 +270,7 @@ export class T3Automation implements TaskAutomationPort {
   #opening: Promise<string | null> | null = null;
   #environments = new Map<string, string>();
   #projectsCache: { expiresAt: number; projects: T3Project[] } | null = null;
-  #capabilitiesCache: { expiresAt: number; runtimeModes: Map<string, string[]> } | null = null;
+  #capabilitiesCache: { expiresAt: number; runtimeModes: Map<string, string[]>; driverKinds: Map<string, string> } | null = null;
   #threadItemCounts = new Map<string, number>();
   #rpcId = 0;
 
@@ -266,8 +323,19 @@ export class T3Automation implements TaskAutomationPort {
 
     const attachments = [];
     for (const image of input.images ?? []) attachments.push(await this.#uploadImage(url, image));
+    const driverKind =
+      input.plan && (input.requirementKind === "requirement" || input.requirementKind === "uncertain")
+        ? await this.#providerDriverKind(selection?.instanceId)
+        : null;
+    const message = formatTaskLaunchMessage({
+      prompt: input.prompt,
+      plan: input.plan,
+      requirementKind: input.requirementKind,
+      driverKind,
+      launchReference,
+    });
     const launched = await this.#call("t3_thread_launch", {
-      projectId: project.id, title: input.title, message: `${launchReference ?? ""}${input.prompt}`,
+      projectId: project.id, title: input.title, message,
       ...(attachments.length ? { attachments } : {}),
       ...(selection ? { modelSelection: selection } : {}), runtimeMode: mode, interactionMode: input.plan ? "plan" : "default",
       workspaceStrategy: input.branch === null ? { type: "root" } : { type: "existing_worktree", worktreePath: input.cwd, branch: input.branch },
@@ -366,7 +434,7 @@ export class T3Automation implements TaskAutomationPort {
     const { thread } = await this.#read(threadId, { limit: 1, runLimit: 1 });
     const failed = thread.status === "failed" || STOPPED_STATUSES.has(thread.status);
     // 凭据换新后同一 clientRequestId 不再去重：最后一条用户消息已是这条说明且没有失败，说明已投递过。
-    const lastUser = (await this.#tail(thread)).filter((item) => item.type === "user_message").at(-1);
+    const lastUser = (await this.#tail(threadId)).filter((item) => item.type === "user_message").at(-1);
     if (!failed && lastUser && !lastUser.textTruncated && lastUser.text === prompt) return;
     if (thread.activeRunId || (LIVE_STATUSES.has(thread.status) && thread.status !== "idle") || thread.pendingRequestCount > 0) {
       throw new T3AutomationError("INVALID_INPUT", "T3 会话仍在执行，请等待当前任务结束后再提交返工。");
@@ -375,8 +443,9 @@ export class T3Automation implements TaskAutomationPort {
   }
 
   async inspect(threadId: string, requirementsFirst = false): Promise<Awaited<ReturnType<TaskAutomationPort["inspect"]>>> {
+    const page = requirementsFirst ? { afterPosition: -1, limit: 8 } : { limit: 1 };
     let initial: T3ThreadRead;
-    try { initial = await this.#read(threadId, { limit: requirementsFirst ? 8 : 1, runLimit: 1 }); }
+    try { initial = await this.#read(threadId, { ...page, runLimit: 1 }); }
     catch (error) {
       if (error instanceof T3AutomationError && error.code === "NOT_FOUND") return { state: "failed", summary: "", error: "T3 会话已删除或归档，请人工检查。" };
       throw error;
@@ -391,7 +460,7 @@ export class T3Automation implements TaskAutomationPort {
     }
     if (thread.status !== "completed" || thread.activeRunId || thread.pendingRequestCount > 0) return { state: "running", summary: "" };
 
-    const tail = await this.#tail(thread);
+    const tail = await this.#tail(threadId);
     const lastUser = tail.filter((item) => item.type === "user_message").at(-1);
     const answers = tail.filter((item) => item.type === "assistant_message" && item.runId === thread.latestRunId);
     const answer = answers.at(-1);
@@ -418,8 +487,7 @@ export class T3Automation implements TaskAutomationPort {
 
   /** 会话最后一条助手回答（推送正文用）；没有时返回空串。 */
   async latestAnswer(threadId: string): Promise<string> {
-    const { thread } = await this.#read(threadId, { limit: 1, runLimit: 1 });
-    const answer = (await this.#tail(thread)).filter((item) => item.type === "assistant_message").at(-1);
+    const answer = (await this.#tail(threadId)).filter((item) => item.type === "assistant_message").at(-1);
     return answer?.text ?? "";
   }
 
@@ -543,24 +611,41 @@ export class T3Automation implements TaskAutomationPort {
     return url;
   }
 
-  async #providerRuntimeModes(instanceId: string): Promise<string[] | null> {
+  async #capabilities(): Promise<{ runtimeModes: Map<string, string[]>; driverKinds: Map<string, string> } | null> {
     if (this.#capabilitiesCache && Date.now() < this.#capabilitiesCache.expiresAt) {
-      return this.#capabilitiesCache.runtimeModes.get(instanceId) ?? null;
+      return this.#capabilitiesCache;
     }
     try {
       const value = await this.#call("orchestrator_capabilities", {});
       if (!object(value) || !Array.isArray(value.providers)) return null;
       const runtimeModes = new Map<string, string[]>();
+      const driverKinds = new Map<string, string>();
       for (const provider of value.providers) {
-        if (!object(provider) || !text(provider.providerInstanceId) || !Array.isArray(provider.runtimeModes)) continue;
-        const modes = provider.runtimeModes.filter((item): item is string => text(item));
-        if (modes.length > 0) runtimeModes.set(provider.providerInstanceId, modes);
+        if (!object(provider) || !text(provider.providerInstanceId)) continue;
+        if (text(provider.driverKind)) {
+          driverKinds.set(provider.providerInstanceId, provider.driverKind);
+        }
+        if (Array.isArray(provider.runtimeModes)) {
+          const modes = provider.runtimeModes.filter((item): item is string => text(item));
+          if (modes.length > 0) runtimeModes.set(provider.providerInstanceId, modes);
+        }
       }
-      this.#capabilitiesCache = { expiresAt: Date.now() + CAPABILITIES_CACHE_TTL_MS, runtimeModes };
-      return runtimeModes.get(instanceId) ?? null;
+      this.#capabilitiesCache = { expiresAt: Date.now() + CAPABILITIES_CACHE_TTL_MS, runtimeModes, driverKinds };
+      return this.#capabilitiesCache;
     } catch {
       return null;
     }
+  }
+
+  async #providerRuntimeModes(instanceId: string): Promise<string[] | null> {
+    const capabilities = await this.#capabilities();
+    return capabilities?.runtimeModes.get(instanceId) ?? null;
+  }
+
+  async #providerDriverKind(instanceId: string | undefined): Promise<string | null> {
+    if (!instanceId) return null;
+    const capabilities = await this.#capabilities();
+    return capabilities?.driverKinds.get(instanceId) ?? normalizeProviderDriverKind(instanceId);
   }
 
   async #projects(forceRefresh = false): Promise<T3Project[]> {
@@ -603,7 +688,7 @@ export class T3Automation implements TaskAutomationPort {
     for (const candidate of (await this.#threads(projectId, title)).filter((thread) => thread.title === title)) {
       const { thread, items } = await this.#read(candidate.threadId, { limit: launchReference ? 8 : 1, runLimit: 1 });
       if (!thread.archived && thread.worktreePath === worktreePath &&
-        (!launchReference || items.find((item) => item.type === "user_message")?.text?.startsWith(launchReference))) return thread.threadId;
+        (!launchReference || hasLaunchReference(items.find((item) => item.type === "user_message")?.text, launchReference))) return thread.threadId;
     }
     return null;
   }
@@ -617,9 +702,8 @@ export class T3Automation implements TaskAutomationPort {
   }
 
   /** 会话末尾的用户与助手消息，按位置升序。 */
-  async #tail(thread: T3ThreadState): Promise<T3Item[]> {
-    const after = thread.itemCount - TAIL_ITEMS;
-    const { items } = await this.#read(thread.threadId, { limit: 100, runLimit: 1, ...(after > 0 ? { afterPosition: after } : {}) });
+  async #tail(threadId: string): Promise<T3Item[]> {
+    const { items } = await this.#read(threadId, { limit: TAIL_ITEMS, runLimit: 1 });
     return [...items].sort((a, b) => a.position - b.position);
   }
 

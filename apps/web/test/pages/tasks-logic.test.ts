@@ -36,10 +36,12 @@ describe("TODO queue presentation", () => {
     expect(visibleTasks(tasks, "one", "all").map((item) => item.id)).toContain("failed");
   });
 
-  test("manual completion is not reported as a merge", () => {
-    expect(taskStatusKey(task("manual", { status: "done", completedManually: true }))).toBe("tasksDone");
-    expect(taskStatusKey(task("merged", { status: "done", manual: true }))).toBe("tasksMerged");
-    expect(taskStatusKey(task("no-project", { status: "done", projectId: null }))).toBe("tasksDone");
+  test("the completed view shows task status regardless of how it was completed", () => {
+    const tasks = [task("manual", { status: "done", completedManually: true }), task("merged", { status: "done", manual: true }), task("no-project", { status: "done", projectId: null }), task("queued")];
+    expect(taskCounts(tasks, "all").done).toBe(3);
+    const completed = visibleTasks(tasks, "all", "done");
+    expect(completed.map((item) => item.id)).toEqual(["manual", "merged", "no-project"]);
+    expect(completed.map(taskStatusKey)).toEqual(["tasksDone", "tasksDone", "tasksDone"]);
   });
 
   test("worktree blockers show the ended run and exact counts, unlike T3 failures", () => {

@@ -17,7 +17,7 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
   return stdout.trim();
 }
 
-test("HTTP manual start → T3 plan → parallel TODO → review → develop pushed → behind task synced, merged and removed", async () => {
+test("HTTP manual start → T3 plan → parallel TODO → review → develop pushed → tasks retained after Git cleanup", async () => {
   const dir = await realpath(await mkdtemp(join(tmpdir(), "yb-todo-flow-")));
   const repo = join(dir, "repo");
   const homeDir = join(dir, "home");
@@ -37,12 +37,18 @@ test("HTTP manual start → T3 plan → parallel TODO → review → develop pus
   await git(repo, "remote", "add", "origin", remote);
   await git(repo, "push", "-u", "origin", "develop");
   const exists = (path: string) => access(path).then(() => true, () => false);
-  const modelSelection = { instanceId: "fixture-provider", model: "fixture-model" };
+  const modelSelection = { instanceId: "codex", model: "dzg/gpt-6.2-sol" };
   const fake = fakeT3({ projects: [{ id: "project", title: "Fixture", workspaceRoot: repo, defaultModelSelection: modelSelection }], environmentId: "test-env" });
   const dispatched = () => fake.calls.filter((call) => call.name === "t3_thread_launch").map((call) => call.args.title);
   const t3 = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: fake.handle });
   const automation = new T3Automation({ getUrl: async () => `http://127.0.0.1:${t3.port}/`, getToken: async () => fake.token });
-  const service = new TaskService({ dataDir: join(dir, "data"), homeDir, automation, git: new TaskGit({ dataDir: join(dir, "data") }) });
+  const service = new TaskService({
+    dataDir: join(dir, "data"),
+    homeDir,
+    automation,
+    git: new TaskGit({ dataDir: join(dir, "data") }),
+    classifyTask: async (input) => (input.title.includes("修复") ? "other" : "requirement"),
+  });
   const http = await startDaemonHttp({ dataDir: join(dir, "data"), deps: { tasks: service } as unknown as HttpDeps });
   const call = async <T>(path: string, method = "GET", body?: unknown): Promise<T> => {
     const response = await fetch(http.baseUrl + path, { method,
@@ -54,7 +60,7 @@ test("HTTP manual start → T3 plan → parallel TODO → review → develop pus
   };
   try {
     await call("/api/tasks", "POST", { title: "low", projectId: "project", priority: 3 });
-    const queued = await call<TaskBoard>("/api/tasks", "POST", { title: "high", projectId: "project", priority: 0 });
+    const queued = await call<TaskBoard>("/api/tasks", "POST", { title: "high", description: "新增按周导出报表功能", projectId: "project", priority: 0 });
     const high = queued.tasks.find((task) => task.title === "high")!;
     const launched = await call<TaskBoard>("/api/tasks/action", "POST", { action: "start", id: high.id });
     const active = launched.tasks.find((task) => task.id === high.id)!;
@@ -63,7 +69,12 @@ test("HTTP manual start → T3 plan → parallel TODO → review → develop pus
     if (!run?.worktreePath || !run.threadId) throw new Error("Expected a linked worktree and T3 thread");
     const projectThread = fake.threads.find((thread) => thread.threadId === run.threadId)!;
     expect(projectThread).toMatchObject({ interactionMode: "plan", worktreePath: run.worktreePath });
-    fake.complete(run.threadId, "请确认需求和计划");
+    const firstMessage = projectThread.items[0]?.text ?? "";
+    expect(firstMessage.startsWith("/skill:grill-me\n\n")).toBe(true);
+    expect(firstMessage).toContain("新增按周导出报表功能");
+    expect(firstMessage).toContain("已判定为需求型 TODO");
+    expect(firstMessage).toContain("每次只问一个问题，给出推荐答案并等待回复");
+    fake.complete(run.threadId, "建议导出 CSV，是否需要其他格式？");
     await call("/api/tasks/action", "POST", { action: "project", projectId: "project", enabled: true });
     await service.tick();
     // 每个任务有独立工作树：高优先级仍在确认需求时，低优先级也被并行领取。
@@ -72,6 +83,10 @@ test("HTTP manual start → T3 plan → parallel TODO → review → develop pus
     expect(low).toMatchObject({ status: "running", run: { baseSha: original } });
     const planning = (await call<TaskBoard>("/api/tasks")).tasks.find((task) => task.id === active.id)!;
     expect(planning).toMatchObject({ status: "planning", run: { reviewSha: null } });
+    await automation.followup(run.threadId, "CSV 就够了", "project-requirements-fixture");
+    fake.complete(run.threadId, "将按周导出 CSV，请确认实施计划");
+    await service.tick();
+    expect((await service.board()).tasks.find((task) => task.id === active.id)?.status).toBe("planning");
     projectThread.interactionMode = "default";
     await automation.followup(run.threadId, "确认需求，按计划执行", "project-plan-fixture");
     expect(run.worktreePath).not.toBe(repo);
@@ -79,22 +94,28 @@ test("HTTP manual start → T3 plan → parallel TODO → review → develop pus
     await writeFile(join(run.worktreePath, "result.txt"), "task change\n");
     await git(run.worktreePath, "add", "result.txt");
     await git(run.worktreePath, "commit", "-m", "fixture task result");
+    for (let update = 0; update < 65; update++) {
+      projectThread.items.push({ type: "assistant_message", runId: projectThread.latestRunId, text: `进度 ${update + 1}` });
+    }
     fake.complete(run.threadId, "变更及检查已完成");
+    await automation.followup(run.threadId, "这次改动新增接口了吗？", "project-followup-fixture");
+    fake.complete(run.threadId, "没有新增接口");
     await service.tick();
     expect((await call<TaskBoard>("/api/tasks")).tasks.find((task) => task.id === active.id)?.status).toBe("review");
     expect(await git(repo, "rev-parse", "develop")).toBe(original);
     expect(dispatched()).toHaveLength(2);
     const review = await call<TaskReview>(`/api/tasks/review?id=${encodeURIComponent(active.id)}`);
     expect(review.diff).toContain("+task change");
-    expect(review.task.run?.summary).toBe("变更及检查已完成");
+    expect(review.task.run?.summary).toBe("没有新增接口");
     await call("/api/tasks/action", "POST", { action: "approve", id: active.id, reviewSha: review.headSha });
     await service.tick();
     expect(await git(repo, "rev-parse", "develop")).toBe(review.headSha);
     expect(dispatched()).toEqual(["high", "low"]);
-    // 合并后自动推送 develop，删除任务分支和工作树，并从列表移除这个 TODO。
     expect(await git(remote, "rev-parse", "develop")).toBe(review.headSha);
     const board = await call<TaskBoard>("/api/tasks");
-    expect(board.tasks.find((task) => task.id === active.id)).toBeUndefined();
+    expect(board.tasks.find((task) => task.id === active.id)).toMatchObject({
+      title: active.title, status: "done", run: { merged: true, reviewSha: review.headSha, threadUrl: run.threadUrl },
+    });
     expect(await git(repo, "branch", "--list", run.branch!)).toBe("");
     expect(await exists(run.worktreePath)).toBe(false);
 
@@ -112,8 +133,8 @@ test("HTTP manual start → T3 plan → parallel TODO → review → develop pus
     expect(lowReview.diff).toContain("+low change");
     expect(lowReview.diff).not.toContain("task change");
     const merged = await call<TaskBoard>("/api/tasks/action", "POST", { action: "approve", id: low.id, reviewSha: lowHead });
-    expect(merged.tasks.find((task) => task.id === low.id)).toBeUndefined();
     const developHead = await git(repo, "rev-parse", "develop");
+    expect(merged.tasks.find((task) => task.id === low.id)).toMatchObject({ status: "done", run: { merged: true, reviewSha: developHead } });
     expect(await git(repo, "rev-parse", "develop^1")).toBe(lowHead);
     expect(await git(repo, "rev-parse", "develop^2")).toBe(review.headSha);
     expect(await git(repo, "show", "develop:low.txt")).toBe("low change");
@@ -122,6 +143,7 @@ test("HTTP manual start → T3 plan → parallel TODO → review → develop pus
     expect(await git(repo, "branch", "--list", lowRun.branch!)).toBe("");
     expect(await exists(lowRun.worktreePath)).toBe(false);
     const lowThread = fake.threads.find((thread) => thread.threadId === lowRun.threadId)!;
+    expect(lowThread.items[0]?.text).not.toContain("grill-me");
     expect(lowThread.items.some((item) => String(item.text ?? "").includes("合入当前任务分支"))).toBe(false);
 
     const created = await call<TaskBoard>("/api/tasks", "POST", { title: "standalone" });
@@ -140,6 +162,80 @@ test("HTTP manual start → T3 plan → parallel TODO → review → develop pus
     await service.tick();
     expect((await call<TaskBoard>("/api/tasks")).tasks.find((task) => task.id === id)).toMatchObject({ status: "done", run: { reviewSha: null } });
     expect(await git(repo, "rev-parse", "develop")).toBe(developHead);
+  } finally {
+    await service.stop(); await http.stop(); await automation.close(); await t3.stop(true);
+    await rm(dir, { recursive: true, force: true });
+  }
+}, 30_000);
+
+test("HTTP manual start dispatches Antigravity /grill-me for requirement TODOs and skips grill-me for non-requirement TODOs", async () => {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), "yb-todo-provider-")));
+  const repo = join(dir, "repo");
+  const homeDir = join(dir, "home");
+  await mkdir(repo);
+  await mkdir(homeDir);
+  await git(repo, "init", "-b", "develop");
+  await git(repo, "config", "user.name", "TODO fixture");
+  await git(repo, "config", "user.email", "fixture@example.invalid");
+  await git(repo, "config", "commit.gpgsign", "false");
+  await writeFile(join(repo, "result.txt"), "base\n");
+  await git(repo, "add", "result.txt");
+  await git(repo, "commit", "-m", "fixture base");
+
+  const fake = fakeT3({
+    projects: [{ id: "agy-proj", title: "Agy", workspaceRoot: repo, defaultModelSelection: { instanceId: "antigravity", model: "gemini-4-neon" } }],
+    providers: [{ providerInstanceId: "antigravity", driverKind: "antigravity", runtimeModes: ["approval-required", "auto-accept-edits", "full-access"] }],
+    environmentId: "test-env",
+  });
+  const t3 = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: fake.handle });
+  const automation = new T3Automation({ getUrl: async () => `http://127.0.0.1:${t3.port}/`, getToken: async () => fake.token });
+  const service = new TaskService({
+    dataDir: join(dir, "data"),
+    homeDir,
+    automation,
+    git: new TaskGit({ dataDir: join(dir, "data") }),
+    classifyTask: async (input) => (input.title.includes("修复") ? "other" : "requirement"),
+  });
+  const http = await startDaemonHttp({ dataDir: join(dir, "data"), deps: { tasks: service } as unknown as HttpDeps });
+  const call = async <T>(path: string, method = "GET", body?: unknown): Promise<T> => {
+    const response = await fetch(http.baseUrl + path, {
+      method,
+      headers: { authorization: `Bearer ${http.token}`, "content-type": "application/json" },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    if (!response.ok) throw new Error(`fixture HTTP ${response.status}: ${await response.text()}`);
+    return await response.json() as T;
+  };
+  try {
+    const createdReq = await call<TaskBoard>("/api/tasks", "POST", {
+      title: "新增多维筛选",
+      description: "在页面工具栏增加状态和标签组合筛选",
+      projectId: "agy-proj",
+      priority: 1,
+    });
+    const reqTask = createdReq.tasks.find((t) => t.title === "新增多维筛选")!;
+    const reqBoard = await call<TaskBoard>("/api/tasks/action", "POST", { action: "start", id: reqTask.id });
+    const startedReq = reqBoard.tasks.find((t) => t.id === reqTask.id)!;
+    expect(startedReq.status).toBe("planning");
+    const reqThread = fake.threads.find((t) => t.threadId === startedReq.run?.threadId)!;
+    expect(reqThread.interactionMode).toBe("plan");
+    expect(String(reqThread.items[0]?.text ?? "").startsWith("/grill-me\n\n")).toBe(true);
+
+    const createdFix = await call<TaskBoard>("/api/tasks", "POST", {
+      title: "修复导出文件名乱码",
+      description: "修正 UTF-8 filename header 编码",
+      projectId: "agy-proj",
+      priority: 1,
+    });
+    const fixTask = createdFix.tasks.find((t) => t.title === "修复导出文件名乱码")!;
+    const fixBoard = await call<TaskBoard>("/api/tasks/action", "POST", { action: "start", id: fixTask.id });
+    const startedFix = fixBoard.tasks.find((t) => t.id === fixTask.id)!;
+    expect(startedFix.status).toBe("planning");
+    const fixThread = fake.threads.find((t) => t.threadId === startedFix.run?.threadId)!;
+    expect(fixThread.interactionMode).toBe("plan");
+    const fixFirstMessage = String(fixThread.items[0]?.text ?? "");
+    expect(fixFirstMessage.startsWith("/")).toBe(false);
+    expect(fixFirstMessage).not.toContain("grill-me");
   } finally {
     await service.stop(); await http.stop(); await automation.close(); await t3.stop(true);
     await rm(dir, { recursive: true, force: true });

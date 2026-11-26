@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { T3Automation, resolveProviderRuntimeMode } from "../../src/deck/t3/automation.js";
+import {
+  T3Automation,
+  formatTaskLaunchMessage,
+  hasLaunchReference,
+  resolveProviderGrillMeTrigger,
+  resolveProviderRuntimeMode,
+} from "../../src/deck/t3/automation.js";
 import { fakeT3, fakeThread, type FakeProject, type FakeProviderCapability, type FakeThread } from "./t3-mcp-fake.js";
 
 const baseUrl = "http://127.0.0.1:3773/";
@@ -83,6 +89,102 @@ describe("T3 TODO automation MCP adapter", () => {
     t3.state.uploadStatus = 500;
     await expect(client.start(input)).rejects.toThrow("TODO 图片未能上传到 T3");
     expect(launches()).toHaveLength(0);
+  });
+
+  test("prepends provider-native grill-me triggers only for requirement plan TODOs and preserves home dispatch recovery", async () => {
+    expect(resolveProviderGrillMeTrigger("codex")).toBe("/skill:grill-me");
+    expect(resolveProviderGrillMeTrigger("antigravity")).toBe("/grill-me");
+    expect(resolveProviderGrillMeTrigger("claudeAgent")).toBe("/grill-me");
+    expect(resolveProviderGrillMeTrigger("cursor")).toBeNull();
+    expect(resolveProviderGrillMeTrigger("grok")).toBeNull();
+    expect(resolveProviderGrillMeTrigger(null)).toBeNull();
+
+    expect(
+      formatTaskLaunchMessage({ prompt: "Auto task", plan: false, requirementKind: "requirement", driverKind: "codex" }),
+    ).toBe("Auto task");
+    expect(
+      formatTaskLaunchMessage({ prompt: "Bugfix", plan: true, requirementKind: "other", driverKind: "antigravity" }),
+    ).toBe("Bugfix");
+    expect(
+      formatTaskLaunchMessage({ prompt: "Unclear", plan: true, requirementKind: "uncertain", driverKind: "antigravity" }),
+    ).toContain("`/grill-me`");
+    expect(
+      formatTaskLaunchMessage({ prompt: "Unclear", plan: true, requirementKind: "uncertain", driverKind: "antigravity" }).startsWith("/"),
+    ).toBe(false);
+
+    const cases: Array<{
+      label: string;
+      selection?: { instanceId: string; model: string };
+      providers?: FakeProviderCapability[];
+      expectedPrefix: string | null;
+    }> = [
+      { label: "codex", selection: { instanceId: "codex", model: "dzg/gpt-6.2-sol" }, expectedPrefix: "/skill:grill-me\n\n" },
+      { label: "antigravity", selection: { instanceId: "antigravity", model: "gemini-4-neon" }, expectedPrefix: "/grill-me\n\n" },
+      { label: "claudeAgent", selection: { instanceId: "claudeAgent", model: "claude-opus-5-5" }, expectedPrefix: "/grill-me\n\n" },
+      {
+        label: "custom-codex-by-capability",
+        selection: { instanceId: "my-codex-proxy", model: "gpt-6.2" },
+        providers: [{ providerInstanceId: "my-codex-proxy", driverKind: "codex" }],
+        expectedPrefix: "/skill:grill-me\n\n",
+      },
+      {
+        label: "custom-agy-by-capability",
+        selection: { instanceId: "my-agy", model: "gemini-4-neon" },
+        providers: [{ providerInstanceId: "my-agy", driverKind: "antigravity" }],
+        expectedPrefix: "/grill-me\n\n",
+      },
+      { label: "cursor", selection: { instanceId: "cursor", model: "default" }, expectedPrefix: null },
+      { label: "grok", selection: { instanceId: "grok", model: "grok-4.7-build-fast" }, expectedPrefix: null },
+      { label: "unconfigured-model", expectedPrefix: null },
+    ];
+
+    for (const item of cases) {
+      const { client, launches } = harness({
+        projects: [{ ...project, defaultModelSelection: item.selection ?? null }],
+        ...(item.providers ? { providers: item.providers } : {}),
+      });
+      await client.start({ ...startInput, plan: true, requirementKind: "requirement", requestId: `req-${item.label}` });
+      const launchedMessage = String(launches()[0]?.args.message ?? "");
+      if (item.expectedPrefix) {
+        expect(launchedMessage.startsWith(item.expectedPrefix)).toBe(true);
+        expect(launchedMessage.slice(item.expectedPrefix.length)).toBe("Do the task");
+      } else {
+        expect(launchedMessage.startsWith("/")).toBe(false);
+        expect(launchedMessage).toContain("~/.agents/skills/grill-me/SKILL.md");
+      }
+    }
+
+    // 未关联项目（branch: null）：触发前缀必须在第 0 位，派发编号紧随其后，且重启恢复仍可匹配原会话。
+    for (const provider of [
+      { instanceId: "codex", model: "dzg/gpt-6.2-sol", prefix: "/skill:grill-me" },
+      { instanceId: "antigravity", model: "gemini-4-neon", prefix: "/grill-me" },
+    ]) {
+      const { client, t3, launches } = harness({
+        projects: [{ id: "home-1", title: "hong", workspaceRoot: "/Users/hong", defaultModelSelection: { instanceId: provider.instanceId, model: provider.model } }],
+      });
+      const homeReq = {
+        projectId: null,
+        branch: null,
+        cwd: "/Users/hong",
+        title: `home-${provider.instanceId}`,
+        prompt: "需求说明",
+        requestId: `home-req-${provider.instanceId}`,
+        plan: true as const,
+        requirementKind: "requirement" as const,
+      };
+      const first = await client.start(homeReq);
+      const sentMessage = String(launches()[0]?.args.message ?? "");
+      expect(sentMessage.startsWith(`${provider.prefix}\n\nU-Brain TODO 派发编号：${homeReq.requestId}\n\n需求说明`)).toBe(true);
+
+      const restarted = new T3Automation({ getUrl: async () => baseUrl, getToken: async () => t3.token, fetch: t3.fetch });
+      expect(await restarted.start(homeReq)).toEqual(first);
+      expect(launches()).toHaveLength(1);
+    }
+
+    expect(hasLaunchReference("U-Brain TODO 派发编号：r1\n\nbody", "U-Brain TODO 派发编号：r1\n\n")).toBe(true);
+    expect(hasLaunchReference("/skill:grill-me\n\nU-Brain TODO 派发编号：r1\n\nbody", "U-Brain TODO 派发编号：r1\n\n")).toBe(true);
+    expect(hasLaunchReference("/grill-me\n\nU-Brain TODO 派发编号：r1\n\nbody", "U-Brain TODO 派发编号：r1\n\n")).toBe(true);
+    expect(hasLaunchReference("正文提到了 U-Brain TODO 派发编号：r1\n\n", "U-Brain TODO 派发编号：r1\n\n")).toBe(false);
   });
 
   test("starts a manual project TODO in plan mode in the owned worktree", async () => {

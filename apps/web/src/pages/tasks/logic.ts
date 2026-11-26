@@ -37,7 +37,7 @@ export function taskCounts(tasks: readonly DevelopmentTask[], project: string) {
 
 export function taskStatusKey(task: DevelopmentTask): MessageKey {
   if (task.status === "failed" && task.worktreeBlock) return "tasksWorktreeBlocked";
-  return task.status === "done" && task.projectId !== null && !task.completedManually ? "tasksMerged" : TASK_STATUS_KEYS[task.status];
+  return TASK_STATUS_KEYS[task.status];
 }
 
 export function taskWorktreeHint({ uncommitted, untracked }: TaskWorktreeBlock, language: Language): string {

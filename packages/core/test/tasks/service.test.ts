@@ -5,7 +5,8 @@ import { describe, expect, test } from "bun:test";
 import { TaskAlreadyMergedError, TaskBehindDevelopError, TaskDirtyWorktreeError, TaskMergeBlockedError, TaskNoCommitError } from "../../src/tasks/git.js";
 import { PROJECT_PARALLEL_LIMIT, TaskService } from "../../src/tasks/service.js";
 import { TaskStore } from "../../src/tasks/store.js";
-import type { TaskAutomationPort, TaskGitPort } from "../../src/tasks/types.js";
+import type { TaskAutomationPort, TaskGitPort, TaskRequirementKind } from "../../src/tasks/types.js";
+import type { TaskRequirementClassifier } from "../../src/tasks/classify.js";
 
 const SHA = "a".repeat(40);
 const BASE = "b".repeat(40);
@@ -30,9 +31,10 @@ async function setup() {
   let followupFailure = false;
   let online = true;
   let projectCwd = "/repo/one";
-  let failRemovalWrite = false;
-  let savedCount = 0;
+  let failCompletionWrite = false;
   const created: Array<{ id: string; name: string; cwd: string }> = [];
+  const classifyCalls: Array<{ title: string; description: string; hasImages: boolean }> = [];
+  let classifyImpl: TaskRequirementClassifier | undefined;
   const store = new TaskStore(join(dir, "tasks", "board.json"));
   const automation: TaskAutomationPort = {
     async projects() {
@@ -74,15 +76,19 @@ async function setup() {
     dataDir: dir, automation, git, homeDir: "/Users/hong",
     id: () => `task-${++counter}`,
     now: () => new Date("2026-11-16T00:00:00Z"),
+    classifyTask: ((input) => {
+      if (!classifyImpl) return Promise.resolve<TaskRequirementKind>("uncertain");
+      classifyCalls.push({ title: input.title, description: input.description, hasImages: input.hasImages });
+      return classifyImpl(input);
+    }) as TaskRequirementClassifier,
     store: {
       read: () => store.read(),
       async write(state: Parameters<TaskStore["write"]>[0]) {
-        if (failRemovalWrite && state.tasks.length < savedCount) {
-          failRemovalWrite = false;
+        if (failCompletionWrite && state.tasks.some((task) => task.status === "done")) {
+          failCompletionWrite = false;
           throw new Error("fixture disk failure");
         }
         await store.write(state);
-        savedCount = state.tasks.length;
       },
     },
   };
@@ -95,12 +101,13 @@ async function setup() {
     return (await board()).tasks.find((task) => task.id === current.id)!;
   };
   return {
-    dir, service, starts, merges, syncs, publishes, cleanups, states, followups, board, ready, options, created,
+    dir, service, starts, merges, syncs, publishes, cleanups, states, followups, board, ready, options, created, classifyCalls,
     setStartFailure(value: boolean) { startFailure = value; },
     setFollowupFailure(value: boolean) { followupFailure = value; },
     setOnline(value: boolean) { online = value; },
     setProjectCwd(value: string) { projectCwd = value; },
-    failNextRemovalWrite() { failRemovalWrite = true; },
+    failNextCompletionWrite() { failCompletionWrite = true; },
+    setClassifier(fn: TaskRequirementClassifier | undefined) { classifyImpl = fn; },
   };
 }
 
@@ -210,8 +217,11 @@ describe("T3 TODO parallel queue", () => {
     expect(f.followups).toHaveLength(0);
   }));
 
-  test("completed turn waits for exact manual approval, then next TODO starts", () => fixture(async (f) => {
-    await f.service.create({ title: "first", projectId: "one" });
+  test("approved merge keeps the original TODO, its attachment and its T3 result", () => fixture(async (f) => {
+    const screenshot = Buffer.from("89504e470d0a1a0a", "hex");
+    const created = (await f.service.create({ title: "first", description: "验收说明", projectId: "one", priority: 1 }, [
+      new File([screenshot], "screenshot.png", { type: "image/png" }),
+    ])).tasks[0]!;
     await f.service.create({ title: "second", projectId: "one" });
     await enable(f.service);
     const review = await f.ready();
@@ -223,11 +233,13 @@ describe("T3 TODO parallel queue", () => {
     expect(f.merges).toHaveLength(0);
     const detail = await f.service.review(review.id);
     const approved = await f.service.action({ action: "approve", id: review.id, reviewSha: detail.headSha });
-    // 合并后推送 develop、删除任务分支和工作树，并从列表移除这个 TODO。
-    expect(approved.tasks.map((item) => item.title)).toEqual(["second"]);
+    const completed = approved.tasks.find((item) => item.id === created.id);
+    expect(completed).toEqual({ ...created, status: "done", error: null, run: { ...detail.task.run!, merged: true } });
+    expect((await f.options.store.read()).tasks[0]).toEqual(completed);
+    const attachment = await f.service.image(created.id, created.images![0]!.id);
+    expect(Buffer.from(attachment.bytes)).toEqual(screenshot);
     expect(f.publishes).toEqual([`task/${review.id}`]);
     expect(f.cleanups).toEqual([`task/${review.id}`]);
-    await expect(f.service.action({ action: "complete", id: review.id })).rejects.toThrow("TODO 不存在");
     await f.service.tick();
     expect(f.merges).toEqual([SHA]);
     expect(f.starts.map((item) => item.title)).toEqual(["first", "second"]);
@@ -312,7 +324,7 @@ describe("T3 TODO parallel queue", () => {
     const resumed = new TaskService(f.options);
     try {
       await resumed.tick();
-      expect((await resumed.board()).tasks.map((item) => item.title)).toEqual(["second"]);
+      expect((await resumed.board()).tasks.find((item) => item.id === task.id)).toMatchObject({ status: "done", run: { merged: true } });
       expect(f.publishes).toEqual([`task/${task.id}`]);
       expect(f.cleanups).toEqual([`task/${task.id}`]);
       expect(f.merges).toHaveLength(0);
@@ -333,8 +345,7 @@ describe("T3 TODO parallel queue", () => {
     } else {
       await f.ready();
     }
-    // 外部合并同样推送 develop、清理分支并移除任务；本身不再合并。
-    expect((await f.board()).tasks).toEqual([]);
+    expect((await f.board()).tasks).toMatchObject([{ id: task.id, status: "done", run: { merged: true, summary: "验证结果" } }]);
     expect(f.publishes).toEqual([`task/${task.id}`]);
     expect(f.cleanups).toEqual([`task/${task.id}`]);
     expect(f.merges).toHaveLength(0);
@@ -420,7 +431,7 @@ describe("T3 TODO parallel queue", () => {
     await expect(f.service.action({ action: "start", id: (await f.board()).tasks[3]!.id })).rejects.toThrow("项目已有 3 个");
   }));
 
-  test("approving a task whose branch is behind develop syncs develop in, then merges, pushes and removes it", () => fixture(async (f) => {
+  test("approving a task whose branch is behind develop syncs develop in, then merges, pushes and completes it", () => fixture(async (f) => {
     await f.service.create({ title: "first", projectId: "one" });
     await f.service.create({ title: "second", projectId: "one" });
     await enable(f.service);
@@ -439,7 +450,7 @@ describe("T3 TODO parallel queue", () => {
     expect(f.merges).toEqual([synced]);
     expect(f.publishes).toEqual([`task/${task.id}`]);
     expect(f.cleanups).toEqual([`task/${task.id}`]);
-    expect(board.tasks.map((item) => item.title)).toEqual(["second"]);
+    expect(board.tasks.find((item) => item.id === task.id)).toMatchObject({ status: "done", run: { reviewSha: synced, merged: true } });
   }));
 
   test("a push failure keeps the merged task for manual handling; retry only pushes again", () => fixture(async (f) => {
@@ -464,7 +475,7 @@ describe("T3 TODO parallel queue", () => {
 
     pushFails = false;
     const board = await f.service.action({ action: "retry", id: task.id });
-    expect(board.tasks).toEqual([]);
+    expect(board.tasks).toMatchObject([{ id: task.id, status: "done", error: null, run: { merged: true, error: null } }]);
     expect(f.publishes).toHaveLength(2);
     expect(f.cleanups).toEqual([`task/${task.id}`]);
     expect(f.merges).toEqual([SHA]);
@@ -612,20 +623,26 @@ describe("T3 TODO parallel queue", () => {
     expect((await f.board()).projects[0]?.enabled).toBe(false);
   }));
 
-  test("a successful merge with a failed removal write recovers the approved merging state", () => fixture(async (f) => {
+  test.each(["approved", "external"])("a failed completion write after an %s merge resumes without the branch or T3 thread", (source) => fixture(async (f) => {
     await f.service.create({ title: "task", projectId: "one" });
     await enable(f.service);
-    const task = await f.ready();
-    f.failNextRemovalWrite();
-    await expect(f.service.action({ action: "approve", id: task.id, reviewSha: SHA })).rejects.toThrow("状态保存失败");
-    expect(f.merges).toHaveLength(1);
+    const task = (await f.board()).tasks[0]!;
+    f.failNextCompletionWrite();
+    if (source === "approved") {
+      await f.ready();
+      await expect(f.service.action({ action: "approve", id: task.id, reviewSha: SHA })).rejects.toThrow("状态保存失败");
+    } else {
+      f.options.git.review = async () => { throw new TaskAlreadyMergedError(); };
+      await expect(f.ready()).rejects.toThrow("状态保存失败");
+    }
+    expect(f.merges).toEqual(source === "approved" ? [SHA] : []);
     expect((await f.board()).tasks[0]?.status).toBe("merging");
-    expect((await f.board()).tasks[0]?.run).toMatchObject({ reviewSha: SHA, merged: true });
+    expect((await f.board()).tasks[0]?.run).toMatchObject({ reviewSha: source === "approved" ? SHA : null, merged: true });
     await expect(f.service.action({ action: "complete", id: task.id })).rejects.toThrow("合并中");
+    f.options.automation.inspect = async () => { throw new Error("T3 thread unavailable"); };
     await f.service.tick();
-    // 恢复时不再重复合并，只补做推送、清理和移除。
-    expect((await f.board()).tasks).toEqual([]);
-    expect(f.merges).toEqual([SHA]);
+    expect((await f.options.store.read()).tasks).toMatchObject([{ id: task.id, status: "done", run: { merged: true } }]);
+    expect(f.merges).toEqual(source === "approved" ? [SHA] : []);
     expect(f.starts).toHaveLength(1);
   }));
 
@@ -650,5 +667,43 @@ describe("T3 TODO parallel queue", () => {
       await expect(resumed.board()).rejects.toThrow();
       expect(await readFile(join(f.dir, "tasks", "board.json"), "utf8")).toBe("invalid json");
     } finally { await resumed.stop(); }
+  }));
+
+  test("manual start classifies once, persists requirementKind for retry, skips grill-me for other, and never classifies automatic claims", () => fixture(async (f) => {
+    let nextKind: TaskRequirementKind = "requirement";
+    f.setClassifier(async () => nextKind);
+
+    const reqTask = (await f.service.create({ title: "新增导出", description: "支持导出 CSV", projectId: "one" })).tasks[0]!;
+    f.setStartFailure(true);
+    await f.service.action({ action: "start", id: reqTask.id });
+    expect(f.classifyCalls).toHaveLength(1);
+    expect((await f.board()).tasks[0]?.run?.requirementKind).toBe("requirement");
+
+    f.setStartFailure(false);
+    nextKind = "other";
+    await f.service.action({ action: "retry", id: reqTask.id });
+    await f.service.tick();
+    expect(f.classifyCalls).toHaveLength(1);
+    expect(f.starts[1]?.requirementKind).toBe("requirement");
+    expect(f.starts[1]?.prompt).toContain("已判定为需求型 TODO");
+
+    const bugTask = (await f.service.create({ title: "修复乱码", description: "仅修复字符编码", projectId: "one" })).tasks[1]!;
+    await f.service.action({ action: "start", id: bugTask.id });
+    expect(f.classifyCalls).toHaveLength(2);
+    expect(f.starts[2]?.requirementKind).toBe("other");
+    expect(f.starts[2]?.prompt).not.toContain("grill-me");
+
+    const thrownTask = (await f.service.create({ title: "未明任务", projectId: "one" })).tasks[2]!;
+    f.setClassifier(async () => { throw new Error("llm down"); });
+    await f.service.action({ action: "start", id: thrownTask.id });
+    expect(f.starts[3]?.requirementKind).toBe("uncertain");
+    expect(f.starts[3]?.prompt).toContain("判断任务类型");
+
+    // 自动领取不调用前置分类
+    const autoTask = (await f.service.create({ title: "自动任务", projectId: "one" })).tasks[3]!;
+    await enable(f.service, "one");
+    const autoStart = f.starts.find((s) => s.title === autoTask.title);
+    expect(autoStart?.requirementKind).toBeUndefined();
+    expect(f.classifyCalls).toHaveLength(3);
   }));
 });

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { TaskActionSchema, TaskCreateSchema, TaskUpdateSchema, type TaskState } from "./schema.js";
 import { TaskAlreadyMergedError, TaskBehindDevelopError, TaskDirtyWorktreeError, TaskMergeBlockedError, TaskNoCommitError } from "./git.js";
 import { parseTaskImage, TaskImages } from "./images.js";
+import type { TaskRequirementClassifier, TaskRequirementKind } from "./classify.js";
 import { TaskStore } from "./store.js";
 import { TASK_IMAGE_MAX_COUNT } from "./types.js";
 import type {
@@ -28,6 +29,8 @@ export interface TaskServiceOptions {
   homeDir?: string;
   /** 按项目 cwd 返回该仓库已锁定的项目决定摘要（< 3KB），供派发时注入。 */
   projectContext?: (cwd: string) => Promise<string | null> | string | null;
+  /** 手动启动前判定 TODO 是否属于需求型；未注入时交由 T3 会话只读判断。 */
+  classifyTask?: TaskRequirementClassifier | undefined;
   /** 测试注入存储故障；生产使用原子文件写入。 */
   store?: Pick<TaskStore, "read" | "write">;
 }
@@ -288,7 +291,7 @@ export class TaskService implements TaskHttpPort {
             task.error = null;
             task.run.error = null;
             await this.#save(task);
-            try { await this.#publishAndRemove(project, task, task.run); }
+            try { await this.#publishAndComplete(project, task, task.run); }
             catch (error) { await this.#fail(task, error); throw new TaskError(409, message(error)); }
             return this.#board();
           }
@@ -358,8 +361,26 @@ export class TaskService implements TaskHttpPort {
     const rawContext = project && this.options.projectContext
       ? await Promise.resolve(this.options.projectContext(project.cwd)).catch(() => null)
       : null;
+    let requirementKind = task.manual ? task.run.requirementKind : undefined;
+    if (task.manual && requirementKind === undefined && this.options.classifyTask) {
+      requirementKind = await this.options.classifyTask({
+        title: task.title,
+        description: task.description,
+        hasImages: (task.images?.length ?? 0) > 0,
+        projectContext: rawContext,
+      }).catch(() => "uncertain" as const);
+      task.run.requirementKind = requirementKind;
+      await this.#save(task);
+      if (this.#stopped) return;
+    }
     const images = await Promise.all((task.images ?? []).map((image) => this.#readImage(image)));
-    const launch = { title: task.title, prompt: this.#taskPrompt(task, rawContext), requestId, ...(images.length ? { images } : {}) };
+    const launch = {
+      title: task.title,
+      prompt: this.#taskPrompt(task, rawContext, requirementKind),
+      requestId,
+      ...(images.length ? { images } : {}),
+      ...(task.manual && requirementKind ? { requirementKind } : {}),
+    };
     const started = project && task.run.branch !== null
       ? await this.options.automation.start({ ...launch, projectId: project.id, cwd: task.run.worktreePath, branch: task.run.branch, plan: task.manual })
       : await this.options.automation.start({ ...launch, projectId: null, cwd: task.run.projectCwd, branch: null, plan: true });
@@ -456,20 +477,21 @@ export class TaskService implements TaskHttpPort {
 
   /**
    * 确认合并：先把最新 develop 同步进任务分支（并行任务可能已先合入），再快进本地 develop，
-   * 然后推送 develop、删除任务分支和工作树、移除这个 TODO。任何一步失败都保留现场等人处理。
+   * 然后推送 develop、清理任务分支和工作树，并标记 TODO 已完成。失败时保留任务等人处理。
    */
   async #merge(project: TaskProject, task: DevelopmentTask): Promise<void> {
     const run = task.run;
-    if (!run?.reviewSha || !run.threadId || run.branch === null) throw new Error("缺少人工核对版本，不能合并。");
-    const live = await this.options.automation.inspect(run.threadId, task.manual);
-    if (live.state !== "ready") throw new Error("T3 会话在核对后发生变化，请完成处理并重新核对。");
+    if (!run || run.branch === null) throw new Error("缺少任务分支记录，不能合并。");
     if (!run.merged) {
+      if (!run.reviewSha || !run.threadId) throw new Error("缺少人工核对版本，不能合并。");
+      const live = await this.options.automation.inspect(run.threadId, task.manual);
+      if (live.state !== "ready") throw new Error("T3 会话在核对后发生变化，请完成处理并重新核对。");
       if (!(await this.#mergeIntoDevelop(project, task, run))) return;
       // 先记下“已合并”：之后推送失败或崩溃，都只补做后半段，不再重复合并。
       run.merged = true;
       await this.#save(task);
     }
-    await this.#publishAndRemove(project, task, run);
+    await this.#publishAndComplete(project, task, run);
   }
 
   /** 返回 false 表示同步 develop 时有冲突，已交回 T3 处理，不继续合并。 */
@@ -495,24 +517,21 @@ export class TaskService implements TaskHttpPort {
     }
   }
 
-  async #publishAndRemove(project: TaskProject, task: DevelopmentTask, run: TaskWorktreeRun): Promise<void> {
+  async #publishAndComplete(project: TaskProject, task: DevelopmentTask, run: TaskWorktreeRun): Promise<void> {
     await this.options.git.publish(project, run);
     await this.options.git.cleanup(project, run);
-    const images = task.images ?? [];
-    const state = this.#state!;
-    state.tasks.splice(state.tasks.indexOf(task), 1);
-    await this.#save();
-    await this.#images.remove(images);
+    await this.#complete(task);
   }
 
-  /** 任务提交已在本地 develop（外部合并）：同样推送、清理并移除；失败则保留任务等人处理。 */
+  /** 任务提交已在本地 develop（外部合并）：同样推送、清理并标记完成。 */
   async #finishMerged(project: TaskProject, task: DevelopmentTask): Promise<void> {
     const run = task.run;
     if (!run || run.branch === null) { await this.#complete(task); return; }
     try {
-      if (!run.merged) { run.merged = true; await this.#save(task); }
+      run.merged = true;
       task.status = "merging";
-      await this.#publishAndRemove(project, task, run);
+      await this.#save(task);
+      await this.#publishAndComplete(project, task, run);
     } catch (error) { await this.#fail(task, error); }
   }
 
@@ -537,7 +556,7 @@ export class TaskService implements TaskHttpPort {
     await this.#save(task);
   }
 
-  #taskPrompt(task: DevelopmentTask, rawProjectContext?: string | null): string {
+  #taskPrompt(task: DevelopmentTask, rawProjectContext?: string | null, requirementKind?: TaskRequirementKind): string {
     const trimmedContext = (rawProjectContext ?? "").trim();
     const projectSection =
       trimmedContext === ""
@@ -546,13 +565,28 @@ export class TaskService implements TaskHttpPort {
             trimmedContext.length > 3_000 ? `${trimmedContext.slice(0, 3_000)}…` : trimmedContext
           }`;
     const run = task.run!;
+    const manualGuidance = !task.manual
+      ? []
+      : requirementKind === "requirement"
+        ? [
+            "本任务已判定为需求型 TODO，请先调用并遵循 `grill-me`（由 T3 按当前 Provider 触发）。先只读查证能从项目中确认的事实，再围绕范围、关键取舍和验收标准按依赖顺序逐项讨论，每次只问一个问题，给出推荐答案并等待回复，需求确认后再拟定实施计划。",
+            "即使描述已很完整，也要等用户明确确认需求和计划。确认前不改文件、不跑有副作用的命令、不提交代码。若会话仍处于计划模式，请用户切换到执行模式后再按确认的计划继续。",
+          ]
+        : requirementKind === "other"
+          ? [
+              "本任务为非需求型 TODO（如缺陷修复、重构、测试、文档或排查），无需调用需求访谈流程；请先只读了解项目现状，明确目标、范围与验收标准，再提出具体实施计划。",
+              "即使描述已很完整，也要等用户明确确认计划。确认前不改文件、不跑有副作用的命令、不提交代码。若会话仍处于计划模式，请用户切换到执行模式后再按确认的计划继续。",
+            ]
+          : [
+              "先只读结合任务标题、说明、附件和项目现状判断任务类型。新增功能、改变既有产品行为或业务规则属于需求型；仅恢复预期行为的缺陷修复、纯重构、测试、文档维护或排查等属于其他任务。无法判断时，先向用户澄清目标，不要凭关键词决定。",
+              "仅对需求型 TODO，先遵循 `grill-me` 讨论方式（若会话已挂载 `grill-me` Skill 可先调用，否则只读查看 `~/.agents/skills/grill-me/SKILL.md`；仍无法加载时告知用户并按同样方式讨论）：能从项目中确认的先自行查证，其余按依赖顺序讨论范围、关键取舍和验收标准，每次只问一个问题，给出推荐答案并等待回复。其他任务按常规流程明确目标、范围和验收标准，再提出计划。",
+              "即使描述已很完整，也要等用户明确确认需求和计划。确认前不改文件、不跑有副作用的命令、不提交代码。若会话仍处于计划模式，请用户切换到执行模式后再按确认的计划继续。",
+            ];
     return [
       "这是 U-Brain TODO 派发的单个任务。", `任务：${task.title}`, task.description,
       `工作目录：${run.worktreePath ?? run.projectCwd}`,
       projectSection,
-      ...(task.manual ? [
-        "先只读了解需求和现状，明确目标、范围和验收标准；在 T3 中向用户确认需求，有歧义先提问，再根据确认结果提出具体计划。即使描述已很完整，也要等用户明确确认需求和计划。确认前不改文件、不跑有副作用的命令、不提交代码。若会话仍处于计划模式，请用户切换到执行模式后再按确认的计划继续。",
-      ] : []),
+      ...manualGuidance,
       ...(run.branch !== null ? [
         `任务分支：${run.branch}。只在这个独立工作树和任务分支完成本任务。先阅读项目规则，保护已有修改。`,
         "完成后运行适用检查，并将本任务变更提交到当前任务分支。提交前检查 diff，只提交相关文件，禁止提交 .env、凭证和密钥。",

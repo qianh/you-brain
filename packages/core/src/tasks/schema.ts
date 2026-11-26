@@ -54,6 +54,7 @@ const runDetails = z.object({
   summary: z.string(), error: z.string().nullable(),
   pendingFeedback: z.object({ commandId: z.string(), prompt: z.string() }).optional(),
   merged: z.literal(true).optional(),
+  requirementKind: z.enum(["requirement", "other", "uncertain"]).optional(),
 });
 
 export const TaskRecordSchema = z.object({

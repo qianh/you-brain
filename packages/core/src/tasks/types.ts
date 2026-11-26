@@ -1,3 +1,7 @@
+import type { TaskRequirementKind } from "./classify.js";
+
+export type { TaskRequirementKind };
+
 /** 可执行 TODO 与话题提炼出的待办分开保存；项目来自 T3。 */
 export interface TaskProject {
   id: string;
@@ -41,6 +45,8 @@ interface TaskRunDetails {
   pendingFeedback?: { commandId: string; prompt: string } | undefined;
   /** 已快进合并到本地 develop；之后只剩推送和清理。推送失败时靠它让“重试”只补做后半段。 */
   merged?: true | undefined;
+  /** 手动启动前分类的 TODO 类型；派发失败重试时直接复用。 */
+  requirementKind?: TaskRequirementKind | undefined;
 }
 
 export interface TaskWorktreeRun extends TaskRunDetails {
@@ -144,7 +150,14 @@ export interface TaskGitPort {
   cleanup(project: TaskProject, run: TaskWorktreeRun): Promise<void>;
 }
 
-type TaskLaunchInput = { title: string; prompt: string; cwd: string; requestId: string; images?: TaskImageData[] } & (
+type TaskLaunchInput = {
+  title: string;
+  prompt: string;
+  cwd: string;
+  requestId: string;
+  images?: TaskImageData[];
+  requirementKind?: TaskRequirementKind | undefined;
+} & (
   | { projectId: string; branch: string; plan?: true | undefined }
   | { projectId: null; branch: null; plan: true }
 );

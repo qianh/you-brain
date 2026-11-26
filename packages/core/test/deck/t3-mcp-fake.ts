@@ -34,6 +34,7 @@ export function fakeThread(overrides: Partial<FakeThread> = {}): FakeThread {
 
 export interface FakeProviderCapability {
   providerInstanceId: string;
+  driverKind?: string;
   runtimeModes?: string[];
 }
 
@@ -88,15 +89,17 @@ export function fakeT3(input: { projects: FakeProject[]; threads?: FakeThread[];
     if (name === "t3_thread_read") {
       const thread = find(args.threadId);
       if (!thread) return failure("thread_not_found", `Thread ${String(args.threadId)} is no longer available.`);
-      const after = typeof args.afterPosition === "number" ? args.afterPosition : -1;
+      const after = typeof args.afterPosition === "number" ? args.afterPosition : undefined;
       const limit = typeof args.limit === "number" ? args.limit : 100;
       const items = thread.items.map((item, position) => ({
         position, visibility: "local", sourceThreadId: thread.threadId, itemId: `item-${position}`, runId: item.runId, messageId: `message-${position}`,
         createdBy: item.type === "user_message" ? "user" : "agent", creationSource: "mcp", type: item.type, status: "completed",
         title: null, text: item.text, textTruncated: false, updatedAt: "2026-11-16T00:00:00.000Z",
-      })).filter((item) => item.position > after).slice(0, limit);
+      }));
+      const remaining = after === undefined ? items : items.filter((item) => item.position > after);
+      const page = after === undefined ? remaining.slice(-limit) : remaining.slice(0, Math.min(limit, 50));
       const { items: _items, ...rest } = thread;
-      return result({ thread: { ...rest, itemCount: thread.items.length }, recentRuns: [], items, nextPosition: null, hasMore: false });
+      return result({ thread: { ...rest, itemCount: thread.items.length }, recentRuns: [], items: page, nextPosition: page.at(-1)?.position ?? null, hasMore: after !== undefined && page.length < remaining.length });
     }
     if (name === "t3_thread_launch") {
       const threadId = `thread-${String(args.clientRequestId)}`;
