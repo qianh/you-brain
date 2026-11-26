@@ -1148,12 +1148,18 @@ export class RemoteDesktopHostManager implements RemoteDesktopPort {
     if (live.length === 0) return;
     const now = Date.now();
     const targetBps = Math.min(...live.map((item) => item.bitrate.targetBps));
+    // 多个中继会话取最差的基线 RTT；任一未知则视为未知，不放开画质。
+    const relayRtts = live.filter((item) => item.relay).map((item) => item.bitrate.baseRttMs);
+    const rttMs = relayRtts.length === 0 || relayRtts.some((rtt) => rtt === null)
+      ? null
+      : Math.max(...(relayRtts as number[]));
     const tier = nextStreamTier({
       current: this.#streamTier,
       relay: live.some((item) => item.relay),
       targetBps,
       nowMs: now,
       changedAtMs: this.#streamTierAt,
+      rttMs,
     });
     if (tier !== this.#streamTier) {
       this.#streamTier = tier;

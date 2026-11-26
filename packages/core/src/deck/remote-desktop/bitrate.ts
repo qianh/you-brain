@@ -91,6 +91,14 @@ export class LossBasedBitrateController {
     return this.#lastRttMs;
   }
 
+  /** 近期窗口内的最小 RTT（无排队基线，毫秒），尚无样本时为 null。 */
+  get baseRttMs(): number | null {
+    if (this.#rttSamples.length === 0) return null;
+    let base = Number.POSITIVE_INFINITY;
+    for (const sample of this.#rttSamples) base = Math.min(base, sample.rtt);
+    return base;
+  }
+
   get #minBps(): number {
     return Math.min(this.#maxBps, Math.max(this.#minAbs, this.#maxBps * this.#minRatio));
   }

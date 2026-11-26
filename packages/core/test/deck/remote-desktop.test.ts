@@ -35,6 +35,7 @@ import {
   type HostStateSnapshot,
   type RemoteDesktopHostBridge,
 } from "../../src/deck/remote-desktop/index.js";
+import { MACOS_UI_BRIDGE_SWIFT } from "../../src/deck/remote-desktop/macos-ui-swift.js";
 
 function makeAvcc(nalus: Buffer[]): Buffer {
   const parts: Buffer[] = [];
@@ -1276,5 +1277,50 @@ describe("中继链路降帧率与分辨率档位", () => {
     expect(nextStreamTier({ ...base, current: "relay-low", relay: true, targetBps: 1_300_000 })).toBe("relay-low");
     expect(nextStreamTier({ ...base, current: "relay", relay: true, targetBps: 1_300_000 })).toBe("relay");
     expect(nextStreamTier({ ...base, current: "relay-low", relay: true, targetBps: 1_700_000 })).toBe("relay");
+  });
+
+  test("低 RTT 的国内中继放开到画质预设；RTT 变高或码率掉下来再收紧", () => {
+    const base = { nowMs: 100_000, changedAtMs: 0, relay: true };
+    const hd = { maxDimension: 1920, fps: 60 };
+    expect(streamProfileFor("relay-fast", hd)).toEqual({ maxDimension: 1920, fps: 60 });
+
+    // RTT 35ms、码率充足 → relay-fast
+    expect(nextStreamTier({ ...base, current: "relay", targetBps: 3_000_000, rttMs: 35 })).toBe("relay-fast");
+    // RTT 未知或偏高（跨境中继）时保持 relay
+    expect(nextStreamTier({ ...base, current: "relay", targetBps: 3_000_000, rttMs: null })).toBe("relay");
+    expect(nextStreamTier({ ...base, current: "relay", targetBps: 3_000_000 })).toBe("relay");
+    expect(nextStreamTier({ ...base, current: "relay", targetBps: 3_000_000, rttMs: 200 })).toBe("relay");
+    // 码率还没爬上来时不放开
+    expect(nextStreamTier({ ...base, current: "relay", targetBps: 1_500_000, rttMs: 35 })).toBe("relay");
+    // 刚切过档（不足 10 秒）保持
+    expect(
+      nextStreamTier({ current: "relay", relay: true, targetBps: 3_000_000, rttMs: 35, nowMs: 105_000, changedAtMs: 100_000 }),
+    ).toBe("relay");
+
+    // 回差：RTT 80~150、码率 1.2M~2M 之间保持 relay-fast
+    expect(nextStreamTier({ ...base, current: "relay-fast", targetBps: 1_500_000, rttMs: 120 })).toBe("relay-fast");
+    expect(nextStreamTier({ ...base, current: "relay-fast", targetBps: 3_000_000, rttMs: 180 })).toBe("relay");
+    expect(nextStreamTier({ ...base, current: "relay-fast", targetBps: 1_100_000, rttMs: 35 })).toBe("relay");
+    expect(nextStreamTier({ ...base, current: "relay-fast", targetBps: 800_000, rttMs: 35 })).toBe("relay-low");
+    // 切回直连立即生效
+    expect(nextStreamTier({ ...base, current: "relay-fast", relay: false, targetBps: 800_000 })).toBe("direct");
+  });
+
+  test("码率控制器给出窗口内的基线 RTT", () => {
+    const bc = new LossBasedBitrateController({ maxBps: 4_000_000 });
+    expect(bc.baseRttMs).toBeNull();
+    bc.onRoundTripTime(40, 0);
+    bc.onRoundTripTime(35, 500);
+    bc.onRoundTripTime(90, 1_000);
+    expect(bc.baseRttMs).toBe(35);
+  });
+});
+
+describe("macOS 宿主滚动方向", () => {
+  test("协议 dx/dy 已是 CGEvent 方向，宿主不再二次取反", () => {
+    expect(MACOS_UI_BRIDGE_SWIFT).toContain("scrollRemainderY += dy");
+    expect(MACOS_UI_BRIDGE_SWIFT).toContain("scrollRemainderX += dx");
+    expect(MACOS_UI_BRIDGE_SWIFT).not.toContain("+= -dy");
+    expect(MACOS_UI_BRIDGE_SWIFT).not.toContain("+= -dx");
   });
 });

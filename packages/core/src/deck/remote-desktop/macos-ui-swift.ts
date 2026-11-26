@@ -103,8 +103,9 @@ final class DesktopUiBridge {
             _ = resolvePoint(normX: nx, normY: ny, bounds: bounds)
         }
         // 累积小数部分：触控板细粒度滚动不再被取整吞掉。
-        scrollRemainderY += -dy
-        scrollRemainderX += -dx
+        // 协议里的 dx/dy 已是 CGEvent 方向（正值 = 向上/向左滚），控制端已完成取反，这里不能再取反。
+        scrollRemainderY += dy
+        scrollRemainderX += dx
         let vy = Int32(scrollRemainderY.rounded(.towardZero))
         let vx = Int32(scrollRemainderX.rounded(.towardZero))
         scrollRemainderY -= Double(vy)
