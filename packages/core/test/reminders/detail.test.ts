@@ -28,6 +28,19 @@ const digest = {
 };
 
 describe("reminderDetail", () => {
+  test("uses the issued digest's selection on a device without original timestamps", () => {
+    const detail = reminderDetail({
+      reminder: digest,
+      book,
+      digestSnapshot: { ids: ["c1", "missing"], total: 2 },
+      timeZoneOffsetMinutes: 0,
+    });
+    expect(detail).toContain("昨日结论（2 条）");
+    expect(detail).toContain("助手决定沿用现有 SSE 通道");
+    expect(detail).toContain("部分结论尚未同步到本机");
+    expect(detail).not.toContain("手环配对要先清除旧绑定");
+  });
+
   test("晨间摘要:列出昨日结论全文与话题,还原被截短的建议话题全名", () => {
     const detail = reminderDetail({ reminder: digest, book, timeZoneOffsetMinutes: 480 });
     expect(detail).toContain("昨日结论（2 条）");

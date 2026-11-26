@@ -2,6 +2,8 @@ import { compareText } from "../topics/order.js";
 import type { TopicBook } from "../topics/types.js";
 import { localDateKey, localParts } from "./time.js";
 
+export const MAX_DIGEST_CONCLUSIONS = 60;
+
 interface DigestDay {
   book: TopicBook;
   day: string;
@@ -10,14 +12,25 @@ interface DigestDay {
   asOf: number;
 }
 
+export function occurrenceTime(
+  item: { occurredAt?: string; sessionKey: string; ts: string },
+  sourceSessionUpdatedAt: Readonly<Record<string, string>>,
+  offsetMinutes: number,
+): number {
+  if (item.occurredAt !== undefined) return Date.parse(item.occurredAt);
+  const activityMs = Date.parse(sourceSessionUpdatedAt[item.sessionKey] ?? "");
+  const eventMs = Date.parse(item.ts);
+  if (!Number.isFinite(activityMs) || !Number.isFinite(eventMs)) return Number.NaN;
+  const eventDay = localDateKey(localParts(eventMs, offsetMinutes));
+  const activityDay = localDateKey(localParts(activityMs, offsetMinutes));
+  return activityMs <= eventMs || activityDay === eventDay ? activityMs : Number.NaN;
+}
+
 function sourceTime(
   item: { occurredAt?: string; sessionKey: string; ts: string },
   input: DigestDay,
 ): number {
-  if (item.occurredAt !== undefined) return Date.parse(item.occurredAt);
-  const activityMs = Date.parse(input.sourceSessionUpdatedAt[item.sessionKey] ?? "");
-  const eventMs = Date.parse(item.ts);
-  return activityMs <= eventMs || (onDay(activityMs, input) && onDay(eventMs, input)) ? activityMs : Number.NaN;
+  return occurrenceTime(item, input.sourceSessionUpdatedAt, input.offsetMinutes);
 }
 
 function onDay(ms: number, input: DigestDay): boolean {
@@ -32,6 +45,16 @@ export function digestConclusions(input: DigestDay) {
     })
     .sort((left, right) => right.ms - left.ms || compareText(left.item.conclusionId, right.item.conclusionId))
     .map(({ item }) => item);
+}
+
+export function hasUndatedDigestItems(input: DigestDay): boolean {
+  const unknown = (item: { occurredAt?: string; sessionKey: string; ts: string }) => {
+    const emitted = Date.parse(item.ts);
+    return Number.isFinite(emitted) && emitted <= input.asOf &&
+      localDateKey(localParts(emitted, input.offsetMinutes)) >= input.day &&
+      !Number.isFinite(sourceTime(item, input));
+  };
+  return input.book.conclusions.some(unknown) || input.book.todos.some((todo) => todo.status === "open" && unknown(todo));
 }
 
 export function digestFollowUps(input: DigestDay, limit: number) {

@@ -1,9 +1,10 @@
 import { rm } from "node:fs/promises";
 
-import { createDefaultSharedConfig } from "@you-brain/protocol";
+import { createDefaultSharedConfig, DRIVE_PATHS, parseRoles } from "@you-brain/protocol";
 import { describe, expect, it } from "bun:test";
 
 import { startDaemon } from "../../src/daemon/daemon.js";
+import { MemoryDrive } from "../../src/drive/memory-drive.js";
 import { localDateKey, localParts, timeZoneOffsetMinutes } from "../../src/reminders/time.js";
 import { SqliteStore } from "../../src/store/sqlite-store.js";
 import { foldEvents } from "../../src/topics/fold.js";
@@ -21,9 +22,10 @@ import { join } from "node:path";
 const LAST = new Date(CLOCK_START.getTime() - 8 * 24 * 60 * 60 * 1000).toISOString();
 
 describe("daemon reminder generation", () => {
-  it("generates on startup for the main device even when notifications are off", async () => {
+  it("waits for Drive on startup, then generates on the main device with notifications off", async () => {
     const dirs = await makeDaemonDirs("you-brain-reminders-daemon-");
     const clock = testClock();
+    const drive = new MemoryDrive({ now: () => clock.now() });
     const first = await startDaemon({
       homeDir: dirs.homeDir,
       platform: "darwin",
@@ -52,6 +54,11 @@ describe("daemon reminder generation", () => {
         body: JSON.stringify({ mainDevice: status.deviceId }),
       });
       expect(rolesResponse.status).toBe(200);
+      await drive.put({
+        path: DRIVE_PATHS.roles,
+        bytes: Buffer.from(JSON.stringify(parseRoles({ mainDevice: status.deviceId }))),
+        mimeType: "application/json",
+      });
     } finally {
       await first.stop();
     }
@@ -59,6 +66,7 @@ describe("daemon reminder generation", () => {
     const shared = createDefaultSharedConfig();
     shared.reminders.notifications = false;
     await writeFile(join(dirs.dataDir, "shared.json"), `${JSON.stringify(shared)}\n`);
+    await drive.put({ path: DRIVE_PATHS.sharedConfig, bytes: Buffer.from(JSON.stringify(shared)), mimeType: "application/json" });
     const store = new SqliteStore(join(dirs.dataDir, "state.sqlite"));
     try {
       store.upsertSession({
@@ -113,7 +121,7 @@ describe("daemon reminder generation", () => {
       env: dirs.env,
       hostname: "reminder-device",
       clock,
-      drive: null,
+      drive,
       llm: null,
       embedder: throwingEmbedder,
       sourceRoots: {},
@@ -121,6 +129,13 @@ describe("daemon reminder generation", () => {
       signals: false,
     });
     try {
+      await second.settled();
+      const initial = await fetch(`${second.baseUrl}/api/reminders`, {
+        headers: { authorization: `Bearer ${second.token}` },
+      }).then((response) => response.json()) as { reminders: unknown[] };
+      expect(initial.reminders).toEqual([]);
+      await clock.advance(2_000);
+      await second.settled();
       const config = (await (
         await fetch(`${second.baseUrl}/api/config`, {
           headers: { authorization: `Bearer ${second.token}` },

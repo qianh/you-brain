@@ -41,11 +41,13 @@ export function historyText(name: string, openTodos: number): string {
 
 export const DIGEST_TODO_PREFIX = "昨日新增待办 ";
 export const DIGEST_FOLLOW_PREFIX = "今日接续：";
+export const DIGEST_INCOMPLETE = "数据不完整：部分会话尚未提炼或无法确认发生日期。";
 
 export function digestText(input: {
   conclusions: readonly string[];
   openTodoCount: number;
   suggestions: readonly string[];
+  incomplete?: boolean;
 }): string {
   const first = input.conclusions[0];
   const conclusionLine =
@@ -59,7 +61,7 @@ export function digestText(input: {
     input.suggestions.length === 0
       ? "没有需要接续的昨日待办。"
       : `${DIGEST_FOLLOW_PREFIX}${input.suggestions.map((name) => clipText(name, 12)).join("、")}。`;
-  return boundReminder([conclusionLine, todoLine, suggestLine]);
+  return boundReminder([conclusionLine, todoLine, suggestLine, ...(input.incomplete ? [DIGEST_INCOMPLETE] : [])]);
 }
 
 export function weeklyText(input: {

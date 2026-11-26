@@ -1,11 +1,8 @@
 import type { TopicBook } from "../topics/types.js";
-import { digestConclusions } from "./digest.js";
+import { digestConclusions, MAX_DIGEST_CONCLUSIONS } from "./digest.js";
 import { REMINDER_KIND } from "./due.js";
 import { DIGEST_FOLLOW_PREFIX, DIGEST_TODO_PREFIX } from "./text.js";
 import { localDateKey, localParts } from "./time.js";
-
-/** 详情里最多列这么多条结论,避免一屏几十页。 */
-const MAX_CONCLUSIONS = 60;
 
 /**
  * 提醒正文为了通知被截成了几十个字(「…」结尾),详情把被截掉的原文找回来。
@@ -20,6 +17,7 @@ export function reminderDetail(input: {
   book: TopicBook;
   timeZoneOffsetMinutes: number;
   sourceSessionUpdatedAt?: Readonly<Record<string, string>>;
+  digestSnapshot?: { ids: readonly string[]; total: number };
 }): string | null {
   if (input.reminder.kind !== REMINDER_KIND.morningDigest) return null;
   const yesterday = dayBefore(input.reminder.reminderId);
@@ -27,7 +25,8 @@ export function reminderDetail(input: {
 
   const names = new Map(input.book.topics.map((topic) => [topic.topicId, topic.name.trim() || "未命名话题"]));
   const recent = input.reminder.text.split("\n").some((line) => line.startsWith(DIGEST_TODO_PREFIX));
-  const conclusions = recent ? digestConclusions({
+  const indexed = input.digestSnapshot ? new Map(input.book.conclusions.map((item) => [item.conclusionId, item])) : null;
+  const conclusions = input.digestSnapshot && indexed ? input.digestSnapshot.ids.flatMap((id) => indexed.get(id) ?? []) : recent ? digestConclusions({
     book: input.book,
     day: yesterday,
     offsetMinutes: input.timeZoneOffsetMinutes,
@@ -40,17 +39,20 @@ export function reminderDetail(input: {
     })
     .sort((left, right) => (left.ts !== right.ts ? (left.ts < right.ts ? 1 : -1) : left.conclusionId < right.conclusionId ? -1 : 1));
 
+  const total = input.digestSnapshot?.total ?? conclusions.length;
   const lines: string[] = [];
-  if (conclusions.length === 0) {
+  if (total === 0) {
     lines.push("昨日没有新结论。");
   } else {
-    lines.push(`昨日结论（${conclusions.length} 条）`);
-    conclusions.slice(0, MAX_CONCLUSIONS).forEach((item, index) => {
+    lines.push(`昨日结论（${total} 条）`);
+    conclusions.slice(0, MAX_DIGEST_CONCLUSIONS).forEach((item, index) => {
       const topic = names.get(item.topicId);
       lines.push(`${index + 1}. ${item.text.replace(/[\r\n]+/gu, " ").trim()}${topic ? `  —— ${topic}` : ""}`);
     });
-    if (conclusions.length > MAX_CONCLUSIONS) {
-      lines.push(`……还有 ${conclusions.length - MAX_CONCLUSIONS} 条较早的结论,在话题册里查看。`);
+    if (input.digestSnapshot && conclusions.length < input.digestSnapshot.ids.length) {
+      lines.push("……部分结论尚未同步到本机。");
+    } else if (total > MAX_DIGEST_CONCLUSIONS) {
+      lines.push(`……还有 ${total - MAX_DIGEST_CONCLUSIONS} 条较早的结论,在话题册里查看。`);
     }
   }
 

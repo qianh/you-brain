@@ -518,6 +518,7 @@ export class ProtocolSync {
 
   async #pullInitial(): Promise<PullResult> {
     await this.ensureProtocol();
+    const token = await this.#drive.startPageToken();
     const entries = dedupeEntries([
       ...(await this.#drive.list({ prefix: YOU_BRAIN_PREFIX })),
       ...(await this.#drive.list({ prefix: INBOX_PREFIX })),
@@ -525,7 +526,6 @@ export class ProtocolSync {
     ]);
     const body = await this.#consume(entries, true);
     await this.#emitRemovedDevices(await this.#reconcileDevices());
-    const token = await this.#drive.startPageToken();
     this.#store.setCursor(SYNC_DRIVE_CURSOR, token);
     return { initial: true, ...body };
   }

@@ -188,6 +188,7 @@ function DigestCard({ reminder, busy, locked, t, onAction, loadDetail, summary }
           <span className="digest-stat-label">{t(summary.recent ? "digestRecentTodos" : "digestTodos")}</span>
         </span>
       </span>
+      {summary.note ? <span className="digest-note">{summary.note}</span> : null}
       {suggestions.length > 0 ? (
         <span className="digest-follow">
           <span className="digest-label">{t(summary.recent ? "digestContinue" : "digestFollow")}</span>

@@ -51,13 +51,17 @@ describe("consolidation across two devices", () => {
       });
       const dirsA = await trackDirs("a");
       const dirsB = await trackDirs("b");
-      await writeClaudeSession(dirsA.sourceDir, [
+      await writeClaudeSession(dirsB.sourceDir, [
         claudeLine("shared-1", "user", "Plan the launch checklist", CLOCK_START.toISOString()),
         claudeLine("shared-1", "assistant", "先列一个清单。", CLOCK_START.toISOString()),
       ]);
 
       const daemonA = await startOne(dirsA, "device-a", clock, drive, llm);
-      const daemonB = await startOne(dirsB, "device-b", clock, drive, llm);
+      let secondaryModelCalls = 0;
+      const daemonB = await startOne(dirsB, "device-b", clock, drive, fakeBackend(async () => {
+        secondaryModelCalls += 1;
+        return refineJson("不应在来源设备提炼");
+      }));
       const idA = (await readStatus(daemonA)).deviceId;
       const idB = (await readStatus(daemonB)).deviceId;
       expect(idA).not.toBe(idB);
@@ -79,12 +83,15 @@ describe("consolidation across two devices", () => {
       }>(daemonB, "/api/roles");
       expect(rolesB).toMatchObject({ mainDevice: idA, consolidation: { enabled: true } });
 
-      const uploaded = await postJson<{ uploaded: number }>(daemonA, "/api/actions/upload", {
+      const uploaded = await postJson<{ uploaded: number }>(daemonB, "/api/actions/upload", {
         backfill: true,
       });
       expect(uploaded.uploaded).toBeGreaterThan(0);
       // Uploading is a sync step; the topic appears once the refine pass has run.
+      await clock.advance(5 * 60_000);
       await refineNow(clock, daemonA);
+      await daemonB.settled();
+      expect(secondaryModelCalls).toBe(0);
       expect(summaryCalls).toBe(0);
       const before = await topicSummary(daemonA);
       expect(before.name).toBe("发布流程");

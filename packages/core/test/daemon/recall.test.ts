@@ -119,7 +119,7 @@ const NOW_ISO = CLOCK_START.toISOString();
 
 /**
  * 设备要先成为主设备，才会收集网页会话；之后网页文件被当作新变化重新报出，再被索引。
- * `roles` 里写 webProcessor 就把网页会话交给别的设备。
+ * `roles` 可以覆盖主设备，模拟当前设备只接收同步结果。
  */
 async function receiveWebSession(booted: Booted, id: string, roles: Record<string, unknown>): Promise<void> {
   const headers = { authorization: `Bearer ${booted.daemon.token}` };
@@ -255,7 +255,7 @@ describe("daemon recall reminders", () => {
 
   it("非网页会话处理设备不考虑网页会话", async () => {
     const booted = await boot();
-    await receiveWebSession(booted, "web-2", { webProcessor: "00000000-0000-4000-8000-000000000001" });
+    await receiveWebSession(booted, "web-2", { mainDevice: "00000000-0000-4000-8000-000000000001" });
     expect(booted.recallCalls).toHaveLength(0);
     expect((await reminders(booted.daemon)).filter((item) => item.kind.startsWith("recall"))).toHaveLength(0);
   });

@@ -38,6 +38,7 @@ function due(
     book: foldEvents(events),
     sessionUpdatedAt: patch.sessionUpdatedAt ?? {},
     ...(patch.sourceSessionUpdatedAt ? { sourceSessionUpdatedAt: patch.sourceSessionUpdatedAt } : {}),
+    ...(patch.pendingMorningRefine ? { pendingMorningRefine: true } : {}),
     reminders: patch.reminders ?? [],
     actions: patch.actions ?? [],
     activeLimit: patch.activeLimit ?? 10,
@@ -57,6 +58,19 @@ function kinds(items: ReadonlyArray<{ kind: string }>, kind: string): number {
 }
 
 describe("computeDueReminders", () => {
+  it("counts weekly conclusions by occurrence, not by the date of a backfill", () => {
+    const events = topicEvents({ topicId: "weekly", name: "本周", key: KEY_A, at: NOW });
+    events.push(...[
+      { conclusionId: "from-last-week", occurredAt: at(NOW_MS - 8 * DAY) },
+      { conclusionId: "from-this-week", occurredAt: at(NOW_MS - DAY) },
+    ].map(({ conclusionId, occurredAt }, index) => buildEvent({
+      device: "main", ts: NOW, seq: 500 + index, type: "conclusion.added",
+      data: { conclusionId, occurredAt, sessionKey: KEY_A, topicId: "weekly", text: conclusionId },
+    })));
+    const weekly = due(events, { sourceSessionUpdatedAt: {} }).find((item) => item.kind === "weekly_review");
+    expect(weekly?.text).toContain("新增结论 1 条。");
+  });
+
   it("triggers stale at 7 days and not at 6 days 23 hours", () => {
     const exactAt = at(NOW_MS - STALE_MS);
     const almostAt = at(NOW_MS - (STALE_MS - 60 * 60 * 1000));
@@ -427,7 +441,7 @@ describe("computeDueReminders", () => {
       sourceSessionUpdatedAt: {},
     });
     expect(items.find((item) => item.kind === "morning_digest")?.text).toBe(
-      "昨日结论：recent\n昨日新增待办 1 件未完成。\n今日接续：昨日项目。",
+      "昨日结论：recent\n昨日新增待办 1 件未完成。\n今日接续：昨日项目。\n数据不完整：部分会话尚未提炼或无法确认发生日期。",
     );
   });
 

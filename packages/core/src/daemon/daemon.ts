@@ -145,7 +145,6 @@ import {
 } from "../reminders/replies.js";
 import {
   dueRemindersForDevice,
-  isMainDevice,
   regenerateMorningDigestForDevice,
   reminderActions,
   type DueDeviceInput,
@@ -171,7 +170,7 @@ import {
   type RecallHistoryItem,
   type RecallLogEntry,
 } from "../recall/index.js";
-import { localDayKey } from "../consolidate/schedule.js";
+import { localDayKey, MAX_CATCH_UP_DAYS, shiftDateKey } from "../consolidate/schedule.js";
 import { resolveMergedTopic } from "../topics/zones.js";
 import { timeZoneOffsetMinutes } from "../reminders/time.js";
 
@@ -376,6 +375,7 @@ function inboxIndexedKey(fileId: string): string {
  * are read, so the queue has to live in the store or a restart would skip them.
  */
 const INBOX_PENDING_CURSOR = "inbox.pending";
+const ANALYSIS_INBOX_CURSOR = "inbox.analysis.v1";
 
 interface InboxPendingFile {
   id: string;
@@ -1239,12 +1239,6 @@ export class YouBrainDaemon {
     this.#lastSearch = startedAt;
     this.#lastVector = startedAt;
     this.#started = true;
-    try {
-      await this.#traced("reminders", () => this.#issueReminders());
-    } catch {
-      // A reminder failure must not block startup.
-    }
-    this.#lastReminders = this.#clock.nowMs();
     if (this.#options.signals === true) {
       this.#onSignal = () => {
         void this.stop();
@@ -1656,11 +1650,14 @@ export class YouBrainDaemon {
       }
       if (
         this.#sync &&
-        intervalDue(this.#lastPull, now, pullInterval(this.changes.subscriberCount()))
+        (intervalDue(this.#lastPull, now, pullInterval(this.changes.subscriberCount())) ||
+          (this.#isAnalysisMain() && this.#lastSyncAt === null && this.#lastSyncError === null))
       ) {
+        const analysisWasReady = this.#analysisInboxReady(7);
         try {
           await this.#traced("pull", () => this.#sync!.pull());
           this.#rememberSyncSuccess();
+          if (!analysisWasReady && this.#isAnalysisMain()) this.#lastReminders = null;
         } catch (error) {
           this.#rememberSyncFailure(error);
           await this.#reviewDrive(error);
@@ -1668,12 +1665,13 @@ export class YouBrainDaemon {
         this.#restoreLocalActivity();
         this.#lastPull = this.#clock.nowMs();
       }
-      if (this.#inboxDirty) {
-        try {
+      try {
+        await this.#seedAnalysisInbox();
+        if (this.#inboxDirty) {
           await this.#traced("inbox", () => this.#drainInbox({ budgetMs: INTERVALS.inboxBudgetMs }));
-        } catch {
-          // One bad pass must not stop the loop. The queue stays for the next tick.
         }
+      } catch {
+        // One bad pass must not stop the loop. The queue stays for the next tick.
       }
     });
     if (intervalDue(this.#lastWebSessions, now, INTERVALS.webSessionsMs)) {
@@ -1768,7 +1766,7 @@ export class YouBrainDaemon {
         void this.#search.warm().catch(() => undefined);
       }
     }
-    if (intervalDue(this.#lastReminders, now, INTERVALS.reminderMs)) {
+    if (this.#isAnalysisMain() && intervalDue(this.#lastReminders, now, INTERVALS.reminderMs) && this.#analysisInboxReady(7)) {
       try {
         await this.#traced("reminders", () => this.#issueReminders());
       } catch {
@@ -1952,8 +1950,9 @@ export class YouBrainDaemon {
     sourceUpdatedAt: string;
     turns: readonly { role: string; text: string }[];
   }): Promise<void> {
-    if (!this.#llm || !this.#store || input.fileId.length === 0) return;
-    const stored = this.#store.getSession(input.key);
+    const store = this.#store;
+    if (!this.#canRefine() || !this.#llm || !store || input.fileId.length === 0) return;
+    const stored = store.getSession(input.key);
     const refinedUpTo = stored?.refinedUpTo ?? 0;
     const messages = input.turns.slice(refinedUpTo).map((turn) => ({
       role: turn.role,
@@ -1997,6 +1996,7 @@ export class YouBrainDaemon {
         else this.#retry.fail(input.key, input.key, new Error(result.detail));
         return;
       }
+      if (!this.#canRefine() || this.#store !== store || this.#stopped) return;
       for (const event of result.events) await this.#emitCopied(event);
       this.#cliSilentStreak = 0;
       this.#cliStalls = 0;
@@ -2030,8 +2030,19 @@ export class YouBrainDaemon {
 
   #canProcessWebSessions(): boolean {
     if (this.#cliPaused() || !this.#llm || !this.#drive || !this.#store) return false;
-    const processor = resolveWebProcessor(this.#roles);
-    return processor !== null && processor === this.#local.deviceId;
+    return this.#webProcessor() === this.#local.deviceId;
+  }
+
+  #isAnalysisMain(): boolean {
+    return this.#roles.mainDevice === this.#local.deviceId;
+  }
+
+  #canRefine(): boolean {
+    return this.#roles.mainDevice === null || this.#isAnalysisMain();
+  }
+
+  #webProcessor(): string | null {
+    return this.#roles.mainDevice ?? resolveWebProcessor(this.#roles);
   }
 
   #webRetryBlocked(key: string, now: number): boolean {
@@ -2042,6 +2053,8 @@ export class YouBrainDaemon {
 
   async #processWebSessions(): Promise<void> {
     if (!this.#canProcessWebSessions()) return;
+    if (this.#isAnalysisMain() && !this.#analysisInboxReady(REFINE_BACKFILL_WINDOW_DAYS)) return;
+    if (this.#llm?.descriptor.kind === "cli" && this.#backfillJob !== null) return;
     const store = this.#store;
     const drive = this.#drive;
     if (!store || !drive) return;
@@ -2074,7 +2087,7 @@ export class YouBrainDaemon {
   }
 
   /**
-   * Refines this device's sessions that are on Drive but not yet refined, newest first.
+   * Refines uploaded sessions, newest first. With a main device, it handles every device.
    *
    * This is the only place a captured session is handed to the model. Uploading does not
    * wait for it: a library that was captured while signed out holds thousands of
@@ -2089,21 +2102,25 @@ export class YouBrainDaemon {
   async #refineBackfill(): Promise<void> {
     const drive = this.#drive;
     const store = this.#store;
-    if (!drive || !store || !this.#llm) return;
+    if (!drive || !store || !this.#llm || !this.#canRefine()) return;
+    if (this.#isAnalysisMain() && !this.#analysisInboxReady(REFINE_BACKFILL_WINDOW_DAYS)) return;
+    if (this.#llm.descriptor.kind === "cli") await this.#webJob;
     if (this.#cliPaused()) return;
-    // Both passes share one CLI slot. A web session is what the user just produced, so
-    // it goes first; the history backlog only loses time, which costs nothing.
-    if (countUnrefinedWebSessions(listWebInbox(store), store.listSessions()) > 0) return;
+    const web = listWebInbox(store);
+    if (!this.#isAnalysisMain() && countUnrefinedWebSessions(web, store.listSessions()) > 0) return;
+    const webKeys = new Set(web.map((item) => item.sessionKey));
+    const idleBefore = this.#clock.nowMs() - this.#shared.refine.idleMinutes * 60_000;
     const windowDays = this.#options.refineBackfillWindowDays ?? REFINE_BACKFILL_WINDOW_DAYS;
     const since = new Date(this.#clock.nowMs() - windowDays * 24 * 60 * 60 * 1000).toISOString();
     const pending = store
       .listSessions({ unrefinedOnly: true, updatedSince: since })
-      .filter((session) => session.device === this.#local.displayName)
-      .filter((session) => session.fileId !== null)
+      .filter((session) => !webKeys.has(session.sessionKey))
+      .filter((session) => session.device !== "" && (this.#isAnalysisMain() || session.device === this.#local.displayName))
+      .filter((session) => session.fileId !== null && (!this.#isAnalysisMain() || Date.parse(session.updatedAt ?? "") <= idleBefore))
       .filter((session) => !this.#webRetryBlocked(session.sessionKey, this.#clock.nowMs()))
       .slice(0, INTERVALS.refineBackfillBatch);
     for (const session of pending) {
-      if (this.#stopped || !this.#llm) return;
+      if (this.#stopped || !this.#llm || !this.#canRefine() || this.#store !== store) return;
       try {
         await this.#refineStoredSession(session);
       } catch (error) {
@@ -2189,6 +2206,7 @@ export class YouBrainDaemon {
   }
 
   async #retryIfDue(key: string, live: LiveSession, now: number): Promise<void> {
+    if (this.#roles.mainDevice !== null) return;
     if (this.#cliPaused()) return;
     const job = this.#retry.get(key);
     if (!job || job.exhausted || job.nextAttemptAt > now || !this.#llm || !this.#store) return;
@@ -2638,6 +2656,9 @@ export class YouBrainDaemon {
         inScope(file.path, scope) &&
         store.getCursor(inboxIndexedKey(file.id)) !== file.modifiedTime,
     );
+    if (this.#isAnalysisMain()) {
+      rest.sort((left, right) => right.modifiedTime.localeCompare(left.modifiedTime));
+    }
     const failed: InboxPendingFile[] = [];
     let progressed = false;
     try {
@@ -2696,11 +2717,54 @@ export class YouBrainDaemon {
     }
   }
 
-  /** This device downloads its own sessions, plus browser-plugin files when it refines them. */
+  async #seedAnalysisInbox(): Promise<void> {
+    const drive = this.#drive;
+    const store = this.#store;
+    if (!this.#isAnalysisMain() || !drive || !store || store.getCursor(ANALYSIS_INBOX_CURSOR) === "1") return;
+    const entries = await drive.list({ prefix: `${DRIVE_PATHS.inbox}/` });
+    if (this.#stopped || this.#drive !== drive || this.#store !== store || !this.#isAnalysisMain()) return;
+    this.#enqueueInbox(entries);
+    store.setCursor(ANALYSIS_INBOX_CURSOR, "1");
+  }
+
+  #analysisInboxReady(days: number): boolean {
+    const store = this.#store;
+    if (!store || !this.#sync || !this.#lastSyncAt || this.#lastSyncError || store.getCursor(ANALYSIS_INBOX_CURSOR) !== "1") {
+      return false;
+    }
+    const { startMs } = zonedDayRange(this.#clock.now(), this.#roles.timezone);
+    const since = startMs - (days * 24 + 2) * 3_600_000;
+    return !this.#inboxDirty || !readInboxPending(store).some((file) => {
+      const modifiedMs = Date.parse(file.modifiedTime);
+      return !Number.isFinite(modifiedMs) || modifiedMs >= since;
+    });
+  }
+
+  async #pullAnalysisInbox(): Promise<void> {
+    await this.#withSyncWindow(async () => {
+      if (!this.#sync) return;
+      try {
+        await this.#sync.pull();
+        this.#rememberSyncSuccess();
+        this.#lastPull = this.#clock.nowMs();
+        await this.#seedAnalysisInbox();
+        if (this.#inboxDirty) await this.#drainInbox({ budgetMs: INTERVALS.inboxBudgetMs });
+      } catch (error) {
+        this.#rememberSyncFailure(error);
+        await this.#reviewDrive(error);
+        return;
+      }
+    });
+  }
+
   #inboxScope(): string[] {
+    return this.#isAnalysisMain() ? [`${DRIVE_PATHS.inbox}/`] : this.#searchInboxScope();
+  }
+
+  #searchInboxScope(): string[] {
     return inboxScopePrefixes({
       device: this.#local.displayName,
-      includeWeb: resolveWebProcessor(this.#roles) === this.#local.deviceId,
+      includeWeb: this.#webProcessor() === this.#local.deviceId,
     });
   }
 
@@ -2924,6 +2988,7 @@ export class YouBrainDaemon {
 
   async #issueReminders(): Promise<void> {
     if (this.#stopped || !this.#store || !this.#log) return;
+    if (!this.#isAnalysisMain()) return;
     const due = dueRemindersForDevice(this.#reminderInput(this.#store));
     for (const item of due) {
       if (this.#stopped) return;
@@ -2933,15 +2998,23 @@ export class YouBrainDaemon {
 
   /** 按当前数据重算今天的早报并用原 id 再发一次,各设备折叠时覆盖旧正文。 */
   async #regenerateMorningDigest(): Promise<MorningDigestRegenerateResult> {
+    return this.#run(async () => this.#regenerateMorningDigestFromDrive());
+  }
+
+  async #regenerateMorningDigestFromDrive(): Promise<MorningDigestRegenerateResult> {
     const store = this.#store;
     if (this.#stopped || !store || !this.#log) {
       throw new HttpError(503, "NOT_READY", "daemon 还没准备好");
     }
-    const input = this.#reminderInput(store);
-    if (!isMainDevice(input)) {
+    if (!this.#isAnalysisMain()) {
       throw new HttpError(409, "NOT_MAIN_DEVICE", "早报只在主设备生成，请在主设备上重新生成");
     }
-    const item = regenerateMorningDigestForDevice(input);
+    await this.#pullAnalysisInbox();
+    if (!this.#isAnalysisMain()) throw new HttpError(409, "NOT_MAIN_DEVICE", "主设备已变更，请在新主设备重试");
+    if (this.#store !== store || !this.#analysisInboxReady(1)) {
+      throw new HttpError(503, "ANALYSIS_INBOX_PENDING", "Drive 会话尚未同步完成，暂未覆盖早报，请稍后重试");
+    }
+    const item = regenerateMorningDigestForDevice(this.#reminderInput(store));
     if (!item) throw new HttpError(409, "NOT_DUE", "还没到今天的早报时间");
     await this.#emitUser("reminder.issued", item);
     return { reminderId: item.reminderId, text: item.text };
@@ -2951,10 +3024,16 @@ export class YouBrainDaemon {
     const now = this.#clock.now();
     const sessionUpdatedAt: Record<string, string> = {};
     const sourceSessionUpdatedAt: Record<string, string> = {};
+    const yesterday = shiftDateKey(localDayKey(now, this.#roles.timezone), -1);
+    let pendingMorningRefine = false;
     for (const session of store.listSessions()) {
       if (session.updatedAt === null) continue;
       sessionUpdatedAt[session.sessionKey] = session.updatedAt;
-      if (session.device !== "") sourceSessionUpdatedAt[session.sessionKey] = session.updatedAt;
+      if (session.device === "") continue;
+      sourceSessionUpdatedAt[session.sessionKey] = session.updatedAt;
+      if (session.refinedUpTo < session.msgCount && localDayKey(new Date(session.updatedAt), this.#roles.timezone) === yesterday) {
+        pendingMorningRefine = true;
+      }
     }
     const events = store.listEvents();
     return {
@@ -2964,6 +3043,7 @@ export class YouBrainDaemon {
       events,
       sessionUpdatedAt,
       sourceSessionUpdatedAt,
+      pendingMorningRefine,
       activeLimit: this.#shared.topics.activeLimit,
       historyDays: this.#shared.topics.historyDays,
       morningDigestTime: this.#shared.reminders.morningDigestTime,
@@ -3015,10 +3095,14 @@ export class YouBrainDaemon {
       await this.#mountSearch();
     }
     if (update.roles) {
-      const wasWebProcessor = resolveWebProcessor(this.#roles) === this.#local.deviceId;
+      const wasWebProcessor = this.#webProcessor() === this.#local.deviceId;
       const wasConsolidationEnabled = this.#roles.consolidation.enabled;
       const prevMainDevice = this.#roles.mainDevice;
       this.#roles = update.roles;
+      if (prevMainDevice === this.#local.deviceId && !this.#isAnalysisMain()) {
+        this.#store?.setCursor(ANALYSIS_INBOX_CURSOR, "0");
+      }
+      if (prevMainDevice !== this.#roles.mainDevice && this.#isAnalysisMain()) this.#lastReminders = null;
       await writeJsonFile(join(this.#paths.dataDir, "roles.json"), this.#roles);
       this.#applyZone();
       this.#mountOutput();
@@ -3031,7 +3115,7 @@ export class YouBrainDaemon {
       if (!wasConsolidationEnabled && this.#roles.consolidation.enabled) {
         this.#resetConsolidationBackoff();
       }
-      if (!wasWebProcessor && resolveWebProcessor(this.#roles) === this.#local.deviceId) {
+      if (!wasWebProcessor && this.#webProcessor() === this.#local.deviceId && !this.#isAnalysisMain()) {
         await this.#catchUpWebInbox();
       }
     }
@@ -3303,7 +3387,7 @@ export class YouBrainDaemon {
     this.#searchSemantic = semantic;
     this.#search = new SearchService({
       drive: asSearchDrive(this.#drive),
-      scope: () => this.#inboxScope(),
+      scope: () => this.#searchInboxScope(),
       embedder,
       database: this.#searchDb,
       semantic,
@@ -4112,7 +4196,11 @@ export class YouBrainDaemon {
       reminderDetail: async (id) => {
         const reminder = await readers.reminder(id);
         if (!reminder) return { detail: null };
-        const book = foldEventsCached(store.listEvents());
+        const events = store.listEvents();
+        const issued = events.findLast((event) =>
+          event.type === "reminder.issued" && event.data.reminderId === id);
+        const digestSnapshot = issued?.type === "reminder.issued" ? issued.data.digestConclusions : undefined;
+        const book = foldEventsCached(events);
         const issuedAt = new Date(reminder.issuedAt);
         return {
           detail: reminderDetail({
@@ -4120,6 +4208,7 @@ export class YouBrainDaemon {
             book,
             sourceSessionUpdatedAt: this.#sessionUpdatedAt(true),
             timeZoneOffsetMinutes: timeZoneOffsetMinutes(this.#roles.timezone, issuedAt),
+            ...(digestSnapshot ? { digestSnapshot } : {}),
           }),
         };
       },
@@ -4577,6 +4666,13 @@ export class YouBrainDaemon {
     const wasConsolidationEnabled = this.#roles.consolidation.enabled;
     const prevMainDevice = this.#roles.mainDevice;
     this.#roles = roles;
+    if (prevMainDevice === this.#local.deviceId && !this.#isAnalysisMain()) {
+      this.#store?.setCursor(ANALYSIS_INBOX_CURSOR, "0");
+    }
+    if (prevMainDevice !== roles.mainDevice && this.#isAnalysisMain()) {
+      this.#lastPull = null;
+      this.#lastReminders = null;
+    }
     await writeJsonFile(join(this.#paths.dataDir, "roles.json"), roles);
     this.#applyZone();
     this.#mountOutput();
@@ -4855,7 +4951,7 @@ export class YouBrainDaemon {
         message: `每日沉淀已完成，但有辅助步骤没做完（${lastRun.warnings.join("；")}）`,
       });
     }
-    const processor = resolveWebProcessor(this.#roles);
+    const processor = this.#webProcessor();
     const isLocalProcessor = processor !== null && processor === this.#local.deviceId;
     const indexed = this.#store ? listWebInbox(this.#store) : [];
     const sawWeb = this.#store?.getCursor(WEB_INBOX_SEEN_CURSOR) === "1";
@@ -5041,6 +5137,15 @@ export class YouBrainDaemon {
           ? {}
           : { stepBudgetMs: this.#options.consolidationStepBudgetMs }),
         load: () => (isAlive() ? this.#consolidationViewFrom(store) : this.#consolidationViewFrom(null)),
+        ready: () => this.#run(async () => {
+          if (!isAlive()) return false;
+          if (options.manual) await this.#pullAnalysisInbox();
+          const ready = isAlive() && this.#isAnalysisMain() && this.#analysisInboxReady(MAX_CATCH_UP_DAYS + 1);
+          if (!ready && options.manual) {
+            throw new HttpError(503, "ANALYSIS_INBOX_PENDING", "Drive 会话尚未同步完成，暂未执行沉淀，请稍后重试");
+          }
+          return ready;
+        }),
         emit: async (type, data) => {
           if (!isAlive()) return;
           await this.#emitUser(type, data);

@@ -50,6 +50,7 @@ export interface ConsolidationRuntime {
   historyDays: number;
   clock: { now(): Date; nowMs(): number };
   load: ConsolidationContext["load"];
+  ready?: () => Promise<boolean>;
   emit: ConsolidationContext["emit"];
   cursors: ConsolidationContext["cursors"];
   portrait?: ConsolidationPortrait;
@@ -147,6 +148,9 @@ export async function executeConsolidation(
       attempted: false,
       result: { day: today, ok: true, steps: [], warnings: [] },
     };
+  }
+  if (runtime.ready && !(await runtime.ready())) {
+    return { status: "skipped", reason: "gates", day: today };
   }
   const steps = runtime.steps ?? consolidationSteps();
   let last: ConsolidationRunResult = { day: today, ok: true, steps: [], warnings: [] };

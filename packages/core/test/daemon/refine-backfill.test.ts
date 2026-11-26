@@ -2,12 +2,14 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "bun:test";
+import { eventLogPath } from "@you-brain/protocol";
 
 import { startDaemon, type YouBrainDaemon } from "../../src/daemon/daemon.js";
 import { conversationKey } from "../../src/domain/session.js";
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
 import { SqliteStore } from "../../src/store/sqlite-store.js";
 import { INTERVALS } from "../../src/daemon/schedule.js";
+import { buildEvent } from "../topics/helpers.js";
 import {
   fakeBackend,
   makeDaemonDirs,
@@ -96,6 +98,87 @@ async function open(
 }
 
 describe("refine backfill", () => {
+  it("recovers legacy early-report data from Drive after promotion, without running the source device", async () => {
+    const dirs = await makeDaemonDirs("you-brain-analysis-main-");
+    roots.push(dirs.root);
+    const clock = testClock();
+    const drive = new MemoryDrive({ now: () => clock.now() });
+    const yesterday = new Date(clock.nowMs() - DAY_MS).toISOString();
+    const source = "other-mac";
+    const topicId = "drive-topic";
+    const key = conversationKey("codex", "drive-yesterday");
+    const file = await drive.put({
+      path: `inbox/${source}/codex/drive-yesterday.md`,
+      bytes: sessionMarkdown({ conversationId: "drive-yesterday", updatedAt: yesterday, text: "Yesterday's Drive session" }),
+      mimeType: "text/markdown",
+    });
+    const events = [
+      buildEvent({ device: source, ts: yesterday, seq: 1, type: "session.refined", data: {
+        sessionKey: key, fileId: file.id, source: "codex", title: "旧提炼", summary: "旧摘要", refinedUpTo: 2,
+      } }),
+      buildEvent({ device: source, ts: yesterday, seq: 2, type: "topic.created", data: { topicId, name: "云盘话题", aliases: [] } }),
+      buildEvent({ device: source, ts: yesterday, seq: 3, type: "conclusion.added", data: {
+        conclusionId: "legacy", topicId, sessionKey: key, text: "昨天确认了安排",
+      } }),
+      buildEvent({ device: source, ts: yesterday, seq: 4, type: "todo.added", data: {
+        todoId: "legacy-todo", topicId, sessionKey: key, text: "继续验证", confidence: 0.9,
+      } }),
+    ];
+    await drive.put({
+      path: eventLogPath(source, yesterday.slice(0, 10)),
+      bytes: Buffer.from(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`),
+      mimeType: "application/jsonl",
+    });
+    let canReadSession = false;
+    const tracked = new Proxy(drive, {
+      get(target, property, receiver) {
+        if (property === "read") return async (id: string) => {
+          if (id === file.id && !canReadSession) throw new Error("Drive read temporarily unavailable");
+          return target.read(id);
+        };
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const prompts: string[] = [];
+    const daemon = await open(dirs, { clock, drive: tracked, llm: fakeBackend(async (request) => {
+      prompts.push(request.user);
+      return refineAnswer({ topicId: "00MAINDEVICEUPLOAD0000000", name: "统一提炼" });
+    }) });
+    await sync(daemon);
+    await clock.advance(INTERVALS.tickMs);
+    await daemon.settled();
+    const id = (await readStatus(daemon)).deviceId;
+    const headers = { authorization: `Bearer ${daemon.token}`, "content-type": "application/json" };
+    expect((await fetch(`${daemon.baseUrl}/api/roles`, {
+      method: "PUT", headers, body: JSON.stringify({ mainDevice: id }),
+    })).ok).toBe(true);
+    await daemon.settleConfigPush();
+    const regenerate = () => fetch(`${daemon.baseUrl}/api/actions/morning-digest`, { method: "POST", headers });
+    expect((await regenerate()).status).toBe(503);
+    canReadSession = true;
+    const success = await regenerate();
+    expect(success.status).toBe(200);
+    const digest = await success.json() as { text: string };
+    expect(digest.text).toContain("昨日结论：昨天确认了安排");
+    expect(digest.text).toContain("昨日新增待办 1 件未完成。");
+    expect(digest.text).not.toContain("数据不完整");
+    expect(prompts).toEqual([]);
+
+    await drive.put({
+      path: `inbox/${source}/codex/drive-unrefined.md`,
+      bytes: sessionMarkdown({ conversationId: "drive-unrefined", updatedAt: yesterday, text: "Analyze this from Drive" }),
+      mimeType: "text/markdown",
+    });
+    const partial = await regenerate();
+    expect(partial.status).toBe(200);
+    expect((await partial.json() as { text: string }).text).toContain("数据不完整");
+    await clock.advance(INTERVALS.refineBackfillMs);
+    await daemon.settled();
+    expect(prompts.join("\n")).toContain("Analyze this from Drive");
+    expect(prompts.join("\n")).not.toContain("Yesterday's Drive session");
+  }, 20_000);
+
   it("refines an uploaded session that was never refined, newest first", async () => {
     const dirs = await makeDaemonDirs("you-brain-refine-backfill-");
     roots.push(dirs.root);

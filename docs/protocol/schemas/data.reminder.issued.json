@@ -2,6 +2,29 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
+    "digestConclusions": {
+      "additionalProperties": false,
+      "properties": {
+        "ids": {
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 60,
+          "type": "array"
+        },
+        "total": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ids",
+        "total"
+      ],
+      "type": "object"
+    },
     "kind": {
       "minLength": 1,
       "type": "string"

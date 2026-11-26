@@ -42,6 +42,7 @@ export interface DigestSummary {
   todos: number;
   suggestions: string[];
   recent?: true;
+  note?: string;
 }
 
 export function parseDigest(text: string): DigestSummary | null {
@@ -49,6 +50,7 @@ export function parseDigest(text: string): DigestSummary | null {
   let todos: number | undefined;
   let suggestions: string[] = [];
   let recent = false;
+  let note: string | undefined;
   for (const raw of text.replaceAll("\r\n", "\n").split("\n")) {
     const line = raw.trim();
     if (line === "") continue;
@@ -66,10 +68,11 @@ export function parseDigest(text: string): DigestSummary | null {
     } else if (line === "今天没有特别建议跟进的话题。" || line === "没有需要接续的昨日待办。") suggestions = [];
     else if (line.startsWith("建议跟进：")) suggestions = splitNames(line.slice("建议跟进：".length));
     else if (line.startsWith("今日接续：")) suggestions = splitNames(line.slice("今日接续：".length));
+    else if (line.startsWith("数据不完整：")) note = line;
     else return null;
   }
   if (conclusions === undefined || todos === undefined) return null;
-  return { conclusions, todos, suggestions, ...(recent ? { recent: true } : {}) };
+  return { conclusions, todos, suggestions, ...(recent ? { recent: true } : {}), ...(note ? { note } : {}) };
 }
 
 /** 详情接口返回的结论全文(packages/core/src/reminders/detail.ts),拆成列表项。 */

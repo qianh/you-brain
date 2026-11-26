@@ -4,8 +4,8 @@ import { YouBrainError } from "../domain/errors.js";
 import type { ReminderRecord } from "../store/types.js";
 import { deriveLastActive, partitionTopics } from "../topics/zones.js";
 import type { TopicBook, ZonedTopic } from "../topics/types.js";
-import { digestConclusions, digestFollowUps } from "./digest.js";
-import { digestText, historyText, staleText, weeklyText } from "./text.js";
+import { digestConclusions, digestFollowUps, hasUndatedDigestItems, MAX_DIGEST_CONCLUSIONS, occurrenceTime } from "./digest.js";
+import { DIGEST_INCOMPLETE, digestText, historyText, staleText, weeklyText } from "./text.js";
 import {
   isoWeekKey,
   localDateKey,
@@ -49,12 +49,14 @@ export interface ReminderIssuedData {
   kind: string;
   topicId: string | null;
   text: string;
+  digestConclusions?: { ids: string[]; total: number };
 }
 
 export interface ComputeDueInput {
   book: TopicBook;
   sessionUpdatedAt: Readonly<Record<string, string>>;
   sourceSessionUpdatedAt?: Readonly<Record<string, string>>;
+  pendingMorningRefine?: boolean;
   reminders: readonly ReminderRecord[];
   actions: readonly ReminderActionFact[];
   activeLimit: number;
@@ -121,13 +123,12 @@ export function computeDueReminders(input: ComputeDueInput): ReminderIssuedData[
 
   if (timeReached(parts, input.morningDigestTime)) {
     const morningId = `morning:${localDateKey(parts)}`;
-    if (input.regenerateMorningDigest === true || !existing.has(morningId)) {
-      due.push({
-        reminderId: morningId,
-        kind: REMINDER_KIND.morningDigest,
-        topicId: null,
-        text: morningBody(input, nowMs, parts),
-      });
+    const previous = input.reminders.find((item) => item.reminderId === morningId);
+    if (input.regenerateMorningDigest === true || !previous || previous.text.includes(DIGEST_INCOMPLETE)) {
+      const body = morningBody(input, nowMs, parts);
+      if (input.regenerateMorningDigest === true || previous?.text !== body.text) {
+        due.push({ reminderId: morningId, kind: REMINDER_KIND.morningDigest, topicId: null, ...body });
+      }
     }
   }
 
@@ -245,7 +246,7 @@ function morningBody(
   input: ComputeDueInput,
   nowMs: number,
   parts: ReturnType<typeof localParts>,
-): string {
+) {
   const day = {
     book: input.book,
     day: localDateKey(shiftDays(parts, -1)),
@@ -253,8 +254,18 @@ function morningBody(
     sourceSessionUpdatedAt: input.sourceSessionUpdatedAt ?? input.sessionUpdatedAt,
     asOf: nowMs,
   };
-  const conclusions = digestConclusions(day).map((item) => item.text);
-  return digestText({ conclusions, ...digestFollowUps(day, DIGEST_SUGGESTION_LIMIT) });
+  const conclusions = digestConclusions(day);
+  return {
+    text: digestText({
+      conclusions: conclusions.map((item) => item.text),
+      ...digestFollowUps(day, DIGEST_SUGGESTION_LIMIT),
+      incomplete: input.pendingMorningRefine || hasUndatedDigestItems(day),
+    }),
+    digestConclusions: {
+      ids: conclusions.slice(0, MAX_DIGEST_CONCLUSIONS).map((item) => item.conclusionId),
+      total: conclusions.length,
+    },
+  };
 }
 
 function weeklyBody(
@@ -265,13 +276,17 @@ function weeklyBody(
   week: string,
 ): string {
   const visible = [...active, ...history];
+  const lastContent = deriveLastActive(input.book, input.sessionUpdatedAt);
   const activeCount = visible.filter((topic) =>
-    inWeek(topic.lastActive, week, input.timeZoneOffsetMinutes),
-  ).length;
-  const conclusionCount = input.book.conclusions.filter((item) =>
-    inWeek(item.ts, week, input.timeZoneOffsetMinutes),
+    inWeek(lastContent.get(topic.topicId) ?? null, week, input.timeZoneOffsetMinutes),
   ).length;
   const nowMs = Date.parse(input.now);
+  const sourceDates = input.sourceSessionUpdatedAt ?? input.sessionUpdatedAt;
+  const conclusionCount = input.book.conclusions.filter((item) => {
+    const occurred = occurrenceTime(item, sourceDates, input.timeZoneOffsetMinutes);
+    return Date.parse(item.ts) <= nowMs && occurred <= nowMs &&
+      isoWeekKey(localParts(occurred, input.timeZoneOffsetMinutes)) === week;
+  }).length;
   const staleNames = active
     .filter((topic) => {
       if ((openTodos.get(topic.topicId) ?? 0) === 0 || topic.lastActive === null) return false;
