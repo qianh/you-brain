@@ -11,6 +11,7 @@ import {
   staleText,
   textLength,
   type ComputeDueInput,
+  type ReminderIssuedData,
 } from "../../src/reminders/index.js";
 import {
   isoWeekKey,
@@ -25,9 +26,9 @@ import { DAY, KEY_A, KEY_B, KEY_C, at, topicEvents } from "./fixture.js";
 const NOW = "2026-10-21T16:30:00.000Z";
 const NOW_MS = Date.parse(NOW);
 
-function reminderIssued(item: { reminderId: string; kind: string; topicId: string | null; text: string } | undefined) {
+function reminderIssued(item: ReminderIssuedData | undefined, ts = NOW) {
   if (!item) throw new Error("missing reminder");
-  return buildEvent({ type: "reminder.issued", data: item, device: "device-a", ts: NOW, seq: 9_999 });
+  return buildEvent({ type: "reminder.issued", data: item, device: "device-a", ts, seq: 9_999 });
 }
 
 function due(
@@ -440,9 +441,48 @@ describe("computeDueReminders", () => {
       sessionUpdatedAt: { [KEY_B]: yesterday, [KEY_C]: yesterday },
       sourceSessionUpdatedAt: {},
     });
-    expect(items.find((item) => item.kind === "morning_digest")?.text).toBe(
-      "昨日结论：recent\n昨日新增待办 1 件未完成。\n今日接续：昨日项目。\n数据不完整：部分会话尚未提炼或无法确认发生日期。",
-    );
+    expect(items.find((item) => item.kind === "morning_digest")).toMatchObject({
+      text: "昨日结论：recent\n昨日新增待办 1 件未完成。\n今日接续：昨日项目。",
+      digestConclusions: { ids: ["recent"], total: 1, incomplete: true },
+    });
+  });
+
+  it("replaces a four-line digest and clears its detail warning without changing the three-line body", () => {
+    const yesterday = at(NOW_MS - DAY);
+    const base = {
+      deviceId: "device-a",
+      mainDevice: "device-a",
+      notifications: false,
+      events: topicEvents({ topicId: "topic", name: "方案", key: KEY_A, at: yesterday }),
+      sessionUpdatedAt: { [KEY_A]: yesterday },
+      activeLimit: 10,
+      historyDays: 30,
+      morningDigestTime: "08:00",
+      weeklyReviewDay: 7,
+      weeklyReviewTime: "23:59",
+      now: NOW,
+      timeZoneOffsetMinutes: 0,
+    };
+    const morning = (input: Parameters<typeof dueRemindersForDevice>[0]) =>
+      dueRemindersForDevice(input).find((item) => item.kind === "morning_digest");
+    const text = "昨日没有新结论。\n昨日新增待办 1 件未完成。\n今日接续：方案。";
+    const legacy = reminderIssued({
+      reminderId: "morning:2026-10-21",
+      kind: "morning_digest",
+      topicId: null,
+      text: `${text}\n数据不完整：部分会话尚未提炼或无法确认发生日期。`,
+      digestConclusions: { ids: [], total: 0 },
+    }, at(NOW_MS - 1_000));
+    const repaired = morning({ ...base, events: [...base.events, legacy], pendingMorningRefine: true });
+    expect(repaired).toMatchObject({ reminderId: legacy.data.reminderId, text, digestConclusions: { incomplete: true } });
+
+    const repairedEvent = reminderIssued(repaired);
+    const afterRepair = { ...base, events: [...base.events, repairedEvent, legacy] };
+    expect(morning({ ...afterRepair, pendingMorningRefine: true })).toBeUndefined();
+    const complete = morning(afterRepair);
+    expect(complete).toMatchObject({ reminderId: legacy.data.reminderId, text });
+    expect(complete?.digestConclusions).toEqual({ ids: [], total: 0 });
+    expect(morning({ ...afterRepair, events: [...afterRepair.events, reminderIssued(complete, at(NOW_MS + 1_000))] })).toBeUndefined();
   });
 
   it("regenerates today's digest with the same id even after it was issued", () => {

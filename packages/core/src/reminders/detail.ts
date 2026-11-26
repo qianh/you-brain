@@ -1,7 +1,7 @@
 import type { TopicBook } from "../topics/types.js";
 import { digestConclusions, MAX_DIGEST_CONCLUSIONS } from "./digest.js";
-import { REMINDER_KIND } from "./due.js";
-import { DIGEST_FOLLOW_PREFIX, DIGEST_TODO_PREFIX } from "./text.js";
+import { REMINDER_KIND, type DigestSnapshot } from "./due.js";
+import { DIGEST_FOLLOW_PREFIX, DIGEST_INCOMPLETE, DIGEST_TODO_PREFIX, hasLegacyDigestWarning } from "./text.js";
 import { localDateKey, localParts } from "./time.js";
 
 /**
@@ -17,7 +17,7 @@ export function reminderDetail(input: {
   book: TopicBook;
   timeZoneOffsetMinutes: number;
   sourceSessionUpdatedAt?: Readonly<Record<string, string>>;
-  digestSnapshot?: { ids: readonly string[]; total: number };
+  digestSnapshot?: DigestSnapshot;
 }): string | null {
   if (input.reminder.kind !== REMINDER_KIND.morningDigest) return null;
   const yesterday = dayBefore(input.reminder.reminderId);
@@ -41,6 +41,7 @@ export function reminderDetail(input: {
 
   const total = input.digestSnapshot?.total ?? conclusions.length;
   const lines: string[] = [];
+  const notes: string[] = [];
   if (total === 0) {
     lines.push("昨日没有新结论。");
   } else {
@@ -50,11 +51,13 @@ export function reminderDetail(input: {
       lines.push(`${index + 1}. ${item.text.replace(/[\r\n]+/gu, " ").trim()}${topic ? `  —— ${topic}` : ""}`);
     });
     if (input.digestSnapshot && conclusions.length < input.digestSnapshot.ids.length) {
-      lines.push("……部分结论尚未同步到本机。");
+      notes.push("部分结论尚未同步到本机。");
     } else if (total > MAX_DIGEST_CONCLUSIONS) {
-      lines.push(`……还有 ${total - MAX_DIGEST_CONCLUSIONS} 条较早的结论,在话题册里查看。`);
+      notes.push(`还有 ${total - MAX_DIGEST_CONCLUSIONS} 条较早的结论,在话题册里查看。`);
     }
   }
+  if (input.digestSnapshot?.incomplete || hasLegacyDigestWarning(input.reminder.text)) notes.push(DIGEST_INCOMPLETE);
+  if (notes.length > 0) lines.push(`……${notes.join("")}`);
 
   const suggestions = fullSuggestionNames(input.reminder.text, [...names.values()]);
   if (suggestions.length > 0) {

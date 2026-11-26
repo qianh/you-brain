@@ -159,7 +159,7 @@ describe("refine backfill", () => {
     canReadSession = true;
     const success = await regenerate();
     expect(success.status).toBe(200);
-    const digest = await success.json() as { text: string };
+    const digest = await success.json() as { reminderId: string; text: string };
     expect(digest.text).toContain("昨日结论：昨天确认了安排");
     expect(digest.text).toContain("昨日新增待办 1 件未完成。");
     expect(digest.text).not.toContain("数据不完整");
@@ -172,11 +172,20 @@ describe("refine backfill", () => {
     });
     const partial = await regenerate();
     expect(partial.status).toBe(200);
-    expect((await partial.json() as { text: string }).text).toContain("数据不完整");
+    expect(await partial.json()).toEqual(digest);
+    const readDetail = async () => {
+      const response = await fetch(`${daemon.baseUrl}/api/reminder-detail?id=${encodeURIComponent(digest.reminderId)}`, { headers });
+      expect(response.status).toBe(200);
+      return (await response.json() as { detail: string }).detail;
+    };
+    expect(await readDetail()).toContain("……数据不完整");
     await clock.advance(INTERVALS.refineBackfillMs);
     await daemon.settled();
     expect(prompts.join("\n")).toContain("Analyze this from Drive");
     expect(prompts.join("\n")).not.toContain("Yesterday's Drive session");
+    const complete = await regenerate();
+    expect(complete.status).toBe(200);
+    expect(await readDetail()).not.toContain("数据不完整");
   }, 20_000);
 
   it("refines an uploaded session that was never refined, newest first", async () => {

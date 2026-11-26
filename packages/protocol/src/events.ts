@@ -104,7 +104,11 @@ export const ReminderIssuedDataSchema = z.object({
   text: z.string().min(1),
   /** The session the reminder was drawn from. Older events and reminders with no single source leave it out. */
   sessionKey: SessionKeySchema.optional(),
-  digestConclusions: z.object({ ids: z.array(IdSchema).max(60), total: z.number().int().nonnegative() }).optional(),
+  digestConclusions: z.object({
+    ids: z.array(IdSchema).max(60),
+    total: z.number().int().nonnegative(),
+    incomplete: z.literal(true).optional(),
+  }).optional(),
 });
 
 export const ReminderActionDataSchema = z.object({

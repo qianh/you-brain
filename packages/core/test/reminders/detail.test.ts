@@ -41,6 +41,14 @@ describe("reminderDetail", () => {
     expect(detail).not.toContain("手环配对要先清除旧绑定");
   });
 
+  test("keeps the completeness and local sync warnings together in the existing detail note format", () => {
+    const digestSnapshot = { ids: ["c1", "missing"], total: 2, incomplete: true as const };
+    const detail = reminderDetail({ reminder: digest, book, digestSnapshot, timeZoneOffsetMinutes: 0 });
+    expect(detail?.split("\n").filter((line) => line.startsWith("……"))).toEqual([
+      "……部分结论尚未同步到本机。数据不完整：部分会话尚未提炼或无法确认发生日期。",
+    ]);
+  });
+
   test("晨间摘要:列出昨日结论全文与话题,还原被截短的建议话题全名", () => {
     const detail = reminderDetail({ reminder: digest, book, timeZoneOffsetMinutes: 480 });
     expect(detail).toContain("昨日结论（2 条）");

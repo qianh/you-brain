@@ -1,6 +1,7 @@
-import type { Event } from "@you-brain/protocol";
+import type { Event, EventOf } from "@you-brain/protocol";
 
 import { foldEventsCached } from "../topics/book-cache.js";
+import { compareEvents } from "../topics/order.js";
 import {
   REMINDER_KIND,
   computeDueReminders,
@@ -61,6 +62,14 @@ function computeInput(input: DueDeviceInput): ComputeDueInput {
     ...(input.sourceSessionUpdatedAt ? { sourceSessionUpdatedAt: input.sourceSessionUpdatedAt } : {}),
     ...(input.pendingMorningRefine ? { pendingMorningRefine: true } : {}),
     reminders: foldReminders(input.events),
+    getMorningDigestSnapshot(reminderId) {
+      let latest: EventOf<"reminder.issued"> | undefined;
+      for (const event of input.events) {
+        if (event.type !== "reminder.issued" || event.data.reminderId !== reminderId) continue;
+        if (!latest || compareEvents(event, latest) > 0) latest = event;
+      }
+      return latest?.data.digestConclusions;
+    },
     actions: reminderActions(input.events),
     activeLimit: input.activeLimit,
     historyDays: input.historyDays,

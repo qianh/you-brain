@@ -1,11 +1,11 @@
-import type { ReminderAction } from "@you-brain/protocol";
+import type { EventOf, ReminderAction } from "@you-brain/protocol";
 
 import { YouBrainError } from "../domain/errors.js";
 import type { ReminderRecord } from "../store/types.js";
 import { deriveLastActive, partitionTopics } from "../topics/zones.js";
 import type { TopicBook, ZonedTopic } from "../topics/types.js";
 import { digestConclusions, digestFollowUps, hasUndatedDigestItems, MAX_DIGEST_CONCLUSIONS, occurrenceTime } from "./digest.js";
-import { DIGEST_INCOMPLETE, digestText, historyText, staleText, weeklyText } from "./text.js";
+import { digestText, hasLegacyDigestWarning, historyText, staleText, weeklyText } from "./text.js";
 import {
   isoWeekKey,
   localDateKey,
@@ -44,12 +44,14 @@ export interface ReminderActionFact {
   ts: string;
 }
 
+export type DigestSnapshot = NonNullable<EventOf<"reminder.issued">["data"]["digestConclusions"]>;
+
 export interface ReminderIssuedData {
   reminderId: string;
   kind: string;
   topicId: string | null;
   text: string;
-  digestConclusions?: { ids: string[]; total: number };
+  digestConclusions?: DigestSnapshot;
 }
 
 export interface ComputeDueInput {
@@ -58,6 +60,7 @@ export interface ComputeDueInput {
   sourceSessionUpdatedAt?: Readonly<Record<string, string>>;
   pendingMorningRefine?: boolean;
   reminders: readonly ReminderRecord[];
+  getMorningDigestSnapshot?: (reminderId: string) => DigestSnapshot | undefined;
   actions: readonly ReminderActionFact[];
   activeLimit: number;
   historyDays: number;
@@ -124,9 +127,10 @@ export function computeDueReminders(input: ComputeDueInput): ReminderIssuedData[
   if (timeReached(parts, input.morningDigestTime)) {
     const morningId = `morning:${localDateKey(parts)}`;
     const previous = input.reminders.find((item) => item.reminderId === morningId);
-    if (input.regenerateMorningDigest === true || !previous || previous.text.includes(DIGEST_INCOMPLETE)) {
+    const previousSnapshot = previous ? input.getMorningDigestSnapshot?.(morningId) : undefined;
+    if (input.regenerateMorningDigest === true || !previous || previousSnapshot?.incomplete || hasLegacyDigestWarning(previous.text)) {
       const body = morningBody(input, nowMs, parts);
-      if (input.regenerateMorningDigest === true || previous?.text !== body.text) {
+      if (input.regenerateMorningDigest === true || previous?.text !== body.text || !sameDigestSnapshot(previousSnapshot, body.digestConclusions)) {
         due.push({ reminderId: morningId, kind: REMINDER_KIND.morningDigest, topicId: null, ...body });
       }
     }
@@ -246,7 +250,7 @@ function morningBody(
   input: ComputeDueInput,
   nowMs: number,
   parts: ReturnType<typeof localParts>,
-) {
+): { text: string; digestConclusions: DigestSnapshot } {
   const day = {
     book: input.book,
     day: localDateKey(shiftDays(parts, -1)),
@@ -259,13 +263,18 @@ function morningBody(
     text: digestText({
       conclusions: conclusions.map((item) => item.text),
       ...digestFollowUps(day, DIGEST_SUGGESTION_LIMIT),
-      incomplete: input.pendingMorningRefine || hasUndatedDigestItems(day),
     }),
     digestConclusions: {
       ids: conclusions.slice(0, MAX_DIGEST_CONCLUSIONS).map((item) => item.conclusionId),
       total: conclusions.length,
+      ...(input.pendingMorningRefine || hasUndatedDigestItems(day) ? { incomplete: true } : {}),
     },
   };
+}
+
+function sameDigestSnapshot(previous: DigestSnapshot | undefined, current: DigestSnapshot): boolean {
+  return previous !== undefined && previous.incomplete === current.incomplete && previous.total === current.total &&
+    previous.ids.length === current.ids.length && previous.ids.every((id, index) => id === current.ids[index]);
 }
 
 function weeklyBody(
