@@ -259,22 +259,32 @@ function morningBody(
     asOf: nowMs,
   };
   const conclusions = digestConclusions(day);
+  const { todoIds, suggestions } = digestFollowUps(day, DIGEST_SUGGESTION_LIMIT);
   return {
     text: digestText({
       conclusions: conclusions.map((item) => item.text),
-      ...digestFollowUps(day, DIGEST_SUGGESTION_LIMIT),
+      openTodoCount: todoIds.length,
+      suggestions: suggestions.map(({ name }) => name),
     }),
     digestConclusions: {
       ids: conclusions.slice(0, MAX_DIGEST_CONCLUSIONS).map((item) => item.conclusionId),
       total: conclusions.length,
       ...(input.pendingMorningRefine || hasUndatedDigestItems(day) ? { incomplete: true } : {}),
+      followUps: { todoIds, topicIds: suggestions.map(({ topicId }) => topicId) },
     },
   };
 }
 
 function sameDigestSnapshot(previous: DigestSnapshot | undefined, current: DigestSnapshot): boolean {
   return previous !== undefined && previous.incomplete === current.incomplete && previous.total === current.total &&
-    previous.ids.length === current.ids.length && previous.ids.every((id, index) => id === current.ids[index]);
+    sameIds(previous.ids, current.ids) &&
+    sameIds(previous.followUps?.todoIds, current.followUps?.todoIds) &&
+    sameIds(previous.followUps?.topicIds, current.followUps?.topicIds);
+}
+
+function sameIds(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+  return left === right || (left !== undefined && right !== undefined &&
+    left.length === right.length && left.every((id, index) => id === right[index]));
 }
 
 function weeklyBody(

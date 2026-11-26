@@ -171,6 +171,7 @@ export function PanelPage() {
               <div className="panel-alerts">
                 <ReminderList
                   reminders={reminders}
+                  topics={topics}
                   layout="panel"
                   timeZone={timeZone}
                   t={t}
@@ -186,7 +187,7 @@ export function PanelPage() {
                     }
                     push({ message: t("reminderAddedTodo"), tone: "success" });
                   }}
-                  loadDetail={(reminderId) => client.reminderDetail(reminderId).then((result) => result.detail)}
+                  loadDetail={(reminderId) => client.reminderDetail(reminderId)}
                 />
               </div>
             ) : null}

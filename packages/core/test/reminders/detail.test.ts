@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { reminderDetail } from "../../src/reminders/detail.js";
+import { reminderDetail, reminderDetailResponse } from "../../src/reminders/detail.js";
 import type { TopicBook } from "../../src/topics/types.js";
 
 const book = {
@@ -96,5 +96,46 @@ describe("reminderDetail", () => {
     expect(detail).not.toContain("用户要求指挥台");
     expect(detail).not.toContain("今天的");
     expect(detail).toContain("今日接续\n· ESP32 Muse 手环固件联调与蓝牙配对问题排查");
+  });
+});
+
+describe("morning digest todo details", () => {
+  const todo: TopicBook["todos"][number] = {
+    todoId: "yesterday-todo",
+    topicId: "t2",
+    sessionKey: "handheld",
+    text: "验证蓝牙配对",
+    status: "open",
+    statusBy: "auto",
+    confidence: 0.9,
+    ts: "2026-11-02T09:00:00.000Z",
+    occurredAt: "2026-11-02T08:00:00.000Z",
+    userLocked: false,
+  };
+  const oldTodo = { ...todo, todoId: "old", occurredAt: "2026-11-01T08:00:00.000Z" };
+  const atIssue = { ...book, todos: [todo, oldTodo] };
+  const input = {
+    reminder: {
+      ...digest,
+      issuedAt: "2026-11-03T01:00:00.000Z",
+      text: "昨日没有新结论。\n昨日新增待办 1 件未完成。\n今日接续：ESP32 Muse …。",
+    },
+    book: { ...book, todos: [{ ...todo, status: "done" as const }, oldTodo] },
+    timeZoneOffsetMinutes: 480,
+  };
+  const expected = [{ todoId: "yesterday-todo", topicId: "t2", sessionKey: "handheld", text: "验证蓝牙配对" }];
+
+  test("reads the frozen selection even after a todo is completed, keeping text detail for older clients", () => {
+    const result = reminderDetailResponse({
+      ...input,
+      digestSnapshot: { ids: [], total: 0, followUps: { todoIds: [todo.todoId], topicIds: [todo.topicId] } },
+    });
+    expect(result.todos).toEqual(expected);
+    expect(result.detail).toContain("昨日没有新结论。");
+  });
+
+  test("reconstructs pre-snapshot reports at issue time only if the count agrees", () => {
+    expect(reminderDetailResponse(input, () => atIssue).todos).toEqual(expected);
+    expect(reminderDetailResponse(input, () => input.book).todos).toBeUndefined();
   });
 });

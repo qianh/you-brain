@@ -317,6 +317,7 @@ describe("computeDueReminders", () => {
     const digest = items.find((item) => item.kind === "morning_digest");
     expect(digest?.text).toContain("今日接续：一、二、三、四、五。");
     expect(digest?.text).not.toContain("六");
+    expect(digest?.digestConclusions?.followUps?.topicIds).toEqual(["t0", "t1", "t2", "t3", "t4"]);
   });
 
   it("uses yesterday's actual progress and leaves old or completed todos out of the digest", () => {
@@ -383,6 +384,7 @@ describe("computeDueReminders", () => {
     expect(digest?.text).toContain("昨日结论：记下了");
     expect(digest?.text).toContain("昨日新增待办 1 件未完成。");
     expect(digest?.text).toContain("今日接续：恢复推进的老项目。");
+    expect(digest?.digestConclusions?.followUps).toEqual({ todoIds: ["new"], topicIds: ["resumed"] });
     expect(digest?.text).not.toContain("旧话题补提炼");
     for (const line of digest?.text.split("\n") ?? []) {
       expect(textLength(line)).toBeLessThanOrEqual(80);
@@ -481,7 +483,8 @@ describe("computeDueReminders", () => {
     expect(morning({ ...afterRepair, pendingMorningRefine: true })).toBeUndefined();
     const complete = morning(afterRepair);
     expect(complete).toMatchObject({ reminderId: legacy.data.reminderId, text });
-    expect(complete?.digestConclusions).toEqual({ ids: [], total: 0 });
+    expect(complete?.digestConclusions).toMatchObject({ ids: [], total: 0 });
+    expect(complete?.digestConclusions?.incomplete).toBeUndefined();
     expect(morning({ ...afterRepair, events: [...afterRepair.events, reminderIssued(complete, at(NOW_MS + 1_000))] })).toBeUndefined();
   });
 

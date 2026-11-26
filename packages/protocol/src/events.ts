@@ -108,6 +108,10 @@ export const ReminderIssuedDataSchema = z.object({
     ids: z.array(IdSchema).max(60),
     total: z.number().int().nonnegative(),
     incomplete: z.literal(true).optional(),
+    followUps: z.object({
+      todoIds: z.array(IdSchema),
+      topicIds: z.array(IdSchema).max(5),
+    }).optional(),
   }).optional(),
 });
 

@@ -205,6 +205,7 @@ export function TodayPage() {
                 <div className={showAllReminders ? "today-reminders-list is-open" : "today-reminders-list"}>
                   <ReminderList
                     reminders={showAllReminders ? reminders : reminders.slice(0, REMINDERS_PREVIEW)}
+                    topics={topics}
                     layout="today"
                     timeZone={timeZone}
                     t={t}
@@ -221,7 +222,7 @@ export function TodayPage() {
                       window.dispatchEvent(new CustomEvent("you-brain-refresh"));
                       push({ message: t("reminderAddedTodo"), tone: "success" });
                     }}
-                    loadDetail={(reminderId) => client.reminderDetail(reminderId).then((result) => result.detail)}
+                    loadDetail={(reminderId) => client.reminderDetail(reminderId)}
                   />
                 </div>
               </div>

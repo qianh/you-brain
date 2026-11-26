@@ -1,5 +1,5 @@
-import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import type { ReminderView } from "@you-brain/core/http/types.js";
+import { useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import type { ReminderDetailResponse, ReminderView, TopicListItem } from "@you-brain/core/http/types.js";
 
 import { Banner } from "../../components/banner.js";
 import { Button, IconButton } from "../../components/button.js";
@@ -9,6 +9,7 @@ import { Spinner } from "../../components/spinner.js";
 import { useToast } from "../../components/toast.js";
 import type { MessageKey } from "../../i18n/messages.js";
 import {
+  digestTopicLinks,
   isDigestReminder,
   isRecallReminder,
   parseDigest,
@@ -30,9 +31,12 @@ const SNOOZE_LABEL: Record<SnoozeChoice, MessageKey> = {
 };
 
 type PendingKind = ReminderActionName | "todo";
+type LoadDetail = (reminderId: string) => Promise<ReminderDetailResponse>;
+type DigestTopic = Pick<TopicListItem, "topicId" | "name">;
 
 export function ReminderList({
   reminders,
+  topics,
   layout,
   timeZone,
   t,
@@ -42,6 +46,7 @@ export function ReminderList({
   loadDetail,
 }: {
   reminders: readonly ReminderView[];
+  topics: readonly DigestTopic[];
   layout: "today" | "panel";
   timeZone: string;
   t: Translate;
@@ -51,7 +56,7 @@ export function ReminderList({
   /** 快速把提醒内容转入 /todos 跟进。 */
   onAddTodo?: ((reminder: ReminderView) => Promise<void>) | undefined;
   /** 取提醒被截短的原文;不传就不显示「查看详情」。 */
-  loadDetail?: ((reminderId: string) => Promise<string | null>) | undefined;
+  loadDetail?: LoadDetail | undefined;
 }) {
   const { push } = useToast();
   const [pending, setPending] = useState<{ id: string; action: PendingKind } | null>(null);
@@ -86,6 +91,7 @@ export function ReminderList({
         <ReminderCard
           key={reminder.reminderId}
           reminder={reminder}
+          topics={topics}
           layout={layout}
           timeZone={timeZone}
           busy={pending?.id === reminder.reminderId ? pending.action : null}
@@ -103,6 +109,7 @@ export function ReminderList({
 
 type CardProps = {
   reminder: ReminderView;
+  topics?: readonly DigestTopic[] | undefined;
   layout: "today" | "panel";
   timeZone: string;
   busy: PendingKind | null;
@@ -111,61 +118,63 @@ type CardProps = {
   onAction: (action: ReminderActionName, until?: string) => void;
   onOpenTopic: (topicId: string, sessionKey: string | null) => void;
   onAddTodo?: (() => void) | undefined;
-  loadDetail?: ((reminderId: string) => Promise<string | null>) | undefined;
+  loadDetail?: LoadDetail | undefined;
 };
 
 export function ReminderCard(props: CardProps) {
   const summary = props.reminder.kind === "morning_digest" ? parseDigest(props.reminder.text) : null;
-  return summary ? <DigestCard {...props} summary={summary} /> : <PlainReminderCard {...props} />;
+  return summary ? (
+    <DigestCard key={`${props.reminder.issuedAt}|${props.reminder.text}`} {...props} summary={summary} />
+  ) : <PlainReminderCard {...props} />;
 }
+
+type DigestSection = "conclusions" | "todos";
 
 /**
  * 晨间摘要:正文里被截短的第一条结论对阅读没有帮助,卡片只放两个数字和建议跟进的话题,
  * 结论全文按需从详情接口取来,逐条列出并标出所在话题。按钮统一放在底栏。
  */
-function DigestCard({ reminder, busy, locked, t, onAction, loadDetail, summary }: CardProps & { summary: DigestSummary }) {
-  const [detail, setDetail] = useState<string | null | undefined>(undefined);
-  const [detailOpen, setDetailOpen] = useState(false);
+function DigestCard({ reminder, topics = [], busy, locked, t, onAction, onOpenTopic, loadDetail, summary }: CardProps & { summary: DigestSummary }) {
+  const detailId = useId();
+  const [detail, setDetail] = useState<ReminderDetailResponse>();
+  const [section, setSection] = useState<DigestSection | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
-  const parsed = detail ? parseDigestDetail(detail) : null;
-  const canDetail = loadDetail !== undefined && summary.conclusions > 0 && detail !== null;
-  const toggleDetail = (): void => {
-    if (detailOpen) {
-      setDetailOpen(false);
-      return;
-    }
-    if (detail !== undefined || loadDetail === undefined) {
-      setDetailOpen(true);
-      return;
-    }
+  const [detailFailed, setDetailFailed] = useState(false);
+  const parsed = detail?.detail ? parseDigestDetail(detail.detail) : null;
+  const canConclusions = loadDetail !== undefined && summary.conclusions > 0;
+  const canTodos = loadDetail !== undefined && summary.recent === true && summary.todos > 0;
+  const fetchDetail = (): void => {
+    if (!loadDetail || detailLoading) return;
     setDetailLoading(true);
+    setDetailFailed(false);
     void loadDetail(reminder.reminderId)
-      .then((text) => {
-        setDetail(text);
-        setDetailOpen(text !== null);
-      })
-      .catch(() => setDetail(null))
+      .then(setDetail)
+      .catch(() => setDetailFailed(true))
       .finally(() => setDetailLoading(false));
   };
-  // 详情里有话题全名,取到后替换掉正文里被截短的名字。
-  const suggestions = parsed && parsed.suggestions.length > 0 ? parsed.suggestions : summary.suggestions;
+  const toggleDetail = (next: DigestSection): void => {
+    if (section === next) {
+      setSection(null);
+      return;
+    }
+    setSection(next);
+    if (detail === undefined) fetchDetail();
+  };
+  const suggestions = digestTopicLinks(summary.suggestions, reminder.digestFollowUpTopicIds, topics);
+  const todoLabel = t(summary.recent ? "digestRecentTodos" : "digestTodos");
 
   const footer = (
     <>
-      {canDetail ? (
+      {canConclusions ? (
         <span className="reminder-links">
           <button
             type="button"
             className="reminder-expand"
-            aria-expanded={detailOpen}
-            disabled={detailLoading}
-            onClick={toggleDetail}
+            aria-controls={detailId}
+            aria-expanded={section === "conclusions"}
+            onClick={() => toggleDetail("conclusions")}
           >
-            {detailOpen
-              ? t("digestHideConclusions")
-              : detailLoading
-                ? `${t("digestViewConclusions")}…`
-                : t("digestViewConclusions")}
+            {t(section === "conclusions" ? "digestHideConclusions" : "digestViewConclusions")}
           </button>
         </span>
       ) : null}
@@ -179,32 +188,79 @@ function DigestCard({ reminder, busy, locked, t, onAction, loadDetail, summary }
     <Banner tone="info" className="reminder-banner digest-banner" action={footer} actionBelow>
       <span className="digest-title">{t("digestTitle")}</span>
       <span className="digest-stats">
-        <span className="digest-stat">
-          <span className="digest-stat-value">{summary.conclusions}</span>
-          <span className="digest-stat-label">{t("digestConclusions")}</span>
-        </span>
-        <span className="digest-stat">
-          <span className="digest-stat-value">{summary.todos}</span>
-          <span className="digest-stat-label">{t(summary.recent ? "digestRecentTodos" : "digestTodos")}</span>
-        </span>
+        <DigestStat
+          value={summary.conclusions}
+          label={t("digestConclusions")}
+          detailId={detailId}
+          expanded={section === "conclusions"}
+          onToggle={canConclusions ? () => toggleDetail("conclusions") : undefined}
+        />
+        <DigestStat
+          value={summary.todos}
+          label={todoLabel}
+          detailId={detailId}
+          expanded={section === "todos"}
+          onToggle={canTodos ? () => toggleDetail("todos") : undefined}
+        />
       </span>
       {summary.note ? <span className="digest-note">{summary.note}</span> : null}
       {suggestions.length > 0 ? (
         <span className="digest-follow">
           <span className="digest-label">{t(summary.recent ? "digestContinue" : "digestFollow")}</span>
           <ol className="digest-follow-list">
-            {suggestions.map((name, index) => (
-              <li key={name} className="digest-follow-item" title={name}>
-                <span className="digest-follow-rank">{index + 1}</span>
-                <span className="digest-follow-name">{name}</span>
-              </li>
-            ))}
+            {suggestions.map(({ name, topicId }, index) => {
+              const content = (
+                <>
+                  <span className="digest-follow-rank" aria-hidden="true">{index + 1}</span>
+                  <span className="digest-follow-name">{name}</span>
+                </>
+              );
+              return (
+                <li key={`${index}:${name}`} className="digest-follow-item" title={name}>
+                  {topicId === null ? <span className="digest-follow-content">{content}</span> : (
+                    <button type="button" className="digest-follow-content" onClick={() => onOpenTopic(topicId, null)}>
+                      {content}
+                      <Icon name="chevron-right" size={13} />
+                    </button>
+                  )}
+                </li>
+              );
+            })}
           </ol>
         </span>
       ) : null}
-      {detailOpen && detail ? (
-        parsed ? (
-          <span className="digest-detail">
+      <div id={detailId} hidden={section === null}>
+        {section === null ? null : detailLoading ? (
+          <span className="digest-note" role="status">{t("digestDetailLoading")}</span>
+        ) : detailFailed ? (
+          <span className="digest-note" role="status">
+            {t("actionFailed")} <button type="button" className="reminder-expand" onClick={fetchDetail}>{t("retry")}</button>
+          </span>
+        ) : section === "todos" ? (
+          <div className="digest-detail" tabIndex={0} aria-label={todoLabel}>
+            {detail?.todos?.length ? (
+              <ol className="digest-list">
+                {detail.todos.map((todo) => {
+                  const topic = topics.find(({ topicId }) => topicId === todo.topicId);
+                  return (
+                    <li key={todo.todoId}>
+                      <span className="digest-item-text">{todo.text}</span>
+                      {topic ? (
+                        <button type="button" className="reminder-expand digest-item-topic" onClick={() => onOpenTopic(topic.topicId, todo.sessionKey)}>
+                          {topic.name}
+                        </button>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ol>
+            ) : null}
+            {detail?.todos === undefined || detail.todos.length < summary.todos ? (
+              <span className="digest-note">{t("digestTodosUnavailable")}</span>
+            ) : null}
+          </div>
+        ) : parsed ? (
+          <div className="digest-detail" tabIndex={0} aria-label={t("digestConclusions")}>
             <ol className="digest-list">
               {parsed.conclusions.map((item, index) => (
                 <li key={index}>
@@ -214,13 +270,34 @@ function DigestCard({ reminder, busy, locked, t, onAction, loadDetail, summary }
               ))}
             </ol>
             {parsed.note ? <span className="digest-note">{parsed.note}</span> : null}
-          </span>
+          </div>
         ) : (
-          <div className="reminder-detail">{detail}</div>
-        )
-      ) : null}
+          <div className="reminder-detail">{detail?.detail ?? t("digestDetailUnavailable")}</div>
+        )}
+      </div>
     </Banner>
   );
+}
+
+function DigestStat({ value, label, detailId, expanded, onToggle }: {
+  value: number;
+  label: string;
+  detailId: string;
+  expanded: boolean;
+  onToggle: (() => void) | undefined;
+}) {
+  const content = (
+    <>
+      <span className="digest-stat-value">{value}</span>
+      <span className="digest-stat-label">{label}</span>
+    </>
+  );
+  return onToggle ? (
+    <button type="button" className="digest-stat" aria-controls={detailId} aria-expanded={expanded} onClick={onToggle}>
+      {content}
+      <Icon name={expanded ? "chevron-up" : "chevron-down"} size={14} />
+    </button>
+  ) : <span className="digest-stat">{content}</span>;
 }
 
 function PlainReminderCard({
@@ -252,7 +329,7 @@ function PlainReminderCard({
     }
     setDetailLoading(true);
     void loadDetail(reminder.reminderId)
-      .then((text) => {
+      .then(({ detail: text }) => {
         setDetail(text);
         setDetailOpen(text !== null);
       })

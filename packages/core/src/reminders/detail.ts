@@ -1,5 +1,6 @@
+import type { ReminderDetailResponse } from "../http/types.js";
 import type { TopicBook } from "../topics/types.js";
-import { digestConclusions, MAX_DIGEST_CONCLUSIONS } from "./digest.js";
+import { digestConclusions, digestTodos, MAX_DIGEST_CONCLUSIONS } from "./digest.js";
 import { REMINDER_KIND, type DigestSnapshot } from "./due.js";
 import { DIGEST_FOLLOW_PREFIX, DIGEST_INCOMPLETE, DIGEST_TODO_PREFIX, hasLegacyDigestWarning } from "./text.js";
 import { localDateKey, localParts } from "./time.js";
@@ -67,6 +68,38 @@ export function reminderDetail(input: {
   return lines.join("\n");
 }
 
+export function reminderDetailResponse(
+  input: Parameters<typeof reminderDetail>[0],
+  bookAtIssue?: () => TopicBook,
+): ReminderDetailResponse {
+  const detail = reminderDetail(input);
+  if (detail === null) return { detail };
+  let ids = input.digestSnapshot?.followUps?.todoIds;
+  if (ids === undefined && bookAtIssue && input.reminder.issuedAt) {
+    const count = /^昨日新增待办 (\d+) 件未完成。$/mu.exec(input.reminder.text);
+    const day = dayBefore(input.reminder.reminderId);
+    if (day && count && Number(count[1]) > 0) {
+      const reconstructed = digestTodos({
+        book: bookAtIssue(),
+        day,
+        offsetMinutes: input.timeZoneOffsetMinutes,
+        sourceSessionUpdatedAt: input.sourceSessionUpdatedAt ?? {},
+        asOf: Date.parse(input.reminder.issuedAt),
+      });
+      if (reconstructed.length === Number(count[1])) ids = reconstructed.map(({ todo }) => todo.todoId);
+    }
+  }
+  if (ids === undefined) return { detail };
+  const indexed = new Map(input.book.todos.map((todo) => [todo.todoId, todo]));
+  const todos = ids.flatMap((id) => {
+    const todo = indexed.get(id);
+    if (!todo) return [];
+    const { todoId, topicId, sessionKey, text } = todo;
+    return [{ todoId, topicId, sessionKey, text }];
+  });
+  return { detail, todos };
+}
+
 /** `morning:2026-11-03` → 前一天 `2026-11-02`。 */
 function dayBefore(reminderId: string): string | null {
   const match = /^morning:(\d{4})-(\d{2})-(\d{2})$/u.exec(reminderId);
@@ -88,6 +121,7 @@ function fullSuggestionNames(text: string, allNames: readonly string[]): string[
     .map((token) => {
       if (!token.endsWith("…")) return token;
       const prefix = token.slice(0, -1).trim();
-      return allNames.find((name) => name.startsWith(prefix)) ?? token;
+      const matches = allNames.filter((name) => name.startsWith(prefix));
+      return matches.length === 1 ? matches[0]! : token;
     });
 }

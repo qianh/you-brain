@@ -556,6 +556,12 @@ export interface ReminderView {
   issuedAt: string;
   /** What the user replied from the popup, when this machine has it. */
   reply?: string | null;
+  digestFollowUpTopicIds?: string[];
+}
+
+export interface ReminderDetailResponse {
+  detail: string | null;
+  todos?: Array<Pick<TodoView, "todoId" | "topicId" | "sessionKey" | "text">>;
 }
 
 export interface ReminderDelivery {

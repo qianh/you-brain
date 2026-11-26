@@ -887,6 +887,31 @@
             "digestConclusions": {
               "additionalProperties": false,
               "properties": {
+                "followUps": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "todoIds": {
+                      "items": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "topicIds": {
+                      "items": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "maxItems": 5,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "todoIds",
+                    "topicIds"
+                  ],
+                  "type": "object"
+                },
                 "ids": {
                   "items": {
                     "minLength": 1,

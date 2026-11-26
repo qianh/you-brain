@@ -134,7 +134,9 @@ import {
   MERGE_SUGGESTIONS_CURSOR,
   type ConsolidationState,
 } from "../consolidate/index.js";
-import { reminderDetail } from "../reminders/detail.js";
+import { reminderDetailResponse } from "../reminders/detail.js";
+import { foldEvents } from "../topics/fold.js";
+import { compareEvents } from "../topics/order.js";
 import { topicIsMuted } from "../reminders/due.js";
 import { foldReminders } from "../reminders/fold.js";
 import {
@@ -4159,10 +4161,23 @@ export class YouBrainDaemon {
       reminders: async (all) => {
         const body = await readers.reminders(all);
         const replies = new Map(readReminderReplies(this.#replyLogPath()).map((item) => [item.reminderId, item.text]));
+        const followUps = new Map<string, string[] | undefined>();
+        if (body.reminders.some((item) => item.kind === "morning_digest")) {
+          for (const event of store.listEventsByType(["reminder.issued"])) {
+            if (event.type === "reminder.issued" && event.data.kind === "morning_digest") {
+              followUps.set(event.data.reminderId, event.data.digestConclusions?.followUps?.topicIds);
+            }
+          }
+        }
         return {
           reminders: body.reminders.map((item) => {
             const reply = replies.get(item.reminderId);
-            return reply === undefined ? item : { ...item, reply };
+            const topicIds = followUps.get(item.reminderId);
+            return {
+              ...item,
+              ...(reply === undefined ? {} : { reply }),
+              ...(topicIds === undefined ? {} : { digestFollowUpTopicIds: topicIds }),
+            };
           }),
           delivery: decideDelivery({
             notifications: this.#shared.reminders.notifications,
@@ -4202,15 +4217,16 @@ export class YouBrainDaemon {
         const digestSnapshot = issued?.type === "reminder.issued" ? issued.data.digestConclusions : undefined;
         const book = foldEventsCached(events);
         const issuedAt = new Date(reminder.issuedAt);
-        return {
-          detail: reminderDetail({
+        return reminderDetailResponse(
+          {
             reminder,
             book,
             sourceSessionUpdatedAt: this.#sessionUpdatedAt(true),
             timeZoneOffsetMinutes: timeZoneOffsetMinutes(this.#roles.timezone, issuedAt),
             ...(digestSnapshot ? { digestSnapshot } : {}),
-          }),
-        };
+          },
+          issued ? () => foldEvents(events.filter((event) => compareEvents(event, issued) < 0)) : undefined,
+        );
       },
       reportActivity: async (at) => {
         this.#noteActivity(at);

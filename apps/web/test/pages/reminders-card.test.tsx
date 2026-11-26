@@ -95,7 +95,7 @@ describe("ReminderCard", () => {
       expect(html).toContain(">727<");
       expect(html).toContain("货代产品能力");
       expect(html).toContain('<ol class="digest-follow-list">');
-      expect(html).toContain('<span class="digest-follow-rank">2</span><span class="digest-follow-name">货代产品能力</span>');
+      expect(html).toContain('<span class="digest-follow-rank" aria-hidden="true">2</span><span class="digest-follow-name">货代产品能力</span>');
       expect(html).not.toContain("digest-chip");
       expect(html).not.toContain("本…");
       expect(html).not.toContain("展开");
@@ -123,6 +123,34 @@ describe("ReminderCard", () => {
       expect(html).toContain("今日接续");
       expect(html).toContain("近期话题");
       expect(html).not.toContain("建议跟进");
+    }
+  });
+
+  test("renders both counts and the suggested topic as controls without an initial detail request", () => {
+    const recent: ReminderView = {
+      ...digest,
+      text: "昨日结论 97 条：方案确认\n昨日新增待办 7 件未完成。\n今日接续：早报里的名称。",
+      digestFollowUpTopicIds: ["topic-trip"],
+    };
+    for (const layout of ["today", "panel"] as const) {
+      const html = renderToStaticMarkup(
+        <ReminderCard
+          reminder={recent}
+          layout={layout}
+          topics={[{ topicId: "topic-trip", name: "更新后的话题名" }]}
+          timeZone="Asia/Shanghai"
+          busy={null}
+          locked={false}
+          t={t}
+          onAction={() => undefined}
+          onOpenTopic={() => undefined}
+          loadDetail={async () => { throw new Error("must not fetch before clicking"); }}
+        />,
+      );
+      expect(html.match(/<button type="button" class="digest-stat"/gu)).toHaveLength(2);
+      expect(html).toContain('<button type="button" class="digest-follow-content">');
+      expect(html).toContain("更新后的话题名");
+      expect(html).not.toContain("早报里的名称");
     }
   });
 

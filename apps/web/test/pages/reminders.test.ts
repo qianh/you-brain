@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  digestTopicLinks,
   isDigestReminder,
   isRecallReminder,
   parseDigest,
@@ -116,6 +117,29 @@ describe("parseDigest / parseDigestDetail", () => {
       suggestions: ["货代产品能力评估"],
     });
     expect(parseDigestDetail("别的格式")).toBeNull();
+  });
+});
+
+describe("digestTopicLinks", () => {
+  const topics = [
+    { topicId: "first", name: "平台集成方案一" },
+    { topicId: "second", name: "平台集成方案二" },
+    { topicId: "legacy", name: "早报格式回归验证" },
+  ] as const;
+
+  test("follows the report's topic ID even when the old name is ambiguous", () => {
+    expect(digestTopicLinks(["平台集成…"], ["second"], topics)).toEqual([topics[1]]);
+    expect(digestTopicLinks(["平台集成方案二"], ["not-synced"], topics)).toEqual([
+      { name: "平台集成方案二", topicId: null },
+    ]);
+  });
+
+  test("only links a legacy name if its full name or prefix resolves uniquely", () => {
+    expect(digestTopicLinks(["平台集成…", "早报格式…", "平台集成方案一"], undefined, topics)).toEqual([
+      { name: "平台集成…", topicId: null },
+      topics[2],
+      topics[0],
+    ]);
   });
 });
 

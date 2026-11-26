@@ -103,6 +103,30 @@ export function parseDigestDetail(detail: string): DigestDetail | null {
   return { conclusions, note, suggestions };
 }
 
+type DigestTopic = { topicId: string; name: string };
+
+export function digestTopicLinks(
+  suggestions: readonly string[],
+  topicIds: readonly string[] | undefined,
+  topics: readonly DigestTopic[],
+): Array<{ name: string; topicId: string | null }> {
+  if (topicIds !== undefined) {
+    const byId = new Map(topics.map((topic) => [topic.topicId, topic]));
+    const resolved = topicIds.map((id) => byId.get(id));
+    if (resolved.every((topic) => topic !== undefined)) return resolved;
+    return suggestions.map((name) => ({ name, topicId: null }));
+  }
+  return suggestions.map((name) => {
+    const prefix = name.endsWith("…") ? name.slice(0, -1).trimEnd() : "";
+    const matches = topics.filter((topic) => {
+      const candidate = topic.name.trim();
+      return candidate === name || (prefix !== "" && candidate.startsWith(prefix));
+    });
+    const match = matches.length === 1 ? matches[0] : undefined;
+    return match ?? { name, topicId: null };
+  });
+}
+
 function splitNames(value: string): string[] {
   return value
     .replace(/。$/u, "")

@@ -17,6 +17,7 @@ import type {
   PortraitResponse,
   PortraitSnapshotsResponse,
   ReminderView,
+  ReminderDetailResponse,
   QuotaView,
   RemindersResponse,
   SearchRequest,
@@ -182,7 +183,7 @@ export interface BrowserDaemon
   /** 弹框回复：关闭提醒并记下这句话。 */
   reminderReply(reminderId: string, text: string): Promise<ReminderView>;
   /** 提醒被截短的原文;没有更多内容为 null。 */
-  reminderDetail(reminderId: string): Promise<{ detail: string | null }>;
+  reminderDetail(reminderId: string): Promise<ReminderDetailResponse>;
   consolidate(body?: { force?: boolean }): Promise<ConsolidateActionResult>;
   /** 知识库(Notion,只读)。 */
   notionStatus(): Promise<NotionStatusView>;
@@ -394,7 +395,7 @@ export function createBrowserDaemon(options?: {
     quota: () => request<QuotaView>("GET", "/api/quota"),
     reminders: () => request<RemindersResponse>("GET", "/api/reminders"),
     reminderDetail: (reminderId) =>
-      request<{ detail: string | null }>("GET", `/api/reminder-detail?id=${encodeURIComponent(reminderId)}`),
+      request<ReminderDetailResponse>("GET", `/api/reminder-detail?id=${encodeURIComponent(reminderId)}`),
     reminderAction: (reminderId, action, until) =>
       request<ReminderView>("POST", "/api/actions/reminder", {
         reminderId,

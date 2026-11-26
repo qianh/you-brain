@@ -16,6 +16,7 @@ import type {
   PortraitResponse,
   PortraitSnapshot,
   ReminderView,
+  ReminderDetailResponse,
   RemindersResponse,
   SearchRequest,
   SearchResponse,
@@ -159,7 +160,7 @@ export interface HttpDeps {
   reminders(all: boolean): Promise<RemindersResponse>;
   reminder(id: string): Promise<ReminderView | null>;
   /** 提醒被截短的原文(目前只有晨间摘要);没有更多内容为 null。 */
-  reminderDetail?(id: string): Promise<{ detail: string | null }>;
+  reminderDetail?(id: string): Promise<ReminderDetailResponse>;
   /** 弹框提醒的回复:关闭提醒并记下这句话(只存本机)。可选,旧测试替身可不实现。 */
   reminderReply?(reminderId: string, text: string): Promise<ReminderView>;
   /** Record keyboard, pointer, or other local activity. `at` is already bounded. */

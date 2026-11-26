@@ -7,6 +7,7 @@ import { eventLogPath } from "@you-brain/protocol";
 import { startDaemon, type YouBrainDaemon } from "../../src/daemon/daemon.js";
 import { conversationKey } from "../../src/domain/session.js";
 import { MemoryDrive } from "../../src/drive/memory-drive.js";
+import type { ReminderDetailResponse, RemindersResponse } from "../../src/http/types.js";
 import { SqliteStore } from "../../src/store/sqlite-store.js";
 import { INTERVALS } from "../../src/daemon/schedule.js";
 import { buildEvent } from "../topics/helpers.js";
@@ -164,6 +165,10 @@ describe("refine backfill", () => {
     expect(digest.text).toContain("昨日新增待办 1 件未完成。");
     expect(digest.text).not.toContain("数据不完整");
     expect(prompts).toEqual([]);
+    const listed = await fetch(`${daemon.baseUrl}/api/reminders`, { headers });
+    expect(listed.status).toBe(200);
+    const { reminders } = await listed.json() as RemindersResponse;
+    expect(reminders.find((item) => item.reminderId === digest.reminderId)?.digestFollowUpTopicIds).toEqual([topicId]);
 
     await drive.put({
       path: `inbox/${source}/codex/drive-unrefined.md`,
@@ -176,16 +181,18 @@ describe("refine backfill", () => {
     const readDetail = async () => {
       const response = await fetch(`${daemon.baseUrl}/api/reminder-detail?id=${encodeURIComponent(digest.reminderId)}`, { headers });
       expect(response.status).toBe(200);
-      return (await response.json() as { detail: string }).detail;
+      return await response.json() as ReminderDetailResponse;
     };
-    expect(await readDetail()).toContain("……数据不完整");
+    const detail = await readDetail();
+    expect(detail.detail).toContain("……数据不完整");
+    expect(detail.todos).toEqual([{ todoId: "legacy-todo", topicId, sessionKey: key, text: "继续验证" }]);
     await clock.advance(INTERVALS.refineBackfillMs);
     await daemon.settled();
     expect(prompts.join("\n")).toContain("Analyze this from Drive");
     expect(prompts.join("\n")).not.toContain("Yesterday's Drive session");
     const complete = await regenerate();
     expect(complete.status).toBe(200);
-    expect(await readDetail()).not.toContain("数据不完整");
+    expect((await readDetail()).detail).not.toContain("数据不完整");
   }, 20_000);
 
   it("refines an uploaded session that was never refined, newest first", async () => {

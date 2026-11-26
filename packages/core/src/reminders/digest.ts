@@ -57,14 +57,20 @@ export function hasUndatedDigestItems(input: DigestDay): boolean {
   return input.book.conclusions.some(unknown) || input.book.todos.some((todo) => todo.status === "open" && unknown(todo));
 }
 
+export function digestTodos(input: DigestDay) {
+  return input.book.todos
+    .flatMap((todo) => {
+      if (todo.status !== "open" || !(Date.parse(todo.ts) <= input.asOf)) return [];
+      const ms = sourceTime(todo, input);
+      return onDay(ms, input) ? [{ todo, ms }] : [];
+    })
+    .sort((left, right) => right.ms - left.ms || compareText(left.todo.todoId, right.todo.todoId));
+}
+
 export function digestFollowUps(input: DigestDay, limit: number) {
+  const todos = digestTodos(input);
   const latestByTopic = new Map<string, number>();
-  let openTodoCount = 0;
-  for (const todo of input.book.todos) {
-    if (todo.status !== "open" || Date.parse(todo.ts) > input.asOf) continue;
-    const ms = sourceTime(todo, input);
-    if (!onDay(ms, input)) continue;
-    openTodoCount += 1;
+  for (const { todo, ms } of todos) {
     latestByTopic.set(todo.topicId, Math.max(ms, latestByTopic.get(todo.topicId) ?? ms));
   }
   const topics = new Map(input.book.topics.map((topic) => [topic.topicId, topic.name]));
@@ -74,7 +80,6 @@ export function digestFollowUps(input: DigestDay, limit: number) {
       return name === undefined ? [] : [{ topicId, name, ms }];
     })
     .sort((left, right) => right.ms - left.ms || compareText(left.topicId, right.topicId))
-    .slice(0, limit)
-    .map(({ name }) => name);
-  return { openTodoCount, suggestions };
+    .slice(0, limit);
+  return { todoIds: todos.map(({ todo }) => todo.todoId), suggestions };
 }
