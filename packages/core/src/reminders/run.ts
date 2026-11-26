@@ -17,6 +17,7 @@ export interface DueDeviceInput {
   notifications: boolean;
   events: readonly Event[];
   sessionUpdatedAt: Readonly<Record<string, string>>;
+  sourceSessionUpdatedAt?: Readonly<Record<string, string>>;
   activeLimit: number;
   historyDays: number;
   morningDigestTime: string;
@@ -56,6 +57,7 @@ function computeInput(input: DueDeviceInput): ComputeDueInput {
   return {
     book: foldEventsCached(input.events),
     sessionUpdatedAt: input.sessionUpdatedAt,
+    ...(input.sourceSessionUpdatedAt ? { sourceSessionUpdatedAt: input.sourceSessionUpdatedAt } : {}),
     reminders: foldReminders(input.events),
     actions: reminderActions(input.events),
     activeLimit: input.activeLimit,

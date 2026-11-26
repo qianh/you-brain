@@ -39,6 +39,9 @@ export function historyText(name: string, openTodos: number): string {
   ]);
 }
 
+export const DIGEST_TODO_PREFIX = "昨日新增待办 ";
+export const DIGEST_FOLLOW_PREFIX = "今日接续：";
+
 export function digestText(input: {
   conclusions: readonly string[];
   openTodoCount: number;
@@ -51,14 +54,11 @@ export function digestText(input: {
       : input.conclusions.length === 1
         ? `昨日结论：${clipText(first, 36)}`
         : `昨日结论 ${input.conclusions.length} 条：${clipText(first, 28)}`;
-  const todoLine =
-    input.openTodoCount === 0
-      ? "没有未完成的待办。"
-      : `未完成待办 ${input.openTodoCount} 件。`;
+  const todoLine = `${DIGEST_TODO_PREFIX}${input.openTodoCount} 件未完成。`;
   const suggestLine =
     input.suggestions.length === 0
-      ? "今天没有特别建议跟进的话题。"
-      : `建议跟进：${input.suggestions.map((name) => clipText(name, 12)).join("、")}。`;
+      ? "没有需要接续的昨日待办。"
+      : `${DIGEST_FOLLOW_PREFIX}${input.suggestions.map((name) => clipText(name, 12)).join("、")}。`;
   return boundReminder([conclusionLine, todoLine, suggestLine]);
 }
 

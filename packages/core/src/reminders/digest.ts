@@ -1,0 +1,57 @@
+import { compareText } from "../topics/order.js";
+import type { TopicBook } from "../topics/types.js";
+import { localDateKey, localParts } from "./time.js";
+
+interface DigestDay {
+  book: TopicBook;
+  day: string;
+  offsetMinutes: number;
+  sourceSessionUpdatedAt: Readonly<Record<string, string>>;
+  asOf: number;
+}
+
+function sourceTime(
+  item: { occurredAt?: string; sessionKey: string; ts: string },
+  input: DigestDay,
+): number {
+  if (item.occurredAt !== undefined) return Date.parse(item.occurredAt);
+  const activityMs = Date.parse(input.sourceSessionUpdatedAt[item.sessionKey] ?? "");
+  const eventMs = Date.parse(item.ts);
+  return activityMs <= eventMs || (onDay(activityMs, input) && onDay(eventMs, input)) ? activityMs : Number.NaN;
+}
+
+function onDay(ms: number, input: DigestDay): boolean {
+  return Number.isFinite(ms) && localDateKey(localParts(ms, input.offsetMinutes)) === input.day;
+}
+
+export function digestConclusions(input: DigestDay) {
+  return input.book.conclusions
+    .flatMap((item) => {
+      const ms = sourceTime(item, input);
+      return Date.parse(item.ts) <= input.asOf && onDay(ms, input) ? [{ item, ms }] : [];
+    })
+    .sort((left, right) => right.ms - left.ms || compareText(left.item.conclusionId, right.item.conclusionId))
+    .map(({ item }) => item);
+}
+
+export function digestFollowUps(input: DigestDay, limit: number) {
+  const latestByTopic = new Map<string, number>();
+  let openTodoCount = 0;
+  for (const todo of input.book.todos) {
+    if (todo.status !== "open" || Date.parse(todo.ts) > input.asOf) continue;
+    const ms = sourceTime(todo, input);
+    if (!onDay(ms, input)) continue;
+    openTodoCount += 1;
+    latestByTopic.set(todo.topicId, Math.max(ms, latestByTopic.get(todo.topicId) ?? ms));
+  }
+  const topics = new Map(input.book.topics.map((topic) => [topic.topicId, topic.name]));
+  const suggestions = [...latestByTopic]
+    .flatMap(([topicId, ms]) => {
+      const name = topics.get(topicId);
+      return name === undefined ? [] : [{ topicId, name, ms }];
+    })
+    .sort((left, right) => right.ms - left.ms || compareText(left.topicId, right.topicId))
+    .slice(0, limit)
+    .map(({ name }) => name);
+  return { openTodoCount, suggestions };
+}

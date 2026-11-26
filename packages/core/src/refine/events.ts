@@ -29,7 +29,7 @@ export function createRefineEventFactory(input: {
 }
 
 export function refineToEvents(
-  input: Pick<RefineSessionInput, "sessionKey" | "fileId" | "source" | "refinedUpTo" | "messages">,
+  input: Pick<RefineSessionInput, "sessionKey" | "fileId" | "source" | "sourceUpdatedAt" | "refinedUpTo" | "messages">,
   output: RefineOutput,
   eventFactory: RefineEventFactory,
   ids: RefineIdSource,
@@ -99,6 +99,7 @@ export function refineToEvents(
           topicId,
           text,
           sessionKey: input.sessionKey,
+          ...(input.sourceUpdatedAt ? { occurredAt: input.sourceUpdatedAt } : {}),
         },
       }),
     );
@@ -114,6 +115,7 @@ export function refineToEvents(
           text: todo.text,
           sessionKey: input.sessionKey,
           confidence: todo.confidence,
+          ...(input.sourceUpdatedAt ? { occurredAt: input.sourceUpdatedAt } : {}),
         },
       }),
     );

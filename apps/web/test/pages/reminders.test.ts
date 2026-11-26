@@ -82,11 +82,13 @@ describe("parseDigest / parseDigestDetail", () => {
       conclusions: 2,
       todos: 727,
       suggestions: ["ChatGPT订阅计费", "货代产品能力", "海运运价预测"],
+      recent: true,
     });
     expect(parseDigest(digestText({ conclusions: ["一条"], openTodoCount: 0, suggestions: [] }))).toEqual({
       conclusions: 1,
       todos: 0,
       suggestions: [],
+      recent: true,
     });
     expect(parseDigest(digestText({ conclusions: [], openTodoCount: 3, suggestions: [] }))?.conclusions).toBe(0);
   });
@@ -102,7 +104,7 @@ describe("parseDigest / parseDigestDetail", () => {
       "2. 没有话题的结论",
       "……还有 1 条较早的结论,在话题册里查看。",
       "",
-      "建议跟进",
+      "今日接续",
       "· 货代产品能力评估",
     ].join("\n");
     expect(parseDigestDetail(detail)).toEqual({

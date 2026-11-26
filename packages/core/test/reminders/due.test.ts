@@ -37,6 +37,7 @@ function due(
   const input: ComputeDueInput = {
     book: foldEvents(events),
     sessionUpdatedAt: patch.sessionUpdatedAt ?? {},
+    ...(patch.sourceSessionUpdatedAt ? { sourceSessionUpdatedAt: patch.sourceSessionUpdatedAt } : {}),
     reminders: patch.reminders ?? [],
     actions: patch.actions ?? [],
     activeLimit: patch.activeLimit ?? 10,
@@ -232,10 +233,10 @@ describe("computeDueReminders", () => {
       topicId: "topic",
       name: "方案",
       key: KEY_A,
-      at: at(NOW_MS - 2 * DAY),
+      at: "2026-10-20T10:00:00.000Z",
       conclusions: [{ id: "c1", text: "跨日结论", ts: "2026-10-20T10:00:00.000Z" }],
     });
-    const sessionUpdatedAt = { [KEY_A]: at(NOW_MS - 2 * DAY) };
+    const sessionUpdatedAt = { [KEY_A]: "2026-10-20T10:00:00.000Z" };
     const utc = due(events, {
       sessionUpdatedAt,
       morningDigestTime: "00:00",
@@ -285,24 +286,26 @@ describe("computeDueReminders", () => {
     expect(isoWeekKey(localParts(Date.parse("2026-01-08T00:00:00.000Z"), 0))).toBe("2026-W02");
   });
 
-  it("lists the five highest-priority follow-up topics", () => {
+  it("lists at most five follow-up topics from yesterday, newest first", () => {
     const names = ["一", "二", "三", "四", "五", "六"];
     const keys = names.map((_, index) => sessionKey(60 + index));
+    const atHour = (index: number) => at(NOW_MS - DAY - index * 3_600_000);
     const events = names.flatMap((name, index) =>
-      topicEvents({ topicId: `t${index}`, name, key: keys[index] ?? "", at: at(NOW_MS - (index + 1) * DAY) }),
+      topicEvents({ topicId: `t${index}`, name, key: keys[index] ?? "", at: atHour(index) }),
     );
     const items = due(events, {
-      sessionUpdatedAt: Object.fromEntries(keys.map((key, index) => [key, at(NOW_MS - (index + 1) * DAY)])),
+      sessionUpdatedAt: Object.fromEntries(keys.map((key, index) => [key, atHour(index)])),
       morningDigestTime: "08:00",
       weeklyReviewDay: 7,
       weeklyReviewTime: "23:59",
     });
     const digest = items.find((item) => item.kind === "morning_digest");
-    expect(digest?.text).toContain("建议跟进：一、二、三、四、五。");
+    expect(digest?.text).toContain("今日接续：一、二、三、四、五。");
     expect(digest?.text).not.toContain("六");
   });
 
-  it("suggests open-todo topics, preferring recent stale and follow-up", () => {
+  it("uses yesterday's actual progress and leaves old or completed todos out of the digest", () => {
+    const resumedToday = sessionKey(99);
     const events = [
       ...topicEvents({
         topicId: "follow",
@@ -312,25 +315,50 @@ describe("computeDueReminders", () => {
         status: "follow_up",
       }),
       ...topicEvents({
-        topicId: "stale",
-        name: "停滞",
+        topicId: "backfilled",
+        name: "旧话题补提炼",
         key: KEY_B,
-        at: at(NOW_MS - 10 * DAY),
+        at: at(NOW_MS - DAY),
+        status: "follow_up",
+        conclusions: [{ id: "c-old", text: "旧会话的结论", ts: at(NOW_MS - DAY) }],
       }),
       ...topicEvents({
-        topicId: "plain",
-        name: "普通",
+        topicId: "resumed",
+        name: "恢复推进的老项目",
         key: KEY_C,
-        at: at(NOW_MS - 2 * DAY),
-        conclusions: [{ id: "c-y", text: "记下了", ts: "2026-10-20T03:00:00.000Z" }],
+        at: at(NOW_MS - 10 * DAY),
+        conclusions: [{ id: "c-y", text: "记下了", ts: at(NOW_MS - DAY) }],
+      }),
+      ...topicEvents({
+        topicId: "resumed-today",
+        name: "今天才续聊的项目",
+        key: resumedToday,
+        at: at(NOW_MS - DAY),
+        conclusions: [{ id: "c-resumed", text: "旧结论补录", ts: at(NOW_MS - DAY) }],
+      }),
+      buildEvent({
+        type: "todo.status_changed",
+        data: { todoId: "follow-todo-0", by: "user", status: "done" },
+        device: "dev-user",
+        ts: NOW,
+        seq: 1,
+      }),
+      buildEvent({
+        type: "todo.added",
+        data: { todoId: "new", topicId: "resumed", text: "接着做", sessionKey: KEY_C, confidence: 0.9 },
+        device: "dev-user",
+        ts: at(NOW_MS - DAY),
+        seq: 2,
       }),
     ];
     const items = due(events, {
       sessionUpdatedAt: {
         [KEY_A]: at(NOW_MS - DAY),
         [KEY_B]: at(NOW_MS - 10 * DAY),
-        [KEY_C]: at(NOW_MS - 2 * DAY),
+        [KEY_C]: at(NOW_MS - DAY),
+        [resumedToday]: NOW,
       },
+      activeLimit: 0,
       morningDigestTime: "08:00",
       weeklyReviewDay: 7,
       weeklyReviewTime: "23:59",
@@ -338,8 +366,9 @@ describe("computeDueReminders", () => {
     const digest = items.find((item) => item.kind === "morning_digest");
     expect(digest?.topicId).toBeNull();
     expect(digest?.text).toContain("昨日结论：记下了");
-    expect(digest?.text).toContain("未完成待办 3 件。");
-    expect(digest?.text).toContain("建议跟进：跟进、停滞、普通。");
+    expect(digest?.text).toContain("昨日新增待办 1 件未完成。");
+    expect(digest?.text).toContain("今日接续：恢复推进的老项目。");
+    expect(digest?.text).not.toContain("旧话题补提炼");
     for (const line of digest?.text.split("\n") ?? []) {
       expect(textLength(line)).toBeLessThanOrEqual(80);
     }
@@ -366,6 +395,42 @@ describe("computeDueReminders", () => {
     expect(staleText("   ", 1)).toContain("未命名话题");
   });
 
+  it("uses synced source dates even without local session metadata, and ignores refine-only dates", () => {
+    const yesterday = at(NOW_MS - DAY);
+    const archived = at(NOW_MS - 10 * DAY);
+    const events = [
+      ...topicEvents({ topicId: "recent", name: "昨日项目", key: KEY_A, at: NOW, todos: 0 }),
+      ...topicEvents({ topicId: "old", name: "旧项目", key: KEY_B, at: yesterday, todos: 0 }),
+      ...topicEvents({ topicId: "unknown", name: "时间未知", key: KEY_C, at: yesterday }),
+      ...[
+        { topicId: "recent", key: KEY_A, occurredAt: yesterday, ts: NOW, seq: 90 },
+        { topicId: "old", key: KEY_B, occurredAt: archived, ts: yesterday, seq: 92 },
+      ].flatMap(({ topicId, key, occurredAt, ts, seq }) => [
+        buildEvent({
+          type: "conclusion.added",
+          data: { conclusionId: topicId, topicId, sessionKey: key, text: topicId, occurredAt },
+          device: "other-device",
+          ts,
+          seq,
+        }),
+        buildEvent({
+          type: "todo.added",
+          data: { todoId: topicId, topicId, sessionKey: key, text: topicId, confidence: 0.9, occurredAt },
+          device: "other-device",
+          ts,
+          seq: seq + 1,
+        }),
+      ]),
+    ];
+    const items = due(events, {
+      sessionUpdatedAt: { [KEY_B]: yesterday, [KEY_C]: yesterday },
+      sourceSessionUpdatedAt: {},
+    });
+    expect(items.find((item) => item.kind === "morning_digest")?.text).toBe(
+      "昨日结论：recent\n昨日新增待办 1 件未完成。\n今日接续：昨日项目。",
+    );
+  });
+
   it("regenerates today's digest with the same id even after it was issued", () => {
     const last = at(NOW_MS - DAY);
     const events = topicEvents({ topicId: "topic", name: "方案", key: KEY_A, at: last });
@@ -389,7 +454,11 @@ describe("computeDueReminders", () => {
       ...events,
       ...topicEvents({ topicId: "other", name: "其他", key: KEY_B, at: last }),
     ];
-    const withDigest = { ...base, events: [...issued, reminderIssued(first)] };
+    const withDigest = {
+      ...base,
+      events: [...issued, reminderIssued(first)],
+      sessionUpdatedAt: { ...base.sessionUpdatedAt, [KEY_B]: last },
+    };
     expect(dueRemindersForDevice(withDigest).some((item) => item.kind === "morning_digest")).toBe(false);
     const again = regenerateMorningDigestForDevice(withDigest);
     expect(again?.reminderId).toBe("morning:2026-10-21");

@@ -1765,6 +1765,7 @@ async function conclusion(request: Request, context: ApiContext): Promise<Respon
         topicId: body.topicId,
         text: body.text,
         sessionKey: body.sessionKey,
+        occurredAt: context.deps.now().toISOString(),
       },
     },
   ];

@@ -67,6 +67,7 @@ export const ConclusionAddedDataSchema = z.object({
   topicId: IdSchema,
   text: z.string().min(1),
   sessionKey: SessionKeySchema,
+  occurredAt: IsoTimestampSchema.optional(),
 });
 
 export const TodoAddedDataSchema = z.object({
@@ -75,6 +76,7 @@ export const TodoAddedDataSchema = z.object({
   text: z.string().min(1),
   sessionKey: SessionKeySchema,
   confidence: z.number().min(0).max(1),
+  occurredAt: IsoTimestampSchema.optional(),
 });
 
 export const TodoStatusChangedDataSchema = z.object({

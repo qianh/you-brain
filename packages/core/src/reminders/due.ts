@@ -4,6 +4,7 @@ import { YouBrainError } from "../domain/errors.js";
 import type { ReminderRecord } from "../store/types.js";
 import { deriveLastActive, partitionTopics } from "../topics/zones.js";
 import type { TopicBook, ZonedTopic } from "../topics/types.js";
+import { digestConclusions, digestFollowUps } from "./digest.js";
 import { digestText, historyText, staleText, weeklyText } from "./text.js";
 import {
   isoWeekKey,
@@ -53,6 +54,7 @@ export interface ReminderIssuedData {
 export interface ComputeDueInput {
   book: TopicBook;
   sessionUpdatedAt: Readonly<Record<string, string>>;
+  sourceSessionUpdatedAt?: Readonly<Record<string, string>>;
   reminders: readonly ReminderRecord[];
   actions: readonly ReminderActionFact[];
   activeLimit: number;
@@ -65,12 +67,6 @@ export interface ComputeDueInput {
   mergeLines?: readonly { fromName: string; intoName: string; reason: string }[];
   /** 当天早报已发过也按当前数据重算一份(同一 id 再发,折叠时覆盖正文)。 */
   regenerateMorningDigest?: boolean;
-}
-
-interface RankedTopic {
-  topic: ZonedTopic;
-  priority: number;
-  lastMs: number;
 }
 
 export function computeDueReminders(input: ComputeDueInput): ReminderIssuedData[] {
@@ -130,7 +126,7 @@ export function computeDueReminders(input: ComputeDueInput): ReminderIssuedData[
         reminderId: morningId,
         kind: REMINDER_KIND.morningDigest,
         topicId: null,
-        text: morningBody(input, [...zoned.active, ...zoned.history], openTodos, nowMs, parts),
+        text: morningBody(input, nowMs, parts),
       });
     }
   }
@@ -247,24 +243,18 @@ const DIGEST_SUGGESTION_LIMIT = 5;
 
 function morningBody(
   input: ComputeDueInput,
-  topics: readonly ZonedTopic[],
-  openTodos: ReadonlyMap<string, number>,
   nowMs: number,
   parts: ReturnType<typeof localParts>,
 ): string {
-  const yesterday = localDateKey(shiftDays(parts, -1));
-  const conclusions = input.book.conclusions
-    .filter((item) => localDateKey(localParts(Date.parse(item.ts), input.timeZoneOffsetMinutes)) === yesterday)
-    .sort((left, right) => {
-      if (left.ts !== right.ts) return left.ts < right.ts ? 1 : -1;
-      return left.conclusionId < right.conclusionId ? -1 : 1;
-    })
-    .map((item) => item.text);
-  const openTodoCount = input.book.todos.filter((todo) => todo.status === "open").length;
-  const suggestions = rankSuggestions(topics, openTodos, nowMs)
-    .slice(0, DIGEST_SUGGESTION_LIMIT)
-    .map((topic) => topic.name);
-  return digestText({ conclusions, openTodoCount, suggestions });
+  const day = {
+    book: input.book,
+    day: localDateKey(shiftDays(parts, -1)),
+    offsetMinutes: input.timeZoneOffsetMinutes,
+    sourceSessionUpdatedAt: input.sourceSessionUpdatedAt ?? input.sessionUpdatedAt,
+    asOf: nowMs,
+  };
+  const conclusions = digestConclusions(day).map((item) => item.text);
+  return digestText({ conclusions, ...digestFollowUps(day, DIGEST_SUGGESTION_LIMIT) });
 }
 
 function weeklyBody(
@@ -318,33 +308,6 @@ function weeklyBody(
     olderCount,
     ...(input.mergeLines ? { mergeSuggestions: input.mergeLines } : {}),
   });
-}
-
-function rankSuggestions(
-  topics: readonly ZonedTopic[],
-  openTodos: ReadonlyMap<string, number>,
-  nowMs: number,
-): ZonedTopic[] {
-  const ranked: RankedTopic[] = [];
-  for (const topic of topics) {
-    if ((openTodos.get(topic.topicId) ?? 0) === 0) continue;
-    const lastMs =
-      topic.lastActive === null || Number.isNaN(Date.parse(topic.lastActive))
-        ? Number.NEGATIVE_INFINITY
-        : Date.parse(topic.lastActive);
-    const stale = lastMs !== Number.NEGATIVE_INFINITY && nowMs - lastMs >= STALE_MS;
-    ranked.push({
-      topic,
-      priority: stale || topic.status === "follow_up" ? 0 : 1,
-      lastMs,
-    });
-  }
-  ranked.sort((left, right) => {
-    if (left.priority !== right.priority) return left.priority - right.priority;
-    if (left.lastMs !== right.lastMs) return right.lastMs - left.lastMs;
-    return left.topic.topicId < right.topic.topicId ? -1 : 1;
-  });
-  return ranked.map((item) => item.topic);
 }
 
 function inWeek(ts: string | null, week: string, offsetMinutes: number): boolean {

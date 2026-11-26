@@ -518,6 +518,7 @@ describe("local HTTP API", () => {
               topicId: "topic-1",
               text: "决定用本地 API",
               sessionKey: SESSION,
+              occurredAt: "2026-07-20T00:00:00.000Z",
             },
           },
         ]);

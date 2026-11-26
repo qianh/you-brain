@@ -291,6 +291,7 @@ function applyConclusion(memory: FoldMemory, event: EventOf<"conclusion.added">)
     sessionKey: event.data.sessionKey,
     text: event.data.text,
     ts: event.ts,
+    ...(event.data.occurredAt === undefined ? {} : { occurredAt: event.data.occurredAt }),
   };
   memory.conclusions.set(conclusion.conclusionId, conclusion);
 }
@@ -316,6 +317,7 @@ function applyTodoAdded(memory: FoldMemory, event: EventOf<"todo.added">): void 
       statusBy: "auto",
       confidence: event.data.confidence,
       ts: event.ts,
+      ...(event.data.occurredAt === undefined ? {} : { occurredAt: event.data.occurredAt }),
       userLocked: false,
       userStatusTs: null,
     });
@@ -326,6 +328,7 @@ function applyTodoAdded(memory: FoldMemory, event: EventOf<"todo.added">): void 
   existing.text = event.data.text;
   existing.confidence = event.data.confidence;
   existing.ts = event.ts;
+  if (event.data.occurredAt !== undefined) existing.occurredAt = event.data.occurredAt;
   touchTodoTopic(memory, existing);
 }
 
@@ -440,6 +443,7 @@ function toPublicTodo(todo: TodoMemory): TopicBook["todos"][number] {
     text: todo.text,
     status: todo.status,
     statusBy: todo.statusBy,
+    ...(todo.occurredAt === undefined ? {} : { occurredAt: todo.occurredAt }),
     confidence: todo.confidence,
     ts: todo.ts,
     userLocked: todo.userLocked,

@@ -41,28 +41,35 @@ export interface DigestSummary {
   conclusions: number;
   todos: number;
   suggestions: string[];
+  recent?: true;
 }
 
 export function parseDigest(text: string): DigestSummary | null {
   let conclusions: number | undefined;
   let todos: number | undefined;
   let suggestions: string[] = [];
+  let recent = false;
   for (const raw of text.replaceAll("\r\n", "\n").split("\n")) {
     const line = raw.trim();
     if (line === "") continue;
     const many = /^昨日结论 (\d+) 条：/u.exec(line);
     const todo = /^未完成待办 (\d+) 件。$/u.exec(line);
+    const recentTodo = /^昨日新增待办 (\d+) 件未完成。$/u.exec(line);
     if (line === "昨日没有新结论。") conclusions = 0;
     else if (many) conclusions = Number(many[1]);
     else if (line.startsWith("昨日结论：")) conclusions = 1;
     else if (line === "没有未完成的待办。") todos = 0;
     else if (todo) todos = Number(todo[1]);
-    else if (line === "今天没有特别建议跟进的话题。") suggestions = [];
+    else if (recentTodo) {
+      todos = Number(recentTodo[1]);
+      recent = true;
+    } else if (line === "今天没有特别建议跟进的话题。" || line === "没有需要接续的昨日待办。") suggestions = [];
     else if (line.startsWith("建议跟进：")) suggestions = splitNames(line.slice("建议跟进：".length));
+    else if (line.startsWith("今日接续：")) suggestions = splitNames(line.slice("今日接续：".length));
     else return null;
   }
   if (conclusions === undefined || todos === undefined) return null;
-  return { conclusions, todos, suggestions };
+  return { conclusions, todos, suggestions, ...(recent ? { recent: true } : {}) };
 }
 
 /** 详情接口返回的结论全文(packages/core/src/reminders/detail.ts),拆成列表项。 */
@@ -78,7 +85,7 @@ export function parseDigestDetail(detail: string): DigestDetail | null {
   let note: string | null = null;
   for (const raw of detail.replaceAll("\r\n", "\n").split("\n")) {
     const line = raw.trim();
-    if (line === "" || line === "建议跟进" || line === "昨日没有新结论。" || /^昨日结论（\d+ 条）$/u.test(line)) continue;
+    if (line === "" || line === "建议跟进" || line === "今日接续" || line === "昨日没有新结论。" || /^昨日结论（\d+ 条）$/u.test(line)) continue;
     const item = /^\d+\. (.*)$/u.exec(line);
     if (item) {
       const body = item[1] ?? "";

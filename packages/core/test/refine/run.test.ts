@@ -99,6 +99,22 @@ const clean: RefineOutput = {
 };
 
 describe("refine session", () => {
+  it("keeps the source update time separate from the time the refine events were emitted", async () => {
+    const sourceUpdatedAt = "2026-07-18T17:30:00.000Z";
+    const result = await refineSession(backend([JSON.stringify(clean)]), { ...input(), sourceUpdatedAt }, {
+      eventFactory: factory(),
+      ids: ids(),
+    });
+    expect(result.status).toBe("refined");
+    if (result.status !== "refined") return;
+    expect(result.events.find(({ type }) => type === "conclusion.added")).toMatchObject({
+      ts: STAMP, data: { occurredAt: sourceUpdatedAt },
+    });
+    expect(result.events.find(({ type }) => type === "todo.added")).toMatchObject({
+      ts: STAMP, data: { occurredAt: sourceUpdatedAt },
+    });
+  });
+
   it("passes the refine timeout to the model call", async () => {
     const model = backend([JSON.stringify(clean)]);
     const seen: Array<number | undefined> = [];

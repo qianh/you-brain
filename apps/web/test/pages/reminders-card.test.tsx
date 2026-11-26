@@ -112,6 +112,20 @@ describe("ReminderCard", () => {
     }
   });
 
+  test("today and panel label the new digest as yesterday's new open todos", () => {
+    const recent: ReminderView = {
+      ...digest,
+      text: "昨日结论：方案确认\n昨日新增待办 1 件未完成。\n今日接续：近期话题。",
+    };
+    for (const layout of ["today", "panel"] as const) {
+      const html = card(recent, layout);
+      expect(html).toContain("昨日新增未完成待办");
+      expect(html).toContain("今日接续");
+      expect(html).toContain("近期话题");
+      expect(html).not.toContain("建议跟进");
+    }
+  });
+
   test("a collapsed panel reminder keeps the compact single row (actions beside the text)", () => {
     expect(card(topic, "panel")).not.toContain("actions-below");
   });

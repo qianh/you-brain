@@ -1939,6 +1939,7 @@ export class YouBrainDaemon {
       key,
       source: live.source,
       fileId,
+      sourceUpdatedAt: session.updatedAt,
       turns: session.turns.map((turn) => ({ role: turn.role, text: turn.text })),
     });
   }
@@ -1948,6 +1949,7 @@ export class YouBrainDaemon {
     key: string;
     source: string;
     fileId: string;
+    sourceUpdatedAt: string;
     turns: readonly { role: string; text: string }[];
   }): Promise<void> {
     if (!this.#llm || !this.#store || input.fileId.length === 0) return;
@@ -1969,6 +1971,9 @@ export class YouBrainDaemon {
           sessionKey: input.key,
           fileId: input.fileId,
           source: input.source,
+          ...(Number.isFinite(Date.parse(input.sourceUpdatedAt))
+            ? { sourceUpdatedAt: new Date(input.sourceUpdatedAt).toISOString() }
+            : {}),
           refinedUpTo,
           messages,
           previous: this.#previous(input.key, stored),
@@ -2131,6 +2136,7 @@ export class YouBrainDaemon {
       key: session.sessionKey,
       source: session.source,
       fileId: session.fileId,
+      sourceUpdatedAt: parsed.updatedAt,
       turns: parsed.turns,
     });
   }
@@ -2177,6 +2183,7 @@ export class YouBrainDaemon {
       key: item.sessionKey,
       source: parsed.source,
       fileId: item.fileId,
+      sourceUpdatedAt: parsed.updatedAt,
       turns: parsed.turns,
     });
   }
@@ -2448,10 +2455,12 @@ export class YouBrainDaemon {
     return this.#replyLogWriter;
   }
 
-  #sessionUpdatedAt(): Record<string, string> {
+  #sessionUpdatedAt(sourceOnly = false): Record<string, string> {
     const updated: Record<string, string> = {};
     for (const session of this.#store?.listSessions() ?? []) {
-      if (session.updatedAt !== null) updated[session.sessionKey] = session.updatedAt;
+      if (session.updatedAt !== null && (!sourceOnly || session.device !== "")) {
+        updated[session.sessionKey] = session.updatedAt;
+      }
     }
     return updated;
   }
@@ -2941,8 +2950,11 @@ export class YouBrainDaemon {
   #reminderInput(store: SqliteStore): DueDeviceInput {
     const now = this.#clock.now();
     const sessionUpdatedAt: Record<string, string> = {};
+    const sourceSessionUpdatedAt: Record<string, string> = {};
     for (const session of store.listSessions()) {
-      if (session.updatedAt !== null) sessionUpdatedAt[session.sessionKey] = session.updatedAt;
+      if (session.updatedAt === null) continue;
+      sessionUpdatedAt[session.sessionKey] = session.updatedAt;
+      if (session.device !== "") sourceSessionUpdatedAt[session.sessionKey] = session.updatedAt;
     }
     const events = store.listEvents();
     return {
@@ -2951,6 +2963,7 @@ export class YouBrainDaemon {
       notifications: this.#shared.reminders.notifications,
       events,
       sessionUpdatedAt,
+      sourceSessionUpdatedAt,
       activeLimit: this.#shared.topics.activeLimit,
       historyDays: this.#shared.topics.historyDays,
       morningDigestTime: this.#shared.reminders.morningDigestTime,
@@ -4105,6 +4118,7 @@ export class YouBrainDaemon {
           detail: reminderDetail({
             reminder,
             book,
+            sourceSessionUpdatedAt: this.#sessionUpdatedAt(true),
             timeZoneOffsetMinutes: timeZoneOffsetMinutes(this.#roles.timezone, issuedAt),
           }),
         };

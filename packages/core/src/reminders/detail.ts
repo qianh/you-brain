@@ -1,5 +1,7 @@
 import type { TopicBook } from "../topics/types.js";
+import { digestConclusions } from "./digest.js";
 import { REMINDER_KIND } from "./due.js";
+import { DIGEST_FOLLOW_PREFIX, DIGEST_TODO_PREFIX } from "./text.js";
 import { localDateKey, localParts } from "./time.js";
 
 /** 详情里最多列这么多条结论,避免一屏几十页。 */
@@ -14,16 +16,24 @@ const MAX_CONCLUSIONS = 60;
  * 所以以前发出的摘要也能展开。
  */
 export function reminderDetail(input: {
-  reminder: { reminderId: string; kind: string; text: string };
+  reminder: { reminderId: string; kind: string; text: string; issuedAt?: string };
   book: TopicBook;
   timeZoneOffsetMinutes: number;
+  sourceSessionUpdatedAt?: Readonly<Record<string, string>>;
 }): string | null {
   if (input.reminder.kind !== REMINDER_KIND.morningDigest) return null;
   const yesterday = dayBefore(input.reminder.reminderId);
   if (yesterday === null) return null;
 
   const names = new Map(input.book.topics.map((topic) => [topic.topicId, topic.name.trim() || "未命名话题"]));
-  const conclusions = input.book.conclusions
+  const recent = input.reminder.text.split("\n").some((line) => line.startsWith(DIGEST_TODO_PREFIX));
+  const conclusions = recent ? digestConclusions({
+    book: input.book,
+    day: yesterday,
+    offsetMinutes: input.timeZoneOffsetMinutes,
+    sourceSessionUpdatedAt: input.sourceSessionUpdatedAt ?? {},
+    asOf: input.reminder.issuedAt === undefined ? Infinity : Date.parse(input.reminder.issuedAt),
+  }) : input.book.conclusions
     .filter((item) => {
       const ms = Date.parse(item.ts);
       return !Number.isNaN(ms) && localDateKey(localParts(ms, input.timeZoneOffsetMinutes)) === yesterday;
@@ -46,7 +56,7 @@ export function reminderDetail(input: {
 
   const suggestions = fullSuggestionNames(input.reminder.text, [...names.values()]);
   if (suggestions.length > 0) {
-    lines.push("", "建议跟进");
+    lines.push("", recent ? "今日接续" : "建议跟进");
     for (const name of suggestions) lines.push(`· ${name}`);
   }
   return lines.join("\n");
@@ -62,10 +72,10 @@ function dayBefore(reminderId: string): string | null {
 
 /** 从「建议跟进：A、B…、C。」里取出话题名,被「…」截短的按前缀还原成全名。 */
 function fullSuggestionNames(text: string, allNames: readonly string[]): string[] {
-  const line = text.split("\n").find((entry) => entry.startsWith("建议跟进："));
+  const line = text.split("\n").find((entry) => entry.startsWith(DIGEST_FOLLOW_PREFIX) || entry.startsWith("建议跟进："));
   if (!line) return [];
   return line
-    .slice("建议跟进：".length)
+    .slice(line.indexOf("：") + 1)
     .replace(/。$/u, "")
     .split("、")
     .map((token) => token.trim())

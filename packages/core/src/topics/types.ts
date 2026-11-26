@@ -50,6 +50,7 @@ export interface ConclusionState {
   sessionKey: string;
   text: string;
   ts: string;
+  occurredAt?: string;
 }
 
 export interface TodoState {
@@ -61,6 +62,7 @@ export interface TodoState {
   statusBy: EventActor;
   confidence: number;
   ts: string;
+  occurredAt?: string;
   userLocked: boolean;
 }
 

@@ -51,4 +51,29 @@ describe("reminderDetail", () => {
       reminderDetail({ reminder: { ...digest, reminderId: "weird" }, book, timeZoneOffsetMinutes: 480 }),
     ).toBeNull();
   });
+
+  test("新早报的详情用来源时间，且不补入发送之后才提炼的结论", () => {
+    const detail = reminderDetail({
+      reminder: {
+        ...digest,
+        issuedAt: "2026-11-03T01:00:00.000Z",
+        text: "昨日结论：同一天的进展\n昨日新增待办 1 件未完成。\n今日接续：ESP32 Muse …。",
+      },
+      book: {
+        ...book,
+        conclusions: [
+          { ...book.conclusions[0]!, occurredAt: "2026-10-28T03:00:00.000Z" },
+          { ...book.conclusions[1]!, sessionKey: "known" },
+          { ...book.conclusions[3]!, occurredAt: "2026-11-02T12:00:00.000Z" },
+        ],
+      },
+      sourceSessionUpdatedAt: { known: "2026-11-02T09:00:00.000Z" },
+      timeZoneOffsetMinutes: 480,
+    });
+    expect(detail).toContain("昨日结论（1 条）");
+    expect(detail).toContain("手环配对要先清除旧绑定");
+    expect(detail).not.toContain("用户要求指挥台");
+    expect(detail).not.toContain("今天的");
+    expect(detail).toContain("今日接续\n· ESP32 Muse 手环固件联调与蓝牙配对问题排查");
+  });
 });

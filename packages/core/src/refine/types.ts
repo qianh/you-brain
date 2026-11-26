@@ -49,6 +49,7 @@ export interface RefineSessionInput {
   sessionKey: string;
   fileId: string;
   source: string;
+  sourceUpdatedAt?: string;
   /** Messages already incorporated. New messages are the ones passed in `messages`. */
   refinedUpTo: number;
   /** New messages only, oldest first, starting at refinedUpTo + 1. */
