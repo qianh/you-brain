@@ -18,6 +18,7 @@ import {
   mapKeyForRemote,
   prepareSdpForDirectP2p,
   roundNormalizedCoord,
+  wheelScaleForDisplay,
   stepZoom,
   summarizeRtcStats,
 } from "../../src/lib/remote-desktop-input.js";
@@ -347,5 +348,19 @@ describe("RemoteFileClient", () => {
     expect(outputSdp).toContain("172.16.202.20");
     // 幂等性：重复调用不会重复追加 renomination
     expect(prepareSdpForDirectP2p(outputSdp)).toBe(outputSdp);
+  });
+});
+
+describe("wheelScaleForDisplay", () => {
+  test("远端画面缩小显示时放大滚动量，放大显示时缩小", () => {
+    expect(wheelScaleForDisplay(2560, 1280)).toBe(2);
+    expect(wheelScaleForDisplay(1440, 2880)).toBe(0.5);
+  });
+
+  test("尺寸未知或异常时不缩放，并限制在 0.25～4 倍", () => {
+    expect(wheelScaleForDisplay(undefined, 1000)).toBe(1);
+    expect(wheelScaleForDisplay(2560, 0)).toBe(1);
+    expect(wheelScaleForDisplay(5120, 100)).toBe(4);
+    expect(wheelScaleForDisplay(100, 5000)).toBe(0.25);
   });
 });

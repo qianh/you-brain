@@ -16,6 +16,7 @@ import {
   keyframeMinIntervalMs,
   NackRateMeter,
   RtpSendHistory,
+  WheelStreamDecoder,
   isBlockedIceCandidateLine,
   LossBasedBitrateController,
   nextStreamTier,
@@ -295,6 +296,23 @@ describe("RTP H.264 packetizer & low-latency streamer", () => {
     expect(sent).toBe(2);
     expect(keyframeMinIntervalMs(null)).toBe(1_100);
     expect(keyframeMinIntervalMs(2_000)).toBe(3_000);
+  });
+
+  test("WheelStreamDecoder 按累计总量滚动：丢包补回距离、乱序旧包丢弃、兼容旧版增量", () => {
+    const decoder = new WheelStreamDecoder();
+    // 首条：以自带增量起步
+    expect(decoder.decode({ t: "wh", dx: 0, dy: -10, ws: "a", s: 1, tx: 0, ty: -10 })).toEqual({ dx: 0, dy: -10 });
+    // 第 2 条丢失（ty=-25），第 3 条到达时补回两条的距离
+    expect(decoder.decode({ t: "wh", dx: 0, dy: -5, ws: "a", s: 3, tx: 0, ty: -30 })).toEqual({ dx: 0, dy: -20 });
+    // 晚到的第 2 条丢弃
+    expect(decoder.decode({ t: "wh", dx: 0, dy: -15, ws: "a", s: 2, tx: 0, ty: -25 })).toBeNull();
+    // 尾部补发：总量不变，不再滚动
+    expect(decoder.decode({ t: "wh", dx: 0, dy: 0, ws: "a", s: 4, tx: 0, ty: -30 })).toBeNull();
+    // 新的滚动流（控制端重连）：以自带增量重新起步
+    expect(decoder.decode({ t: "wh", dx: 3, dy: 0, ws: "b", s: 1, tx: 3, ty: 0 })).toEqual({ dx: 3, dy: 0 });
+    // 旧版控制端：只有增量
+    expect(decoder.decode({ t: "wh", dx: 1.5, dy: 2 })).toEqual({ dx: 1.5, dy: 2 });
+    expect(decoder.decode({ t: "wh", dx: 0, dy: 0 })).toBeNull();
   });
 
   test("RtpSendHistory 按序号取回，被覆盖后返回 undefined；NackRateMeter 去重计比例", () => {

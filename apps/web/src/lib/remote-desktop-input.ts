@@ -90,6 +90,16 @@ export function normalizeWheelDelta(
 }
 
 /**
+ * 滚动量换算比例 = 远端屏幕宽度（点）÷ 画面在本地显示的宽度。
+ * 远端画面缩小显示时，同样的手指位移要让远端多滚一些，画面才跟手；放大显示时相应减少。
+ * 尺寸未知时为 1，结果限制在 [0.25, 4]，避免异常几何把滚动放大到失控。
+ */
+export function wheelScaleForDisplay(remoteWidth: number | undefined, shownWidth: number): number {
+  if (!remoteWidth || remoteWidth <= 0 || !Number.isFinite(shownWidth) || shownWidth <= 1) return 1;
+  return Math.max(0.25, Math.min(4, remoteWidth / shownWidth));
+}
+
+/**
  * 提取键盘事件上的修饰键标记。始终给出明确的 true/false，
  * 远端据此清掉残留的修饰键状态，避免松开 ⌘ 后仍按 ⌘ 组合键处理。
  */

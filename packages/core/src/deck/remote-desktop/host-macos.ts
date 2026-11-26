@@ -13,6 +13,7 @@ import { resolveMacKeyCode } from "./keycodes-macos.js";
 import { MACOS_REMOTE_HOST_APP_SWIFT, MACOS_REMOTE_HOST_PLIST } from "./macos-app-swift.js";
 import { MACOS_UI_BRIDGE_SWIFT } from "./macos-ui-swift.js";
 import { MACOS_VIDEO_PIPELINE_SWIFT } from "./macos-video-swift.js";
+import { WheelStreamDecoder } from "./wheel.js";
 import {
   CLIPBOARD_MAX_CHARS,
   QUALITY_PRESETS,
@@ -359,6 +360,8 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
   #pendingMove: { x: number; y: number } | null = null;
   #moveFlushScheduled = false;
   #lastKeyframeReqAt = 0;
+  /** 控制端滚轮累计总量 → 增量（丢包、乱序不丢滚动距离）。 */
+  readonly #wheel = new WheelStreamDecoder();
   #videoCounters: HostVideoCounters | null = null;
 
   constructor(options?: { homeDir?: string }) {
@@ -450,11 +453,13 @@ export class MacOsRemoteDesktopBridge implements RemoteDesktopHostBridge {
       return;
     }
     if (msg.t === "wh") {
+      const step = this.#wheel.decode(msg);
+      if (!step) return;
       this.#flushPendingMove();
       this.#sendCtrl({
         op: "wh",
-        dx: Number.isFinite(msg.dx) ? msg.dx : 0,
-        dy: Number.isFinite(msg.dy) ? msg.dy : 0,
+        dx: step.dx,
+        dy: step.dy,
         ...(msg.x !== undefined ? { x: clampUnit(msg.x) } : {}),
         ...(msg.y !== undefined ? { y: clampUnit(msg.y) } : {}),
       });

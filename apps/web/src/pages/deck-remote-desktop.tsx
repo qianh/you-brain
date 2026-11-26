@@ -61,6 +61,7 @@ import {
   mapKeyForRemote,
   normalizeVideoPoint,
   normalizeWheelDelta,
+  wheelScaleForDisplay,
   prepareSdpForDirectP2p,
   roundNormalizedCoord,
   stepZoom,
@@ -93,6 +94,8 @@ const MOVE_INTERVAL_DIRECT_MS = 8;
 /** TURN 中继或高 RTT（>80ms）链路下的鼠标移动发送间隔（约 60Hz），避免 250Hz SCTP SACK 风暴拖垮事件循环与视频发包。 */
 const MOVE_INTERVAL_RELAY_MS = 16;
 const WHEEL_FLUSH_MS = 12;
+/** 停止滚动后补发累计总量的时机（毫秒），覆盖最后一条滚轮消息丢失。 */
+const WHEEL_TAIL_RESEND_MS = [60, 200];
 /** 声明本地光标后等待光标形状的超时（需兼容跨国 TURN 400ms+ RTT 与首帧 IDR 突发，且后续收到 cursor 仍会自动恢复）。 */
 const CURSOR_SHAPE_TIMEOUT_MS = 5_000;
 const COPY_WAIT_MS = 1_500;
@@ -1630,18 +1633,46 @@ export function DeckRemoteDesktopPane({
     let wheelDy = 0;
     let wheelPt: { x: number; y: number } | null = null;
     let wheelTimer: ReturnType<typeof setTimeout> | null = null;
+    // 滚轮走不重传通道：每条同时带累计总量与序号，宿主按总量差滚动，丢包或乱序不丢距离。
+    // 停止滚动后再补发两次总量，兜住最后一条恰好丢失的情况（增量为 0，旧版宿主不受影响）。
+    const wheelStream = Math.random().toString(36).slice(2, 10);
+    let wheelSeq = 0;
+    let wheelTotalX = 0;
+    let wheelTotalY = 0;
+    const wheelTailTimers: Array<ReturnType<typeof setTimeout>> = [];
+    const round2 = (value: number) => Math.round(value * 100) / 100;
+    const sendWheel = (pt: { x: number; y: number }, dx: number, dy: number) => {
+      sendFast({ t: "wh", x: pt.x, y: pt.y, dx, dy, ws: wheelStream, s: ++wheelSeq, tx: wheelTotalX, ty: wheelTotalY });
+    };
+    const clearWheelTail = () => {
+      for (const timer of wheelTailTimers) clearTimeout(timer);
+      wheelTailTimers.length = 0;
+    };
     const flushWheel = () => {
       wheelTimer = null;
       if ((wheelDx === 0 && wheelDy === 0) || !wheelPt) return;
-      sendFast({
-        t: "wh",
-        x: wheelPt.x,
-        y: wheelPt.y,
-        dx: Math.round(wheelDx * 100) / 100,
-        dy: Math.round(wheelDy * 100) / 100,
-      });
+      const dx = round2(wheelDx);
+      const dy = round2(wheelDy);
       wheelDx = 0;
       wheelDy = 0;
+      wheelTotalX = round2(wheelTotalX + dx);
+      wheelTotalY = round2(wheelTotalY + dy);
+      const pt = wheelPt;
+      sendWheel(pt, dx, dy);
+      clearWheelTail();
+      for (const delay of WHEEL_TAIL_RESEND_MS) {
+        wheelTailTimers.push(setTimeout(() => sendWheel(pt, 0, 0), delay));
+      }
+    };
+    /** 远端屏幕点数 ÷ 画面本地显示宽度：画面缩小显示时放大滚动量，让内容跟手。 */
+    const wheelScale = () => {
+      let rect = surfaceRectRef.current;
+      if (rect.width <= 0 || rect.height <= 0) rect = syncSurfaceRect();
+      const video = videoRef.current;
+      const box = computeVideoContentBox(rect.width, rect.height, video?.videoWidth ?? 0, video?.videoHeight ?? 0);
+      const display =
+        displaysRef.current.find((item) => item.id === activeDisplayIdRef.current) ?? displaysRef.current[0];
+      return wheelScaleForDisplay(display?.width, box.width);
     };
     const onWheel = (event: WheelEvent) => {
       if (gestureActive) {
@@ -1668,8 +1699,9 @@ export function DeckRemoteDesktopPane({
       event.preventDefault();
       const { dx, dy } = normalizeWheelDelta(event.deltaX, event.deltaY, event.deltaMode);
       if (dx === 0 && dy === 0) return;
-      wheelDx += dx;
-      wheelDy += dy;
+      const scale = wheelScale();
+      wheelDx += dx * scale;
+      wheelDy += dy * scale;
       wheelPt = pointFromClient(event.clientX, event.clientY);
       if (wheelTimer === null) wheelTimer = setTimeout(flushWheel, WHEEL_FLUSH_MS);
     };
@@ -1694,6 +1726,7 @@ export function DeckRemoteDesktopPane({
       moveThrottle.cancel();
       if (moveThrottleRef.current === moveThrottle) moveThrottleRef.current = null;
       if (wheelTimer !== null) clearTimeout(wheelTimer);
+      clearWheelTail();
       window.removeEventListener("keydown", onWinKeyDown, { capture: true });
       window.removeEventListener("keyup", onWinKeyUp, { capture: true });
       window.removeEventListener("blur", onWinBlur);

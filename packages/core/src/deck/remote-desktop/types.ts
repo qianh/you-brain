@@ -104,7 +104,24 @@ export interface HostStreamOptions {
 
 export type FastInputMessage =
   | { t: "mm"; x: number; y: number; seq?: number }
-  | { t: "wh"; dx: number; dy: number; x?: number; y?: number };
+  | WheelInputMessage;
+
+/**
+ * 滚轮增量。`dx/dy` 为距上一条的增量（旧版宿主只认它）；
+ * 新版控制端另带滚动流 ID `ws`、序号 `s` 与累计总量 `tx/ty`，宿主按“新总量 − 上次总量”滚动，
+ * 不可靠通道上丢包或乱序都不会丢失滚动距离。
+ */
+export interface WheelInputMessage {
+  t: "wh";
+  dx: number;
+  dy: number;
+  x?: number;
+  y?: number;
+  ws?: string;
+  s?: number;
+  tx?: number;
+  ty?: number;
+}
 
 export interface ClipboardChunkInfo {
   /** 分片批次 ID。 */
@@ -117,7 +134,7 @@ export interface ClipboardChunkInfo {
 
 export type ControlClientMessage =
   | { t: "mm"; x: number; y: number; seq?: number }
-  | { t: "wh"; dx: number; dy: number; x?: number; y?: number }
+  | WheelInputMessage
   | { t: "md"; x: number; y: number; b: 0 | 1 | 2; clicks?: number; seq?: number }
   | { t: "mu"; x: number; y: number; b: 0 | 1 | 2; clicks?: number; seq?: number }
   | {

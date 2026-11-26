@@ -3,6 +3,7 @@ export * from "./keycodes-macos.js";
 export * from "./fec.js";
 export * from "./keyframe-gate.js";
 export * from "./retransmit.js";
+export * from "./wheel.js";
 export * from "./rtp-h264.js";
 export * from "./host-macos.js";
 export * from "./session-manager.js";
