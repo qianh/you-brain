@@ -2,7 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { completeJsonWithRetry } from "../consolidate/llm-json.js";
 import type { LlmBackend } from "../llm/types.js";
-import { MEETING_IMPORT_MAX_BYTES, type MeetingImportDraft, type MeetingImportView, type MeetingTodoDraft, type TaskProject } from "./types.js";
+import { projectSelectionMessage, TaskRelatedProjectsSchema, validProjectSelection } from "./project-selection.js";
+import { MEETING_IMPORT_MAX_BYTES, TASK_PROJECT_MAX_COUNT, type MeetingImportDraft, type MeetingImportView, type MeetingTodoDraft, type TaskProject } from "./types.js";
 
 const MAX_ITEMS = 40;
 const id = z.uuid();
@@ -21,13 +22,13 @@ const text = z.string().min(1).max(MEETING_IMPORT_MAX_BYTES).refine(
 const revision = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const version = { id, revision };
 const consentKey = z.string().regex(/^[a-f0-9]{64}$/u);
-const review = z.object({ id, projectId, priority, selected: z.boolean() }).strict();
+const review = z.object({ id, projectId, relatedProjectIds: TaskRelatedProjectsSchema.optional(), priority, selected: z.boolean() }).strict();
 
 export const MeetingImportActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("import"), fileName, text }).strict(),
   z.object({ action: z.literal("analyse"), ...version, consentKey }).strict(),
   z.object({ action: z.literal("revise"), ...version, consentKey, feedback }).strict(),
-  z.object({ action: z.literal("select"), ...version, items: z.array(review).max(MAX_ITEMS) }).strict(),
+  z.object({ action: z.literal("select"), ...version, items: z.array(review.refine(validProjectSelection, projectSelectionMessage)).max(MAX_ITEMS) }).strict(),
   z.object({ action: z.literal("discard"), ...version }).strict(),
   z.object({ action: z.literal("confirm"), ...version }).strict(),
 ]);
@@ -60,6 +61,7 @@ export function meetingImportModel(backend: LlmBackend | null): MeetingImportVie
 const modelItem = z.object({
   previousId: id.nullable(), title, description, source, quote,
   projectName: z.string().trim().max(200).nullable(),
+  relatedProjectNames: z.array(z.string().trim().min(1).max(200)).max(TASK_PROJECT_MAX_COUNT - 1).nullable(),
 }).strict();
 const output = z.object({
   items: z.array(modelItem).max(MAX_ITEMS), questions, message: z.string().trim().max(1200),
@@ -82,6 +84,7 @@ export async function analyseMeetingImport(input: {
     "每条会议任务的 source 是 meeting，quote 必须为会议原文中的一段连续逐字引用；用户明确补充的新任务的 source 是 user，quote 填 null。",
     "有用户反馈时，只修改受影响的事项；保留其它条目与顺序。保留条目时 previousId 填原编号，新条目填 null。",
     "项目仅在用户反馈明确写出已有项目全名时设置：填其唯一名称；明确要求取消关联填空字符串；其它情况填 null，保留已有项目。",
+    "projectName 是主项目。用户明确要求关联多个项目时，把其余项目全名填入 relatedProjectNames；未要求改动时填 null。明确只保留主项目、取消副项目时填空数组。",
     "有歧义先把问题写到 clarification，此轮不改清单。否则 clarification 为 null，message 简述这次整理或修订结果。",
   ].join("\n");
 
@@ -89,9 +92,10 @@ export async function analyseMeetingImport(input: {
     system,
     user: JSON.stringify({
       meeting: draft.text,
-      current: draft.items.map(({ id: itemId, title: itemTitle, description: itemDescription, source: itemSource, quote: itemQuote, projectId: itemProject }) => ({
+      current: draft.items.map(({ id: itemId, title: itemTitle, description: itemDescription, source: itemSource, quote: itemQuote, projectId: itemProject, relatedProjectIds }) => ({
         id: itemId, title: itemTitle, description: itemDescription, source: itemSource, quote: itemQuote,
         projectName: projects.find((project) => project.id === itemProject)?.name ?? null,
+        ...(relatedProjectIds?.length ? { relatedProjects: projects.filter((project) => relatedProjectIds.includes(project.id)).map((project) => project.name) } : {}),
       })),
       unresolved: draft.questions,
       ...(instruction === undefined ? {} : {
@@ -109,6 +113,12 @@ export async function analyseMeetingImport(input: {
     }
     const retained = new Set<string>();
     const feedbackContext = [...draft.pendingFeedback, instruction ?? ""].join("\n").toLowerCase();
+    const explicitProject = (label: string): string => {
+      const name = label.toLowerCase();
+      const matches = projects.filter((project) => project.name.toLowerCase() === name);
+      if (matches.length !== 1 || !feedbackContext.includes(name)) throw new Error("必须由用户明确指定唯一的已有项目");
+      return matches[0]!.id;
+    };
     const items = result.items.map((item): MeetingTodoDraft => {
       const previous = item.previousId === null ? undefined : priorItems.get(item.previousId);
       if (item.previousId !== null && (!previous || retained.has(item.previousId))) throw new Error("无效或重复的草稿编号");
@@ -116,18 +126,27 @@ export async function analyseMeetingImport(input: {
       if (item.source === "meeting" && (!item.quote || !draft.text.includes(item.quote))) throw new Error("会议依据必须逐字来自原文");
       if (item.source === "user" && (instruction === undefined || item.quote !== null)) throw new Error("用户补充不能伪造会议依据");
       let linked = previous?.projectId ?? null;
+      let related = previous?.relatedProjectIds;
       if (item.projectName !== null && instruction !== undefined) {
-        const name = item.projectName.toLowerCase();
-        if (!name && /(?:取消|清除|不关联|未关联|无项目|unassign|clear|no project)/iu.test(feedbackContext)) linked = null;
-        if (name) {
-          const matches = projects.filter((project) => project.name.toLowerCase() === name);
-          if (matches.length !== 1 || !feedbackContext.includes(name)) throw new Error("必须由用户明确指定唯一的已有项目");
-          linked = matches[0]!.id;
+        if (item.projectName === "" && /(?:取消|清除|不关联|未关联|无项目|unassign|clear|no project)/iu.test(feedbackContext)) linked = null;
+        if (item.projectName) {
+          const next = explicitProject(item.projectName);
+          if (linked && related?.includes(next)) related = [linked, ...related.filter((projectId) => projectId !== next)];
+          linked = next;
+        }
+      }
+      if (instruction !== undefined && item.relatedProjectNames !== null) {
+        if (item.relatedProjectNames.length || /(?:只保留|仅保留|取消|清除|移除|删除|只关联|only|clear|remove)/iu.test(feedbackContext)) {
+          related = item.relatedProjectNames.map(explicitProject);
+          if (!validProjectSelection({ projectId: linked, relatedProjectIds: related }) || new Set(related).size !== related.length) {
+            throw new Error("多项目草稿必须指定不重复的主项目和关联项目");
+          }
         }
       }
       return {
         id: previous?.id ?? randomUUID(), title: item.title, description: item.description,
         source: item.source, quote: item.quote, projectId: linked,
+        ...(linked !== null && related?.length ? { relatedProjectIds: related } : {}),
         priority: previous?.priority ?? 2, selected: previous?.selected ?? true,
       };
     });

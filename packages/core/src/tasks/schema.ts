@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { StoredMeetingImportSchema } from "./meeting-import.js";
+import { projectSelectionMessage, TaskRelatedProjectsSchema, validProjectSelection } from "./project-selection.js";
 import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT, TASK_IMAGE_TYPES } from "./types.js";
 
 const title = z.string().trim().min(1).max(200);
@@ -18,17 +19,16 @@ const newProject = z.object({
   name: z.string().trim().min(1).max(100),
   cwd: z.string().trim().min(1).max(4096).refine((value) => value.startsWith("/"), "项目文件夹必须是绝对路径").optional(),
 }).strict();
-const oneProject = (body: { projectId?: string | null | undefined; newProject?: unknown }): boolean =>
-  !(body.newProject !== undefined && body.projectId);
-const oneProjectMessage = { message: "projectId 与 newProject 只能二选一" };
+const relatedProjectIds = TaskRelatedProjectsSchema.optional();
 
 export const TaskCreateSchema = z.object({
   title,
   description: description.optional(),
   projectId: projectId.optional(),
+  relatedProjectIds,
   newProject: newProject.optional(),
   priority: priority.optional(),
-}).strict().refine(oneProject, oneProjectMessage);
+}).strict().refine(validProjectSelection, projectSelectionMessage);
 
 export const TaskUpdateSchema = z.object({
   id,
@@ -36,9 +36,10 @@ export const TaskUpdateSchema = z.object({
   description: description.optional(),
   retainImageIds: z.array(TaskImageIdSchema).max(TASK_IMAGE_MAX_COUNT).optional(),
   projectId: projectId.optional(),
+  relatedProjectIds,
   newProject: newProject.optional(),
   priority: priority.optional(),
-}).strict().refine(oneProject, oneProjectMessage);
+}).strict().refine(validProjectSelection, projectSelectionMessage);
 
 export const TaskActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("project"), projectId: id, enabled: z.boolean() }).strict(),
@@ -46,6 +47,7 @@ export const TaskActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("complete"), id }).strict(),
   z.object({ action: z.literal("retry"), id }).strict(),
   z.object({ action: z.literal("approve"), id, reviewSha: z.string().regex(/^[a-f0-9]{40,64}$/u) }).strict(),
+  z.object({ action: z.literal("approveBatch"), id, reviewToken: z.string().regex(/^[a-f0-9]{64}$/u) }).strict(),
   z.object({ action: z.literal("reject"), id, feedback: z.string().trim().min(1).max(10_000) }).strict(),
 ]);
 
@@ -57,8 +59,19 @@ const runDetails = z.object({
   merged: z.literal(true).optional(),
 });
 
+const worktree = z.object({ branch: z.string(), worktreePath: z.string(), baseSha: z.string() });
+const batch = z.object({
+  token: z.string().nullable(), approved: z.literal(true).optional(),
+  repositories: z.array(worktree.extend({
+    projectId: id, projectCwd: z.string(),
+    phase: z.enum(["pending", "merged", "published", "delivered", "skipping", "skipped"]),
+    review: z.object({ headSha: z.string(), baseSha: z.string(), unchanged: z.boolean() }).optional(),
+  })),
+});
+
 export const TaskRecordSchema = z.object({
   id, title, description, projectId, priority,
+  relatedProjectIds,
   images: z.array(taskImage).max(TASK_IMAGE_MAX_COUNT).optional(),
   status: z.enum(["queued", "preparing", "planning", "running", "review", "merging", "done", "failed"]),
   createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
@@ -67,7 +80,7 @@ export const TaskRecordSchema = z.object({
   manual: z.literal(true).optional(),
   completedManually: z.literal(true).optional(),
   run: z.union([
-    runDetails.extend({ branch: z.string(), worktreePath: z.string(), baseSha: z.string() }),
+    runDetails.extend({ ...worktree.shape, batch: batch.optional() }),
     runDetails.extend({ branch: z.null(), worktreePath: z.null(), baseSha: z.null() }),
   ]).nullable(),
 });

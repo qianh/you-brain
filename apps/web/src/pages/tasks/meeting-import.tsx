@@ -14,8 +14,9 @@ import { Select } from "../../components/select.js";
 import { Spinner } from "../../components/spinner.js";
 import { useDaemon } from "../../daemon-context.js";
 import { TASK_PRIORITY_KEYS } from "./logic.js";
+import { ProjectPicker } from "./project-picker.js";
 
-type Selection = Pick<MeetingTodoDraft, "id" | "projectId" | "priority" | "selected">;
+type Selection = Pick<MeetingTodoDraft, "id" | "projectId" | "relatedProjectIds" | "priority" | "selected">;
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 export function MeetingImportDialog({ projects, onClose, onCreated }: {
@@ -103,7 +104,7 @@ export function MeetingImportDialog({ projects, onClose, onCreated }: {
 
   const select = (change: (item: Selection) => Selection) => {
     if (!draft) return;
-    const items = draft.items.map(({ id, projectId, priority, selected: checked }) => change({ id, projectId, priority, selected: checked }));
+    const items = draft.items.map(({ id, projectId, relatedProjectIds, priority, selected: checked }) => change({ id, projectId, relatedProjectIds, priority, selected: checked }));
     void send({ action: "select", id: draft.id, revision: draft.revision, items });
   };
 
@@ -161,7 +162,7 @@ export function MeetingImportDialog({ projects, onClose, onCreated }: {
             {draft.items.length > 0 ? <>
               {projects.length > 0 && <div className="tasks-meeting-bulk">
                 <Select label={t("tasksMeetingBulkProject")} value={bulkProject} onChange={setBulkProject} disabled={disabled || !selected} options={projectOptions} />
-                <Button size="sm" disabled={disabled || !selected} onClick={() => select((item) => item.selected ? { ...item, projectId: bulkProject || null } : item)}>{t("tasksMeetingApplyProject")}</Button>
+                <Button size="sm" disabled={disabled || !selected} onClick={() => select((item) => item.selected ? { ...item, projectId: bulkProject || null, relatedProjectIds: [] } : item)}>{t("tasksMeetingApplyProject")}</Button>
               </div>}
               <ol className="tasks-meeting-items">
                 {draft.items.map((item, index) => <li key={item.id}>
@@ -174,10 +175,9 @@ export function MeetingImportDialog({ projects, onClose, onCreated }: {
                   {item.quote ? <details><summary>{t("tasksMeetingSource")}</summary><blockquote>{item.quote}</blockquote></details>
                     : <small>{t("tasksMeetingUserSource")}</small>}
                   <div className="tasks-meeting-item-controls">
-                    <Select label={`${t("tasksProject")} · ${index + 1}`} value={item.projectId ?? ""} onChange={(value) => select((row) => row.id === item.id ? { ...row, projectId: value || null } : row)} disabled={disabled}
-                      options={item.projectId && !projects.some((project) => project.id === item.projectId)
-                        ? [...projectOptions, { value: item.projectId, label: t("tasksUnknownProject") }]
-                        : projectOptions} />
+                    <ProjectPicker projects={projects} value={{ projectId: item.projectId ?? "", relatedProjectIds: item.relatedProjectIds }} allowNew={false}
+                      onChange={(value) => { if ("projectId" in value) select((row) => row.id === item.id
+                        ? { ...row, projectId: value.projectId || null, relatedProjectIds: value.relatedProjectIds ?? [] } : row); }} disabled={disabled} />
                     <Select label={`${t("tasksPriority")} · ${index + 1}`} value={String(item.priority)} onChange={(value) => select((row) => row.id === item.id ? { ...row, priority: Number(value) as TaskPriority } : row)} disabled={disabled} options={priorityOptions} />
                   </div>
                 </li>)}

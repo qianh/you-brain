@@ -1,4 +1,5 @@
 import type { DevelopmentTask, TaskProject, TaskStatus, TaskWorktreeBlock } from "@you-brain/core/tasks/types.js";
+import { taskProjectIds } from "@you-brain/core/tasks/types.js";
 import { deckT3ThreadHref } from "../../lib/route.js";
 import { translate, type MessageKey } from "../../i18n/messages.js";
 import type { Language } from "../../lib/format.js";
@@ -21,7 +22,7 @@ export function isTaskActive(status: TaskStatus): status is "preparing" | "plann
 }
 
 function matchesProject(task: DevelopmentTask, project: string): boolean {
-  return project === "all" || task.projectId === (project === "unassigned" ? null : project);
+  return project === "all" || (project === "unassigned" ? task.projectId === null : taskProjectIds(task).includes(project));
 }
 
 export function taskCounts(tasks: readonly DevelopmentTask[], project: string) {
@@ -73,7 +74,7 @@ export function taskThreadHref(value: string | null | undefined): string | null 
 /** 项目内未结束的任务：执行中优先，其次待核对，最后受阻。同一项目可并行多项。 */
 export function projectTasks(tasks: DevelopmentTask[], projectId: string): DevelopmentTask[] {
   const rank = (task: DevelopmentTask): number => task.status === "review" ? 1 : task.status === "failed" ? 2 : 0;
-  return tasks.filter((task) => task.projectId === projectId && task.status !== "queued" && task.status !== "done")
+  return tasks.filter((task) => matchesProject(task, projectId) && task.status !== "queued" && task.status !== "done")
     .sort((a, b) => rank(a) - rank(b));
 }
 
@@ -99,7 +100,7 @@ const normalized = (value: string): string => value.trim().toLocaleLowerCase();
  * 项目选择器的候选行：只按名称搜索，不展示完整路径；同名项目才用上级目录名区分。
  * 输入了列表里没有的名称时给出「新建项目」，本机可选文件夹时始终保留「添加文件夹」。
  */
-export function projectPickerRows(projects: readonly TaskProject[], query: string, canPickFolder: boolean): ProjectPickerRow[] {
+export function projectPickerRows(projects: readonly TaskProject[], query: string, canPickFolder: boolean, allowNew = true): ProjectPickerRow[] {
   const needle = normalized(query);
   const counts = new Map<string, number>();
   for (const project of projects) counts.set(normalized(project.name), (counts.get(normalized(project.name)) ?? 0) + 1);
@@ -111,7 +112,7 @@ export function projectPickerRows(projects: readonly TaskProject[], query: strin
     const parent = project.cwd.replace(/\/+$/u, "").split("/").slice(0, -1);
     rows.push({ kind: "project", project, hint: (counts.get(normalized(project.name)) ?? 0) > 1 ? folderName(parent.join("/")) || null : null });
   }
-  if (needle !== "" && !projects.some((project) => normalized(project.name) === needle)) rows.push({ kind: "create", name: query.trim() });
+  if (allowNew && needle !== "" && !projects.some((project) => normalized(project.name) === needle)) rows.push({ kind: "create", name: query.trim() });
   if (canPickFolder) rows.push({ kind: "folder" });
   return rows;
 }

@@ -158,6 +158,10 @@
 .tasks-picker-pop .picker-search svg { color: var(--text-3); flex: none; }
 .tasks-picker-list { max-height: 264px; scroll-padding: var(--sp-1); }
 .tasks-picker-option { transition: background-color 80ms ease; }
+.tasks-picker-option .tasks-picker-checkbox { border: 1px solid var(--border); border-radius: 3px; }
+.tasks-picker-option[aria-selected="true"] .tasks-picker-checkbox { border-color: var(--accent); }
+.tasks-linked-picker { display: grid; gap: var(--sp-2); min-width: 0; }
+.tasks-primary-picker { display: grid; gap: var(--sp-1); font-size: var(--fs-sm); color: var(--text-2); }
 .tasks-picker-option > .tasks-picker-label { display: inline-flex; align-items: center; gap: var(--sp-2); min-width: 0; flex: 1; }
 .tasks-picker-option .tasks-picker-label > svg { color: var(--text-3); flex: none; }
 .tasks-picker-option small { flex: none; margin-left: auto; color: var(--text-3); font-size: var(--fs-micro); }
@@ -169,6 +173,10 @@
 .tasks-review-dialog .dialog-body, .tasks-editor-dialog .dialog-body { min-height: 0; overflow: auto; }
 .tasks-review-dialog .dialog-head, .tasks-review-dialog .dialog-foot, .tasks-editor-dialog .dialog-head, .tasks-editor-dialog .dialog-foot { flex-shrink: 0; }
 .tasks-review-content { display: flex; flex-direction: column; gap: var(--sp-4); }
+.tasks-repository-review { display: grid; gap: var(--sp-2); min-width: 0; border-top: 1px solid var(--border); padding-top: var(--sp-3); }
+.tasks-repository-progress { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); padding: 0; margin: var(--sp-2) 0 0; list-style: none; font-size: var(--fs-sm); color: var(--text-2); }
+.tasks-repository-progress li { overflow-wrap: anywhere; }
+.tasks-meeting-item-controls .tasks-linked-picker { flex: 1 1 140px; }
 .tasks-review-task { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--sp-3); }
 .tasks-review-task h3 { font-size: var(--fs-lg); font-weight: 600; overflow-wrap: anywhere; }
 .tasks-review-meta { display: flex; flex-direction: column; gap: var(--sp-2); padding: var(--sp-3); background: var(--surface-2); border-radius: var(--r-ctl); }

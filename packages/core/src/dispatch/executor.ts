@@ -18,7 +18,7 @@ import {
   type T3ThreadConversation,
 } from "../deck/t3/automation.js";
 import { TaskError } from "../tasks/service.js";
-import type { TaskBoard, TaskHttpPort, TaskReview } from "../tasks/types.js";
+import { taskProjectIds, type TaskBoard, type TaskGuard, type TaskHttpPort, type TaskReview } from "../tasks/types.js";
 import { AgentSessionStore } from "./agent-sessions.js";
 import { AuditLog } from "./audit.js";
 import type { DispatchFollowupResult, DispatchReadResult, OutboxEntry } from "./hub.js";
@@ -818,13 +818,13 @@ export class DispatchExecutor {
     }
   }
 
-  async #assertExistingTaskAllowed(tasks: DispatchTasksPort, policy: DispatchPolicy, id: string): Promise<void> {
-    if (policy.allProjects) return;
-    const board = await tasks.board();
-    const task = board.tasks.find((item) => item.id === id);
-    if (task && task.projectId !== null && !policy.allowedProjects.includes(task.projectId)) {
-      throw new DispatchFailure(REJECTED);
-    }
+  #taskGuard(policy: DispatchPolicy, singleProjectOnly = false): TaskGuard {
+    return (task) => {
+      if (!policy.allProjects && taskProjectIds(task).some((projectId) => !policy.allowedProjects.includes(projectId))) {
+        throw new DispatchFailure(REJECTED);
+      }
+      if (singleProjectOnly && task.relatedProjectIds?.length) throw new DispatchFailure("多项目 TODO 请在设备的 TODO 页面编辑或逐仓核对。");
+    };
   }
 
   #presentTaskBoard(board: TaskBoard, policy: DispatchPolicy): TaskBoard {
@@ -832,7 +832,7 @@ export class DispatchExecutor {
     const filtered: TaskBoard = {
       projects: allowed ? board.projects.filter((project) => allowed.has(project.id)) : structuredClone(board.projects),
       tasks: allowed
-        ? board.tasks.filter((task) => task.projectId === null || allowed.has(task.projectId)).map((task) => structuredClone(task))
+        ? board.tasks.filter((task) => taskProjectIds(task).every((id) => allowed.has(id))).map((task) => structuredClone(task))
         : structuredClone(board.tasks),
       connectionError: board.connectionError,
     };
@@ -854,8 +854,7 @@ export class DispatchExecutor {
   async #tasksUpdate(args: Extract<DispatchCommand, { kind: "tasks.update" }>["args"], policy: DispatchPolicy): Promise<TaskBoard> {
     const tasks = this.#requireTasks();
     this.#assertProjectAllowed(policy, args.projectId, args.newProject);
-    await this.#assertExistingTaskAllowed(tasks, policy, args.id);
-    const board = await tasks.update(args);
+    const board = await tasks.update(args, undefined, this.#taskGuard(policy, true));
     return this.#presentTaskBoard(board, policy);
   }
 
@@ -863,17 +862,14 @@ export class DispatchExecutor {
     const tasks = this.#requireTasks();
     if (args.action === "project") {
       this.#assertProjectAllowed(policy, args.projectId, undefined);
-    } else {
-      await this.#assertExistingTaskAllowed(tasks, policy, args.id);
     }
-    const board = await tasks.action(args);
+    const board = await tasks.action(args, this.#taskGuard(policy, args.action === "approve"));
     return this.#presentTaskBoard(board, policy);
   }
 
   async #tasksReview(id: string, policy: DispatchPolicy): Promise<TaskReview> {
     const tasks = this.#requireTasks();
-    await this.#assertExistingTaskAllowed(tasks, policy, id);
-    const review = await tasks.review(id);
+    const review = await tasks.review(id, this.#taskGuard(policy, true));
     return compactTaskReview(review);
   }
 

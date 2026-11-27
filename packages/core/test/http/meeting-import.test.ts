@@ -11,8 +11,8 @@ import { TaskStore } from "../../src/tasks/store.js";
 import type { MeetingImportAction, MeetingImportResult } from "../../src/tasks/types.js";
 
 const notes = "决定：新增导出按钮。\n决定：补齐导入回归测试。\n是否增加报表仍待讨论。\n只存在于原文的内部备忘。";
-const item = (title: string, quote: string | null = null, previousId: string | null = null, projectName: string | null = null) => ({
-  title, description: `交付：${title}`, source: quote ? "meeting" : "user", quote, previousId, projectName,
+const item = (title: string, quote: string | null = null, previousId: string | null = null, projectName: string | null = null, relatedProjectNames: string[] | null = null) => ({
+  title, description: `交付：${title}`, source: quote ? "meeting" : "user", quote, previousId, projectName, relatedProjectNames,
 });
 const answer = (items: ReturnType<typeof item>[], clarification: string | null = null) => JSON.stringify({
   items, clarification, questions: ["是否增加报表？"], message: "已整理可执行事项。",
@@ -45,7 +45,7 @@ function fixture(dataDir: string) {
       await store.write(state);
     } },
     automation: {
-      async projects() { return projectAvailable ? [{ id: "alpha", name: "Alpha", cwd: dataDir }] : []; },
+      async projects() { return projectAvailable ? [{ id: "alpha", name: "Alpha", cwd: dataDir }, { id: "beta", name: "Beta", cwd: join(dataDir, "beta") }] : []; },
       createProject: unexpected,
       async start(input) { dispatched.push(input.title); return { threadId: "thread", threadUrl: "http://localhost:3773/thread" }; },
       async inspect() { return { state: "planning", summary: "" }; },
@@ -125,15 +125,15 @@ test("confirmed meeting import survives restart, handles conversational edits, a
     service = new TaskService(fixtureData.options);
     expect((await service.meetingImport()).draft).toEqual(draft);
 
-    fixtureData.replies.push(answer([item("导出功能及回归", "新增导出按钮", initialItems[0]!.id, "Alpha"), item("灰度验证")]));
-    draft = (await send({ action: "revise", id, revision: draft.revision, consentKey: modelKey, feedback: "合并第 1、2 项，另加一项灰度验证。" })).draft!;
-    expect(draft.items).toMatchObject([{ title: "导出功能及回归", projectId: "alpha" }, { title: "灰度验证", source: "user", quote: null }]);
+    fixtureData.replies.push(answer([item("导出功能及回归", "新增导出按钮", initialItems[0]!.id, "Alpha", ["Beta"]), item("灰度验证")]));
+    draft = (await send({ action: "revise", id, revision: draft.revision, consentKey: modelKey, feedback: "合并第 1、2 项，关联 Beta，保持 Alpha 为主项目。另加一项灰度验证。" })).draft!;
+    expect(draft.items).toMatchObject([{ title: "导出功能及回归", projectId: "alpha", relatedProjectIds: ["beta"] }, { title: "灰度验证", source: "user", quote: null }]);
     expect(draft.clarification).toBeNull();
     expect(fixtureData.params.at(-1)?.user).toContain("合并一下，安排到 Alpha");
 
     const previousRevision = draft.revision;
     draft = (await send({ action: "select", id, revision: draft.revision,
-      items: draft.items.map(({ id: itemId, projectId }, index) => ({ id: itemId, projectId, priority: 1, selected: index === 0 })),
+      items: draft.items.map(({ id: itemId, projectId }, index) => ({ id: itemId, projectId, priority: 1, selected: index === 0, relatedProjectIds: index === 0 ? ["beta"] : [] })),
     })).draft!;
     expect((await request({ action: "confirm", id, revision: previousRevision })).status).toBe(409);
     expect(fixtureData.dispatched).toEqual([]);
@@ -146,7 +146,7 @@ test("confirmed meeting import survives restart, handles conversational edits, a
     expect((await service.meetingImport()).draft).toEqual(draft);
     const result = await send(confirm);
     expect(result.draft).toBeNull();
-    expect(result.created).toMatchObject({ count: 1, board: { tasks: [{ title: "导出功能及回归", priority: 1, projectId: "alpha" }] } });
+    expect(result.created).toMatchObject({ count: 1, board: { tasks: [{ title: "导出功能及回归", priority: 1, projectId: "alpha", relatedProjectIds: ["beta"] }] } });
     await service.tick();
     expect(fixtureData.dispatched).toEqual(["导出功能及回归"]);
     expect(await readFile(boardPath, "utf8")).not.toContain("内部备忘");

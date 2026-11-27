@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT, TASK_IMAGE_TYPES, type DevelopmentTask, type TaskActionInput, type TaskBoard, type TaskCreateInput, type TaskImage, type TaskPriority, type TaskProject, type TaskReview } from "@you-brain/core/tasks/types.js";
+import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT, TASK_IMAGE_TYPES, taskProjectIds, type DevelopmentTask, type TaskActionInput, type TaskBoard, type TaskCreateInput, type TaskDiff, type TaskImage, type TaskPriority, type TaskProject, type TaskReview, type TaskRepositoryPhase } from "@you-brain/core/tasks/types.js";
 
 import { Banner } from "../components/banner.js";
 import { Button, IconButton } from "../components/button.js";
@@ -26,6 +26,10 @@ const errorMessage = (error: unknown): string => error instanceof Error ? error.
 const TASK_METRICS = [
   ["all", "tasksAll"], ["queued", "tasksQueued"], ["active", "tasksActive"], ["review", "tasksReview"], ["done", "tasksDone"],
 ] as const;
+const REPOSITORY_PHASE_KEYS = {
+  pending: "tasksRepoPending", merged: "tasksRepoMerged", published: "tasksRepoPublished",
+  delivered: "tasksRepoDelivered", skipping: "tasksRepoSkipping", skipped: "tasksRepoSkipped",
+} as const satisfies Record<TaskRepositoryPhase, string>;
 
 function ThreadLink({ task, onOpen }: { task: DevelopmentTask; onOpen?: () => void }) {
   const { t } = useDaemon();
@@ -225,7 +229,9 @@ export function TasksPage() {
           </div>
           {loading && !board ? <div className="tasks-loading" role="status"><Spinner /><span>{t("tasksLoadingBoard")}</span></div> : filtered.length === 0 ? <EmptyState title={t(tasks.length === 0 ? "tasksNoTasks" : "tasksNoMatches")} {...(tasks.length === 0 ? { description: t("tasksNoTasksHint"), action: <Button onClick={() => setEditor({ task: null })}>{t("tasksNew")}</Button> } : {})} /> : <ul className="tasks-list">
             {filtered.map((task) => {
-              const linked = projects.find((item) => item.id === task.projectId);
+              const linked = taskProjectIds(task);
+              const projectName = (id: string) => projects.find((item) => item.id === id)?.name ?? t("tasksUnknownProject");
+              const batch = task.run?.branch != null ? task.run.batch : undefined;
               const worktreeBlock = task.status === "failed" ? task.worktreeBlock : undefined;
               const taskError = task.error ?? task.run?.error;
               return <li className={`tasks-item is-${task.status}`} key={task.id}>
@@ -233,16 +239,18 @@ export function TasksPage() {
                 <div className="tasks-item-body">
                   <div className="tasks-item-title"><h3>{task.title}</h3><span className={`tasks-status is-${worktreeBlock ? "worktree-blocked" : task.status}`}>{t(taskStatusKey(task))}</span></div>
                   {task.description && <p className="tasks-description">{task.description}</p>}
-                  <div className="tasks-item-meta"><span><Icon name="folder" size={12} />{linked?.name ?? t(task.projectId ? "tasksUnknownProject" : "tasksUnassigned")}</span>{task.run?.branch && <code>{task.run.branch}</code>}<span>{t("tasksUpdated", { when: formatRelative(task.updatedAt, language, timeZone) })}</span></div>
+                  <div className="tasks-item-meta"><span><Icon name="folder" size={12} />{linked.length ? linked.map((id) => `${projectName(id)}${linked.length > 1 && id === task.projectId ? ` (${t("tasksPrimaryProject")})` : ""}`).join(" · ") : t("tasksUnassigned")}</span>{task.run?.branch && <code>{task.run.branch}</code>}<span>{t("tasksUpdated", { when: formatRelative(task.updatedAt, language, timeZone) })}</span></div>
+                  {batch && (task.status === "failed" || task.status === "merging" || batch.repositories.some((repo) => repo.phase !== "pending")) &&
+                    <ul className="tasks-repository-progress">{linked.map((id) => <li key={id}>{projectName(id)} · {t(REPOSITORY_PHASE_KEYS[batch.repositories.find((repo) => repo.projectId === id)?.phase ?? "pending"])}</li>)}</ul>}
                   {!!task.images?.length && <Button size="sm" variant="ghost" onClick={() => setViewingImages(task)}>{t("tasksImages", { count: task.images.length })}</Button>}
-                  {worktreeBlock ? <p className="tasks-item-error is-worktree-blocked" role="status">{taskWorktreeHint(worktreeBlock, language)}</p>
+                  {worktreeBlock ? <p className="tasks-item-error is-worktree-blocked" role="status">{batch && taskError ? `${taskError}。` : ""}{taskWorktreeHint(worktreeBlock, language)}</p>
                     : taskError && <p className="tasks-item-error" role="alert">{taskError}</p>}
                 </div>
                 <div className="tasks-item-actions">
                   {task.status === "queued" && <Button size="sm" disabled={busy || !!board?.connectionError} loading={launchingId === task.id} onClick={() => void startTask(task.id)} icon={<Icon name="play" size={13} />}>{t("tasksStartOne")}</Button>}
                   {task.status === "queued" && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditor({ task })} icon={<Icon name="pencil" size={13} />}>{t("tasksEdit")}</Button>}
                   {task.status === "review" && <Button size="sm" variant="primary" disabled={busy} onClick={() => setReviewing(task)}>{t("tasksInspect")}</Button>}
-                  {task.status === "failed" && <Button size="sm" disabled={busy} onClick={() => void act({ action: "retry", id: task.id })}>{t("tasksRetry")}</Button>}
+                  {task.status === "failed" && <Button size="sm" disabled={busy} onClick={() => void act({ action: "retry", id: task.id })}>{t(batch?.approved ? "tasksResumeDelivery" : "tasksRetry")}</Button>}
                   {task.status !== "done" && task.status !== "merging" && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setCompleting(task)} icon={<Icon name="check" size={13} />}>{t("tasksComplete")}</Button>}
                   <ThreadLink task={task} />
                 </div>
@@ -289,7 +297,7 @@ function TaskEditor({ task, projects, initialProject, busy, onClose, onSave }: {
   const { t } = useDaemon();
   const [title, setTitle] = useState(task?.title ?? "");
   const [description, setDescription] = useState(task?.description ?? "");
-  const [project, setProject] = useState<ProjectChoice>({ projectId: task?.projectId ?? (projects.some((item) => item.id === initialProject) ? initialProject : "") });
+  const [project, setProject] = useState<ProjectChoice>({ projectId: task ? task.projectId ?? "" : (projects.some((item) => item.id === initialProject) ? initialProject : ""), relatedProjectIds: task?.relatedProjectIds });
   const [priority, setPriority] = useState<TaskPriority>(task?.priority ?? 2);
   const [savedImages, setSavedImages] = useState<TaskImage[]>(task?.images ?? []);
   const [newImages, setNewImages] = useState<Array<{ id: number; file: File }>>([]);
@@ -311,7 +319,7 @@ function TaskEditor({ task, projects, initialProject, busy, onClose, onSave }: {
   const submit = (event: FormEvent): void => {
     event.preventDefault();
     if (busy || !title.trim()) return;
-    const linked = "newProject" in project ? { newProject: project.newProject } : { projectId: project.projectId || null };
+    const linked = "newProject" in project ? { newProject: project.newProject, relatedProjectIds: [] } : { projectId: project.projectId || null, relatedProjectIds: project.relatedProjectIds ?? [] };
     void onSave({ title: title.trim(), description: description.trim(), ...linked, priority }, newImages.map(({ file }) => file), savedImages.map(({ id }) => id));
   };
   return <Dialog open className="tasks-editor-dialog" onClose={onClose} title={t(task ? "tasksEdit" : "tasksNew")} footer={<><Button variant="ghost" disabled={busy} onClick={onClose}>{t("cancel")}</Button><Button variant="primary" type="submit" form="task-editor" loading={busy} disabled={!title.trim()}>{t(task ? "tasksSave" : "tasksCreate")}</Button></>}>
@@ -362,7 +370,8 @@ function TaskReviewDialog({ task, onClose, onChanged }: { task: DevelopmentTask;
     setError(null);
     try {
       const next = await client.taskAction(action === "approve"
-        ? { action, id: task.id, reviewSha: review.headSha }
+        ? review.batch ? { action: "approveBatch", id: task.id, reviewToken: review.batch.token }
+          : { action, id: task.id, reviewSha: review.headSha }
         : { action, id: task.id, feedback: feedback.trim() });
       onChanged(next);
       // 合并成功后任务已从列表移除；只有同步 develop 时发生冲突，任务才会交回 T3 继续处理。
@@ -370,6 +379,7 @@ function TaskReviewDialog({ task, onClose, onChanged }: { task: DevelopmentTask;
       push({ message: t(action === "approve" ? (synced ? "tasksApproveSynced" : "tasksApproved") : "tasksRejected"), tone: synced ? "info" : "success" });
       onClose();
     } catch (error) {
+      if (review.batch) await client.taskBoard().then(onChanged, () => undefined);
       setError(errorMessage(error));
       setAcknowledged(false);
     } finally {
@@ -377,21 +387,35 @@ function TaskReviewDialog({ task, onClose, onChanged }: { task: DevelopmentTask;
     }
   };
 
-  return <Dialog open size="lg" className="tasks-review-dialog" title={t("tasksReviewTitle")} description={t("tasksReviewHint")} onClose={() => { if (!busy) onClose(); }} footer={<>
+  return <Dialog open size="lg" className="tasks-review-dialog" title={t("tasksReviewTitle")} description={t(review?.batch ? "tasksBatchReviewHint" : "tasksReviewHint")} onClose={() => { if (!busy) onClose(); }} footer={<>
     <Button variant="ghost" disabled={busy} onClick={onClose}>{t("closeForm")}</Button>
     <Button disabled={busy || !review || !feedback.trim()} onClick={() => void act("reject")}>{t("tasksReject")}</Button>
-    <Button variant="primary" loading={busy} disabled={!review || !acknowledged} onClick={() => void act("approve")}>{t("tasksApprove")}</Button>
+    <Button variant="primary" loading={busy} disabled={!review || !acknowledged} onClick={() => void act("approve")}>{t(review?.batch ? "tasksApproveBatch" : "tasksApprove")}</Button>
   </>}>
     {error && <Banner tone="danger" action={<Button size="sm" disabled={busy} onClick={() => setRevision((value) => value + 1)}>{t(review ? "reload" : "retry")}</Button>}>{error}</Banner>}
     {!review && !error && <div className="tasks-loading" role="status"><Spinner />{t("tasksLoadingReview")}</div>}
     {review && <div className="tasks-review-content">
       <header className="tasks-review-task"><h3>{review.task.title}</h3><ThreadLink task={review.task} onOpen={onClose} /></header>
-      <dl className="tasks-review-meta"><div><dt>{t("tasksBranch")}</dt><dd><code>{review.task.run?.branch}</code></dd></div><div><dt>{t("tasksCommit")}</dt><dd><code>{review.headSha}</code></dd></div><div><dt>{t("tasksBaseCommit")}</dt><dd><code>{review.baseSha}</code></dd></div><div><dt>{t("tasksWorktree")}</dt><dd><code>{review.task.run?.worktreePath}</code></dd></div></dl>
       <section><h4>{t("tasksSummary")}</h4><p className="tasks-review-summary">{review.task.run?.summary || t("tasksNoSummary")}</p></section>
-      <section><h4>{t("tasksChanges")}</h4><pre className="tasks-review-stat">{review.stat}</pre></section>
-      <section><h4>{t("tasksDiff")}</h4>{review.truncated && <Banner tone="warn">{t("tasksTruncated")}</Banner>}<pre className="tasks-review-diff" tabIndex={0} aria-label={t("tasksDiff")}>{review.diff}</pre></section>
-      <label className="tasks-review-ack"><input type="checkbox" checked={acknowledged} disabled={busy} onChange={(event) => setAcknowledged(event.target.checked)} /><span>{t("tasksAcknowledged")}</span></label>
+      {review.batch ? review.batch.repositories.map(({ projectId, name, phase, diff }) => {
+        const repo = review.task.run?.branch != null ? review.task.run.batch?.repositories.find((item) => item.projectId === projectId) : undefined;
+        return <section key={projectId} className="tasks-repository-review">
+          <h4>{name}{projectId === review.task.projectId ? ` · ${t("tasksPrimaryProject")}` : ""}</h4>
+          {diff ? <RepositoryDiff diff={diff} branch={repo?.branch} path={repo?.worktreePath} />
+            : <p>{t(phase === "pending" ? "tasksRepoUnchanged" : REPOSITORY_PHASE_KEYS[phase])}</p>}
+        </section>;
+      }) : <RepositoryDiff diff={review} branch={review.task.run?.branch} path={review.task.run?.worktreePath} />}
+      <label className="tasks-review-ack"><input type="checkbox" checked={acknowledged} disabled={busy} onChange={(event) => setAcknowledged(event.target.checked)} /><span>{t(review.batch ? "tasksBatchAcknowledged" : "tasksAcknowledged")}</span></label>
       <label className="tasks-review-feedback"><span>{t("tasksFeedback")}</span><Textarea label={t("tasksFeedback")} value={feedback} maxLength={10_000} rows={3} disabled={busy} onChange={(event) => setFeedback(event.target.value)} placeholder={t("tasksFeedbackPlaceholder")} /></label>
     </div>}
   </Dialog>;
+}
+
+function RepositoryDiff({ diff, branch, path }: { diff: TaskDiff; branch?: string | null | undefined; path?: string | null | undefined }) {
+  const { t } = useDaemon();
+  return <>
+    <dl className="tasks-review-meta"><div><dt>{t("tasksBranch")}</dt><dd><code>{branch}</code></dd></div><div><dt>{t("tasksCommit")}</dt><dd><code>{diff.headSha}</code></dd></div><div><dt>{t("tasksBaseCommit")}</dt><dd><code>{diff.baseSha}</code></dd></div><div><dt>{t("tasksWorktree")}</dt><dd><code>{path}</code></dd></div></dl>
+    <section><h4>{t("tasksChanges")}</h4><pre className="tasks-review-stat">{diff.stat}</pre></section>
+    <section><h4>{t("tasksDiff")}</h4>{diff.truncated && <Banner tone="warn">{t("tasksTruncated")}</Banner>}<pre className="tasks-review-diff" tabIndex={0} aria-label={t("tasksDiff")}>{diff.diff}</pre></section>
+  </>;
 }

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 
-import type { TaskGitPort, TaskProject, TaskReview, TaskWorktreeBlock, TaskWorktreeRun } from "./types.js";
+import type { TaskDiff, TaskGitPort, TaskProject, TaskWorktreeBlock, TaskWorktreeRun } from "./types.js";
 
 const DIFF_LIMIT = 128 * 1024;
 const COMMAND_LIMIT = 1024 * 1024;
@@ -36,8 +36,8 @@ export class TaskMergeBlockedError extends Error {}
 export class TaskBehindDevelopError extends TaskMergeBlockedError {}
 
 export class TaskDirtyWorktreeError extends Error {
-  constructor(readonly counts: TaskWorktreeBlock) {
-    super("任务工作树有未提交或未跟踪的内容，请在 T3 中确认后重新检查");
+  constructor(readonly counts: TaskWorktreeBlock, projectName?: string) {
+    super(`${projectName ? `${projectName}：` : ""}任务工作树有未提交或未跟踪的内容，请在 T3 中确认后重新检查`);
   }
 }
 
@@ -54,6 +54,11 @@ export class TaskGit implements TaskGitPort {
 
   constructor(options: { dataDir: string; env?: NodeJS.ProcessEnv }) {
     this.#options = options;
+  }
+
+  async repositoryKey(project: TaskProject): Promise<string> {
+    const repo = await this.#repo(project);
+    return realpath((await this.#git(repo, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).text.trim());
   }
 
   async prepare(project: TaskProject, taskId: string): Promise<Pick<TaskWorktreeRun, "branch" | "worktreePath" | "baseSha">> {
@@ -114,14 +119,17 @@ export class TaskGit implements TaskGitPort {
     });
   }
 
-  async review(project: TaskProject, run: TaskWorktreeRun): Promise<Omit<TaskReview, "task">> {
+  async review(project: TaskProject, run: TaskWorktreeRun, includeMerged = false): Promise<TaskDiff> {
     this.#assertProject(project, run);
     const repo = await this.#repo(project);
     return this.#serialize(repo, async () => {
       const headSha = await this.#verifyRun(repo, run);
       if (run.baseSha === headSha) throw new TaskNoCommitError();
-      const baseSha = await this.#reviewBase(repo, run.baseSha, headSha);
-      if (baseSha === headSha) throw new TaskAlreadyMergedError();
+      let baseSha = await this.#reviewBase(repo, run.baseSha, headSha);
+      if (baseSha === headSha) {
+        if (!includeMerged) throw new TaskAlreadyMergedError();
+        baseSha = run.baseSha;
+      }
       await this.#safeChanges(repo, baseSha, headSha);
       const stat = (await this.#git(repo, ["diff", "--no-ext-diff", "--no-textconv", "--stat", baseSha, headSha, "--"])).text;
       const diff = await this.#git(repo, ["diff", "--no-ext-diff", "--no-textconv", "--no-color", baseSha, headSha, "--"], { limit: DIFF_LIMIT });
@@ -129,7 +137,7 @@ export class TaskGit implements TaskGitPort {
     });
   }
 
-  async merge(project: TaskProject, run: TaskWorktreeRun, approvedSha: string): Promise<void> {
+  async merge(project: TaskProject, run: TaskWorktreeRun, approvedSha: string, reviewedBaseSha?: string): Promise<void> {
     this.#assertProject(project, run);
     if (!SHA.test(approvedSha)) throw new Error("核对提交编号不正确");
     if (run.reviewSha === null) throw new Error("任务尚未核对，请先核对提交后再合并");
@@ -137,9 +145,12 @@ export class TaskGit implements TaskGitPort {
     return this.#serialize(repo, async () => {
       const headSha = await this.#verifyRun(repo, run);
       if (approvedSha !== headSha || run.reviewSha !== approvedSha) {
-        throw new Error("任务提交已变化，请重新核对后再合并");
+        throw new TaskMergeBlockedError("任务提交已变化，请重新核对后再合并");
       }
       const develop = await this.#develop(repo);
+      if (reviewedBaseSha && !(await this.#isAncestor(repo, reviewedBaseSha, develop))) {
+        throw new TaskMergeBlockedError("develop 已不包含逐仓核对时的基线，请重新核对后再合并");
+      }
       // 崩溃可能发生在 Git 成功后、队列写回前。相同提交可以安全补记完成。
       if (develop === approvedSha) return;
       if (!(await this.#isAncestor(repo, develop, approvedSha))) {
@@ -209,16 +220,21 @@ export class TaskGit implements TaskGitPort {
    * 把本地 develop 推到远端：只推 develop 一个分支，不强推。
    * 远端领先、被拒绝或网络、认证失败都会抛错并带上 Git 的原因，由人处理后重试；本地 develop 不受影响。
    */
-  async publish(project: TaskProject, run: TaskWorktreeRun): Promise<"pushed" | "no-remote"> {
+  async publish(project: TaskProject, run: TaskWorktreeRun, verifyApproved = false): Promise<"pushed" | "no-remote"> {
     this.#assertProject(project, run);
     const repo = await this.#repo(project);
     return this.#serialize(repo, async () => {
-      await this.#develop(repo);
+      const develop = await this.#develop(repo);
+      if (verifyApproved && (!run.reviewSha || (await this.#verifyRun(repo, run)) !== run.reviewSha ||
+          !(await this.#isAncestor(repo, run.reviewSha, develop)))) {
+        throw new Error("已合并的任务或 develop 提交发生变化，请人工检查后再重试推送");
+      }
       const configured = (await this.#git(repo, ["config", "--get", "branch.develop.remote"], { allowFailure: true })).text.trim();
       const remote = configured !== "" ? configured : "origin";
       const remotes = (await this.#git(repo, ["remote"])).text.split("\n").map((item) => item.trim()).filter(Boolean);
       if (!remotes.includes(remote)) return "no-remote";
-      const pushed = await this.#git(repo, ["push", remote, "refs/heads/develop:refs/heads/develop"], { allowFailure: true, stderr: true, timeoutMs: PUSH_TIMEOUT_MS });
+      const source = verifyApproved ? develop : "refs/heads/develop";
+      const pushed = await this.#git(repo, ["push", remote, `${source}:refs/heads/develop`], { allowFailure: true, stderr: true, timeoutMs: PUSH_TIMEOUT_MS });
       if (pushed.code !== 0) {
         throw new Error(`已合并到本地 develop，但推送到 ${remote} 失败：${redact(pushed.err).slice(0, 300) || `退出码 ${pushed.code}`}。请人工处理后点“重试”`);
       }
@@ -227,7 +243,7 @@ export class TaskGit implements TaskGitPort {
   }
 
   /** 合并并推送完成后删除任务工作树、任务分支和归属记录；每一步都容忍已经做过。 */
-  async cleanup(project: TaskProject, run: TaskWorktreeRun): Promise<void> {
+  async cleanup(project: TaskProject, run: TaskWorktreeRun, expectedSha?: string): Promise<void> {
     this.#assertProject(project, run);
     const repo = await this.#repo(project);
     return this.#serialize(repo, async () => {
@@ -239,6 +255,9 @@ export class TaskGit implements TaskGitPort {
       this.#assertOwner(owner, repo, run.branch, location.worktreePath);
       const branchRef = `refs/heads/${owner.branch}`;
       const branchSha = (await this.#hasRef(repo, branchRef)) ? await this.#sha(repo, branchRef) : null;
+      if (expectedSha && branchSha !== null && branchSha !== expectedSha) {
+        throw new Error("任务分支已经变化，已保留分支和工作树");
+      }
       // 只删已经完整进入 develop 的分支，避免丢掉没合并的提交。
       if (branchSha !== null && !(await this.#isAncestor(repo, branchSha, "refs/heads/develop"))) {
         throw new Error("任务分支还有未合入 develop 的提交，已保留分支和工作树");
