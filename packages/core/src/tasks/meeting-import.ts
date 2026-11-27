@@ -2,10 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { completeJsonWithRetry } from "../consolidate/llm-json.js";
 import type { LlmBackend } from "../llm/types.js";
+import { dingTalkTaskId } from "./dingtalk-minutes.js";
 import { projectSelectionMessage, TaskRelatedProjectsSchema, validProjectSelection } from "./project-selection.js";
 import { MEETING_IMPORT_MAX_BYTES, TASK_PROJECT_MAX_COUNT, type MeetingImportDraft, type MeetingImportView, type MeetingTodoDraft, type TaskProject } from "./types.js";
 
-const MAX_ITEMS = 40;
+export const MEETING_IMPORT_MAX_ITEMS = 40;
 const id = z.uuid();
 const title = z.string().trim().min(1).max(200);
 const description = z.string().trim().min(1).max(3000);
@@ -23,28 +24,34 @@ const revision = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const version = { id, revision };
 const consentKey = z.string().regex(/^[a-f0-9]{64}$/u);
 const review = z.object({ id, projectId, relatedProjectIds: TaskRelatedProjectsSchema.optional(), priority, selected: z.boolean() }).strict();
+export const dingTalkMinutesSource = z.object({ taskUuid: dingTalkTaskId, title: z.string().trim().min(1).max(255) });
+export const dingTalkActionKey = z.string().regex(/^[a-f0-9]{64}$/u);
 
 export const MeetingImportActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("import"), fileName, text }).strict(),
+  z.object({ action: z.literal("import-dingtalk"), taskUuid: dingTalkTaskId.optional(), url: z.string().trim().min(1).max(4096).optional() })
+    .strict().refine((value) => (value.taskUuid === undefined) !== (value.url === undefined)),
   z.object({ action: z.literal("analyse"), ...version, consentKey }).strict(),
   z.object({ action: z.literal("revise"), ...version, consentKey, feedback }).strict(),
-  z.object({ action: z.literal("select"), ...version, items: z.array(review.refine(validProjectSelection, projectSelectionMessage)).max(MAX_ITEMS) }).strict(),
+  z.object({ action: z.literal("select"), ...version, items: z.array(review.refine(validProjectSelection, projectSelectionMessage)).max(MEETING_IMPORT_MAX_ITEMS) }).strict(),
   z.object({ action: z.literal("discard"), ...version }).strict(),
   z.object({ action: z.literal("confirm"), ...version }).strict(),
 ]);
 
 export const StoredMeetingImportSchema = z.object({
-  ...version, fileName, text, analysed: z.boolean(),
-  items: z.array(review.extend({ title, description, source, quote })).max(MAX_ITEMS),
+  ...version, fileName: z.string().min(1).max(255), text: z.union([text, z.literal("")]), analysed: z.boolean(), dingtalk: dingTalkMinutesSource.optional(),
+  items: z.array(review.extend({ title, description, source, quote, dingtalkKey: dingTalkActionKey.optional() })).max(MEETING_IMPORT_MAX_ITEMS),
   questions, message: z.string().max(1200), clarification: z.string().max(600).nullable(),
   pendingFeedback: z.array(feedback).max(4),
-});
+}).refine((draft) => draft.dingtalk
+  ? draft.analysed && draft.text === "" && draft.items.every((item) => item.dingtalkKey !== undefined)
+  : fileName.safeParse(draft.fileName).success && draft.text !== "");
 
 export type StoredMeetingImport = z.infer<typeof StoredMeetingImportSchema>;
 
 export function meetingImportDraft(draft: StoredMeetingImport): MeetingImportDraft {
-  const { text: _text, pendingFeedback: _pendingFeedback, ...view } = draft;
-  return view;
+  const { text: _text, pendingFeedback: _pendingFeedback, items, ...view } = draft;
+  return { ...view, items: items.map(({ dingtalkKey: _key, ...item }) => item) };
 }
 
 export function meetingImportModel(backend: LlmBackend | null): MeetingImportView["model"] {
@@ -64,7 +71,7 @@ const modelItem = z.object({
   relatedProjectNames: z.array(z.string().trim().min(1).max(200)).max(TASK_PROJECT_MAX_COUNT - 1).nullable(),
 }).strict();
 const output = z.object({
-  items: z.array(modelItem).max(MAX_ITEMS), questions, message: z.string().trim().max(1200),
+  items: z.array(modelItem).max(MEETING_IMPORT_MAX_ITEMS), questions, message: z.string().trim().max(1200),
   clarification: z.string().trim().min(1).max(600).nullable(),
 }).strict();
 

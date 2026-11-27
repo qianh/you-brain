@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  MEETING_IMPORT_MAX_BYTES, type MeetingImportAction, type MeetingImportView, type MeetingTodoDraft,
+  dingTalkMinutesUrl, MEETING_IMPORT_MAX_BYTES, type DingTalkMinutesPage, type MeetingImportAction, type MeetingImportResult, type MeetingImportView, type MeetingTodoDraft,
   type TaskBoard, type TaskPriority, type TaskProject,
 } from "@you-brain/core/tasks/types.js";
 
@@ -9,10 +9,12 @@ import { Banner } from "../../components/banner.js";
 import { Button } from "../../components/button.js";
 import { Dialog } from "../../components/dialog.js";
 import { Icon } from "../../components/icons.js";
-import { Textarea } from "../../components/input.js";
+import { Input, Textarea } from "../../components/input.js";
+import { Segmented } from "../../components/segmented.js";
 import { Select } from "../../components/select.js";
 import { Spinner } from "../../components/spinner.js";
 import { useDaemon } from "../../daemon-context.js";
+import { formatDateTime } from "../../lib/format.js";
 import { TASK_PRIORITY_KEYS } from "./logic.js";
 import { ProjectPicker } from "./project-picker.js";
 
@@ -24,17 +26,24 @@ export function MeetingImportDialog({ projects, onClose, onCreated }: {
   onClose: () => void;
   onCreated: (board: TaskBoard, count: number) => void;
 }) {
-  const { client, t } = useDaemon();
+  const { client, t, language, timeZone } = useDaemon();
   const [view, setView] = useState<MeetingImportView | null>(null);
   const [error, setError] = useState("");
   const [file, setFile] = useState<{ fileName: string; text: string } | null>(null);
+  const [source, setSource] = useState("file");
+  const [link, setLink] = useState("");
+  const [query, setQuery] = useState("");
+  const [listedQuery, setListedQuery] = useState("");
+  const [meetings, setMeetings] = useState<DingTalkMinutesPage | null>(null);
+  const [dingtalkEmpty, setDingtalkEmpty] = useState<MeetingImportResult["dingtalkEmpty"]>();
   const [feedback, setFeedback] = useState("");
   const [bulkProject, setBulkProject] = useState("");
-  const [busy, setBusy] = useState<MeetingImportAction["action"] | "read" | null>(null);
+  const [busy, setBusy] = useState<MeetingImportAction["action"] | "read" | "list" | null>(null);
   const [discarding, setDiscarding] = useState(false);
   const working = useRef(false);
   const picker = useRef<HTMLInputElement>(null);
   const draft = view?.draft;
+  const dingTalkDraft = draft?.dingtalk;
   const consentKey = view?.model?.consentKey;
   const selected = draft?.items.filter((item) => item.selected).length ?? 0;
   const projectOptions = [{ value: "", label: t("tasksUnassigned") }, ...projects.map((project) => ({ value: project.id, label: project.name }))];
@@ -43,6 +52,29 @@ export function MeetingImportDialog({ projects, onClose, onCreated }: {
   const refresh = useCallback(async () => {
     setView(await client.meetingImport());
   }, [client]);
+
+  const listMeetings = async (keyword: string, cursor?: string) => {
+    if (working.current) return;
+    working.current = true;
+    setBusy("list");
+    setError("");
+    setDingtalkEmpty(undefined);
+    if (!cursor) setMeetings(null);
+    try {
+      const result = await client.listDingTalkMinutes(keyword, cursor);
+      setListedQuery(keyword);
+      setMeetings((previous) => {
+        if (!cursor || !previous) return result;
+        const ids = new Set(previous.items.map((item) => item.taskUuid));
+        return { ...result, items: [...previous.items, ...result.items.filter((item) => !ids.has(item.taskUuid))] };
+      });
+    } catch (error) {
+      setError(errorMessage(error));
+    } finally {
+      working.current = false;
+      setBusy(null);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -78,9 +110,11 @@ export function MeetingImportDialog({ projects, onClose, onCreated }: {
     working.current = true;
     setBusy(action.action);
     setError("");
+    setDingtalkEmpty(undefined);
     try {
       let result = await client.meetingImportAction(action);
       setView(result);
+      setDingtalkEmpty(result.dingtalkEmpty);
       if (action.action === "import" && consentKey && result.draft) {
         setFile(null);
         setBusy("analyse");
@@ -117,7 +151,7 @@ export function MeetingImportDialog({ projects, onClose, onCreated }: {
   const disabled = busy !== null || discarding;
   return <Dialog open size="lg" className="tasks-meeting-dialog" title={t("tasksMeetingImport")}
     onClose={() => { if (!working.current) onClose(); }} footer={<>
-      {draft?.analysed && selected > 0 && !discarding && <p className="tasks-meeting-muted tasks-meeting-queue-hint">{t("tasksMeetingQueueHint")}</p>}
+      {draft?.analysed && selected > 0 && !discarding && <p className="tasks-meeting-muted tasks-meeting-queue-hint">{t(dingTalkDraft ? "tasksDingTalkQueueHint" : "tasksMeetingQueueHint")}</p>}
       {draft && !discarding && <Button variant="ghost" disabled={busy !== null} onClick={() => setDiscarding(true)} icon={<Icon name="trash" />}>{t("tasksMeetingDiscard")}</Button>}
       <div className="tasks-meeting-footer">
         {discarding ? <>
@@ -129,7 +163,7 @@ export function MeetingImportDialog({ projects, onClose, onCreated }: {
           <Button variant="ghost" disabled={busy !== null} onClick={onClose}>{t("tasksMeetingClose")}</Button>
           {draft?.analysed ? <Button variant="primary" loading={busy === "confirm"} disabled={disabled || !selected}
             onClick={() => void send({ action: "confirm", id: draft.id, revision: draft.revision })}>{t("tasksMeetingConfirm", { count: selected })}</Button>
-            : <Button variant="primary" loading={busy === "analyse" || busy === "import"} disabled={disabled || !view || !(file || draft) || !consentKey}
+            : (draft || source === "file") && <Button variant="primary" loading={busy === "analyse" || busy === "import"} disabled={disabled || !view || !(file || draft) || !consentKey}
               onClick={analyse}>{t("tasksMeetingAnalyse")}</Button>}
         </>}
       </div>
@@ -141,7 +175,16 @@ export function MeetingImportDialog({ projects, onClose, onCreated }: {
       }}>{t("retry")}</Button> : undefined}>{error}</Banner>}
       {!view && !error && <div className="tasks-loading" role="status"><Spinner /></div>}
       {view && <>
-        {!draft && <div className="tasks-meeting-drop" onDragOver={(event) => { event.preventDefault(); }}
+        {!draft && <Segmented className="tasks-meeting-sources" labelledBy="radiogroup" label={t("tasksMeetingImport")} value={source} options={[
+          { value: "file", label: t("tasksMeetingSourceFile") }, { value: "dingtalk", label: t("tasksDingTalk") },
+        ]} onChange={(next) => {
+          if (disabled || next === source) return;
+          setError("");
+          setDingtalkEmpty(undefined);
+          setSource(next);
+          if (next === "dingtalk" && !meetings) void listMeetings(query.trim());
+        }} />}
+        {!draft && source === "file" && <div className="tasks-meeting-drop" onDragOver={(event) => { event.preventDefault(); }}
           onDrop={(event) => { event.preventDefault(); void loadFile(event.dataTransfer.files); }}>
           <input ref={picker} type="file" accept=".md,.txt" hidden onChange={(event) => {
             void loadFile(event.currentTarget.files);
@@ -150,11 +193,35 @@ export function MeetingImportDialog({ projects, onClose, onCreated }: {
           <Button disabled={disabled} onClick={() => picker.current?.click()} icon={<Icon name="folder" />}>{t("tasksMeetingFile")}</Button>
           <span>{file?.fileName ?? t("tasksMeetingFileHint")}</span>
         </div>}
-        {draft && <div className="tasks-meeting-file"><Icon name="file" /><strong>{draft.fileName}</strong></div>}
+        {!draft && source === "dingtalk" && <div className="tasks-meeting-dingtalk">
+          <form onSubmit={(event) => { event.preventDefault(); if (link.trim()) void send({ action: "import-dingtalk", url: link.trim() }); }}>
+            <Input label={t("tasksDingTalkLink")} placeholder="https://shanji.dingtalk.com/…" value={link} maxLength={4096} disabled={disabled} onChange={(event) => setLink(event.currentTarget.value)} />
+            <Button type="submit" disabled={disabled || !link.trim()}>{t("tasksDingTalkLoad")}</Button>
+          </form>
+          {dingtalkEmpty && <Banner tone="info">{t(dingtalkEmpty === "no-actions" ? "tasksDingTalkNoActions" : "tasksDingTalkAllImported")}</Banner>}
+          {busy === "import-dingtalk" && <div className="tasks-meeting-status" role="status"><Spinner />{t("tasksDingTalkLoading")}</div>}
+          <form onSubmit={(event) => { event.preventDefault(); void listMeetings(query.trim()); }}>
+            <Input label={t("tasksDingTalkQuery")} placeholder={t("tasksDingTalkQuery")} value={query} maxLength={200} disabled={disabled} onChange={(event) => setQuery(event.currentTarget.value)} />
+            <Button type="submit" icon={<Icon name="search" size={14} />} disabled={disabled} loading={busy === "list"}>{t("tasksDingTalkSearch")}</Button>
+          </form>
+          {meetings && <>
+            {meetings.items.length ? <ul className="tasks-meeting-dingtalk-list">{meetings.items.map(({ taskUuid, title, startTime }) => {
+              const date = startTime === undefined ? null : new Date(typeof startTime === "number" || /^\d+$/u.test(startTime) ? Number(startTime) : startTime);
+              const time = date && !Number.isNaN(date.getTime()) ? date.toISOString() : null;
+              return <li key={taskUuid}><button type="button" disabled={disabled} onClick={() => void send({ action: "import-dingtalk", taskUuid })}>
+                <span>{title}</span>{time && <time dateTime={time}>{formatDateTime(time, language, timeZone)}</time>}
+              </button></li>;
+            })}</ul> : !busy && <p className="tasks-meeting-muted">{t("tasksDingTalkNoMeetings")}</p>}
+            {meetings.nextCursor && <Button size="sm" disabled={disabled || query.trim() !== listedQuery} onClick={() => void listMeetings(listedQuery, meetings.nextCursor!)}>{t("tasksDingTalkMore")}</Button>}
+          </>}
+        </div>}
+        {draft && <div className="tasks-meeting-file"><Icon name="file" />{dingTalkDraft
+          ? <a className="text-link" href={dingTalkMinutesUrl(dingTalkDraft.taskUuid)} target="_blank" rel="noreferrer">{t("tasksDingTalkSource", { title: dingTalkDraft.title })}</a>
+          : <strong>{draft.fileName}</strong>}</div>}
         {!draft?.analysed && draft && <p className="tasks-meeting-muted">{t("tasksMeetingPending")}</p>}
         {busy === "analyse" && <div className="tasks-meeting-status" role="status"><Spinner />{t("tasksMeetingAnalysing")}</div>}
-        {discarding && <Banner tone="warn">{t("tasksMeetingDiscardHint")}</Banner>}
-        {draft?.analysed && <div className="tasks-meeting-review">
+        {discarding && <Banner tone="warn">{t(dingTalkDraft ? "tasksDingTalkDiscardHint" : "tasksMeetingDiscardHint")}</Banner>}
+        {draft?.analysed && <div className={`tasks-meeting-review${dingTalkDraft ? " is-dingtalk" : ""}`}>
           <section aria-label={t("tasksMeetingItems")}>
             <div className="tasks-meeting-heading">
               <h3>{t("tasksMeetingItems")}</h3><span>{t("tasksMeetingSelected", { count: selected })}</span>
@@ -171,9 +238,9 @@ export function MeetingImportDialog({ projects, onClose, onCreated }: {
                       onChange={(event) => { const checked = event.currentTarget.checked; select((row) => row.id === item.id ? { ...row, selected: checked } : row); }} />
                     <small>{String(index + 1).padStart(2, "0")}</small><strong>{item.title}</strong>
                   </label>
-                  <p>{item.description}</p>
-                  {item.quote ? <details><summary>{t("tasksMeetingSource")}</summary><blockquote>{item.quote}</blockquote></details>
-                    : <small>{t("tasksMeetingUserSource")}</small>}
+                  {(!dingTalkDraft || item.description !== item.title) && <p>{item.description}</p>}
+                  {!dingTalkDraft && (item.quote ? <details><summary>{t("tasksMeetingSource")}</summary><blockquote>{item.quote}</blockquote></details>
+                    : <small>{t("tasksMeetingUserSource")}</small>)}
                   <div className="tasks-meeting-item-controls">
                     <ProjectPicker projects={projects} value={{ projectId: item.projectId ?? "", relatedProjectIds: item.relatedProjectIds }} allowNew={false}
                       onChange={(value) => { if ("projectId" in value) select((row) => row.id === item.id
@@ -184,7 +251,7 @@ export function MeetingImportDialog({ projects, onClose, onCreated }: {
               </ol>
             </> : <p className="tasks-meeting-muted">{t("tasksMeetingNoItems")}</p>}
           </section>
-          <aside className="tasks-meeting-feedback">
+          {!dingTalkDraft && <aside className="tasks-meeting-feedback">
             {draft.questions.length > 0 && <section className="tasks-meeting-questions">
               <h3>{t("tasksMeetingQuestions")}</h3>
               <ul>{draft.questions.map((question, index) => <li key={index}>{question}</li>)}</ul>
@@ -200,9 +267,9 @@ export function MeetingImportDialog({ projects, onClose, onCreated }: {
               {busy === "revise" && <span className="tasks-meeting-muted" role="status">{t("tasksMeetingRevising")}</span>}
               <p className="tasks-meeting-muted">{consentKey && view.model ? t("tasksMeetingModel", { model: view.model.name }) : t("tasksMeetingNoModel")}</p>
             </form>
-          </aside>
+          </aside>}
         </div>}
-        {!draft?.analysed && <p className="tasks-meeting-muted">{consentKey && view.model ? t("tasksMeetingModel", { model: view.model.name }) : t("tasksMeetingNoModel")}</p>}
+        {!draft?.analysed && (draft || source === "file") && <p className="tasks-meeting-muted">{consentKey && view.model ? t("tasksMeetingModel", { model: view.model.name }) : t("tasksMeetingNoModel")}</p>}
       </>}
     </div>
   </Dialog>;

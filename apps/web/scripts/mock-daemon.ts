@@ -1195,6 +1195,7 @@ async function handleApi(request: Request, url: URL): Promise<Response> {
       project.enabled = input.enabled;
       simulateNextTask(project.id);
     } else {
+      if (!("id" in input)) return fail(501, "NOT_SUPPORTED", "演示服务未连接钉钉听记。");
       const task = mockTaskBoard.tasks.find((task) => task.id === input.id);
       if (!task) return fail(404, "NOT_FOUND", "演示任务不存在");
       if (input.action === "complete") {

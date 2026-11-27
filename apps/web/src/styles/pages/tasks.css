@@ -270,11 +270,34 @@
 .tasks-meeting-footer { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-left: auto; }
 .tasks-meeting-queue-hint { flex-basis: 100%; text-align: end; }
 .tasks-meeting-content { display: grid; gap: var(--sp-3); overflow-wrap: anywhere; }
+.tasks-meeting-sources { justify-self: start; max-width: 100%; }
+.tasks-meeting-dingtalk { display: grid; justify-items: start; gap: var(--sp-3); }
+.tasks-meeting-dingtalk form { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: var(--sp-2); width: 100%; }
+.tasks-meeting-dingtalk form + form { padding-top: var(--sp-3); border-top: 1px solid var(--border); }
+.tasks-meeting-dingtalk-list { width: 100%; max-height: 260px; overflow: auto; padding: 0; margin: 0; list-style: none; border-block: 1px solid var(--border); }
+.tasks-meeting-dingtalk-list > li + li { border-top: 1px solid var(--border); }
+.tasks-meeting-dingtalk-list button { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-2); width: 100%; padding: var(--sp-2) var(--sp-3); border: 0; background: var(--surface-2); color: var(--text-1); font: inherit; text-align: start; cursor: pointer; }
+.tasks-meeting-dingtalk-list button:not(:disabled):hover, .tasks-meeting-dingtalk-list button:focus-visible { background: var(--surface-3); }
+.tasks-meeting-dingtalk-list button:disabled { opacity: .65; cursor: default; }
+.tasks-meeting-dingtalk-list button span { min-width: 0; overflow-wrap: anywhere; }
+.tasks-meeting-dingtalk-list time { color: var(--text-3); font-size: var(--fs-sm); flex: none; }
+.tasks-dingtalk-source { display: inline-block; margin-top: var(--sp-2); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.tasks-dingtalk-inbox { display: grid; min-width: 0; gap: var(--sp-2); padding: var(--sp-3) 0; border-block: 1px solid var(--border); }
+.tasks-dingtalk-inbox header, .tasks-dingtalk-inbox header > div, .tasks-dingtalk-inbox footer, .tasks-dingtalk-inbox footer > div { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2); }
+.tasks-dingtalk-inbox header, .tasks-dingtalk-inbox footer { justify-content: space-between; }
+.tasks-dingtalk-inbox h2 { font-size: var(--fs-base); overflow-wrap: anywhere; }
+.tasks-dingtalk-inbox h2 > span, .tasks-dingtalk-inbox time, .tasks-dingtalk-inbox small, .tasks-dingtalk-inbox > p { color: var(--text-3); font-size: var(--fs-sm); }
+.tasks-dingtalk-inbox-meeting { padding-block: var(--sp-2); border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.tasks-dingtalk-inbox-meeting summary { cursor: pointer; }
+.tasks-dingtalk-inbox-meeting summary small { margin-inline-start: var(--sp-2); }
+.tasks-dingtalk-inbox-meeting label { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: var(--sp-2); white-space: pre-wrap; cursor: pointer; }
+.tasks-dingtalk-inbox-meeting input { accent-color: var(--accent); margin-top: 3px; }
 .tasks-meeting-drop { display: grid; justify-items: center; gap: var(--sp-3); padding: var(--sp-5) var(--sp-3); border: 1px dashed var(--border-strong); border-radius: var(--r-ctl); background: var(--surface-2); text-align: center; }
 .tasks-meeting-file, .tasks-meeting-status { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
 .tasks-meeting-file svg { flex: none; color: var(--text-3); }
 .tasks-meeting-muted, .tasks-meeting-drop > span { color: var(--text-2); font-size: var(--fs-sm); }
 .tasks-meeting-review { display: grid; grid-template-columns: minmax(0, 3fr) minmax(200px, 2fr); gap: var(--sp-4); }
+.tasks-meeting-review.is-dingtalk { grid-template-columns: minmax(0, 1fr); }
 .tasks-meeting-heading, .tasks-meeting-bulk, .tasks-meeting-item-controls { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2); }
 .tasks-meeting-heading { justify-content: space-between; }
 .tasks-meeting-heading h3, .tasks-meeting-questions h3 { font-size: var(--fs-base); }

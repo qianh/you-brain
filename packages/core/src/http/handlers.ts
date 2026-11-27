@@ -27,6 +27,7 @@ import { UiPrefsLimitError, type UiPrefsPatch } from "../ui-prefs/store.js";
 import { MuseError } from "../deck/muse/sdk/errors.js";
 import { TelegramApiError } from "../deck/telegram/api.js";
 import { TaskError } from "../tasks/service.js";
+import { DingTalkMinutesError, dingTalkMinutesQuery } from "../tasks/dingtalk-minutes.js";
 import { MeetingImportActionSchema } from "../tasks/meeting-import.js";
 import { TaskActionSchema, TaskCreateSchema, TaskImageIdSchema, TaskUpdateSchema } from "../tasks/schema.js";
 import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT } from "../tasks/types.js";
@@ -193,6 +194,7 @@ export class HttpError extends Error {
 }
 
 export function errorResponse(error: unknown): Response {
+  if (error instanceof DingTalkMinutesError) return apiError(error.status, error.code, error.message);
   if (error instanceof TaskError) return apiError(error.status, "TASK_REJECTED", error.message);
   if (error instanceof MuseError) return apiError(400, "MUSE_ERROR", error.message);
   if (error instanceof TelegramApiError) return apiError(502, "TELEGRAM_ERROR", error.message);
@@ -239,6 +241,14 @@ export async function handleApi(
   context: ApiContext,
 ): Promise<Response> {
   const path = url.pathname;
+  if (path === "/api/tasks/meeting-import/dingtalk") {
+    if (request.method !== "GET") return methodNotAllowed("GET");
+    const port = context.deps.meetingImport;
+    if (!port?.listDingTalkMinutes) notSupported();
+    const input = dingTalkMinutesQuery.safeParse({ query: url.searchParams.get("query") ?? undefined, cursor: url.searchParams.get("cursor") ?? undefined });
+    if (!input.success) throw new HttpError(400, "INVALID_INPUT", "钉钉听记查询参数无效。");
+    return json(await port.listDingTalkMinutes(input.data));
+  }
   if (path === "/api/tasks/meeting-import") {
     const port = context.deps.meetingImport;
     if (!port) notSupported();
@@ -246,8 +256,14 @@ export async function handleApi(
     if (request.method === "GET") {
       result = await port.meetingImport();
     } else if (request.method === "POST") {
-      const body = MeetingImportActionSchema.safeParse(await readMeetingImportJson(request));
-      if (!body.success) throw new HttpError(400, "INVALID_INPUT", "纪要请求无效；请使用不超过 64 KiB 的非空 UTF-8 Markdown 或纯文本文件。");
+      const raw = await readMeetingImportJson(request);
+      const body = MeetingImportActionSchema.safeParse(raw);
+      if (!body.success) {
+        if (typeof raw === "object" && raw !== null && "action" in raw && raw.action === "import-dingtalk") {
+          throw new DingTalkMinutesError("DINGTALK_INVALID_LINK");
+        }
+        throw new HttpError(400, "INVALID_INPUT", "纪要请求无效；请使用不超过 64 KiB 的非空 UTF-8 Markdown 或纯文本文件。");
+      }
       result = await port.meetingImportAction(body.data);
     } else {
       return methodNotAllowed("GET, POST");

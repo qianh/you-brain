@@ -15,6 +15,32 @@ export type TaskPriority = 0 | 1 | 2 | 3;
 
 export const MEETING_IMPORT_MAX_BYTES = 64 * 1024;
 
+export interface DingTalkMinutesSource {
+  taskUuid: string;
+  title: string;
+}
+
+export interface DingTalkMinutesPage {
+  items: Array<DingTalkMinutesSource & { startTime?: number | string }>;
+  nextCursor: string | null;
+}
+
+export interface DingTalkInboxMeeting {
+  source: DingTalkMinutesSource;
+  items: Array<{ id: string; title: string; description: string }>;
+}
+
+export interface DingTalkInboxView {
+  meetings: DingTalkInboxMeeting[];
+  lastSyncedAt: string | null;
+  error: string | null;
+  syncing: boolean;
+}
+
+export function dingTalkMinutesUrl(taskUuid: string): string {
+  return `https://shanji.dingtalk.com/app/transcribes/${encodeURIComponent(taskUuid)}`;
+}
+
 export interface MeetingTodoDraft {
   id: string;
   title: string;
@@ -31,6 +57,7 @@ export interface MeetingImportDraft {
   id: string;
   revision: number;
   fileName: string;
+  dingtalk?: DingTalkMinutesSource | undefined;
   analysed: boolean;
   items: MeetingTodoDraft[];
   questions: string[];
@@ -47,6 +74,7 @@ type MeetingDraftVersion = { id: string; revision: number };
 
 export type MeetingImportAction =
   | { action: "import"; fileName: string; text: string }
+  | { action: "import-dingtalk"; taskUuid?: string | undefined; url?: string | undefined }
   | (MeetingDraftVersion & { action: "analyse"; consentKey: string })
   | (MeetingDraftVersion & { action: "revise"; consentKey: string; feedback: string })
   | (MeetingDraftVersion & { action: "select"; items: Array<Pick<MeetingTodoDraft, "id" | "selected" | "priority" | "projectId" | "relatedProjectIds">> })
@@ -54,11 +82,13 @@ export type MeetingImportAction =
 
 export interface MeetingImportResult extends MeetingImportView {
   created?: { count: number; board: TaskBoard };
+  dingtalkEmpty?: "no-actions" | "already-imported";
 }
 
 export interface MeetingImportHttpPort {
   meetingImport(): Promise<MeetingImportView>;
   meetingImportAction(input: MeetingImportAction): Promise<MeetingImportResult>;
+  listDingTalkMinutes?(input: { query?: string | undefined; cursor?: string | undefined }): Promise<DingTalkMinutesPage>;
 }
 
 export const TASK_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
@@ -145,6 +175,7 @@ export interface DevelopmentTask {
   id: string;
   title: string;
   description: string;
+  dingtalk?: DingTalkMinutesSource | undefined;
   images?: TaskImage[] | undefined;
   projectId: string | null;
   relatedProjectIds?: string[] | undefined;
@@ -164,6 +195,7 @@ export interface TaskBoard {
   projects: TaskProject[];
   tasks: DevelopmentTask[];
   connectionError: string | null;
+  dingtalkInbox?: DingTalkInboxView | undefined;
 }
 
 /** 保存 TODO 时顺带在 T3 登记的新项目：有 cwd 时登记本机已有文件夹，否则由 T3 新建空仓库。 */
@@ -196,6 +228,9 @@ export interface TaskUpdateInput {
 
 export type TaskActionInput =
   | { action: "project"; projectId: string; enabled: boolean }
+  | { action: "dingtalk-sync" }
+  | { action: "dingtalk-confirm"; taskUuid: string; ids: string[] }
+  | { action: "dingtalk-ignore"; taskUuid: string; ids: string[] }
   | { action: "start"; id: string }
   | { action: "complete"; id: string }
   | { action: "retry"; id: string }
