@@ -1,5 +1,5 @@
 import type { DaemonClient } from "@you-brain/core/http/client.js";
-import type { MeetingImportAction, MeetingImportResult, MeetingImportView, TaskActionInput, TaskBoard, TaskCreateInput, TaskReview, TaskUpdateInput } from "@you-brain/core/tasks/types.js";
+import type { DingTalkMinutesPage, MeetingImportAction, MeetingImportResult, MeetingImportView, TaskActionInput, TaskBoard, TaskCreateInput, TaskReview, TaskUpdateInput } from "@you-brain/core/tasks/types.js";
 import type {
   ActionResponse,
   ApiErrorBody,
@@ -261,6 +261,7 @@ export interface BrowserDaemon
   deckTty7Terminal(pane: number, size: DeckTerminalSize, deviceId?: string | null): WebSocket;
   taskBoard(): Promise<TaskBoard>;
   meetingImport(): Promise<MeetingImportView>;
+  listDingTalkMinutes(query?: string, cursor?: string): Promise<DingTalkMinutesPage>;
   meetingImportAction(body: MeetingImportAction): Promise<MeetingImportResult>;
   createTask(body: TaskCreateInput, images?: readonly File[]): Promise<TaskBoard>;
   updateTask(body: TaskUpdateInput, images?: readonly File[]): Promise<TaskBoard>;
@@ -338,6 +339,7 @@ export function createBrowserDaemon(options?: {
     baseUrl,
     taskBoard: () => request<TaskBoard>("GET", "/api/tasks"),
     meetingImport: () => request<MeetingImportView>("GET", "/api/tasks/meeting-import"),
+    listDingTalkMinutes: (query, cursor) => request<DingTalkMinutesPage>("GET", `/api/tasks/meeting-import/dingtalk?${new URLSearchParams({ ...(query ? { query } : {}), ...(cursor ? { cursor } : {}) })}`),
     meetingImportAction: (body) => request<MeetingImportResult>("POST", "/api/tasks/meeting-import", body),
     createTask: (body, images) => request<TaskBoard>("POST", "/api/tasks", taskMutationBody(body, images)),
     updateTask: (body, images) => request<TaskBoard>("PUT", "/api/tasks", taskMutationBody(body, images)),

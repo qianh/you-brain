@@ -1,5 +1,7 @@
 import { z } from "zod";
-import { StoredMeetingImportSchema } from "./meeting-import.js";
+import { DingTalkInboxSchema } from "./dingtalk-inbox.js";
+import { dingTalkTaskId } from "./dingtalk-minutes.js";
+import { dingTalkActionKey, dingTalkMinutesSource, MEETING_IMPORT_MAX_ITEMS, StoredMeetingImportSchema } from "./meeting-import.js";
 import { projectSelectionMessage, TaskRelatedProjectsSchema, validProjectSelection } from "./project-selection.js";
 import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT, TASK_IMAGE_TYPES } from "./types.js";
 
@@ -41,8 +43,12 @@ export const TaskUpdateSchema = z.object({
   priority: priority.optional(),
 }).strict().refine(validProjectSelection, projectSelectionMessage);
 
+const dingtalkSelection = { taskUuid: dingTalkTaskId, ids: z.array(dingTalkActionKey).min(1).max(MEETING_IMPORT_MAX_ITEMS) };
 export const TaskActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("project"), projectId: id, enabled: z.boolean() }).strict(),
+  z.object({ action: z.literal("dingtalk-confirm"), ...dingtalkSelection }).strict(),
+  z.object({ action: z.literal("dingtalk-ignore"), ...dingtalkSelection }).strict(),
+  z.object({ action: z.literal("dingtalk-sync") }).strict(),
   z.object({ action: z.literal("start"), id }).strict(),
   z.object({ action: z.literal("complete"), id }).strict(),
   z.object({ action: z.literal("retry"), id }).strict(),
@@ -71,6 +77,7 @@ const batch = z.object({
 
 export const TaskRecordSchema = z.object({
   id, title, description, projectId, priority,
+  dingtalk: dingTalkMinutesSource.optional(),
   relatedProjectIds,
   images: z.array(taskImage).max(TASK_IMAGE_MAX_COUNT).optional(),
   status: z.enum(["queued", "preparing", "planning", "running", "review", "merging", "done", "failed"]),
@@ -90,6 +97,8 @@ export const TaskStateSchema = z.object({
   projects: z.array(z.object({ id, name: z.string(), cwd: z.string(), enabled: z.boolean() })),
   tasks: z.array(TaskRecordSchema),
   meetingImport: StoredMeetingImportSchema.optional(),
+  importedDingTalkActions: z.array(dingTalkActionKey).optional(),
+  dingtalkInbox: DingTalkInboxSchema.optional(),
   lastMeetingImport: z.object({ id: z.uuid(), revision: z.number().int().nonnegative(), count: z.number().int().positive() }).optional(),
 });
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT, TASK_IMAGE_TYPES, taskProjectIds, type DevelopmentTask, type TaskActionInput, type TaskBoard, type TaskCreateInput, type TaskDiff, type TaskImage, type TaskPriority, type TaskProject, type TaskReview, type TaskRepositoryPhase } from "@you-brain/core/tasks/types.js";
+import { dingTalkMinutesUrl, TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT, TASK_IMAGE_TYPES, taskProjectIds, type DevelopmentTask, type TaskActionInput, type TaskBoard, type TaskCreateInput, type TaskDiff, type TaskImage, type TaskPriority, type TaskProject, type TaskReview, type TaskRepositoryPhase } from "@you-brain/core/tasks/types.js";
 
 import { Banner } from "../components/banner.js";
 import { Button, IconButton } from "../components/button.js";
@@ -21,6 +21,7 @@ import { projectTasks, TASK_PRIORITY_KEYS, TASK_STATUS_KEYS, taskCounts, taskSta
 import { ProjectPicker, type ProjectChoice } from "./tasks/project-picker.js";
 import { clipboardTaskImages, TaskImagePreview } from "./tasks/images.js";
 import { MeetingImportDialog } from "./tasks/meeting-import.js";
+import { DingTalkInbox } from "./tasks/dingtalk-inbox.js";
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const TASK_METRICS = [
@@ -211,6 +212,10 @@ export function TasksPage() {
             <span>{t(label)}</span><strong className={pendingBoard ? "is-pending" : undefined}>{shown(counts[key])}</strong>
           </button>)}
         </div>
+        {board?.dingtalkInbox && <DingTalkInbox inbox={board.dingtalkInbox} busy={busy} onAction={(input) => mutate(
+          () => client.taskAction(input), input.action === "dingtalk-confirm" ? t("tasksMeetingAdded", { count: input.ids.length }) : undefined,
+          input.action === "dingtalk-confirm" ? () => { setProject("all"); setStatus("all"); } : undefined,
+        )} />}
         <section className="tasks-queue" aria-label={t("navTasks")}>
           <div className="tasks-toolbar">
             <span>{t("tasksCount", { count: filtered.length })}</span>
@@ -239,6 +244,9 @@ export function TasksPage() {
                 <div className="tasks-item-body">
                   <div className="tasks-item-title"><h3>{task.title}</h3><span className={`tasks-status is-${worktreeBlock ? "worktree-blocked" : task.status}`}>{t(taskStatusKey(task))}</span></div>
                   {task.description && <p className="tasks-description">{task.description}</p>}
+                  {task.dingtalk && <a className="text-link tasks-dingtalk-source" href={dingTalkMinutesUrl(task.dingtalk.taskUuid)} target="_blank" rel="noreferrer">
+                    {t("tasksDingTalkSource", { title: task.dingtalk.title })}
+                  </a>}
                   <div className="tasks-item-meta"><span><Icon name="folder" size={12} />{linked.length ? linked.map((id) => `${projectName(id)}${linked.length > 1 && id === task.projectId ? ` (${t("tasksPrimaryProject")})` : ""}`).join(" · ") : t("tasksUnassigned")}</span>{task.run?.branch && <code>{task.run.branch}</code>}<span>{t("tasksUpdated", { when: formatRelative(task.updatedAt, language, timeZone) })}</span></div>
                   {batch && (task.status === "failed" || task.status === "merging" || batch.repositories.some((repo) => repo.phase !== "pending")) &&
                     <ul className="tasks-repository-progress">{linked.map((id) => <li key={id}>{projectName(id)} · {t(REPOSITORY_PHASE_KEYS[batch.repositories.find((repo) => repo.projectId === id)?.phase ?? "pending"])}</li>)}</ul>}
