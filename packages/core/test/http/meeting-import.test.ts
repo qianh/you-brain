@@ -521,3 +521,53 @@ test("in-flight analysis does not block the queue or resurrect a discarded draft
     await rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test("钉钉一键安装：装好后仍未登录就自动拉起授权，授权完成后同步并清除提示", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "yb-dingtalk-setup-"));
+  const { options: base } = fixture(dataDir);
+  let installed = false;
+  let authorized = false;
+  const steps: string[] = [];
+  let finishLogin!: () => void;
+  const dingtalkMinutes = createDingTalkMinutes({ async run(args) {
+    if (!installed) throw new DingTalkMinutesError("DINGTALK_NOT_INSTALLED");
+    if (!authorized) throw new DingTalkMinutesError("DINGTALK_AUTH_REQUIRED");
+    if (args[1] === "list") return { result: { itemList: [], nextToken: "", hasMore: false } };
+    throw new Error("unexpected detail");
+  } });
+  const service = new TaskService({ ...base, dingtalkMinutes, dingtalkSetup: {
+    async install() { steps.push("install"); installed = true; return "/fake/dws"; },
+    async login(onUrl) {
+      steps.push("login");
+      onUrl("https://login.dingtalk.com/oauth2/auth?x=1");
+      await new Promise<void>((resolve) => { finishLogin = resolve; });
+      authorized = true;
+    },
+  } });
+  const until = async (check: (board: TaskBoard) => boolean): Promise<TaskBoard> => {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const board = await service.board();
+      if (check(board)) return board;
+      await Bun.sleep(5);
+    }
+    throw new Error("timed out");
+  };
+
+  try {
+    await service.syncDingTalk();
+    expect((await service.board()).dingtalkInbox).toMatchObject({ errorCode: "DINGTALK_NOT_INSTALLED", setup: null });
+    await expect(service.action({ action: "dingtalk-install" }, { deviceId: "remote" } as never)).rejects.toThrow("只能在本机");
+
+    await service.action({ action: "dingtalk-install" });
+    const waiting = await until((board) => board.dingtalkInbox?.setup?.loginUrl !== undefined);
+    expect(waiting.dingtalkInbox).toMatchObject({ errorCode: "DINGTALK_AUTH_REQUIRED", setup: { step: "login", loginUrl: "https://login.dingtalk.com/oauth2/auth?x=1" } });
+    expect(steps).toEqual(["install", "login"]);
+
+    finishLogin();
+    const done = await until((board) => board.dingtalkInbox?.setup === null);
+    expect(done.dingtalkInbox).toMatchObject({ error: null, errorCode: null, lastSyncedAt: expect.any(String) });
+  } finally {
+    await service.stop();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});

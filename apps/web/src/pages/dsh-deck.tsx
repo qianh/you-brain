@@ -51,7 +51,12 @@ export function DshDeckPage() {
   const [knownDevices, setKnownDevices] = useState<ActiveT3Device[]>([]);
   const [deviceNames, setDeviceNames] = useState<Record<string, string>>({});
   const handleDevicesChange = useCallback((devices: ActiveT3Device[]) => {
-    setKnownDevices(devices);
+    setKnownDevices((current) =>
+      current.length === devices.length &&
+      current.every((item, index) => item.id === devices[index]?.id && item.name === devices[index]?.name)
+        ? current
+        : devices,
+    );
     if (devices.length === 0) return;
     setDeviceNames((current) => {
       let changed = false;
@@ -66,7 +71,9 @@ export function DshDeckPage() {
     });
   }, []);
   const handleActiveDeviceChange = useCallback((device: ActiveT3Device | null) => {
-    setActiveT3Device(device);
+    setActiveT3Device((current) =>
+      current?.id === device?.id && current?.name === device?.name ? current : device,
+    );
     if (device !== null) {
       setDeviceNames((current) => (current[device.id] === device.name ? current : { ...current, [device.id]: device.name }));
     }

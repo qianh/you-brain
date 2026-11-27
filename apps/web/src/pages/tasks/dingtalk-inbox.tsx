@@ -13,6 +13,15 @@ type InboxProps = { busy: boolean; onAction: (input: InboxAction) => Promise<boo
 export function DingTalkInbox({ inbox, busy, onAction }: InboxProps & { inbox: DingTalkInboxView }) {
   const { t, language, timeZone } = useDaemon();
   const count = inbox.meetings.reduce((total, meeting) => total + meeting.items.length, 0);
+  // 未安装 / 未登录时直接在提示里给出处理按钮，不用让用户去终端找安装命令。
+  const setupAction = (code: DingTalkInboxView["errorCode"]) => {
+    if (code !== "DINGTALK_NOT_INSTALLED" && code !== "DINGTALK_AUTH_REQUIRED") return undefined;
+    const install = code === "DINGTALK_NOT_INSTALLED";
+    return <Button size="sm" variant="primary" disabled={busy} icon={<Icon name={install ? "plus" : "key"} size={13} />}
+      onClick={() => void onAction({ action: install ? "dingtalk-install" : "dingtalk-login" })}>
+      {t(install ? "tasksDingTalkInstall" : "tasksDingTalkLogin")}
+    </Button>;
+  };
   return <section className="tasks-dingtalk-inbox" aria-label={t("tasksDingTalkInbox")}>
     <header>
       <h2>{t("tasksDingTalkInbox")} <span>{count}</span></h2>
@@ -21,8 +30,13 @@ export function DingTalkInbox({ inbox, busy, onAction }: InboxProps & { inbox: D
         <Button size="sm" variant="ghost" loading={inbox.syncing} disabled={busy || inbox.syncing} icon={<Icon name="refresh" size={13} />} onClick={() => void onAction({ action: "dingtalk-sync" })}>{t("tasksDingTalkSyncNow")}</Button>
       </div>
     </header>
-    {inbox.error && !inbox.syncing && <Banner tone="warn">{inbox.error}</Banner>}
-    {inbox.meetings.length === 0 && !inbox.error && !inbox.syncing && <p>{t("tasksDingTalkInboxEmpty")}</p>}
+    {inbox.setup
+      ? <Banner tone="info">
+        {t(inbox.setup.step === "install" ? "tasksDingTalkInstalling" : "tasksDingTalkLoggingIn")}
+        {inbox.setup.loginUrl && <> <a className="text-link" href={inbox.setup.loginUrl} target="_blank" rel="noreferrer">{t("tasksDingTalkLoginLink")}</a></>}
+      </Banner>
+      : inbox.error && !inbox.syncing && <Banner tone="warn" action={setupAction(inbox.errorCode)}>{inbox.error}</Banner>}
+    {inbox.meetings.length === 0 && !inbox.error && !inbox.syncing && !inbox.setup && <p>{t("tasksDingTalkInboxEmpty")}</p>}
     {inbox.meetings.map((meeting) => <DingTalkMeeting key={meeting.source.taskUuid} meeting={meeting} busy={busy} onAction={onAction} />)}
   </section>;
 }

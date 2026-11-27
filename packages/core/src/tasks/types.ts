@@ -34,7 +34,11 @@ export interface DingTalkInboxView {
   meetings: DingTalkInboxMeeting[];
   lastSyncedAt: string | null;
   error: string | null;
+  /** 可在界面里一键处理的错误：未安装 dws、未登录钉钉。 */
+  errorCode: "DINGTALK_NOT_INSTALLED" | "DINGTALK_AUTH_REQUIRED" | null;
   syncing: boolean;
+  /** 一键安装 / 登录进行中；login 拿到授权链接后带上，浏览器没自动打开时可手动访问。 */
+  setup: { step: "install" | "login"; loginUrl?: string | undefined } | null;
 }
 
 export function dingTalkMinutesUrl(taskUuid: string): string {
@@ -229,6 +233,8 @@ export interface TaskUpdateInput {
 export type TaskActionInput =
   | { action: "project"; projectId: string; enabled: boolean }
   | { action: "dingtalk-sync" }
+  | { action: "dingtalk-install" }
+  | { action: "dingtalk-login" }
   | { action: "dingtalk-confirm"; taskUuid: string; ids: string[] }
   | { action: "dingtalk-ignore"; taskUuid: string; ids: string[] }
   | { action: "start"; id: string }

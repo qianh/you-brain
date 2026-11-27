@@ -27,17 +27,22 @@ export function Segmented({
   const role = labelledBy ?? "tablist";
 
   useLayoutEffect(() => {
+    // 测量值没变时保留原对象：调用方每次渲染传入新的 options 数组时，
+    // 这里每次都会重跑，若总是 setBox 新对象就会触发无限重渲染（React #185）。
+    const update = (x: number, w: number): void => {
+      setBox((prev) => (prev.x === x && prev.w === w ? prev : { x, w }));
+    };
     const measure = (): void => {
       const parent = root.current;
       const index = options.findIndex((option) => option.value === value);
       const current = index < 0 ? undefined : buttons.current[index];
       if (!parent || !current) {
-        setBox({ x: 0, w: 0 });
+        update(0, 0);
         return;
       }
       const parentBox = parent.getBoundingClientRect();
       const currentBox = current.getBoundingClientRect();
-      setBox({ x: currentBox.left - parentBox.left, w: currentBox.width });
+      update(currentBox.left - parentBox.left, currentBox.width);
     };
     measure();
     const observer = new ResizeObserver(measure);

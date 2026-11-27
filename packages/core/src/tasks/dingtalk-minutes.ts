@@ -79,7 +79,7 @@ function commandError(stdout: string, stderr: string, exitCode?: number | string
   return new DingTalkMinutesError("DINGTALK_BAD_RESPONSE");
 }
 
-async function resolveDws(env: NodeJS.ProcessEnv, homeDir: string): Promise<string> {
+export async function resolveDws(env: NodeJS.ProcessEnv, homeDir: string): Promise<string> {
   const directories = [...(env.PATH ?? "").split(delimiter), join(homeDir, ".local", "bin"), "/opt/homebrew/bin", "/usr/local/bin"];
   for (const dir of new Set(directories.filter(isAbsolute))) {
     const candidate = join(dir, "dws");

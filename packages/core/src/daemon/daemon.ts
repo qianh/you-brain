@@ -251,6 +251,7 @@ import { T3Automation } from "../deck/t3/automation.js";
 import { T3ThreadWatcher } from "../deck/t3/watch.js";
 import { createLlmTaskClassifier } from "../tasks/classify.js";
 import { createDingTalkMinutes } from "../tasks/dingtalk-minutes.js";
+import { createDingTalkSetup } from "../tasks/dingtalk-setup.js";
 import { TaskGit } from "../tasks/git.js";
 import { TaskService } from "../tasks/service.js";
 import { TERMINAL_NOTIFY_PREF_KEY } from "../deck/session-notices.js";
@@ -4280,6 +4281,7 @@ export class YouBrainDaemon {
         git: new TaskGit({ dataDir: paths.dataDir, env: this.#env }),
         meetingModel: () => this.#llm,
         dingtalkMinutes: createDingTalkMinutes({ env: this.#env, homeDir: this.#homeDir }),
+        dingtalkSetup: createDingTalkSetup({ env: this.#env, homeDir: this.#homeDir }),
         now: () => this.#clock.now(),
         onChange: () => this.changes.publish("deck", this.#clock.now().toISOString()),
         classifyTask: createLlmTaskClassifier(async () => this.#llm),

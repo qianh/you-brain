@@ -59,6 +59,7 @@ function savedActive(endpoints: readonly T3Endpoint[], threadUrl: string | null)
 import { DeckRemoteDesktopPane } from "./deck-remote-desktop.js";
 
 const DEVICE_ID_PREFIX = "device:";
+const EMPTY_DEVICE_TABS: readonly DeviceTab[] = [];
 
 export interface DeviceTab {
   id: string;
@@ -202,7 +203,7 @@ export function DeckT3Panel({
   frameRef,
   threadUrl,
   threadTarget = null,
-  initialDeviceTabs = [],
+  initialDeviceTabs = EMPTY_DEVICE_TABS,
 }: {
   reloadVersion: number;
   /** 递增时强制切回本机端点（例如打开本机终端通知时）。 */

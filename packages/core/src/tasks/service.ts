@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { LlmBackend } from "../llm/types.js";
 import { dingTalkActionItems, DINGTALK_SYNC_MS, newDingTalkScan } from "./dingtalk-inbox.js";
 import { DINGTALK_SYNC_SCOPES, DingTalkMinutesError, parseDingTalkMinutesLink, type DingTalkMinutesPort, type DingTalkMinutesQuery } from "./dingtalk-minutes.js";
+import { DingTalkSetupError, type DingTalkSetupPort } from "./dingtalk-setup.js";
 import { TaskActionSchema, TaskCreateSchema, TaskUpdateSchema, type TaskState } from "./schema.js";
 import { TaskAlreadyMergedError, TaskBehindDevelopError, TaskDirtyWorktreeError, TaskMergeBlockedError, TaskNoCommitError } from "./git.js";
 import { parseTaskImage, TaskImages } from "./images.js";
@@ -13,7 +14,7 @@ import { validProjectSelection } from "./project-selection.js";
 import { TaskStore } from "./store.js";
 import { dingTalkMinutesUrl, TASK_IMAGE_MAX_COUNT, taskProjectIds } from "./types.js";
 import type {
-  DevelopmentTask, MeetingImportAction, MeetingImportHttpPort, MeetingImportResult, MeetingImportView,
+  DevelopmentTask, DingTalkInboxView, MeetingImportAction, MeetingImportHttpPort, MeetingImportResult, MeetingImportView,
   TaskActionInput, TaskAutomationPort, TaskBoard, TaskCreateInput,
   TaskDiff, TaskGitPort, TaskGuard, TaskHttpPort, TaskImageData, TaskNewProject, TaskProject, TaskRepositoryRun, TaskReview, TaskRun, TaskStatus, TaskUpdateInput, TaskWorktreeRun,
 } from "./types.js";
@@ -35,6 +36,8 @@ export interface TaskServiceOptions {
   homeDir?: string;
   meetingModel?: () => LlmBackend | null;
   dingtalkMinutes?: DingTalkMinutesPort;
+  /** 收件箱里一键安装 dws / 登录钉钉；未注入时界面只显示错误提示。 */
+  dingtalkSetup?: DingTalkSetupPort;
   /** 按项目 cwd 返回该仓库已锁定的项目决定摘要（< 3KB），供派发时注入。 */
   projectContext?: (cwd: string) => Promise<string | null> | string | null;
   /** 手动启动前判定 TODO 是否属于需求型；未注入时交由 T3 会话只读判断。 */
@@ -86,6 +89,9 @@ export class TaskService implements TaskHttpPort, MeetingImportHttpPort {
   #dingTalkTimer: ReturnType<typeof setInterval> | null = null;
   #dingTalkJob: Promise<void> | null = null;
   #dingTalkError: string | null = null;
+  #dingTalkErrorCode: DingTalkInboxView["errorCode"] = null;
+  #dingTalkSetup: DingTalkInboxView["setup"] = null;
+  #dingTalkSetupJob: Promise<void> | null = null;
 
   constructor(private readonly options: TaskServiceOptions) {
     this.#store = options.store ?? new TaskStore(join(options.dataDir, "tasks", "board.json"));
@@ -113,6 +119,7 @@ export class TaskService implements TaskHttpPort, MeetingImportHttpPort {
     this.#timer = null;
     this.#dingTalkTimer = null;
     await this.#dingTalkJob;
+    await this.#dingTalkSetupJob;
     await this.#queue;
   }
 
@@ -270,12 +277,48 @@ export class TaskService implements TaskHttpPort, MeetingImportHttpPort {
     const port = this.options.dingtalkMinutes;
     if (this.#stopped || !port) return Promise.resolve();
     return this.#dingTalkJob ??= this.#pullDingTalk(port).then(
-      () => { this.#dingTalkError = null; },
+      () => { this.#dingTalkError = null; this.#dingTalkErrorCode = null; },
       (error: unknown) => {
-        if (!this.#stopped) this.#dingTalkError = error instanceof DingTalkMinutesError || error instanceof TaskPersistenceError
+        if (this.#stopped) return;
+        this.#dingTalkError = error instanceof DingTalkMinutesError || error instanceof TaskPersistenceError
           ? error.message : new DingTalkMinutesError("DINGTALK_BAD_RESPONSE").message;
+        this.#dingTalkErrorCode = dingTalkUnavailable(error) ? (error as DingTalkMinutesError).code as NonNullable<DingTalkInboxView["errorCode"]> : null;
       },
     ).finally(() => { this.#dingTalkJob = null; });
+  }
+
+  /** 一键安装 dws（装好后若仍未登录，接着拉起浏览器授权），或单独登录；完成后立即同步一次。 */
+  #runDingTalkSetup(step: "install" | "login"): void {
+    const setup = this.options.dingtalkSetup;
+    if (this.#stopped || !setup || this.#dingTalkSetupJob) return;
+    const signal = this.#dingTalkStop.signal;
+    const changed = (): void => { if (!this.#stopped) this.options.onChange?.(); };
+    const resync = async (): Promise<void> => {
+      await this.#dingTalkJob;
+      await this.syncDingTalk();
+    };
+    const run = async (): Promise<void> => {
+      if (step === "install") {
+        this.#dingTalkSetup = { step: "install" };
+        changed();
+        await setup.install(signal);
+        await resync();
+        if (this.#dingTalkErrorCode !== "DINGTALK_AUTH_REQUIRED") return;
+      }
+      this.#dingTalkSetup = { step: "login" };
+      changed();
+      await setup.login((loginUrl) => { this.#dingTalkSetup = { step: "login", loginUrl }; changed(); }, signal);
+      await resync();
+    };
+    this.#dingTalkSetupJob = run().catch((error: unknown) => {
+      if (this.#stopped) return;
+      this.#dingTalkError = error instanceof DingTalkSetupError || error instanceof DingTalkMinutesError
+        ? error.message : `钉钉 CLI 设置失败：${message(error)}`;
+    }).finally(() => {
+      this.#dingTalkSetup = null;
+      this.#dingTalkSetupJob = null;
+      changed();
+    });
   }
 
   async #pullDingTalk(port: DingTalkMinutesPort): Promise<void> {
@@ -523,6 +566,12 @@ export class TaskService implements TaskHttpPort, MeetingImportHttpPort {
     if (body.action === "dingtalk-sync") {
       if (guard) throw new TaskError(403, "只能在本机处理钉钉收件。");
       void this.syncDingTalk();
+      return this.#serial(async () => { await this.#load(); return this.#board(); });
+    }
+    if (body.action === "dingtalk-install" || body.action === "dingtalk-login") {
+      if (guard) throw new TaskError(403, "只能在本机处理钉钉收件。");
+      if (!this.options.dingtalkSetup) throw new TaskError(501, "当前设备不支持一键设置钉钉 CLI。");
+      this.#runDingTalkSetup(body.action === "dingtalk-install" ? "install" : "login");
       return this.#serial(async () => { await this.#load(); return this.#board(); });
     }
     return this.#serial(async () => {
@@ -1264,7 +1313,8 @@ export class TaskService implements TaskHttpPort, MeetingImportHttpPort {
     return structuredClone({ projects: state.projects, tasks: state.tasks, connectionError: this.#connectionError,
       ...(this.options.dingtalkMinutes ? { dingtalkInbox: {
         meetings: inbox?.meetings ?? [], lastSyncedAt: inbox?.lastScan === undefined ? null : new Date(inbox.lastScan).toISOString(),
-        error: this.#dingTalkError, syncing: this.#dingTalkJob !== null,
+        error: this.#dingTalkError, errorCode: this.#dingTalkErrorCode, syncing: this.#dingTalkJob !== null,
+        setup: this.#dingTalkSetup,
       } } : {}),
     });
   }

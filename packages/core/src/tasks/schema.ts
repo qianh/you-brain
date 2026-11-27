@@ -51,6 +51,8 @@ export const TaskActionSchema = z.discriminatedUnion("action", [
   z.object({ action: z.literal("dingtalk-confirm"), ...dingtalkSelection }).strict(),
   z.object({ action: z.literal("dingtalk-ignore"), ...dingtalkSelection }).strict(),
   z.object({ action: z.literal("dingtalk-sync") }).strict(),
+  z.object({ action: z.literal("dingtalk-install") }).strict(),
+  z.object({ action: z.literal("dingtalk-login") }).strict(),
   z.object({ action: z.literal("start"), id }).strict(),
   z.object({ action: z.literal("complete"), id }).strict(),
   z.object({ action: z.literal("retry"), id }).strict(),
