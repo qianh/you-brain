@@ -251,6 +251,12 @@ describe("dispatch tasks.* remote TODO management", () => {
     // Seed one task in p1 (allowed) and one in p2 (not allowed)
     const b1 = await tasks.create({ title: "允许的项目任务", projectId: "p1", priority: 1 });
     await tasks.create({ title: "未允许的项目任务", projectId: "p2", priority: 2 });
+    const multi = await tasks.create({ title: "跨仓任务", projectId: "p1", relatedProjectIds: ["p2"] }, [
+      new File(["test attachment"], "notes.txt", { type: "text/plain" }),
+    ]);
+    const multiTask = multi.tasks.at(-1)!;
+    const multiId = multiTask.id;
+    const attachment = { taskId: multiId, imageId: multiTask.images![0]!.id };
     const p1TaskId = b1.tasks[0]!.id;
     await tasks.action({ action: "start", id: p1TaskId });
     await tasks.tick();
@@ -283,6 +289,9 @@ describe("dispatch tasks.* remote TODO management", () => {
     // Rejects creating in disallowed project
     const denied = await send("tasks.create", { title: "越权任务", projectId: "p2" });
     expect(denied.ok).toBe(false);
+    expect((await send("tasks.action", { action: "start", id: multiId })).ok).toBe(false);
+    expect((await send("tasks.review", { id: multiId })).ok).toBe(false);
+    expect((await send("tasks.blob.get", attachment)).ok).toBe(false);
 
     // Oversized diff is truncated to fit well inside relay's 256 KB result frame limit
     const reviewRes = await send("tasks.review", { id: p1TaskId });
@@ -290,6 +299,14 @@ describe("dispatch tasks.* remote TODO management", () => {
     const review = (reviewRes as { ok: true; result: TaskReview }).result;
     expect(review.truncated).toBe(true);
     expect(Buffer.byteLength(JSON.stringify(review), "utf8")).toBeLessThanOrEqual(190 * 1024);
+
+    await executor.updatePolicy({ allowedProjects: ["p1", "p2"] });
+    expect((await send("tasks.blob.get", attachment)).ok).toBe(true);
+    await tasks.action({ action: "start", id: multiId });
+    await tasks.tick();
+    expect((await send("tasks.review", { id: multiId })).ok).toBe(false);
+    expect((await send("tasks.action", { action: "approve", id: multiId, reviewSha: "b".repeat(40) })).ok).toBe(false);
+    expect((await tasks.board()).tasks.find((task) => task.id === multiId)?.status).toBe("review");
 
     await tasks.stop();
   });

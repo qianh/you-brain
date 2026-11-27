@@ -23,6 +23,13 @@ describe("TODO queue presentation", () => {
     expect(visibleTasks(tasks, "one", "review").map((item) => item.id)).toEqual(["waiting"]);
   });
 
+  test("a multi-project task is visible under either project without increasing the total", () => {
+    const batch = task("batch", { relatedProjectIds: ["two"], status: "running" });
+    expect(visibleTasks([batch], "two", "active")).toEqual([batch]);
+    expect(projectTasks([batch], "two")).toEqual([batch]);
+    expect(taskCounts([batch], "all").all).toBe(1);
+  });
+
   test("project card lists unfinished tasks with running ones first", () => {
     const tasks = [task("failed", { status: "failed" }), task("waiting", { status: "review" }), task("queued"), task("planning", { status: "planning" }), task("running", { status: "running" }), task("done", { status: "done" })];
     expect(projectTasks(tasks, "one").map((item) => item.id)).toEqual(["planning", "running", "waiting", "failed"]);

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT, type DevelopmentTask, type TaskActionInput, type TaskBoard, type TaskCreateInput, type TaskImage, type TaskPriority, type TaskProject, type TaskReview } from "@you-brain/core/tasks/types.js";
+import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT, taskProjectIds, type DevelopmentTask, type TaskActionInput, type TaskBoard, type TaskCreateInput, type TaskDiff, type TaskImage, type TaskPriority, type TaskProject, type TaskReview, type TaskRepositoryPhase } from "@you-brain/core/tasks/types.js";
 
 import { useActiveDevice } from "../active-device-context.js";
 import { Banner } from "../components/banner.js";
@@ -21,11 +21,16 @@ import { useRoute } from "../router.js";
 import { projectTasks, TASK_PRIORITY_KEYS, TASK_STATUS_KEYS, taskCounts, taskStatusKey, taskThreadHref, taskWorktreeHint, visibleTasks } from "./tasks/logic.js";
 import { ProjectPicker, type ProjectChoice } from "./tasks/project-picker.js";
 import { clipboardTaskImages, TaskAttachmentCard, TaskImagePreview } from "./tasks/images.js";
+import { MeetingImportDialog } from "./tasks/meeting-import.js";
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const TASK_METRICS = [
   ["all", "tasksAll"], ["queued", "tasksQueued"], ["active", "tasksActive"], ["review", "tasksReview"], ["done", "tasksDone"],
 ] as const;
+const REPOSITORY_PHASE_KEYS = {
+  pending: "tasksRepoPending", merged: "tasksRepoMerged", published: "tasksRepoPublished",
+  delivered: "tasksRepoDelivered", skipping: "tasksRepoSkipping", skipped: "tasksRepoSkipped",
+} as const satisfies Record<TaskRepositoryPhase, string>;
 
 function ThreadLink({ task, deviceId, onOpen }: { task: DevelopmentTask; deviceId?: string | null; onOpen?: () => void }) {
   const { t } = useDaemon();
@@ -56,6 +61,7 @@ export function TasksPage() {
   const [status, setStatus] = useState("all");
   const [tab, setTab] = useState<"tasks" | "projects">("tasks");
   const [editor, setEditor] = useState<{ task: DevelopmentTask | null } | null>(null);
+  const [meetingImport, setMeetingImport] = useState(false);
   const [reviewing, setReviewing] = useState<DevelopmentTask | null>(null);
   const [viewingImages, setViewingImages] = useState<DevelopmentTask | null>(null);
   const [completing, setCompleting] = useState<DevelopmentTask | null>(null);
@@ -88,6 +94,7 @@ export function TasksPage() {
     polling.current = false;
     setProject("all");
     setEditor(null);
+    setMeetingImport(false);
     setReviewing(null);
     setViewingImages(null);
     setCompleting(null);
@@ -205,6 +212,7 @@ export function TasksPage() {
       <PageHeader title={deviceTitle} description={t("tasksLead")} actions={<>
         <Segmented label={t("tasksProjects")} value={tab} options={[{ value: "tasks", label: t("tasksTabTasks") }, { value: "projects", label: t("tasksTabProjects") }]} onChange={(value) => setTab(value === "projects" ? "projects" : "tasks")} />
         <Button variant="ghost" onClick={() => { void reloadDevices(); void load(activeDeviceId); }} disabled={busy} aria-label={t("tasksRefresh")} icon={<Icon name="refresh" />}>{t("reload")}</Button>
+        {!isRemote && <Button disabled={busy} onClick={() => setMeetingImport(true)} icon={<Icon name="file" />}>{t("tasksMeetingImport")}</Button>}
         <Button variant="primary" disabled={!canWrite} onClick={() => setEditor({ task: null })} icon={<Icon name="plus" />}>{t("tasksNew")}</Button>
       </>} />
 
@@ -326,7 +334,9 @@ export function TasksPage() {
           </div>
           {loading && !board ? <div className="tasks-loading" role="status"><Spinner /><span>{t("tasksLoadingBoard")}</span></div> : filtered.length === 0 ? <EmptyState title={t(tasks.length === 0 ? "tasksNoTasks" : "tasksNoMatches")} {...(tasks.length === 0 && canWrite ? { description: t("tasksNoTasksHint"), action: <Button onClick={() => setEditor({ task: null })}>{t("tasksNew")}</Button> } : {})} /> : <ul className="tasks-list">
             {filtered.map((task) => {
-              const linked = projects.find((item) => item.id === task.projectId);
+              const linked = taskProjectIds(task);
+              const projectName = (id: string) => projects.find((item) => item.id === id)?.name ?? t("tasksUnknownProject");
+              const batch = task.run?.branch != null ? task.run.batch : undefined;
               const worktreeBlock = task.status === "failed" ? task.worktreeBlock : undefined;
               const taskError = task.error ?? task.run?.error;
               return <li className={`tasks-item is-${task.status}`} key={task.id}>
@@ -334,16 +344,18 @@ export function TasksPage() {
                 <div className="tasks-item-body">
                   <div className="tasks-item-title"><h3>{task.title}</h3><span className={`tasks-status is-${worktreeBlock ? "worktree-blocked" : task.status}`}>{t(taskStatusKey(task))}</span></div>
                   {task.description && <p className="tasks-description">{task.description}</p>}
-                  <div className="tasks-item-meta"><span><Icon name="folder" size={12} />{linked?.name ?? t(task.projectId ? "tasksUnknownProject" : "tasksUnassigned")}</span>{task.run?.branch && <code>{task.run.branch}</code>}<span>{t("tasksUpdated", { when: formatRelative(task.updatedAt, language, timeZone) })}</span></div>
+                  <div className="tasks-item-meta"><span><Icon name="folder" size={12} />{linked.length ? linked.map((id) => `${projectName(id)}${linked.length > 1 && id === task.projectId ? ` (${t("tasksPrimaryProject")})` : ""}`).join(" · ") : t("tasksUnassigned")}</span>{task.run?.branch && <code>{task.run.branch}</code>}<span>{t("tasksUpdated", { when: formatRelative(task.updatedAt, language, timeZone) })}</span></div>
+                  {batch && (task.status === "failed" || task.status === "merging" || batch.repositories.some((repo) => repo.phase !== "pending")) &&
+                    <ul className="tasks-repository-progress">{linked.map((id) => <li key={id}>{projectName(id)} · {t(REPOSITORY_PHASE_KEYS[batch.repositories.find((repo) => repo.projectId === id)?.phase ?? "pending"])}</li>)}</ul>}
                   {!!task.images?.length && <Button size="sm" variant="ghost" onClick={() => setViewingImages(task)}>{t("tasksImages", { count: task.images.length })}</Button>}
-                  {worktreeBlock ? <p className="tasks-item-error is-worktree-blocked" role="status">{taskWorktreeHint(worktreeBlock, language)}</p>
+                  {worktreeBlock ? <p className="tasks-item-error is-worktree-blocked" role="status">{batch && taskError ? `${taskError}。` : ""}{taskWorktreeHint(worktreeBlock, language)}</p>
                     : taskError && <p className="tasks-item-error" role="alert">{taskError}</p>}
                 </div>
                 <div className="tasks-item-actions">
                   {task.status === "queued" && <Button size="sm" disabled={!canWrite || !!board?.connectionError} loading={launchingId === task.id} onClick={() => void startTask(task.id)} icon={<Icon name="play" size={13} />}>{t("tasksStartOne")}</Button>}
                   {task.status === "queued" && <Button size="sm" variant="ghost" disabled={!canWrite} onClick={() => setEditor({ task })} icon={<Icon name="pencil" size={13} />}>{t("tasksEdit")}</Button>}
                   {task.status === "review" && <Button size="sm" variant="primary" disabled={!canWrite} onClick={() => setReviewing(task)}>{t("tasksInspect")}</Button>}
-                  {task.status === "failed" && <Button size="sm" disabled={!canWrite} onClick={() => void act({ action: "retry", id: task.id })}>{t("tasksRetry")}</Button>}
+                  {task.status === "failed" && <Button size="sm" disabled={!canWrite} onClick={() => void act({ action: "retry", id: task.id })}>{t(batch?.approved ? "tasksResumeDelivery" : "tasksRetry")}</Button>}
                   {task.status !== "done" && task.status !== "merging" && <Button size="sm" variant="ghost" disabled={!canWrite} onClick={() => setCompleting(task)} icon={<Icon name="check" size={13} />}>{t("tasksComplete")}</Button>}
                   <ThreadLink task={task} deviceId={activeDeviceId} />
                 </div>
@@ -354,6 +366,14 @@ export function TasksPage() {
         </section>
       </>}
     </div>
+    {pageActive && !isRemote && meetingImport && <MeetingImportDialog projects={projects} onClose={() => setMeetingImport(false)} onCreated={(next, count) => {
+      acceptBoard("local", next);
+      setTab("tasks");
+      setProject("all");
+      setStatus("all");
+      setMeetingImport(false);
+      push({ message: t("tasksMeetingAdded", { count }), tone: "success" });
+    }} />}
     {editor && <TaskEditor
       key={`${deviceKey}:${editor.task?.id ?? "new"}`}
       task={editor.task}
@@ -419,7 +439,7 @@ function TaskEditor({ task, projects, initialProject, deviceId, deviceName, busy
   const { t } = useDaemon();
   const [title, setTitle] = useState(task?.title ?? "");
   const [description, setDescription] = useState(task?.description ?? "");
-  const [project, setProject] = useState<ProjectChoice>({ projectId: task?.projectId ?? (projects.some((item) => item.id === initialProject) ? initialProject : "") });
+  const [project, setProject] = useState<ProjectChoice>({ projectId: task ? task.projectId ?? "" : (projects.some((item) => item.id === initialProject) ? initialProject : ""), relatedProjectIds: task?.relatedProjectIds });
   const [priority, setPriority] = useState<TaskPriority>(task?.priority ?? 2);
   const [savedImages, setSavedImages] = useState<TaskImage[]>(task?.images ?? []);
   const [newImages, setNewImages] = useState<Array<{ id: number; file: File }>>([]);
@@ -442,7 +462,8 @@ function TaskEditor({ task, projects, initialProject, deviceId, deviceName, busy
     event.preventDefault();
     if (busy || !title.trim()) return;
     const linked = "newProject" in project ? { newProject: project.newProject } : { projectId: project.projectId || null };
-    void onSave({ title: title.trim(), description: description.trim(), ...linked, priority }, newImages.map(({ file }) => file), savedImages.map(({ id }) => id));
+    const related = deviceId === null ? { relatedProjectIds: "projectId" in project ? project.relatedProjectIds ?? [] : [] } : {};
+    void onSave({ title: title.trim(), description: description.trim(), ...linked, ...related, priority }, newImages.map(({ file }) => file), savedImages.map(({ id }) => id));
   };
   const dialogTitle = deviceName ? `${t(task ? "tasksEdit" : "tasksNew")} · ${deviceName}` : t(task ? "tasksEdit" : "tasksNew");
   return <Dialog open className="tasks-editor-dialog" onClose={onClose} title={dialogTitle} footer={<><Button variant="ghost" disabled={busy} onClick={onClose}>{t("cancel")}</Button><Button variant="primary" type="submit" form="task-editor" loading={busy} disabled={!title.trim()}>{t(task ? "tasksSave" : "tasksCreate")}</Button></>}>
@@ -463,7 +484,7 @@ function TaskEditor({ task, projects, initialProject, deviceId, deviceName, busy
           {imageError && <small role="alert">{imageError}</small>}
         </div>
       </div>
-      <div className="tasks-form-pair"><div><label>{t("tasksProject")}</label><ProjectPicker projects={projects} value={project} onChange={setProject} disabled={busy} allowPickFolder={deviceId === null} /></div><div><label>{t("tasksPriority")}</label><Select label={t("tasksPriority")} value={String(priority)} onChange={(value) => setPriority(Number(value) as TaskPriority)} disabled={busy} options={TASK_PRIORITY_KEYS.map((key, index) => ({ value: String(index), label: t(key) }))} /></div></div>
+      <div className="tasks-form-pair"><div><label>{t("tasksProject")}</label><ProjectPicker projects={projects} value={project} onChange={setProject} disabled={busy} allowPickFolder={deviceId === null} {...(deviceId !== null ? { maxProjects: 1 } : {})} /></div><div><label>{t("tasksPriority")}</label><Select label={t("tasksPriority")} value={String(priority)} onChange={(value) => setPriority(Number(value) as TaskPriority)} disabled={busy} options={TASK_PRIORITY_KEYS.map((key, index) => ({ value: String(index), label: t(key) }))} /></div></div>
       {"newProject" in project && <p className="tasks-form-hint" role="status"><Icon name="info" size={13} />{t(project.newProject.cwd ? "tasksProjectWillAdd" : "tasksProjectWillCreate", { name: project.newProject.name })}</p>}
     </form>
   </Dialog>;
@@ -500,7 +521,8 @@ function TaskReviewDialog({ task, deviceId, deviceName, onClose, onChanged }: {
     try {
       const next = await client.taskAction(
         action === "approve"
-          ? { action, id: task.id, reviewSha: review.headSha }
+          ? review.batch ? { action: "approveBatch", id: task.id, reviewToken: review.batch.token }
+            : { action, id: task.id, reviewSha: review.headSha }
           : { action, id: task.id, feedback: feedback.trim() },
         deviceId,
       );
@@ -509,6 +531,7 @@ function TaskReviewDialog({ task, deviceId, deviceName, onClose, onChanged }: {
       push({ message: t(action === "approve" ? (synced ? "tasksApproveSynced" : "tasksApproved") : "tasksRejected"), tone: synced ? "info" : "success" });
       onClose();
     } catch (caught) {
+      if (review.batch) await client.taskBoard(deviceId).then(onChanged, () => undefined);
       setError(errorMessage(caught));
       setAcknowledged(false);
     } finally {
@@ -517,9 +540,9 @@ function TaskReviewDialog({ task, deviceId, deviceName, onClose, onChanged }: {
   };
 
   const reviewTitle = deviceName ? `${t("tasksReviewTitle")} · ${deviceName}` : t("tasksReviewTitle");
-  const approveLabel = deviceName ? t("tasksApproveDevice", { device: deviceName }) : t("tasksApprove");
+  const approveLabel = review?.batch ? t("tasksApproveBatch") : deviceName ? t("tasksApproveDevice", { device: deviceName }) : t("tasksApprove");
 
-  return <Dialog open size="lg" className="tasks-review-dialog" title={reviewTitle} description={t("tasksReviewHint")} onClose={() => { if (!busy) onClose(); }} footer={<>
+  return <Dialog open size="lg" className="tasks-review-dialog" title={reviewTitle} description={t(review?.batch ? "tasksBatchReviewHint" : "tasksReviewHint")} onClose={() => { if (!busy) onClose(); }} footer={<>
     <Button variant="ghost" disabled={busy} onClick={onClose}>{t("closeForm")}</Button>
     <Button disabled={busy || !review || !feedback.trim()} onClick={() => void act("reject")}>{t("tasksReject")}</Button>
     <Button variant="primary" loading={busy} disabled={!review || !acknowledged} onClick={() => void act("approve")}>{approveLabel}</Button>
@@ -528,12 +551,26 @@ function TaskReviewDialog({ task, deviceId, deviceName, onClose, onChanged }: {
     {!review && !error && <div className="tasks-loading" role="status"><Spinner />{t("tasksLoadingReview")}</div>}
     {review && <div className="tasks-review-content">
       <header className="tasks-review-task"><h3>{review.task.title}</h3><ThreadLink task={review.task} deviceId={deviceId} onOpen={onClose} /></header>
-      <dl className="tasks-review-meta"><div><dt>{t("tasksBranch")}</dt><dd><code>{review.task.run?.branch}</code></dd></div><div><dt>{t("tasksCommit")}</dt><dd><code>{review.headSha}</code></dd></div><div><dt>{t("tasksBaseCommit")}</dt><dd><code>{review.baseSha}</code></dd></div><div><dt>{t("tasksWorktree")}</dt><dd><code>{review.task.run?.worktreePath}</code></dd></div></dl>
       <section><h4>{t("tasksSummary")}</h4><p className="tasks-review-summary">{review.task.run?.summary || t("tasksNoSummary")}</p></section>
-      <section><h4>{t("tasksChanges")}</h4><pre className="tasks-review-stat">{review.stat}</pre></section>
-      <section><h4>{t("tasksDiff")}</h4>{review.truncated && <Banner tone="warn">{t("tasksTruncated")}</Banner>}<pre className="tasks-review-diff" tabIndex={0} aria-label={t("tasksDiff")}>{review.diff}</pre></section>
-      <label className="tasks-review-ack"><input type="checkbox" checked={acknowledged} disabled={busy} onChange={(event) => setAcknowledged(event.target.checked)} /><span>{t("tasksAcknowledged")}</span></label>
+      {review.batch ? review.batch.repositories.map(({ projectId, name, phase, diff }) => {
+        const repo = review.task.run?.branch != null ? review.task.run.batch?.repositories.find((item) => item.projectId === projectId) : undefined;
+        return <section key={projectId} className="tasks-repository-review">
+          <h4>{name}{projectId === review.task.projectId ? ` · ${t("tasksPrimaryProject")}` : ""}</h4>
+          {diff ? <RepositoryDiff diff={diff} branch={repo?.branch} path={repo?.worktreePath} />
+            : <p>{t(phase === "pending" ? "tasksRepoUnchanged" : REPOSITORY_PHASE_KEYS[phase])}</p>}
+        </section>;
+      }) : <RepositoryDiff diff={review} branch={review.task.run?.branch} path={review.task.run?.worktreePath} />}
+      <label className="tasks-review-ack"><input type="checkbox" checked={acknowledged} disabled={busy} onChange={(event) => setAcknowledged(event.target.checked)} /><span>{t(review.batch ? "tasksBatchAcknowledged" : "tasksAcknowledged")}</span></label>
       <label className="tasks-review-feedback"><span>{t("tasksFeedback")}</span><Textarea label={t("tasksFeedback")} value={feedback} maxLength={10_000} rows={3} disabled={busy} onChange={(event) => setFeedback(event.target.value)} placeholder={t("tasksFeedbackPlaceholder")} /></label>
     </div>}
   </Dialog>;
+}
+
+function RepositoryDiff({ diff, branch, path }: { diff: TaskDiff; branch?: string | null | undefined; path?: string | null | undefined }) {
+  const { t } = useDaemon();
+  return <>
+    <dl className="tasks-review-meta"><div><dt>{t("tasksBranch")}</dt><dd><code>{branch}</code></dd></div><div><dt>{t("tasksCommit")}</dt><dd><code>{diff.headSha}</code></dd></div><div><dt>{t("tasksBaseCommit")}</dt><dd><code>{diff.baseSha}</code></dd></div><div><dt>{t("tasksWorktree")}</dt><dd><code>{path}</code></dd></div></dl>
+    <section><h4>{t("tasksChanges")}</h4><pre className="tasks-review-stat">{diff.stat}</pre></section>
+    <section><h4>{t("tasksDiff")}</h4>{diff.truncated && <Banner tone="warn">{t("tasksTruncated")}</Banner>}<pre className="tasks-review-diff" tabIndex={0} aria-label={t("tasksDiff")}>{diff.diff}</pre></section>
+  </>;
 }

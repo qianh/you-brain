@@ -4106,7 +4106,7 @@ export class YouBrainDaemon {
       },
       ...(this.#deck === null ? {} : { deck: this.#deckPort() as DeckHttpPort }),
       ...(this.#dispatchHub === null ? {} : { dispatch: this.#dispatchHttpPort() }),
-      ...(this.#tasks === null ? {} : { tasks: this.#tasks }),
+      ...(this.#tasks === null ? {} : { tasks: this.#tasks, meetingImport: this.#tasks }),
       uiPrefs: this.#uiPrefsStore(),
       status: () => {
         // 聚合一次要跑全量会话/采集/Drive 检查(秒级);短缓存让启动和
@@ -4277,6 +4277,7 @@ export class YouBrainDaemon {
         homeDir: this.#homeDir,
         automation,
         git: new TaskGit({ dataDir: paths.dataDir, env: this.#env }),
+        meetingModel: () => this.#llm,
         now: () => this.#clock.now(),
         onChange: () => this.changes.publish("deck", this.#clock.now().toISOString()),
         classifyTask: createLlmTaskClassifier(async () => this.#llm),

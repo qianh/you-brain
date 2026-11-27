@@ -13,9 +13,58 @@ export interface TaskProject {
 export type TaskStatus = "queued" | "preparing" | "planning" | "running" | "review" | "merging" | "done" | "failed";
 export type TaskPriority = 0 | 1 | 2 | 3;
 
+export const MEETING_IMPORT_MAX_BYTES = 64 * 1024;
+
+export interface MeetingTodoDraft {
+  id: string;
+  title: string;
+  description: string;
+  source: "meeting" | "user";
+  quote: string | null;
+  projectId: string | null;
+  relatedProjectIds?: string[] | undefined;
+  priority: TaskPriority;
+  selected: boolean;
+}
+
+export interface MeetingImportDraft {
+  id: string;
+  revision: number;
+  fileName: string;
+  analysed: boolean;
+  items: MeetingTodoDraft[];
+  questions: string[];
+  message: string;
+  clarification: string | null;
+}
+
+export interface MeetingImportView {
+  draft: MeetingImportDraft | null;
+  model: { name: string; consentKey: string | null } | null;
+}
+
+type MeetingDraftVersion = { id: string; revision: number };
+
+export type MeetingImportAction =
+  | { action: "import"; fileName: string; text: string }
+  | (MeetingDraftVersion & { action: "analyse"; consentKey: string })
+  | (MeetingDraftVersion & { action: "revise"; consentKey: string; feedback: string })
+  | (MeetingDraftVersion & { action: "select"; items: Array<Pick<MeetingTodoDraft, "id" | "selected" | "priority" | "projectId" | "relatedProjectIds">> })
+  | (MeetingDraftVersion & { action: "discard" | "confirm" });
+
+export interface MeetingImportResult extends MeetingImportView {
+  created?: { count: number; board: TaskBoard };
+}
+
+export interface MeetingImportHttpPort {
+  meetingImport(): Promise<MeetingImportView>;
+  meetingImportAction(input: MeetingImportAction): Promise<MeetingImportResult>;
+}
+
 export const TASK_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
 export const TASK_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 export const TASK_IMAGE_MAX_COUNT = 4;
+export const TASK_PROJECT_MAX_COUNT = 10;
 
 export type TaskAttachmentKind = "image" | "file";
 
@@ -65,6 +114,25 @@ export interface TaskWorktreeRun extends TaskRunDetails {
   branch: string;
   worktreePath: string;
   baseSha: string;
+  batch?: TaskBatchRun | undefined;
+}
+
+export type TaskRepositoryPhase = "pending" | "merged" | "published" | "delivered" | "skipping" | "skipped";
+
+export interface TaskRepositoryRun {
+  projectId: string;
+  projectCwd: string;
+  branch: string;
+  worktreePath: string;
+  baseSha: string;
+  phase: TaskRepositoryPhase;
+  review?: { headSha: string; baseSha: string; unchanged: boolean } | undefined;
+}
+
+export interface TaskBatchRun {
+  repositories: TaskRepositoryRun[];
+  token: string | null;
+  approved?: true | undefined;
 }
 
 export type TaskRun = TaskWorktreeRun | (TaskRunDetails & {
@@ -79,6 +147,7 @@ export interface DevelopmentTask {
   description: string;
   images?: TaskImage[] | undefined;
   projectId: string | null;
+  relatedProjectIds?: string[] | undefined;
   /** P0 最高，同优先级按创建时间及入队顺序排序。 */
   priority: TaskPriority;
   status: TaskStatus;
@@ -107,6 +176,7 @@ export interface TaskCreateInput {
   title: string;
   description?: string | undefined;
   projectId?: string | null | undefined;
+  relatedProjectIds?: string[] | undefined;
   /** 与 projectId 互斥。 */
   newProject?: TaskNewProject | undefined;
   priority?: TaskPriority | undefined;
@@ -118,6 +188,7 @@ export interface TaskUpdateInput {
   description?: string | undefined;
   retainImageIds?: string[] | undefined;
   projectId?: string | null | undefined;
+  relatedProjectIds?: string[] | undefined;
   /** 与 projectId 互斥。 */
   newProject?: TaskNewProject | undefined;
   priority?: TaskPriority | undefined;
@@ -129,10 +200,10 @@ export type TaskActionInput =
   | { action: "complete"; id: string }
   | { action: "retry"; id: string }
   | { action: "approve"; id: string; reviewSha: string }
+  | { action: "approveBatch"; id: string; reviewToken: string }
   | { action: "reject"; id: string; feedback: string };
 
-export interface TaskReview {
-  task: DevelopmentTask;
+export interface TaskDiff {
   headSha: string;
   baseSha: string;
   stat: string;
@@ -140,26 +211,43 @@ export interface TaskReview {
   truncated: boolean;
 }
 
+export interface TaskReview extends TaskDiff {
+  task: DevelopmentTask;
+  batch?: { token: string; repositories: Array<{
+    projectId: string;
+    name: string;
+    phase: TaskRepositoryPhase;
+    diff: TaskDiff | null;
+  }> };
+}
+
+export function taskProjectIds(task: { projectId?: string | null | undefined; relatedProjectIds?: string[] | undefined }): string[] {
+  return [...(task.projectId ? [task.projectId] : []), ...task.relatedProjectIds ?? []];
+}
+
+export type TaskGuard = (task: DevelopmentTask) => void;
+
 export interface TaskHttpPort {
   board(): Promise<TaskBoard>;
   create(input: TaskCreateInput, images?: readonly File[]): Promise<TaskBoard>;
-  update(input: TaskUpdateInput, images?: readonly File[]): Promise<TaskBoard>;
-  image(taskId: string, imageId: string): Promise<TaskImageData>;
-  action(input: TaskActionInput): Promise<TaskBoard>;
-  review(id: string): Promise<TaskReview>;
+  update(input: TaskUpdateInput, images?: readonly File[], guard?: TaskGuard): Promise<TaskBoard>;
+  image(taskId: string, imageId: string, guard?: TaskGuard): Promise<TaskImageData>;
+  action(input: TaskActionInput, guard?: TaskGuard): Promise<TaskBoard>;
+  review(id: string, guard?: TaskGuard): Promise<TaskReview>;
 }
 
 export interface TaskGitPort {
+  repositoryKey?(project: TaskProject): Promise<string>;
   prepare(project: TaskProject, taskId: string): Promise<Pick<TaskWorktreeRun, "branch" | "worktreePath" | "baseSha">>;
   isMerged(project: TaskProject, run: TaskWorktreeRun): Promise<boolean>;
-  review(project: TaskProject, run: TaskWorktreeRun): Promise<Omit<TaskReview, "task">>;
-  merge(project: TaskProject, run: TaskWorktreeRun, approvedSha: string): Promise<void>;
+  review(project: TaskProject, run: TaskWorktreeRun, includeMerged?: boolean): Promise<TaskDiff>;
+  merge(project: TaskProject, run: TaskWorktreeRun, approvedSha: string, reviewedBaseSha?: string): Promise<void>;
   /** 合并被分叉阻止时，把本地 develop 合入任务分支；冲突时还原并返回 conflict。 */
   syncDevelop(project: TaskProject, run: TaskWorktreeRun, approvedSha: string): Promise<"merged" | "conflict" | "current">;
   /** 把本地 develop 推到远端（不强推）。没有可用的远端时返回 "no-remote"；推送失败抛错，保留现场。 */
-  publish(project: TaskProject, run: TaskWorktreeRun): Promise<"pushed" | "no-remote">;
+  publish(project: TaskProject, run: TaskWorktreeRun, verifyApproved?: boolean): Promise<"pushed" | "no-remote">;
   /** 任务已合入 develop 后删除任务工作树和分支；可重复调用，工作树有未提交内容或分支未合入时拒绝。 */
-  cleanup(project: TaskProject, run: TaskWorktreeRun): Promise<void>;
+  cleanup(project: TaskProject, run: TaskWorktreeRun, expectedSha?: string): Promise<void>;
 }
 
 type TaskLaunchInput = {

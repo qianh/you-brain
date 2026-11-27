@@ -1,5 +1,5 @@
 import type { DaemonClient } from "@you-brain/core/http/client.js";
-import type { TaskActionInput, TaskBoard, TaskCreateInput, TaskReview, TaskUpdateInput } from "@you-brain/core/tasks/types.js";
+import type { MeetingImportAction, MeetingImportResult, MeetingImportView, TaskActionInput, TaskBoard, TaskCreateInput, TaskReview, TaskUpdateInput } from "@you-brain/core/tasks/types.js";
 import type {
   ActionResponse,
   ApiErrorBody,
@@ -273,6 +273,8 @@ export interface BrowserDaemon
   deckTty7PasteImage(data: Blob, deviceId?: string | null): Promise<DeckTty7PasteImageResponse>;
   deckTty7Terminal(pane: number, size: DeckTerminalSize, deviceId?: string | null): WebSocket;
   taskBoard(deviceId?: string | null): Promise<TaskBoard>;
+  meetingImport(): Promise<MeetingImportView>;
+  meetingImportAction(body: MeetingImportAction): Promise<MeetingImportResult>;
   createTask(body: TaskCreateInput, images?: readonly File[], deviceId?: string | null): Promise<TaskBoard>;
   updateTask(body: TaskUpdateInput, images?: readonly File[], deviceId?: string | null): Promise<TaskBoard>;
   taskImage(taskId: string, imageId: string, deviceId?: string | null): Promise<Blob>;
@@ -352,6 +354,8 @@ export function createBrowserDaemon(options?: {
   return {
     baseUrl,
     taskBoard: (deviceId) => request<TaskBoard>("GET", `/api/tasks${deviceQuery(deviceId)}`),
+    meetingImport: () => request<MeetingImportView>("GET", "/api/tasks/meeting-import"),
+    meetingImportAction: (body) => request<MeetingImportResult>("POST", "/api/tasks/meeting-import", body),
     createTask: (body, images, deviceId) =>
       request<TaskBoard>("POST", `/api/tasks${deviceQuery(deviceId)}`, taskMutationBody(body, images)),
     updateTask: (body, images, deviceId) =>
