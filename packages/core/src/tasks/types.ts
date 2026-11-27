@@ -17,11 +17,23 @@ export const TASK_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/
 export const TASK_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 export const TASK_IMAGE_MAX_COUNT = 4;
 
+export type TaskAttachmentKind = "image" | "file";
+
+export function isTaskImageMime(mimeType: string): mimeType is typeof TASK_IMAGE_TYPES[number] {
+  return (TASK_IMAGE_TYPES as readonly string[]).includes(mimeType);
+}
+
+export function isTaskImageAttachment(item: Pick<TaskImage, "mimeType" | "kind">): boolean {
+  return item.kind === "image" || (item.kind === undefined && isTaskImageMime(item.mimeType));
+}
+
 export interface TaskImage {
   id: string;
   name: string;
-  mimeType: typeof TASK_IMAGE_TYPES[number];
+  mimeType: string;
   sizeBytes: number;
+  /** "image" 可直接预览并按图片发给 T3；"file" 为通用文件附件。旧数据缺省时按 mimeType 推断。 */
+  kind?: TaskAttachmentKind | undefined;
 }
 
 export type TaskImageData = TaskImage & { bytes: Uint8Array<ArrayBuffer> };

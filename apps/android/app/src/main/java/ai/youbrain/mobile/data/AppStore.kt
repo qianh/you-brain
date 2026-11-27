@@ -28,13 +28,24 @@ class AppStore(context: Context) {
         }.apply()
     }
 
-    fun getSelectedTodoDeviceId(): String? = prefs.getString("todo_device_id", null)
+    fun getSelectedDeviceId(): String? =
+        prefs.getString("selected_device_id", null) ?: prefs.getString("todo_device_id", null)
 
-    fun setSelectedTodoDeviceId(deviceId: String?) {
+    fun setSelectedDeviceId(deviceId: String?) {
         prefs.edit().apply {
-            if (deviceId == null) remove("todo_device_id") else putString("todo_device_id", deviceId)
+            if (deviceId == null) {
+                remove("selected_device_id")
+                remove("todo_device_id")
+            } else {
+                putString("selected_device_id", deviceId)
+                putString("todo_device_id", deviceId)
+            }
         }.apply()
     }
+
+    fun getSelectedTodoDeviceId(): String? = getSelectedDeviceId()
+
+    fun setSelectedTodoDeviceId(deviceId: String?) = setSelectedDeviceId(deviceId)
 
     fun isBackgroundKeepAliveEnabled(): Boolean = prefs.getBoolean("keep_alive", true)
 
@@ -150,7 +161,12 @@ class AppStore(context: Context) {
 
     @Synchronized
     fun clearPushesAndSeq() {
-        prefs.edit().remove("last_push_seq").remove("master_device_id").remove("todo_device_id").apply()
+        prefs.edit()
+            .remove("last_push_seq")
+            .remove("master_device_id")
+            .remove("selected_device_id")
+            .remove("todo_device_id")
+            .apply()
         runCatching { pushesFile.delete() }
         runCatching { agentSnapshotsFile.delete() }
         runCatching { todoBoardsFile.delete() }

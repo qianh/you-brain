@@ -3,9 +3,11 @@ import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { writeFileAtomic } from "../domain/atomic.js";
 import { TaskImageIdSchema } from "./schema.js";
-import { TASK_IMAGE_MAX_BYTES, type TaskImage, type TaskImageData } from "./types.js";
+import { isTaskImageAttachment, TASK_IMAGE_MAX_BYTES, TASK_IMAGE_TYPES, type TaskImage, type TaskImageData } from "./types.js";
 
-function imageMime(bytes: Buffer): TaskImage["mimeType"] | undefined {
+const SAFE_MIME_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/iu;
+
+function imageMime(bytes: Buffer): typeof TASK_IMAGE_TYPES[number] | undefined {
   if (bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) return "image/png";
   if (bytes.subarray(0, 3).equals(Buffer.from("ffd8ff", "hex"))) return "image/jpeg";
   const gif = bytes.toString("latin1", 0, 6);
@@ -14,13 +16,44 @@ function imageMime(bytes: Buffer): TaskImage["mimeType"] | undefined {
   return undefined;
 }
 
+function normalizeMime(raw: string): string {
+  const base = raw.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (base !== "" && SAFE_MIME_RE.test(base)) return base;
+  return "application/octet-stream";
+}
+
+function sanitizeFileName(raw: string, fallback: string): string {
+  const name = (raw.split(/[\\/]/u).at(-1) ?? "").replace(/[\p{Cc}\p{Cf}]/gu, "").trim().slice(0, 255).trimEnd();
+  return name || fallback;
+}
+
 export async function parseTaskImage(file: File): Promise<TaskImageData | null> {
   if (file.size === 0 || file.size > TASK_IMAGE_MAX_BYTES) return null;
   const buffer = await file.arrayBuffer();
-  const mimeType = imageMime(Buffer.from(buffer));
-  if (!mimeType || (file.type !== "" && file.type !== "application/octet-stream" && file.type !== mimeType)) return null;
-  const name = (file.name.split(/[\\/]/u).at(-1) ?? "").replace(/[\p{Cc}\p{Cf}]/gu, "").trim().slice(0, 255).trimEnd();
-  return { id: randomUUID(), name: name || `image.${mimeType.split("/")[1]}`, mimeType, sizeBytes: file.size, bytes: new Uint8Array(buffer) };
+  const bytes = Buffer.from(buffer);
+  const detectedImage = imageMime(bytes);
+  const declared = normalizeMime(file.type ?? "");
+  if (detectedImage) {
+    // 真实字节是受支持的图片：按图片保存与预览。
+    return {
+      id: randomUUID(),
+      name: sanitizeFileName(file.name, `image.${detectedImage.split("/")[1]}`),
+      mimeType: detectedImage,
+      sizeBytes: file.size,
+      kind: "image",
+      bytes: new Uint8Array(buffer),
+    };
+  }
+  // 声称是受支持的图片但魔数不符时降级为通用二进制文件，避免按图片渲染触发异常。
+  const mimeType = (TASK_IMAGE_TYPES as readonly string[]).includes(declared) ? "application/octet-stream" : declared;
+  return {
+    id: randomUUID(),
+    name: sanitizeFileName(file.name, "attachment"),
+    mimeType,
+    sizeBytes: file.size,
+    kind: "file",
+    bytes: new Uint8Array(buffer),
+  };
 }
 
 export class TaskImages {
@@ -34,7 +67,8 @@ export class TaskImages {
 
   async read(image: TaskImage): Promise<TaskImageData> {
     const bytes = await readFile(this.#path(image.id));
-    if (bytes.length !== image.sizeBytes || imageMime(bytes) !== image.mimeType) throw new Error("Invalid task image");
+    if (bytes.length !== image.sizeBytes) throw new Error("Invalid task attachment");
+    if (isTaskImageAttachment(image) && imageMime(bytes) !== image.mimeType) throw new Error("Invalid task image");
     return { ...image, bytes };
   }
 

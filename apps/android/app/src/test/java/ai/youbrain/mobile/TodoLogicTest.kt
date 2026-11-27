@@ -1,7 +1,9 @@
 package ai.youbrain.mobile
 
 import ai.youbrain.mobile.data.DevelopmentTask
+import ai.youbrain.mobile.data.RelayDevice
 import ai.youbrain.mobile.data.TaskBoard
+import ai.youbrain.mobile.data.TaskImage
 import ai.youbrain.mobile.data.TaskReview
 import ai.youbrain.mobile.data.TaskRun
 import ai.youbrain.mobile.data.TaskWorktreeBlock
@@ -192,5 +194,26 @@ class TodoLogicTest {
             ),
         )
         assertEquals(2, totalReview)
+    }
+
+    @Test
+    fun resolvesUnifiedActiveDeviceAndFormatsAttachments() {
+        val mac = RelayDevice(id = "dev-mac", name = "Mac", online = false, enrolled = true)
+        val vps = RelayDevice(id = "dev-vps", name = "VPS", online = true, enrolled = true)
+        val devices = listOf(vps, mac)
+
+        // 显式选中的设备即使临时离线也保持不跳走
+        assertEquals("dev-mac", TodoLogic.resolveActiveDeviceId("dev-mac", devices, "dev-vps"))
+        // 未选时优先主控在线设备
+        assertEquals("dev-vps", TodoLogic.resolveActiveDeviceId(null, devices, "dev-vps"))
+        // 选中不存在的设备时回落首个在线设备
+        assertEquals("dev-vps", TodoLogic.resolveActiveDeviceId("dev-gone", devices, null))
+
+        assertEquals("512 B", TodoLogic.formatAttachmentSize(512L))
+        assertEquals("2.0 KB", TodoLogic.formatAttachmentSize(2048L))
+        assertEquals("2.5 MB", TodoLogic.formatAttachmentSize((2.5 * 1024 * 1024).toLong()))
+
+        assertTrue(TaskImage(id = "1", name = "a.png", mimeType = "image/png", sizeBytes = 10).isImage)
+        assertFalse(TaskImage(id = "2", name = "spec.pdf", mimeType = "application/pdf", sizeBytes = 10, kind = "file").isImage)
     }
 }

@@ -272,12 +272,12 @@ export interface BrowserDaemon
   deckTty7Start(body: DeckTty7StartBody, deviceId?: string | null): Promise<DeckTty7StartResponse>;
   deckTty7PasteImage(data: Blob, deviceId?: string | null): Promise<DeckTty7PasteImageResponse>;
   deckTty7Terminal(pane: number, size: DeckTerminalSize, deviceId?: string | null): WebSocket;
-  taskBoard(): Promise<TaskBoard>;
-  createTask(body: TaskCreateInput, images?: readonly File[]): Promise<TaskBoard>;
-  updateTask(body: TaskUpdateInput, images?: readonly File[]): Promise<TaskBoard>;
-  taskImage(taskId: string, imageId: string): Promise<Blob>;
-  taskAction(body: TaskActionInput): Promise<TaskBoard>;
-  taskReview(id: string): Promise<TaskReview>;
+  taskBoard(deviceId?: string | null): Promise<TaskBoard>;
+  createTask(body: TaskCreateInput, images?: readonly File[], deviceId?: string | null): Promise<TaskBoard>;
+  updateTask(body: TaskUpdateInput, images?: readonly File[], deviceId?: string | null): Promise<TaskBoard>;
+  taskImage(taskId: string, imageId: string, deviceId?: string | null): Promise<Blob>;
+  taskAction(body: TaskActionInput, deviceId?: string | null): Promise<TaskBoard>;
+  taskReview(id: string, deviceId?: string | null): Promise<TaskReview>;
 }
 
 export function readDaemonToken(): string {
@@ -285,6 +285,10 @@ export function readDaemonToken(): string {
   if (typeof injected === "string" && injected.length > 0) return injected;
   const fromEnv = import.meta.env.VITE_DAEMON_TOKEN;
   return typeof fromEnv === "string" ? fromEnv : "";
+}
+
+function deviceQuery(deviceId?: string | null): string {
+  return deviceId ? `?device=${encodeURIComponent(deviceId)}` : "";
 }
 
 function taskMutationBody(task: TaskCreateInput | TaskUpdateInput, images?: readonly File[]): typeof task | FormData {
@@ -347,12 +351,22 @@ export function createBrowserDaemon(options?: {
 
   return {
     baseUrl,
-    taskBoard: () => request<TaskBoard>("GET", "/api/tasks"),
-    createTask: (body, images) => request<TaskBoard>("POST", "/api/tasks", taskMutationBody(body, images)),
-    updateTask: (body, images) => request<TaskBoard>("PUT", "/api/tasks", taskMutationBody(body, images)),
-    taskImage: (taskId, imageId) => request("GET", `/api/tasks/image?${new URLSearchParams({ task: taskId, id: imageId })}`, undefined, (response) => response.blob()),
-    taskAction: (body) => request<TaskBoard>("POST", "/api/tasks/action", body),
-    taskReview: (id) => request<TaskReview>("GET", `/api/tasks/review?id=${encodeURIComponent(id)}`),
+    taskBoard: (deviceId) => request<TaskBoard>("GET", `/api/tasks${deviceQuery(deviceId)}`),
+    createTask: (body, images, deviceId) =>
+      request<TaskBoard>("POST", `/api/tasks${deviceQuery(deviceId)}`, taskMutationBody(body, images)),
+    updateTask: (body, images, deviceId) =>
+      request<TaskBoard>("PUT", `/api/tasks${deviceQuery(deviceId)}`, taskMutationBody(body, images)),
+    taskImage: (taskId, imageId, deviceId) => {
+      const params = new URLSearchParams({ task: taskId, id: imageId });
+      if (deviceId) params.set("device", deviceId);
+      return request("GET", `/api/tasks/image?${params.toString()}`, undefined, (response) => response.blob());
+    },
+    taskAction: (body, deviceId) => request<TaskBoard>("POST", `/api/tasks/action${deviceQuery(deviceId)}`, body),
+    taskReview: (id, deviceId) => {
+      const params = new URLSearchParams({ id });
+      if (deviceId) params.set("device", deviceId);
+      return request<TaskReview>("GET", `/api/tasks/review?${params.toString()}`);
+    },
     today: () => request<TodayResponse>("GET", "/api/today"),
     topics: (query) => request<TopicsResponse>("GET", `/api/topics${queryString(query)}`),
     topic: (id) => request<TopicDetail>("GET", `/api/topics/${encodeURIComponent(id)}`),

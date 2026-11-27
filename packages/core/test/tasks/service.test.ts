@@ -706,4 +706,24 @@ describe("T3 TODO parallel queue", () => {
     expect(autoStart?.requirementKind).toBeUndefined();
     expect(f.classifyCalls).toHaveLength(3);
   }));
+
+  test("supports general file attachments alongside images and passes both to T3", () => fixture(async (f) => {
+    const png = Buffer.from("89504e470d0a1a0a", "hex");
+    const specText = "# 需求文档\n支持任意文件上传\n";
+    const created = (await f.service.create({ title: "带文件附件的 TODO", projectId: "one" }, [
+      new File([png], "ui.png", { type: "image/png" }),
+      new File([specText], "spec.md", { type: "text/markdown" }),
+    ])).tasks[0]!;
+    expect(created.images).toHaveLength(2);
+    expect(created.images![0]).toMatchObject({ name: "ui.png", mimeType: "image/png", kind: "image" });
+    expect(created.images![1]).toMatchObject({ name: "spec.md", mimeType: "text/markdown", kind: "file" });
+
+    const readSpec = await f.service.image(created.id, created.images![1]!.id);
+    expect(Buffer.from(readSpec.bytes).toString("utf8")).toBe(specText);
+
+    await f.service.action({ action: "start", id: created.id });
+    expect(f.starts).toHaveLength(1);
+    expect(f.starts[0]?.images).toHaveLength(2);
+    expect(f.starts[0]?.images?.[1]?.kind).toBe("file");
+  }));
 });

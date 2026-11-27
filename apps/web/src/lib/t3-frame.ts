@@ -4,8 +4,12 @@ import { t3ThreadFrameUrl } from "./route.js";
  * T3 iframe 的地址：daemon 给了转发地址（frameUrl）就走转发，转发里才有多巴胺底色和输入框 @ 引用；
  * 会话链接仍按 T3 自己的地址校验，再把源换成转发地址。
  */
-export function t3FrameSrc(view: { url: string; frameUrl?: string }, threadUrl: string | null): string {
-  const direct = t3ThreadFrameUrl(view.url, threadUrl);
+export function t3FrameSrc(
+  view: { url: string; frameUrl?: string },
+  threadUrl: string | null,
+  allowLoopbackRemap = false,
+): string {
+  const direct = t3ThreadFrameUrl(view.url, threadUrl, allowLoopbackRemap);
   if (!view.frameUrl) return direct;
   const target = new URL(direct);
   return new URL(`${target.pathname}${target.search}`, view.frameUrl).href;

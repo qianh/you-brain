@@ -187,19 +187,20 @@ private fun MainTabsShell(
 ) {
     val state by repository.uiState.collectAsState()
     var currentTab by remember { mutableStateOf(AppTab.AGENT) }
-    var targetT3DeviceId by remember { mutableStateOf<String?>(null) }
     var targetT3ThreadUrl by remember { mutableStateOf<String?>(null) }
+    var targetT3ThreadSeq by remember { mutableStateOf(0L) }
     var everOpenedT3 by remember { mutableStateOf(false) }
     var remoteDesktopDeviceId by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(state.navTarget) {
         val nav = state.navTarget ?: return@LaunchedEffect
         currentTab = nav.tab
-        if (nav.tab == AppTab.TODOS && nav.deviceId != null) {
-            repository.selectTodoDevice(nav.deviceId)
-        } else {
-            if (nav.deviceId != null) targetT3DeviceId = nav.deviceId
-            if (nav.threadUrl != null) targetT3ThreadUrl = nav.threadUrl
+        if (!nav.deviceId.isNullOrBlank()) {
+            repository.selectDevice(nav.deviceId)
+        }
+        if (nav.tab == AppTab.T3 && !nav.threadUrl.isNullOrBlank()) {
+            targetT3ThreadUrl = nav.threadUrl
+            targetT3ThreadSeq += 1L
         }
     }
 
@@ -267,8 +268,8 @@ private fun MainTabsShell(
                         state = state,
                         repository = repository,
                         isVisibleTab = (currentTab == AppTab.T3 && activeRdDevice == null),
-                        preferredDeviceId = targetT3DeviceId,
                         preferredThreadUrl = targetT3ThreadUrl,
+                        preferredThreadSeq = targetT3ThreadSeq,
                         onFileChooser = onFileChooser,
                         onJumpSettings = { currentTab = AppTab.SETTINGS },
                         onOpenRemoteDesktop = { dev ->
@@ -281,34 +282,30 @@ private fun MainTabsShell(
                         color = c.groupedBg,
                         modifier = Modifier.fillMaxSize(),
                     ) {
+                        val openDeviceT3: (String, String?) -> Unit = { devId, threadUrl ->
+                            repository.selectDevice(devId)
+                            if (!threadUrl.isNullOrBlank()) {
+                                targetT3ThreadUrl = threadUrl
+                                targetT3ThreadSeq += 1L
+                            }
+                            currentTab = AppTab.T3
+                        }
                         when (currentTab) {
                             AppTab.AGENT -> AgentScreen(
                                 state = state,
                                 repository = repository,
-                                onOpenDeviceT3 = { devId, threadUrl ->
-                                    targetT3DeviceId = devId
-                                    targetT3ThreadUrl = threadUrl
-                                    currentTab = AppTab.T3
-                                },
+                                onOpenDeviceT3 = openDeviceT3,
                             )
                             AppTab.TODOS -> TodoScreen(
                                 state = state,
                                 repository = repository,
                                 isVisibleTab = true,
-                                onOpenDeviceT3 = { devId, threadUrl ->
-                                    targetT3DeviceId = devId
-                                    targetT3ThreadUrl = threadUrl
-                                    currentTab = AppTab.T3
-                                },
+                                onOpenDeviceT3 = openDeviceT3,
                             )
                             AppTab.PUSHES -> PushCenterScreen(
                                 state = state,
                                 repository = repository,
-                                onOpenDeviceT3 = { devId, threadUrl ->
-                                    targetT3DeviceId = devId
-                                    targetT3ThreadUrl = threadUrl
-                                    currentTab = AppTab.T3
-                                },
+                                onOpenDeviceT3 = openDeviceT3,
                             )
                             AppTab.SETTINGS -> SettingsScreen(
                                 state = state,

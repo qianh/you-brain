@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT, TASK_IMAGE_TYPES } from "./types.js";
+import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT } from "./types.js";
 
 const title = z.string().trim().min(1).max(200);
 const description = z.string().max(20_000);
@@ -7,11 +7,13 @@ const projectId = z.string().min(1).max(200).nullable();
 const priority = z.union([z.literal(0), z.literal(1), z.literal(2), z.literal(3)]);
 const id = z.string().min(1).max(200);
 export const TaskImageIdSchema = z.uuid();
+const MIME_RE = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/iu;
 const taskImage = z.object({
   id: TaskImageIdSchema,
   name: z.string().trim().min(1).max(255),
-  mimeType: z.enum(TASK_IMAGE_TYPES),
+  mimeType: z.string().trim().min(1).max(128).regex(MIME_RE),
   sizeBytes: z.number().int().positive().max(TASK_IMAGE_MAX_BYTES),
+  kind: z.enum(["image", "file"]).optional(),
 });
 const newProject = z.object({
   name: z.string().trim().min(1).max(100),

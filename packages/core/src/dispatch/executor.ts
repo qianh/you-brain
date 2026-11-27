@@ -22,12 +22,13 @@ import {
   type T3ThreadConversation,
 } from "../deck/t3/automation.js";
 import { TaskError } from "../tasks/service.js";
-import type { TaskBoard, TaskHttpPort, TaskReview } from "../tasks/types.js";
+import { isTaskImageAttachment, type TaskBoard, type TaskHttpPort, type TaskReview } from "../tasks/types.js";
 import { AgentSessionStore } from "./agent-sessions.js";
 import { AuditLog } from "./audit.js";
 import type { DispatchFollowupResult, DispatchReadResult, OutboxEntry } from "./hub.js";
 import { Ledger, type CommandOutcome, type DispatchRecord } from "./ledger.js";
 import { PolicyStore, type DispatchPolicy, type DispatchSender, type MasterModelSelection } from "./policy.js";
+import { TaskBlobStaging } from "./task-blobs.js";
 
 const EXPLICIT_REASONING_OPTION_IDS = new Set(["thought_level", "effort", "reasoningEffort"]);
 
@@ -43,7 +44,17 @@ const RETRY_MS = [60_000, 120_000, 300_000] as const;
 const SUMMARY_LIMIT = 32_000;
 /** 中转对单条 result 帧上限为 256 KB，这里预留外层封装与转义空间。 */
 const TASK_RESULT_MAX_BYTES = 190 * 1024;
-const UNLEDGERED_READ_KINDS = new Set<string>(["tasks.board", "tasks.review", "rd.open", "rd.ice", "rd.close"]);
+const UNLEDGERED_READ_KINDS = new Set<string>([
+  "tasks.board",
+  "tasks.review",
+  "tasks.blob.put",
+  "tasks.blob.get",
+  "rd.open",
+  "rd.ice",
+  "rd.close",
+]);
+const BLOB_READ_DEFAULT_BYTES = 120 * 1024;
+const BLOB_READ_MAX_BYTES = 140 * 1024;
 const CLOSED = "本机没有开启接收派活";
 const RD_CLOSED = "本机没有开放远程桌面";
 const REJECTED = "本机不接受这条指令";
@@ -161,7 +172,8 @@ export interface DispatchExecutorDeviceSnapshot {
   projects: Array<{ id: string; name: string }>;
 }
 
-export type DispatchTasksPort = Pick<TaskHttpPort, "board" | "create" | "update" | "action" | "review">;
+export type DispatchTasksPort = Pick<TaskHttpPort, "board" | "create" | "update" | "action" | "review"> &
+  Partial<Pick<TaskHttpPort, "image">>;
 
 export interface DispatchExecutorOptions {
   dataDir: string;
@@ -236,6 +248,7 @@ export class DispatchExecutor {
   readonly #ledger: Ledger;
   readonly #sessions: AgentSessionStore;
   readonly #audit: AuditLog;
+  readonly #blobs: TaskBlobStaging;
   readonly #nonces = new Map<string, number>();
   #seen: Map<string, string> | null = null;
   /** 刚派出、还没被轮询看到过的会话：以 running 为起点，短任务在一个周期内做完也能发出状态变化。 */
@@ -261,6 +274,7 @@ export class DispatchExecutor {
     this.#ledger = new Ledger(options.dataDir, this.#now);
     this.#sessions = new AgentSessionStore(options.dataDir, this.#now);
     this.#audit = new AuditLog(options.dataDir);
+    this.#blobs = new TaskBlobStaging(options.dataDir);
 
     this.#remoteDesktop?.setSignalingEvents({
       onIce: (to, sessionId, candidates) => {
@@ -552,13 +566,17 @@ export class DispatchExecutor {
       case "tasks.board":
         return this.#tasksBoard(policy);
       case "tasks.create":
-        return this.#tasksCreate(command.args, policy);
+        return this.#tasksCreate(command.args, frame.from, policy, now);
       case "tasks.update":
-        return this.#tasksUpdate(command.args, policy);
+        return this.#tasksUpdate(command.args, frame.from, policy, now);
       case "tasks.action":
         return this.#tasksAction(command.args, policy);
       case "tasks.review":
         return this.#tasksReview(command.args.id, policy);
+      case "tasks.blob.put":
+        return this.#tasksBlobPut(command.args, frame.from, now);
+      case "tasks.blob.get":
+        return this.#tasksBlobGet(command.args, policy);
       case "rd.open":
         return this.#rdCall(() => this.#remoteDesktop!.openSession(frame.from, command.args));
       case "rd.ice":
@@ -970,19 +988,86 @@ export class DispatchExecutor {
     return this.#presentTaskBoard(await tasks.board(), policy);
   }
 
-  async #tasksCreate(args: Extract<DispatchCommand, { kind: "tasks.create" }>["args"], policy: DispatchPolicy): Promise<TaskBoard> {
+  async #tasksCreate(
+    args: Extract<DispatchCommand, { kind: "tasks.create" }>["args"],
+    from: string,
+    policy: DispatchPolicy,
+    now: number,
+  ): Promise<TaskBoard> {
     const tasks = this.#requireTasks();
     this.#assertProjectAllowed(policy, args.projectId, args.newProject);
-    const board = await tasks.create(args);
+    const { uploadIds, ...input } = args;
+    const files = uploadIds && uploadIds.length > 0 ? await this.#consumeTaskBlobs(from, uploadIds, now) : undefined;
+    const board = await tasks.create(input, files);
     return this.#presentTaskBoard(board, policy);
   }
 
-  async #tasksUpdate(args: Extract<DispatchCommand, { kind: "tasks.update" }>["args"], policy: DispatchPolicy): Promise<TaskBoard> {
+  async #tasksUpdate(
+    args: Extract<DispatchCommand, { kind: "tasks.update" }>["args"],
+    from: string,
+    policy: DispatchPolicy,
+    now: number,
+  ): Promise<TaskBoard> {
     const tasks = this.#requireTasks();
     this.#assertProjectAllowed(policy, args.projectId, args.newProject);
     await this.#assertExistingTaskAllowed(tasks, policy, args.id);
-    const board = await tasks.update(args);
+    const { uploadIds, ...input } = args;
+    const files = uploadIds && uploadIds.length > 0 ? await this.#consumeTaskBlobs(from, uploadIds, now) : undefined;
+    const board = await tasks.update(input, files);
     return this.#presentTaskBoard(board, policy);
+  }
+
+  async #tasksBlobPut(
+    args: Extract<DispatchCommand, { kind: "tasks.blob.put" }>["args"],
+    from: string,
+    now: number,
+  ): Promise<{ uploadId: string; receivedBytes: number; ready: boolean }> {
+    this.#requireTasks();
+    try {
+      return await this.#blobs.put(from, args, now);
+    } catch (error) {
+      throw new DispatchFailure(error instanceof Error ? error.message : "附件上传失败");
+    }
+  }
+
+  async #consumeTaskBlobs(from: string, uploadIds: readonly string[], now: number): Promise<File[]> {
+    try {
+      return await this.#blobs.consume(from, uploadIds, now);
+    } catch (error) {
+      throw new DispatchFailure(error instanceof Error ? error.message : "附件读取失败");
+    }
+  }
+
+  async #tasksBlobGet(
+    args: Extract<DispatchCommand, { kind: "tasks.blob.get" }>["args"],
+    policy: DispatchPolicy,
+  ): Promise<{
+    name: string;
+    mimeType: string;
+    kind: "image" | "file";
+    sizeBytes: number;
+    offset: number;
+    chunk: string;
+    eof: boolean;
+  }> {
+    const tasks = this.#requireTasks();
+    if (!tasks.image) throw new DispatchFailure("本机暂不支持远程读取 TODO 附件");
+    await this.#assertExistingTaskAllowed(tasks, policy, args.taskId);
+    const attachment = await tasks.image(args.taskId, args.imageId);
+    const total = attachment.bytes.byteLength;
+    const offset = Math.min(args.offset ?? 0, total);
+    const length = Math.min(args.length ?? BLOB_READ_DEFAULT_BYTES, BLOB_READ_MAX_BYTES);
+    const end = Math.min(offset + length, total);
+    const slice = Buffer.from(attachment.bytes.subarray(offset, end));
+    return {
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      kind: isTaskImageAttachment(attachment) ? "image" : "file",
+      sizeBytes: attachment.sizeBytes,
+      offset,
+      chunk: slice.toString("base64"),
+      eof: end >= total,
+    };
   }
 
   async #tasksAction(args: Extract<DispatchCommand, { kind: "tasks.action" }>["args"], policy: DispatchPolicy): Promise<TaskBoard> {

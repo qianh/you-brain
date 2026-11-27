@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths>
     <cache-path name="rd_clipboard" path="rd-clipboard/" />
+    <cache-path name="todo_attachments" path="todo-attachments/" />
 </paths>

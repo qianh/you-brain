@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { DevelopmentTask } from "../../../../packages/core/src/tasks/types.js";
-import { folderName, projectPickerRows, projectTask, projectTasks, taskCounts, taskStatusKey, taskThreadHref, taskThreadUrl, taskWorktreeHint, visibleTasks } from "../../src/pages/tasks/logic.js";
+import { folderName, formatAttachmentSize, projectPickerRows, projectTask, projectTasks, taskCounts, taskStatusKey, taskThreadHref, taskThreadUrl, taskWorktreeHint, visibleTasks } from "../../src/pages/tasks/logic.js";
 import { t3FrameSrc } from "../../src/lib/t3-frame.js";
 import { clipboardTaskImages } from "../../src/pages/tasks/images.js";
 
@@ -66,7 +66,14 @@ describe("TODO queue presentation", () => {
     expect(route.pathname).toBe("/deck");
     expect(t3FrameSrc({ url: "http://127.0.0.1:3773", frameUrl: "http://127.0.0.1:3922" }, route.searchParams.get("t3Thread")))
       .toBe("http://127.0.0.1:3922/desk/thread-123");
+    const remoteRoute = new URL(taskThreadHref(url, "dev-vps")!, "http://localhost:3921");
+    expect(remoteRoute.searchParams.get("device")).toBe("dev-vps");
+    expect(t3FrameSrc({ url: "http://127.0.0.1:19888", frameUrl: "http://127.0.0.1:19888" }, remoteRoute.searchParams.get("t3Thread"), true))
+      .toBe("http://127.0.0.1:19888/desk/thread-123");
     expect(taskThreadHref("https://example.com/thread")).toBeNull();
+    expect(formatAttachmentSize(512)).toBe("512 B");
+    expect(formatAttachmentSize(2048)).toBe("2.0 KB");
+    expect(formatAttachmentSize(2.5 * 1024 * 1024)).toBe("2.5 MB");
   });
 
   test("accepts pasted screenshots from both clipboard layouts and leaves text alone", () => {

@@ -83,6 +83,9 @@ const EVENT_FRAME_MAX_BYTES = 64 * 1024;
 const CMD_TTL_MS = 60_000;
 const RATE_WINDOW_MS = 60_000;
 const CMD_RATE_LIMIT = 30;
+/** TODO 附件分块收发使用独立速率桶，单帧仍受 64 KB / 256 KB 上限约束。 */
+const BLOB_CMD_RATE_LIMIT = 600;
+const BLOB_CMD_KINDS = new Set(["tasks.blob.put", "tasks.blob.get"]);
 const EVENT_RATE_LIMIT = 120;
 /** T3 隧道帧（端到端加密，中转只转发）：单帧上限与每台发起设备每分钟的帧数。 */
 const TUN_FRAME_MAX_BYTES = 160 * 1024;
@@ -174,6 +177,8 @@ export class DispatchRouter {
   readonly #nonces = new Map<string, number>();
   /** 发起方 deviceId → 最近 1 分钟 cmd 时间戳列表 */
   readonly #cmdRates = new Map<string, number[]>();
+  /** 发起方 deviceId → 最近 1 分钟 TODO 附件分块指令时间戳列表 */
+  readonly #blobCmdRates = new Map<string, number[]>();
   /** 目标方 deviceId → 最近 1 分钟 event 时间戳列表 */
   readonly #eventRates = new Map<string, number[]>();
   /** 发起方 deviceId → 当前 1 分钟窗口的隧道帧数（帧很多，用固定窗口计数而不是时间戳列表）。 */
@@ -369,7 +374,10 @@ export class DispatchRouter {
     }
     const auditKind = safeAuditKind(cmdKindRaw, "cmd");
 
-    if (!this.#consumeRate(this.#cmdRates, socket.deviceId, CMD_RATE_LIMIT, now)) {
+    const isBlobCmd = BLOB_CMD_KINDS.has(cmdKindRaw);
+    const rateBucket = isBlobCmd ? this.#blobCmdRates : this.#cmdRates;
+    const rateLimit = isBlobCmd ? BLOB_CMD_RATE_LIMIT : CMD_RATE_LIMIT;
+    if (!this.#consumeRate(rateBucket, socket.deviceId, rateLimit, now)) {
       await this.#ports.audit({ ts: now, from: socket.deviceId, to, kind: auditKind, outcome: "rejected:rate_limited" });
       sendJson(socket, { t: "res", id, ok: false, error: "发送过于频繁，请稍后再试" });
       return;

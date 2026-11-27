@@ -222,7 +222,10 @@ describe("dispatch tasks.* remote TODO management", () => {
       reviewSha: review.headSha,
     });
     expect(approveRes.ok).toBe(true);
-    expect((approveRes as { ok: true; result: TaskBoard }).result.tasks).toHaveLength(0);
+    expect((approveRes as { ok: true; result: TaskBoard }).result.tasks[0]).toMatchObject({
+      id: taskId,
+      status: "done",
+    });
 
     // Read-only commands (tasks.board / tasks.review) should not bloat ledger.json
     const ledgerText = await readFile(join(dir, "dispatch", "ledger.json"), "utf8");
@@ -478,4 +481,141 @@ describe("dispatch tasks.* remote TODO management", () => {
     const localBoard = (await httpTasks.json()) as TaskBoard;
     expect(localBoard.tasks.some((t) => t.title === "手机端远程 TODO")).toBe(true);
   }, 15_000);
+
+  test("chunked tasks.blob.put / tasks.blob.get uploads general files, isolates senders, and forwards over HTTP ?device=", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ubrain-tasks-blob-"));
+    tempDirs.push(dir);
+
+    const now = 1_760_000_000_000;
+    const phoneKeys = generateKeyPair();
+    const otherKeys = generateKeyPair();
+    const tasks = new TaskService({
+      dataDir: dir,
+      automation: fakeAutomation(),
+      git: fakeGit(),
+      now: () => new Date(now),
+    });
+
+    const executor = new DispatchExecutor({
+      dataDir: dir,
+      deviceId: "dev-mac",
+      now: () => now,
+      t3: fakeT3Port(),
+      tasksPort: tasks,
+      emitEvent: () => {},
+    });
+    await executor.updatePolicy({
+      enabled: true,
+      allProjects: true,
+      allowedSenders: [
+        { deviceId: "dev-phone", name: "Phone", publicKey: phoneKeys.publicKey },
+        { deviceId: "dev-other", name: "Other", publicKey: otherKeys.publicKey },
+      ],
+    });
+
+    const sendAs = (keys: { privateKey: string }, from: string, kind: string, args: unknown) =>
+      executor.handle(makeSignedFrame(keys, from, "dev-mac", kind, args, now));
+
+    // 分两块上传一个 50 KB 普通文本文件
+    const rawContent = Buffer.from("A".repeat(40_000) + "B".repeat(10_000), "utf8");
+    const uploadId = "11111111-1111-4111-8111-111111111111";
+    const put1 = await sendAs(phoneKeys, "dev-phone", "tasks.blob.put", {
+      uploadId,
+      name: "report.txt",
+      mimeType: "text/plain",
+      totalBytes: rawContent.length,
+      offset: 0,
+      chunk: rawContent.subarray(0, 30_000).toString("base64"),
+      final: false,
+    });
+    expect(put1.ok).toBe(true);
+    const put2 = await sendAs(phoneKeys, "dev-phone", "tasks.blob.put", {
+      uploadId,
+      name: "report.txt",
+      mimeType: "text/plain",
+      totalBytes: rawContent.length,
+      offset: 30_000,
+      chunk: rawContent.subarray(30_000).toString("base64"),
+      final: true,
+    });
+    expect(put2.ok).toBe(true);
+
+    // 其他设备不能越权消费 dev-phone 上传的 uploadId
+    const hijack = await sendAs(otherKeys, "dev-other", "tasks.create", {
+      title: "越权引用",
+      projectId: "p1",
+      uploadIds: [uploadId],
+    });
+    expect(hijack.ok).toBe(false);
+
+    // dev-phone 正常创建并消费 uploadId
+    const created = await sendAs(phoneKeys, "dev-phone", "tasks.create", {
+      title: "带文件附件的远程 TODO",
+      projectId: "p1",
+      uploadIds: [uploadId],
+    });
+    expect(created.ok).toBe(true);
+    const task = (created as { ok: true; result: TaskBoard }).result.tasks[0]!;
+    expect(task.images).toHaveLength(1);
+    expect(task.images![0]).toMatchObject({ name: "report.txt", mimeType: "text/plain", kind: "file", sizeBytes: rawContent.length });
+
+    // 分块下载回读完全一致
+    const got = await sendAs(phoneKeys, "dev-phone", "tasks.blob.get", {
+      taskId: task.id,
+      imageId: task.images![0]!.id,
+      offset: 0,
+      length: 60_000,
+    });
+    expect(got.ok).toBe(true);
+    const blobResult = (got as { ok: true; result: { chunk: string; eof: boolean; name: string } }).result;
+    expect(blobResult.eof).toBe(true);
+    expect(blobResult.name).toBe("report.txt");
+    expect(Buffer.from(blobResult.chunk, "base64")).toEqual(rawContent);
+
+    // 验证桌面端 Daemon HTTP /api/tasks?device=dev-mac 转发上传与下载
+    const { startDaemonHttp } = await import("../../src/http/server.js");
+    const http = await startDaemonHttp({
+      dataDir: dir,
+      deps: {
+        tasks,
+        dispatch: {
+          devices: async () => ({
+            self: { deviceId: "dev-desktop", name: "Desktop" },
+            connected: true,
+            enrolled: true,
+            devices: [],
+          }),
+          send: async (body: { to: string; kind: string; args?: Record<string, unknown> }) => {
+            expect(body.to).toBe("dev-mac");
+            return sendAs(phoneKeys, "dev-phone", body.kind, body.args ?? {});
+          },
+        },
+      } as unknown as import("../../src/http/deps.js").HttpDeps,
+    });
+    cleanups.push(() => http.stop());
+
+    const form = new FormData();
+    form.set("task", JSON.stringify({ title: "桌面端跨设备传文件", projectId: "p1", priority: 1 }));
+    form.append("images", new File(["hello-remote-file"], "notes.md", { type: "text/markdown" }));
+    const postRes = await fetch(`${http.baseUrl}/api/tasks?device=dev-mac`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${http.token}` },
+      body: form,
+    });
+    expect(postRes.status).toBe(200);
+    const postBoard = (await postRes.json()) as TaskBoard;
+    const remoteTask = postBoard.tasks.find((item) => item.title === "桌面端跨设备传文件")!;
+    expect(remoteTask.images).toHaveLength(1);
+    expect(remoteTask.images![0]).toMatchObject({ name: "notes.md", kind: "file" });
+
+    const imgRes = await fetch(
+      `${http.baseUrl}/api/tasks/image?device=dev-mac&task=${encodeURIComponent(remoteTask.id)}&id=${encodeURIComponent(remoteTask.images![0]!.id)}&download=1`,
+      { headers: { authorization: `Bearer ${http.token}` } },
+    );
+    expect(imgRes.status).toBe(200);
+    expect(imgRes.headers.get("content-disposition")).toContain("attachment");
+    expect(await imgRes.text()).toBe("hello-remote-file");
+
+    await tasks.stop();
+  });
 });

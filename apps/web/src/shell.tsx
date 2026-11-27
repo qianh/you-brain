@@ -15,6 +15,7 @@ import { DeckRail } from "./components/deck-rail.js";
 import { Tooltip } from "./components/tooltip.js";
 import { useQuota } from "./pages/panel/use-quota.js";
 import { useDaemon } from "./daemon-context.js";
+import { useActiveDevice } from "./active-device-context.js";
 import { devOverlayAllowed } from "./lib/dev-overlay.js";
 import { capsuleFromStatus, capsuleWarningCount, type CapsuleKind, type CapsuleStatus } from "./lib/health.js";
 import { prefs } from "./lib/prefs.js";
@@ -66,6 +67,7 @@ function capsuleText(kind: CapsuleKind, count: number, t: (key: MessageKey, vars
 
 export function Shell({ children }: { children: ReactNode }) {
   const { t, error, streamError, reload, loading, status, language, client } = useDaemon();
+  const { activeDevice } = useActiveDevice();
   const { cards: quotaCards, nowMs: quotaNow, reload: reloadQuota } = useQuota();
   const { push } = useToast();
   const { href, location, navigate } = useRoute();
@@ -197,7 +199,10 @@ export function Shell({ children }: { children: ReactNode }) {
               onChange={(value) => navigate(tabTarget(value))}
               options={TABS.map((tab) => ({
                 value: tab.href,
-                label: t(tab.key),
+                label:
+                  tab.href === "/todos" && activeDevice !== null
+                    ? `${t(tab.key)} · ${activeDevice.name}`
+                    : t(tab.key),
                 icon: <Icon name={tab.icon} size={14} />,
               }))}
             />

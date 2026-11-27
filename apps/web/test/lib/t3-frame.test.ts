@@ -13,6 +13,12 @@ describe("t3FrameSrc", () => {
     expect(t3FrameSrc({ url: "http://127.0.0.1:3773/", frameUrl: "http://127.0.0.1:13773/" }, "http://evil.test/a/b")).toBe("http://127.0.0.1:13773/");
     expect(t3FrameSrc({ url: "http://127.0.0.1:3773/" }, "http://127.0.0.1:3773/env-1/thread-1")).toBe("http://127.0.0.1:3773/env-1/thread-1");
   });
+
+  test("远端设备代理允许将对端回环会话路径映射到本机代理地址，但仍拒绝非回环外域", () => {
+    const remoteView = { url: "http://127.0.0.1:19876/", frameUrl: "http://127.0.0.1:19876/" };
+    expect(t3FrameSrc(remoteView, "http://127.0.0.1:3773/env-remote/thread-9", true)).toBe("http://127.0.0.1:19876/env-remote/thread-9");
+    expect(t3FrameSrc(remoteView, "http://evil.test/env-remote/thread-9", true)).toBe("http://127.0.0.1:19876/");
+  });
 });
 
 describe("t3FrameMessage", () => {

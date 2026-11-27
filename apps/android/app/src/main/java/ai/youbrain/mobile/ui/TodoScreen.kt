@@ -1,5 +1,11 @@
 package ai.youbrain.mobile.ui
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -45,6 +51,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -53,10 +60,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.core.content.FileProvider
 import ai.youbrain.mobile.data.ConnectionState
 import ai.youbrain.mobile.data.DevelopmentTask
+import ai.youbrain.mobile.data.PendingTodoAttachment
 import ai.youbrain.mobile.data.RelayDevice
 import ai.youbrain.mobile.data.TaskBoard
+import ai.youbrain.mobile.data.TaskImage
 import ai.youbrain.mobile.data.TaskProject
 import ai.youbrain.mobile.data.TaskReview
 import ai.youbrain.mobile.net.AppUiState
@@ -71,8 +81,12 @@ import ai.youbrain.mobile.ui.components.IosSwitch
 import ai.youbrain.mobile.ui.components.IosTextField
 import ai.youbrain.mobile.ui.theme.IosColors
 import ai.youbrain.mobile.ui.theme.IosTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
+import java.util.UUID
 
 private data class TodoBannerMessage(
     val text: String,
@@ -87,22 +101,19 @@ fun TodoScreen(
     onOpenDeviceT3: (deviceId: String, threadUrl: String?) -> Unit,
 ) {
     val c = IosTheme.colors
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val devices = remember(state.relayState.devices, state.deviceId, state.deviceAliases) {
-        repository.todoDevices()
+        repository.managedDevices()
     }
 
-    val activeDeviceId = remember(state.selectedTodoDeviceId, devices) {
-        val preferred = state.selectedTodoDeviceId
-        if (!preferred.isNullOrBlank() && devices.any { it.id == preferred }) {
-            preferred
-        } else {
-            devices.firstOrNull { it.online }?.id ?: devices.firstOrNull()?.id
-        }
+    val activeDeviceId = remember(state.selectedDeviceId, state.agent.masterDeviceId, devices) {
+        TodoLogic.resolveActiveDeviceId(state.selectedDeviceId, devices, state.agent.masterDeviceId)
     }
     val activeDevice = remember(activeDeviceId, devices) {
         devices.firstOrNull { it.id == activeDeviceId }
     }
+    val activeDeviceName = activeDevice?.let { state.displayName(it) }.orEmpty()
     val deviceState = activeDeviceId?.let { state.todoBoards[it] } ?: DeviceTodoState()
     val board = deviceState.board
 
@@ -111,12 +122,13 @@ fun TodoScreen(
     var projectFilter by remember(activeDeviceId) { mutableStateOf(PROJECT_FILTER_ALL) }
     var expandedTaskIds by remember(activeDeviceId) { mutableStateOf(setOf<String>()) }
     var launchingTaskId by remember(activeDeviceId) { mutableStateOf<String?>(null) }
+    var downloadingAttachmentId by remember(activeDeviceId) { mutableStateOf<String?>(null) }
 
     var renameDevice by remember { mutableStateOf<RelayDevice?>(null) }
-    var editorTarget by remember { mutableStateOf<Pair<Boolean, DevelopmentTask?>?>(null) }
-    var reviewingTask by remember { mutableStateOf<DevelopmentTask?>(null) }
-    var completingTask by remember { mutableStateOf<DevelopmentTask?>(null) }
-    var startingProject by remember { mutableStateOf<TaskProject?>(null) }
+    var editorTarget by remember(activeDeviceId) { mutableStateOf<Pair<Boolean, DevelopmentTask?>?>(null) }
+    var reviewingTask by remember(activeDeviceId) { mutableStateOf<DevelopmentTask?>(null) }
+    var completingTask by remember(activeDeviceId) { mutableStateOf<DevelopmentTask?>(null) }
+    var startingProject by remember(activeDeviceId) { mutableStateOf<TaskProject?>(null) }
     var banner by remember { mutableStateOf<TodoBannerMessage?>(null) }
 
     fun showBanner(text: String, isError: Boolean = false) {
@@ -207,7 +219,7 @@ fun TodoScreen(
                                     if (isSelected) {
                                         renameDevice = dev
                                     } else {
-                                        repository.selectTodoDevice(dev.id)
+                                        repository.selectDevice(dev.id)
                                     }
                                 },
                             )
@@ -418,6 +430,7 @@ fun TodoScreen(
                         projectFilter = projectFilter,
                         expandedTaskIds = expandedTaskIds,
                         launchingTaskId = launchingTaskId,
+                        downloadingAttachmentId = downloadingAttachmentId,
                         canWrite = canWrite,
                         canViewT3 = canViewT3,
                         onSelectStatus = { statusFilter = it },
@@ -431,6 +444,27 @@ fun TodoScreen(
                         },
                         onCreateNew = { editorTarget = Pair(true, null) },
                         onEdit = { task -> editorTarget = Pair(false, task) },
+                        onOpenAttachment = { task, image ->
+                            scope.launch {
+                                downloadingAttachmentId = image.id
+                                try {
+                                    val res = repository.downloadTodoAttachment(activeDeviceId, task.id, image)
+                                    res.fold(
+                                        onSuccess = { file ->
+                                            val opened = openTodoAttachmentFile(context, file, image.mimeType)
+                                            if (!opened) {
+                                                showBanner("没有可打开「${image.name}」的应用", isError = true)
+                                            }
+                                        },
+                                        onFailure = { err ->
+                                            showBanner(err.message ?: "下载附件失败", isError = true)
+                                        },
+                                    )
+                                } finally {
+                                    if (downloadingAttachmentId == image.id) downloadingAttachmentId = null
+                                }
+                            }
+                        },
                         onStart = { task ->
                             scope.launch {
                                 launchingTaskId = task.id
@@ -523,12 +557,13 @@ fun TodoScreen(
         }
         TodoEditorDialog(
             isNew = isNew,
+            deviceName = activeDeviceName,
             task = editingTask,
             defaultProjectId = defaultProjectId,
             projects = board?.projects.orEmpty(),
             saving = deviceState.mutating,
             onDismiss = { editorTarget = null },
-            onSubmit = { title, desc, selectedProjectId, newName, newCwd, priority ->
+            onSubmit = { title, desc, selectedProjectId, newName, newCwd, priority, retainImageIds, attachments ->
                 scope.launch {
                     val res = if (isNew || editingTask == null) {
                         repository.createTodo(
@@ -539,6 +574,7 @@ fun TodoScreen(
                             newProjectName = newName,
                             newProjectCwd = newCwd,
                             priority = priority,
+                            attachments = attachments,
                         )
                     } else {
                         repository.updateTodo(
@@ -550,6 +586,8 @@ fun TodoScreen(
                             newProjectName = newName,
                             newProjectCwd = newCwd,
                             priority = priority,
+                            retainImageIds = retainImageIds,
+                            attachments = attachments,
                         )
                     }
                     res.fold(
@@ -571,6 +609,7 @@ fun TodoScreen(
         val devId = activeDeviceId ?: return@let
         TodoReviewDialog(
             deviceId = devId,
+            deviceName = activeDeviceName,
             task = task,
             repository = repository,
             canWrite = canWrite,
@@ -764,6 +803,7 @@ private fun TasksTabContent(
     projectFilter: String,
     expandedTaskIds: Set<String>,
     launchingTaskId: String?,
+    downloadingAttachmentId: String?,
     canWrite: Boolean,
     canViewT3: Boolean,
     onSelectStatus: (TodoStatusFilter) -> Unit,
@@ -771,6 +811,7 @@ private fun TasksTabContent(
     onToggleExpand: (String) -> Unit,
     onCreateNew: () -> Unit,
     onEdit: (DevelopmentTask) -> Unit,
+    onOpenAttachment: (DevelopmentTask, TaskImage) -> Unit,
     onStart: (DevelopmentTask) -> Unit,
     onRetry: (DevelopmentTask) -> Unit,
     onReview: (DevelopmentTask) -> Unit,
@@ -881,9 +922,11 @@ private fun TasksTabContent(
                         },
                         expanded = expandedTaskIds.contains(task.id),
                         launching = launchingTaskId == task.id,
+                        downloadingAttachmentId = downloadingAttachmentId,
                         canWrite = canWrite,
                         canViewT3 = canViewT3,
                         onToggleExpand = { onToggleExpand(task.id) },
+                        onOpenAttachment = { image -> onOpenAttachment(task, image) },
                         onStart = { onStart(task) },
                         onEdit = { onEdit(task) },
                         onReview = { onReview(task) },
@@ -904,9 +947,11 @@ private fun TodoTaskCard(
     projectName: String,
     expanded: Boolean,
     launching: Boolean,
+    downloadingAttachmentId: String?,
     canWrite: Boolean,
     canViewT3: Boolean,
     onToggleExpand: () -> Unit,
+    onOpenAttachment: (TaskImage) -> Unit,
     onStart: () -> Unit,
     onEdit: () -> Unit,
     onReview: () -> Unit,
@@ -988,7 +1033,41 @@ private fun TodoTaskCard(
                 MetaChip(text = branch, monospace = true)
             }
             if (task.images.isNotEmpty()) {
-                MetaChip(text = "含 ${task.images.size} 张桌面附图")
+                task.images.forEach { attachment ->
+                    val loadingThis = downloadingAttachmentId == attachment.id
+                    Row(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(c.blue.copy(alpha = if (c.isDark) 0.22f else 0.12f))
+                            .clickable(enabled = !loadingThis) { onOpenAttachment(attachment) }
+                            .padding(horizontal = 7.dp, vertical = 3.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        if (loadingThis) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(10.dp),
+                                strokeWidth = 1.5.dp,
+                                color = c.blue,
+                            )
+                        } else {
+                            Icon(
+                                imageVector = IosIcons.ExternalLink,
+                                contentDescription = null,
+                                tint = c.blue,
+                                modifier = Modifier.size(11.dp),
+                            )
+                        }
+                        Text(
+                            text = attachment.name,
+                            fontSize = 11.5.sp,
+                            color = c.blue,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.widthIn(max = 180.dp),
+                        )
+                    }
+                }
             }
         }
 
@@ -1317,6 +1396,7 @@ private fun ProjectsTabContent(
 @Composable
 private fun TodoEditorDialog(
     isNew: Boolean,
+    deviceName: String,
     task: DevelopmentTask?,
     defaultProjectId: String?,
     projects: List<TaskProject>,
@@ -1329,9 +1409,13 @@ private fun TodoEditorDialog(
         newProjectName: String?,
         newProjectCwd: String?,
         priority: Int,
+        retainImageIds: List<String>?,
+        attachments: List<PendingTodoAttachment>,
     ) -> Unit,
 ) {
     val c = IosTheme.colors
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var title by remember(task?.id, isNew) { mutableStateOf(task?.title.orEmpty()) }
     var description by remember(task?.id, isNew) { mutableStateOf(task?.description.orEmpty()) }
     var priority by remember(task?.id, isNew) { mutableIntStateOf(task?.priority ?: 2) }
@@ -1341,17 +1425,71 @@ private fun TodoEditorDialog(
     }
     var newProjectName by remember(task?.id, isNew) { mutableStateOf("") }
     var newProjectCwd by remember(task?.id, isNew) { mutableStateOf("") }
+    var retainedImages by remember(task?.id, isNew) {
+        mutableStateOf(if (isNew) emptyList() else task?.images.orEmpty())
+    }
+    var newAttachments by remember(task?.id, isNew) {
+        mutableStateOf<List<PendingTodoAttachment>>(emptyList())
+    }
+    var readingFiles by remember(task?.id, isNew) { mutableStateOf(false) }
+    var attachmentError by remember(task?.id, isNew) { mutableStateOf<String?>(null) }
+
+    val totalAttachments = retainedImages.size + newAttachments.size
+
+    val filePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris: List<Uri> ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        scope.launch {
+            readingFiles = true
+            attachmentError = null
+            val remaining = 4 - (retainedImages.size + newAttachments.size)
+            if (remaining <= 0) {
+                attachmentError = "每个 TODO 最多可添加 4 个附件。"
+                readingFiles = false
+                return@launch
+            }
+            val picked = ArrayList<PendingTodoAttachment>()
+            var errMsg: String? = null
+            if (uris.size > remaining) {
+                errMsg = "每个 TODO 最多可添加 4 个附件，已截取前 $remaining 个。"
+            }
+            for (uri in uris.take(remaining)) {
+                val read = withContext(Dispatchers.IO) { readPickedTodoAttachment(context, uri) }
+                read.fold(
+                    onSuccess = { picked.add(it) },
+                    onFailure = { errMsg = it.message ?: "读取文件失败" },
+                )
+            }
+            if (picked.isNotEmpty()) {
+                newAttachments = newAttachments + picked
+            }
+            attachmentError = errMsg
+            readingFiles = false
+        }
+    }
 
     val canSubmit = !saving &&
+        !readingFiles &&
         title.trim().isNotEmpty() &&
         (!createNewProject || newProjectName.trim().isNotEmpty())
 
+    val sheetTitle = buildString {
+        append(if (isNew) "新建 TODO" else "编辑 TODO")
+        if (deviceName.isNotBlank()) append(" · $deviceName")
+    }
+
     IosModalSheet(
-        title = if (isNew) "新建 TODO" else "编辑 TODO",
+        title = sheetTitle,
         onDismiss = onDismiss,
-        confirmText = if (saving) "保存中…" else if (isNew) "创建" else "保存",
+        confirmText = when {
+            saving && newAttachments.isNotEmpty() -> "上传中…"
+            saving -> "保存中…"
+            isNew -> "创建"
+            else -> "保存"
+        },
         confirmEnabled = canSubmit,
-        dismissEnabled = !saving,
+        dismissEnabled = !saving && !readingFiles,
         onConfirm = {
             onSubmit(
                 title.trim(),
@@ -1360,6 +1498,8 @@ private fun TodoEditorDialog(
                 if (createNewProject) newProjectName.trim() else null,
                 if (createNewProject) newProjectCwd.trim().takeIf { it.isNotEmpty() } else null,
                 priority,
+                if (isNew) null else retainedImages.map { it.id },
+                newAttachments,
             )
         },
     ) {
@@ -1389,6 +1529,112 @@ private fun TodoEditorDialog(
                 maxLines = 6,
                 enabled = !saving,
             )
+
+            FieldLabel("附件文件（最多 4 个，单个 ≤ 10 MB）")
+            if (retainedImages.isNotEmpty() || newAttachments.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    retainedImages.forEach { existing ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(c.tertiaryFill)
+                                .padding(horizontal = 10.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                text = existing.name,
+                                fontSize = 12.5.sp,
+                                color = c.label,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                text = TodoLogic.formatAttachmentSize(existing.sizeBytes),
+                                fontSize = 11.5.sp,
+                                color = c.secondaryLabel,
+                            )
+                            Icon(
+                                imageVector = IosIcons.Close,
+                                contentDescription = "移除附件",
+                                tint = c.secondaryLabel,
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .clickable(enabled = !saving) {
+                                        retainedImages = retainedImages.filterNot { it.id == existing.id }
+                                        attachmentError = null
+                                    },
+                            )
+                        }
+                    }
+                    newAttachments.forEach { item ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(c.blue.copy(alpha = if (c.isDark) 0.18f else 0.10f))
+                                .padding(horizontal = 10.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(
+                                text = item.name,
+                                fontSize = 12.5.sp,
+                                color = c.label,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                text = TodoLogic.formatAttachmentSize(item.sizeBytes),
+                                fontSize = 11.5.sp,
+                                color = c.blue,
+                            )
+                            Icon(
+                                imageVector = IosIcons.Close,
+                                contentDescription = "移除附件",
+                                tint = c.secondaryLabel,
+                                modifier = Modifier
+                                    .size(14.dp)
+                                    .clickable(enabled = !saving) {
+                                        newAttachments = newAttachments.filterNot { it.localId == item.localId }
+                                        attachmentError = null
+                                    },
+                            )
+                        }
+                    }
+                }
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (!saving && !readingFiles && totalAttachments < 4) c.tertiaryFill else c.quaternaryFill)
+                        .clickable(enabled = !saving && !readingFiles && totalAttachments < 4) {
+                            filePicker.launch(arrayOf("*/*"))
+                        }
+                        .padding(horizontal = 12.dp, vertical = 7.dp),
+                ) {
+                    Text(
+                        text = if (readingFiles) "读取文件中…" else "+ 添加文件 / 图片 ($totalAttachments/4)",
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = if (!saving && !readingFiles && totalAttachments < 4) c.blue else c.secondaryLabel,
+                    )
+                }
+            }
+            if (!attachmentError.isNullOrBlank()) {
+                Text(
+                    text = attachmentError!!,
+                    fontSize = 12.sp,
+                    color = c.red,
+                )
+            }
 
             FieldLabel("优先级")
             Row(
@@ -1476,21 +1722,70 @@ private fun TodoEditorDialog(
                     enabled = !saving,
                 )
             }
-
-            if (!isNew && task != null && task.images.isNotEmpty()) {
-                Text(
-                    text = "该任务在桌面端附加的 ${task.images.size} 张图片将自动保留。",
-                    fontSize = 12.sp,
-                    color = c.secondaryLabel,
-                )
-            }
         }
     }
+}
+
+private const val MAX_PICKED_TODO_FILE_BYTES = 10 * 1024 * 1024
+
+private fun readPickedTodoAttachment(context: Context, uri: Uri): Result<PendingTodoAttachment> = runCatching {
+    var name = uri.lastPathSegment?.substringAfterLast('/')?.trim().orEmpty()
+    var declaredSize = -1L
+    runCatching {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)
+            ?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                    if (nameIdx >= 0 && !cursor.isNull(nameIdx)) name = cursor.getString(nameIdx)
+                    if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) declaredSize = cursor.getLong(sizeIdx)
+                }
+            }
+    }
+    if (name.isBlank()) name = "attachment"
+    if (declaredSize > MAX_PICKED_TODO_FILE_BYTES) {
+        error("文件「$name」超过 10 MB 限制")
+    }
+    val mimeType = context.contentResolver.getType(uri)?.trim().orEmpty().ifBlank { "application/octet-stream" }
+    val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(32 * 1024)
+        var total = 0
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            total += n
+            if (total > MAX_PICKED_TODO_FILE_BYTES) error("文件「$name」超过 10 MB 限制")
+            out.write(buf, 0, n)
+        }
+        out.toByteArray()
+    } ?: error("无法读取文件「$name」")
+    if (bytes.isEmpty()) error("文件「$name」为空，无法上传")
+    PendingTodoAttachment(
+        localId = UUID.randomUUID().toString(),
+        name = name,
+        mimeType = mimeType,
+        bytes = bytes,
+    )
+}
+
+private fun openTodoAttachmentFile(context: Context, file: java.io.File, mimeType: String): Boolean {
+    return runCatching {
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.rdfiles", file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, mimeType.ifBlank { "*/*" })
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        context.startActivity(intent)
+        true
+    }.getOrDefault(false)
 }
 
 @Composable
 private fun TodoReviewDialog(
     deviceId: String,
+    deviceName: String,
     task: DevelopmentTask,
     repository: UBrainRepository,
     canWrite: Boolean,
@@ -1815,7 +2110,13 @@ private fun TodoReviewDialog(
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Text(
-                                    text = if (submitting) "处理中…" else "确认并合并到 develop",
+                                    text = if (submitting) {
+                                        "处理中…"
+                                    } else if (deviceName.isNotBlank()) {
+                                        "确认并合并到 $deviceName 的 develop"
+                                    } else {
+                                        "确认并合并到 develop"
+                                    },
                                     fontSize = 15.sp,
                                     fontWeight = FontWeight.SemiBold,
                                     color = if (acknowledged && canWrite && !submitting) Color.White else c.secondaryLabel,

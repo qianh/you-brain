@@ -84,8 +84,8 @@ fun T3DeckScreen(
     state: AppUiState,
     repository: UBrainRepository,
     isVisibleTab: Boolean,
-    preferredDeviceId: String?,
     preferredThreadUrl: String?,
+    preferredThreadSeq: Long = 0L,
     onFileChooser: (ValueCallback<Array<Uri>>, Intent) -> Unit,
     onJumpSettings: () -> Unit,
     onOpenRemoteDesktop: (RelayDevice) -> Unit = {},
@@ -93,11 +93,13 @@ fun T3DeckScreen(
     val context = LocalContext.current
     val c = IosTheme.colors
     val scope = rememberCoroutineScope()
-    val devices = remember(state.relayState.devices, state.deviceId) {
-        repository.viewT3Devices()
+    val devices = remember(state.relayState.devices, state.deviceId, state.deviceAliases) {
+        repository.managedDevices()
     }
 
-    var selectedId by remember { mutableStateOf<String?>(null) }
+    val activeId = remember(state.selectedDeviceId, state.agent.masterDeviceId, devices) {
+        TodoLogic.resolveActiveDeviceId(state.selectedDeviceId, devices, state.agent.masterDeviceId)
+    }
     var renameDevice by remember { mutableStateOf<RelayDevice?>(null) }
     val proxyUrls = remember { mutableStateMapOf<String, String>() }
     val loadingIds = remember { mutableStateMapOf<String, Boolean>() }
@@ -151,27 +153,15 @@ fun T3DeckScreen(
         }
     }
 
-    LaunchedEffect(preferredDeviceId, state.agent.masterDeviceId, devices) {
-        if (!preferredDeviceId.isNullOrBlank() && devices.any { it.id == preferredDeviceId }) {
-            selectedId = preferredDeviceId
-        } else if (selectedId == null || devices.none { it.id == selectedId }) {
-            val masterOnline = state.agent.masterDeviceId?.takeIf { id ->
-                devices.any { it.id == id && it.online }
-            }
-            selectedId = masterOnline ?: devices.firstOrNull { it.online }?.id ?: devices.firstOrNull()?.id
-        }
-    }
-
-    val activeId = selectedId
     val activeDevice = devices.firstOrNull { it.id == activeId }
     val activeHasViewT3 = activeDevice?.dispatch?.viewT3 == true
     val activeHasRd = activeDevice?.dispatch?.remoteDesktop == true
 
-    LaunchedEffect(activeId, activeDevice?.online, activeHasViewT3, state.connectionState) {
+    LaunchedEffect(activeId, activeDevice?.online, activeHasViewT3, activeHasRd, state.connectionState) {
         val devId = activeId ?: return@LaunchedEffect
         if (refreshingIds[devId] == true) return@LaunchedEffect
 
-        if (!activeHasViewT3 && activeHasRd) {
+        if (!activeHasViewT3) {
             loadingIds[devId] = false
             errorByDevice[devId] = if (activeDevice?.online == true) null else "该设备当前离线"
             return@LaunchedEffect
@@ -216,7 +206,7 @@ fun T3DeckScreen(
         )
     }
 
-    LaunchedEffect(activeId, preferredThreadUrl, proxyUrls[activeId]) {
+    LaunchedEffect(activeId, preferredThreadUrl, preferredThreadSeq, proxyUrls[activeId]) {
         val devId = activeId ?: return@LaunchedEffect
         val base = proxyUrls[devId] ?: return@LaunchedEffect
         val deep = preferredThreadUrl?.takeIf { it.isNotBlank() } ?: return@LaunchedEffect
@@ -301,7 +291,7 @@ fun T3DeckScreen(
                                             .clip(CircleShape)
                                             .background(pillBg)
                                             .clickable {
-                                                if (isSelected) renameDevice = dev else selectedId = dev.id
+                                                if (isSelected) renameDevice = dev else repository.selectDevice(dev.id)
                                             }
                                             .padding(horizontal = 10.dp),
                                         verticalAlignment = Alignment.CenterVertically,
@@ -341,7 +331,7 @@ fun T3DeckScreen(
                                                     if (isSelected) c.blue.copy(alpha = 0.16f) else c.tertiaryFill,
                                                 )
                                                 .clickable {
-                                                    selectedId = dev.id
+                                                    repository.selectDevice(dev.id)
                                                     onOpenRemoteDesktop(dev)
                                                 },
                                             contentAlignment = Alignment.Center,
@@ -582,6 +572,37 @@ fun T3DeckScreen(
                             Text("暂无开放 T3 或桌面协同的设备", fontSize = 17.sp, fontWeight = FontWeight.SemiBold, color = c.label)
                             Text(
                                 text = "请在电脑端 U-Brain「设置 → 接入 → 跨设备派活」开启「允许查看本机 T3」或「允许桌面画面协同」，并点击该手机的「信任此设备」。",
+                                fontSize = 13.5.sp,
+                                lineHeight = 19.sp,
+                                color = c.secondaryLabel,
+                                textAlign = TextAlign.Center,
+                            )
+                        }
+                    }
+                }
+                activeDevice != null && activeDevice.online && !activeHasViewT3 && !activeHasRd -> {
+                    Box(
+                        modifier = Modifier.fillMaxSize().padding(24.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(16.dp))
+                                .background(c.cardBg)
+                                .padding(22.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            IosIconBadge(icon = IosIcons.TerminalWindow, background = c.indigo)
+                            Text(
+                                text = "${state.displayName(activeDevice)} 未开启 T3 查看",
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = c.label,
+                            )
+                            Text(
+                                text = "请在该设备的 U-Brain「设置 → 集成 → 跨设备派活」开启「允许查看本机 T3」或「允许桌面画面协同」。",
                                 fontSize = 13.5.sp,
                                 lineHeight = 19.sp,
                                 color = c.secondaryLabel,

@@ -1,12 +1,14 @@
 package ai.youbrain.mobile.ui
 
 import ai.youbrain.mobile.data.DevelopmentTask
+import ai.youbrain.mobile.data.RelayDevice
 import ai.youbrain.mobile.data.TaskBoard
 import ai.youbrain.mobile.data.TaskWorktreeBlock
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 const val PROJECT_FILTER_ALL = "__all__"
 const val PROJECT_FILTER_UNASSIGNED = "__unassigned__"
@@ -170,4 +172,28 @@ object TodoLogic {
 
     fun shortSha(sha: String?): String =
         sha?.trim()?.take(7).orEmpty()
+
+    fun formatAttachmentSize(bytes: Long): String = when {
+        bytes < 1024L -> "$bytes B"
+        bytes < 1024L * 1024L -> {
+            val kb = bytes / 1024.0
+            if (bytes < 10L * 1024L) String.format(Locale.US, "%.1f KB", kb) else "${bytes / 1024L} KB"
+        }
+        else -> String.format(Locale.US, "%.1f MB", bytes / (1024.0 * 1024.0))
+    }
+
+    /** 统一解析当前设备：显式选中且仍在设备列表里时绝不跳走；未选时优先主控在线设备，其次首个在线设备。 */
+    fun resolveActiveDeviceId(
+        selectedDeviceId: String?,
+        devices: List<RelayDevice>,
+        masterDeviceId: String? = null,
+    ): String? {
+        if (!selectedDeviceId.isNullOrBlank() && devices.any { it.id == selectedDeviceId }) {
+            return selectedDeviceId
+        }
+        val masterOnline = masterDeviceId?.takeIf { id ->
+            devices.any { it.id == id && it.online }
+        }
+        return masterOnline ?: devices.firstOrNull { it.online }?.id ?: devices.firstOrNull()?.id
+    }
 }

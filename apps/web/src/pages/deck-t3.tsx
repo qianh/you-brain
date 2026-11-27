@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { DEFAULT_T3_URL, normalizeT3Url, type T3WebState } from "@you-brain/core/deck/t3/index.js";
 
+import { useActiveDevice } from "../active-device-context.js";
 import { Button, IconButton } from "../components/button.js";
 import { Dialog } from "../components/dialog.js";
 import { Icon } from "../components/icons.js";
@@ -57,14 +58,13 @@ function savedActive(endpoints: readonly T3Endpoint[], threadUrl: string | null)
 
 import { DeckRemoteDesktopPane } from "./deck-remote-desktop.js";
 
-/** 设备栏的轮询间隔：设备上线、开放 T3 或桌面协同后不用刷新页面就会出现。 */
-const DEVICE_POLL_MS = 20_000;
 const DEVICE_ID_PREFIX = "device:";
 
 export interface DeviceTab {
   id: string;
   deviceId: string;
   name: string;
+  online?: boolean;
   canT3: boolean;
   canRd: boolean;
 }
@@ -140,7 +140,7 @@ function DeckT3EndpointPane({
         <iframe
           ref={frameRef}
           className="dsh-frame"
-          src={t3FrameSrc(view, threadUrl)}
+          src={t3FrameSrc(view, threadUrl, deviceId !== undefined)}
           title={`${t("dshDeckT3FrameTitle")} · ${name}`}
           allow="clipboard-read; clipboard-write"
           referrerPolicy="no-referrer"
@@ -183,6 +183,12 @@ export interface ActiveT3Device {
   name: string;
 }
 
+export interface DeckT3ThreadTarget {
+  deviceId: string | null;
+  url: string;
+  seq: number;
+}
+
 /** 首次切到 T3 时挂载，各端点按首次选中懒挂载并仅隐藏不卸载，保留各自会话与输入状态。 */
 export function DeckT3Panel({
   reloadVersion,
@@ -195,6 +201,7 @@ export function DeckT3Panel({
   onDevicesChange,
   frameRef,
   threadUrl,
+  threadTarget = null,
   initialDeviceTabs = [],
 }: {
   reloadVersion: number;
@@ -210,19 +217,40 @@ export function DeckT3Panel({
   onDevicesChange?: (devices: ActiveT3Device[]) => void;
   frameRef?: RefObject<HTMLIFrameElement | null>;
   threadUrl: string | null;
+  /** 从 TODO 跳转过来的目标会话（支持本机或远端同账号设备）。 */
+  threadTarget?: DeckT3ThreadTarget | null;
   /** 测试可注入预设远端设备列表。 */
   initialDeviceTabs?: readonly DeviceTab[];
 }) {
   const { client, t } = useDaemon();
+  const {
+    devices: managedDevices,
+    activeDeviceId: globalDeviceId,
+    activeDevice: globalActiveDevice,
+    manualT3Endpoint,
+    selectDevice: selectGlobalDevice,
+    selectManualT3Endpoint,
+  } = useActiveDevice();
   const [localUrl, setLocalUrl] = useState(savedLocalUrl);
-  const [deviceTabs, setDeviceTabs] = useState<DeviceTab[]>(() => [...initialDeviceTabs]);
   const [warmedUrls, setWarmedUrls] = useState<Record<string, string>>({});
   const warmingDevicesRef = useRef(new Set<string>());
   const [endpoints, setEndpoints] = useState<T3Endpoint[]>(() => savedEndpoints(localUrl));
-  const [activeId, setActiveId] = useState<string>(() => savedActive(endpoints, threadUrl));
+  const [activeId, setActiveId] = useState<string>(() => {
+    if (threadTarget) return threadTarget.deviceId ? `${DEVICE_ID_PREFIX}${threadTarget.deviceId}` : LOCAL_T3_ID;
+    if (threadUrl) return LOCAL_T3_ID;
+    if (globalDeviceId !== null) return `${DEVICE_ID_PREFIX}${globalDeviceId}`;
+    return savedActive(endpoints, null);
+  });
   const [visited, setVisited] = useState<ReadonlySet<string>>(() => new Set([activeId]));
   const [rdOpenDevices, setRdOpenDevices] = useState<ReadonlySet<string>>(() => new Set());
   const [reloadCounts, setReloadCounts] = useState<Record<string, number>>({});
+  const [threadByEndpoint, setThreadByEndpoint] = useState<Record<string, string | null>>(() =>
+    threadTarget
+      ? { [threadTarget.deviceId ? `${DEVICE_ID_PREFIX}${threadTarget.deviceId}` : LOCAL_T3_ID]: threadTarget.url }
+      : threadUrl
+        ? { [LOCAL_T3_ID]: threadUrl }
+        : {},
+  );
 
   const [draft, setDraft] = useState(localUrl);
   const [localError, setLocalError] = useState<LocalUrlError>(null);
@@ -238,6 +266,32 @@ export function DeckT3Panel({
   onActiveDeviceChangeRef.current = onActiveDeviceChange;
   const onDevicesChangeRef = useRef(onDevicesChange);
   onDevicesChangeRef.current = onDevicesChange;
+
+  const deviceTabs = useMemo<DeviceTab[]>(() => {
+    const source: DeviceTab[] =
+      managedDevices.length > 0
+        ? managedDevices.map((device) => ({
+            id: `${DEVICE_ID_PREFIX}${device.id}`,
+            deviceId: device.id,
+            name: device.name,
+            online: device.online,
+            canT3: device.canT3,
+            canRd: device.canRd,
+          }))
+        : [...initialDeviceTabs];
+    // 当前选中的同账号远端设备若临时不在列表里，仍保留标签显示离线态，不静默跳走。
+    if (globalDeviceId !== null && !source.some((tab) => tab.deviceId === globalDeviceId)) {
+      source.push({
+        id: `${DEVICE_ID_PREFIX}${globalDeviceId}`,
+        deviceId: globalDeviceId,
+        name: globalActiveDevice?.name ?? globalDeviceId,
+        online: false,
+        canT3: globalActiveDevice?.canT3 ?? false,
+        canRd: globalActiveDevice?.canRd ?? false,
+      });
+    }
+    return source;
+  }, [managedDevices, initialDeviceTabs, globalDeviceId, globalActiveDevice]);
 
   const warmDevice = (deviceId: string): void => {
     if (typeof client.deckT3Device !== "function") return;
@@ -257,62 +311,46 @@ export function DeckT3Panel({
     );
   };
 
-  // 同账号下已入网、在线、并向本机开放了 T3 或桌面协同的设备，自动列进标签栏。
-  useEffect(() => {
-    if (typeof client.dispatchDevices !== "function") return;
-    const listDevices = client.dispatchDevices.bind(client);
-    let cancelled = false;
-    const load = (): void => {
-      void listDevices().then(
-        (response) => {
-          if (cancelled) return;
-          const next = response.devices
-            .filter(
-              (device) =>
-                !device.self &&
-                device.enrolled &&
-                device.online &&
-                (device.dispatch?.viewT3 === true || device.dispatch?.remoteDesktop === true),
-            )
-            .map((device) => ({
-              id: `${DEVICE_ID_PREFIX}${device.id}`,
-              deviceId: device.id,
-              name: device.name,
-              canT3: device.dispatch?.viewT3 === true,
-              canRd: device.dispatch?.remoteDesktop === true,
-            }));
-          setDeviceTabs((current) =>
-            current.length === next.length &&
-            current.every(
-              (tab, index) =>
-                tab.id === next[index]?.id &&
-                tab.name === next[index]?.name &&
-                tab.canT3 === next[index]?.canT3 &&
-                tab.canRd === next[index]?.canRd,
-            )
-              ? current
-              : next,
-          );
-        },
-        () => undefined,
-      );
-    };
-    load();
-    const timer = setInterval(load, DEVICE_POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [client]);
-
   useEffect(() => {
     onDevicesChangeRef.current?.(
-      deviceTabs.filter((tab) => tab.canT3).map((tab) => ({ id: tab.deviceId, name: tab.name })),
+      deviceTabs.filter((tab) => tab.online !== false && tab.canT3).map((tab) => ({ id: tab.deviceId, name: tab.name })),
     );
     for (const tab of deviceTabs) {
-      if (tab.canT3 && warmedUrls[tab.deviceId] === undefined) warmDevice(tab.deviceId);
+      if (tab.online !== false && tab.canT3 && warmedUrls[tab.deviceId] === undefined) warmDevice(tab.deviceId);
     }
   }, [deviceTabs]);
+
+  // 同步外部切换（例如用户在 TODO 页切换了设备）：让指挥台 T3 与终端立刻跟随。
+  useEffect(() => {
+    if (globalDeviceId !== null) {
+      const targetId = `${DEVICE_ID_PREFIX}${globalDeviceId}`;
+      setActiveId((current) => (current === targetId ? current : targetId));
+      const matched = deviceTabs.find((tab) => tab.deviceId === globalDeviceId);
+      if (matched && !matched.canT3 && matched.canRd && matched.online !== false) {
+        setRdOpenDevices((current) => (current.has(globalDeviceId) ? current : new Set([...current, globalDeviceId])));
+      } else {
+        setVisited((current) => (current.has(targetId) ? current : new Set([...current, targetId])));
+      }
+      return;
+    }
+    // globalDeviceId === null 时，若不是刻意停留在手动 T3 端点，则回到本机。
+    if (manualT3Endpoint !== null) return;
+    if (activeIdRef.current.startsWith(DEVICE_ID_PREFIX)) {
+      setActiveId(LOCAL_T3_ID);
+      setVisited((current) => (current.has(LOCAL_T3_ID) ? current : new Set([...current, LOCAL_T3_ID])));
+    }
+  }, [globalDeviceId, manualT3Endpoint, deviceTabs]);
+
+  // 初始持久化在手动端点时，通知全局上下文（让 TODO 显示本机 + 手动端点提示条）。
+  useEffect(() => {
+    if (globalDeviceId !== null) return;
+    if (!activeId.startsWith(DEVICE_ID_PREFIX) && activeId !== LOCAL_T3_ID) {
+      const ep = endpoints.find((item) => item.id === activeId);
+      if (ep && manualT3Endpoint?.id !== ep.id) {
+        selectManualT3Endpoint({ id: ep.id, name: ep.name });
+      }
+    }
+  }, [activeId, endpoints, globalDeviceId, manualT3Endpoint, selectManualT3Endpoint]);
 
   const closeRdForDevice = (deviceId: string, tabId?: string): void => {
     setRdOpenDevices((current) => {
@@ -334,18 +372,21 @@ export function DeckT3Panel({
       return;
     }
     setActiveId(tabId);
+    selectGlobalDevice(deviceId);
     setRdOpenDevices((current) => (current.has(deviceId) ? current : new Set([...current, deviceId])));
   };
 
-  const selectEndpoint = (id: string, deviceMeta?: { deviceId: string; canT3: boolean; canRd: boolean }): void => {
+  const selectEndpoint = (id: string, deviceMeta?: { deviceId: string; canT3: boolean; canRd: boolean; online?: boolean }): void => {
     if (id.startsWith(DEVICE_ID_PREFIX)) {
+      const devId = deviceMeta?.deviceId ?? id.slice(DEVICE_ID_PREFIX.length);
       setActiveId(id);
-      if (deviceMeta && !deviceMeta.canT3 && deviceMeta.canRd) {
+      selectGlobalDevice(devId);
+      if (deviceMeta && deviceMeta.online !== false && !deviceMeta.canT3 && deviceMeta.canRd) {
         setRdOpenDevices((current) =>
-          current.has(deviceMeta.deviceId) ? current : new Set([...current, deviceMeta.deviceId]),
+          current.has(devId) ? current : new Set([...current, devId]),
         );
       } else if (deviceMeta) {
-        closeRdForDevice(deviceMeta.deviceId);
+        closeRdForDevice(devId);
         setVisited((current) => (current.has(id) ? current : new Set([...current, id])));
       } else {
         setVisited((current) => (current.has(id) ? current : new Set([...current, id])));
@@ -356,6 +397,12 @@ export function DeckT3Panel({
     setActiveId(resolved);
     setVisited((current) => (current.has(resolved) ? current : new Set([...current, resolved])));
     try { prefs.setItem(T3_ACTIVE_KEY, resolved); } catch { /* 本次切换仍可用。 */ }
+    if (resolved === LOCAL_T3_ID) {
+      selectGlobalDevice(null);
+    } else {
+      const ep = endpoints.find((item) => item.id === resolved);
+      selectManualT3Endpoint(ep ? { id: ep.id, name: ep.name } : null);
+    }
   };
 
   const bumpReload = (id: string): void => {
@@ -384,17 +431,39 @@ export function DeckT3Panel({
     if (forceLocalVersion === prevForceLocal.current) return;
     prevForceLocal.current = forceLocalVersion;
     setActiveId(LOCAL_T3_ID);
+    selectGlobalDevice(null);
     setVisited((current) => (current.has(LOCAL_T3_ID) ? current : new Set([...current, LOCAL_T3_ID])));
     try { prefs.setItem(T3_ACTIVE_KEY, LOCAL_T3_ID); } catch { /* 本次切换仍可用。 */ }
-  }, [forceLocalVersion]);
+  }, [forceLocalVersion, selectGlobalDevice]);
 
-  // 会话深链来自本机 T3，切回本机端点。
+  // TODO 深链：支持打开本机或指定远端设备的 T3 会话。
+  const prevThreadSeq = useRef(threadTarget?.seq ?? 0);
   useEffect(() => {
+    if (threadTarget) {
+      if (threadTarget.seq === prevThreadSeq.current && activeIdRef.current === (threadTarget.deviceId ? `${DEVICE_ID_PREFIX}${threadTarget.deviceId}` : LOCAL_T3_ID)) {
+        return;
+      }
+      prevThreadSeq.current = threadTarget.seq;
+      const targetId = threadTarget.deviceId ? `${DEVICE_ID_PREFIX}${threadTarget.deviceId}` : LOCAL_T3_ID;
+      setActiveId(targetId);
+      setVisited((current) => (current.has(targetId) ? current : new Set([...current, targetId])));
+      setThreadByEndpoint((current) => ({ ...current, [targetId]: threadTarget.url }));
+      if (threadTarget.deviceId) {
+        closeRdForDevice(threadTarget.deviceId, targetId);
+        selectGlobalDevice(threadTarget.deviceId);
+      } else {
+        selectGlobalDevice(null);
+        try { prefs.setItem(T3_ACTIVE_KEY, LOCAL_T3_ID); } catch { /* 本次切换仍可用。 */ }
+      }
+      return;
+    }
     if (!threadUrl) return;
     setActiveId(LOCAL_T3_ID);
+    selectGlobalDevice(null);
     setVisited((current) => (current.has(LOCAL_T3_ID) ? current : new Set([...current, LOCAL_T3_ID])));
+    setThreadByEndpoint((current) => ({ ...current, [LOCAL_T3_ID]: threadUrl }));
     try { prefs.setItem(T3_ACTIVE_KEY, LOCAL_T3_ID); } catch { /* 本次切换仍可用。 */ }
-  }, [threadUrl]);
+  }, [threadTarget, threadUrl, selectGlobalDevice]);
 
   useEffect(() => {
     if (!settingsOpen) return;
@@ -447,6 +516,7 @@ export function DeckT3Panel({
     });
     if (activeId === id) {
       setActiveId(LOCAL_T3_ID);
+      selectGlobalDevice(null);
       setVisited((current) => (current.has(LOCAL_T3_ID) ? current : new Set([...current, LOCAL_T3_ID])));
       try { prefs.setItem(T3_ACTIVE_KEY, LOCAL_T3_ID); } catch { /* 本次仍有效。 */ }
     }
@@ -467,25 +537,29 @@ export function DeckT3Panel({
     url: string;
     isLocal: boolean;
     deviceId?: string;
+    online?: boolean;
     canT3: boolean;
     canRd: boolean;
   }> = [
-    { id: LOCAL_T3_ID, name: t("dshDeckT3Local"), url: localUrl, isLocal: true, canT3: true, canRd: false },
-    ...endpoints.map((endpoint) => ({ ...endpoint, isLocal: false, canT3: true, canRd: false })),
+    { id: LOCAL_T3_ID, name: t("dshDeckT3Local"), url: localUrl, isLocal: true, online: true, canT3: true, canRd: false },
+    ...endpoints.map((endpoint) => ({ ...endpoint, isLocal: false, online: true, canT3: true, canRd: false })),
     ...deviceTabs.map((tab) => ({
       id: tab.id,
       name: tab.name,
       url: tab.name,
       isLocal: false,
       deviceId: tab.deviceId,
+      online: tab.online !== false,
       canT3: tab.canT3,
       canRd: tab.canRd,
     })),
   ];
-  // 当前设备标签随设备下线消失时，退回本机。
   const shownActiveId = allEndpoints.some((item) => item.id === activeId) ? activeId : LOCAL_T3_ID;
   const activeEntry = allEndpoints.find((item) => item.id === shownActiveId);
-  const activeDeviceId = activeEntry?.deviceId !== undefined && activeEntry.canT3 ? activeEntry.deviceId : null;
+  const activeDeviceId =
+    activeEntry?.deviceId !== undefined && activeEntry.online !== false && activeEntry.canT3
+      ? activeEntry.deviceId
+      : null;
   const activeDeviceName = activeDeviceId !== null && activeEntry ? activeEntry.name : null;
 
   useEffect(() => {
@@ -502,16 +576,17 @@ export function DeckT3Panel({
         <div className="deck-t3-tabs" role="tablist" aria-label={t("dshDeckT3SwitchLabel")}>
           {allEndpoints.map((item) => {
             const selected = item.id === shownActiveId;
-            const rdOpen = item.deviceId !== undefined && item.canRd && rdOpenDevices.has(item.deviceId);
+            const rdOpen = item.deviceId !== undefined && item.online !== false && item.canRd && rdOpenDevices.has(item.deviceId);
             const tabButton = (
               <button
-                key={item.canRd ? undefined : item.id}
+                key={item.canRd && item.online !== false ? undefined : item.id}
                 type="button"
                 role="tab"
                 aria-selected={selected}
                 className={[
                   "deck-t3-tab",
-                  item.canRd ? "has-rd" : "",
+                  item.canRd && item.online !== false ? "has-rd" : "",
+                  item.deviceId !== undefined && item.online === false ? "is-offline" : "",
                   selected && !rdOpen ? "is-active" : "",
                   selected && rdOpen ? "is-rd-active" : "",
                 ]
@@ -519,12 +594,12 @@ export function DeckT3Panel({
                   .join(" ")}
                 title={item.url}
                 onMouseEnter={() => {
-                  if (item.deviceId !== undefined && item.canT3 && warmedUrls[item.deviceId] === undefined) {
+                  if (item.deviceId !== undefined && item.online !== false && item.canT3 && warmedUrls[item.deviceId] === undefined) {
                     warmDevice(item.deviceId);
                   }
                 }}
                 onFocus={() => {
-                  if (item.deviceId !== undefined && item.canT3 && warmedUrls[item.deviceId] === undefined) {
+                  if (item.deviceId !== undefined && item.online !== false && item.canT3 && warmedUrls[item.deviceId] === undefined) {
                     warmDevice(item.deviceId);
                   }
                 }}
@@ -532,17 +607,20 @@ export function DeckT3Panel({
                   selectEndpoint(
                     item.id,
                     item.deviceId !== undefined
-                      ? { deviceId: item.deviceId, canT3: item.canT3, canRd: item.canRd }
+                      ? { deviceId: item.deviceId, canT3: item.canT3, canRd: item.canRd, online: item.online !== false }
                       : undefined,
                   )
                 }
               >
                 <Icon name={item.isLocal ? "laptop" : item.deviceId !== undefined ? "monitor" : "server"} size={14} />
+                {item.deviceId !== undefined ? (
+                  <span className={`tasks-device-dot${item.online !== false ? " is-online" : ""}`} aria-hidden="true" />
+                ) : null}
                 <span className="deck-t3-tab-name">{item.name}</span>
               </button>
             );
 
-            if (item.deviceId !== undefined && item.canRd) {
+            if (item.deviceId !== undefined && item.online !== false && item.canRd) {
               const targetDeviceId = item.deviceId;
               return (
                 <div
@@ -578,10 +656,32 @@ export function DeckT3Panel({
       <div className="deck-t3-panes">
         {allEndpoints.map((item) => {
           const isActiveItem = item.id === shownActiveId;
-          const isRdActive = item.deviceId !== undefined && item.canRd && rdOpenDevices.has(item.deviceId);
+          const isRdActive = item.deviceId !== undefined && item.online !== false && item.canRd && rdOpenDevices.has(item.deviceId);
+          const endpointThreadUrl = threadByEndpoint[item.id] ?? (item.isLocal ? threadUrl : null);
           return (
             <div key={item.id} className="deck-t3-slot" hidden={!isActiveItem}>
-              {item.canT3 && visited.has(item.id) ? (
+              {item.deviceId !== undefined && item.online === false ? (
+                <div className="dsh-deck-state" role="status">
+                  <p className="dsh-deck-error">{t("tasksDeviceOffline", { name: item.name })}</p>
+                  <p className="dsh-deck-hint">{t("dshDeckT3DeviceHint")}</p>
+                  <div className="dsh-deck-actions">
+                    <Button size="sm" variant="ghost" onClick={() => selectEndpoint(LOCAL_T3_ID)}>{t("tasksBackToLocal")}</Button>
+                  </div>
+                </div>
+              ) : item.deviceId !== undefined && !item.canT3 && !isRdActive ? (
+                <div className="dsh-deck-state" role="status">
+                  <p className="dsh-deck-error">{t("tasksDeviceNoT3", { name: item.name })}</p>
+                  <p className="dsh-deck-hint">{t("dshDeckT3DeviceHint")}</p>
+                  <div className="dsh-deck-actions">
+                    {item.canRd ? (
+                      <Button size="sm" onClick={() => openOrToggleRd(item.id, item.deviceId!, false)}>
+                        {t("deckRdOpen", { name: item.name })}
+                      </Button>
+                    ) : null}
+                    <Button size="sm" variant="ghost" onClick={() => selectEndpoint(LOCAL_T3_ID)}>{t("tasksBackToLocal")}</Button>
+                  </div>
+                </div>
+              ) : item.canT3 && visited.has(item.id) ? (
                 <DeckT3EndpointPane
                   url={item.url}
                   {...(item.deviceId !== undefined ? { deviceId: item.deviceId } : {})}
@@ -590,13 +690,13 @@ export function DeckT3Panel({
                   active={isActiveItem && !isRdActive}
                   reloadCount={reloadCounts[item.id] ?? 0}
                   {...(item.isLocal && frameRef ? { frameRef } : {})}
-                  threadUrl={item.isLocal ? threadUrl : null}
+                  threadUrl={endpointThreadUrl}
                   onRetry={() => bumpReload(item.id)}
                   onOpenSettings={() => onSettingsChange(true)}
                   {...(item.isLocal && onLocalReload ? { onProbeStart: onLocalReload } : {})}
                 />
               ) : null}
-              {item.deviceId !== undefined && item.canRd && rdOpenDevices.has(item.deviceId) ? (
+              {item.deviceId !== undefined && item.online !== false && item.canRd && rdOpenDevices.has(item.deviceId) ? (
                 <DeckRemoteDesktopPane
                   deviceId={item.deviceId}
                   deviceName={item.name}

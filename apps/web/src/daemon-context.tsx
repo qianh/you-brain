@@ -17,6 +17,7 @@ import {
   type BrowserDaemon,
   type ReminderActionName,
 } from "./api/client.js";
+import { ActiveDeviceProvider } from "./active-device-context.js";
 import { driveStillChecking } from "./lib/drive-state.js";
 import type { Language } from "./lib/format.js";
 import { translate, type MessageKey } from "./i18n/messages.js";
@@ -367,7 +368,11 @@ export function DaemonProvider({ children }: { children: ReactNode }) {
     ],
   );
 
-  return <DaemonContext.Provider value={value}>{children}</DaemonContext.Provider>;
+  return (
+    <DaemonContext.Provider value={value}>
+      <ActiveDeviceProvider client={client}>{children}</ActiveDeviceProvider>
+    </DaemonContext.Provider>
+  );
 }
 
 /**

@@ -203,11 +203,11 @@ export class TaskService implements TaskHttpPort {
   }
 
   async #parseImages(files: readonly File[], retained: number): Promise<TaskImageData[]> {
-    if (files.length + retained > TASK_IMAGE_MAX_COUNT) throw new TaskError(400, "每个 TODO 最多可添加 4 张图片。");
+    if (files.length + retained > TASK_IMAGE_MAX_COUNT) throw new TaskError(400, "每个 TODO 最多可添加 4 个附件。");
     const images: TaskImageData[] = [];
     for (const file of files) {
       const image = await parseTaskImage(file);
-      if (!image) throw new TaskError(400, "仅支持不超过 10 MB 的 PNG、JPEG、GIF 或 WebP 图片。");
+      if (!image) throw new TaskError(400, "附件不能为空且单个不能超过 10 MB。");
       images.push(image);
     }
     return images;

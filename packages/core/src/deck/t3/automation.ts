@@ -5,7 +5,7 @@ import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join, resolve } from "node:path";
 
-import type { TaskAutomationPort, TaskImageData, TaskRequirementKind } from "../../tasks/types.js";
+import { isTaskImageAttachment, type TaskAutomationPort, type TaskImageData, type TaskRequirementKind } from "../../tasks/types.js";
 import { normalizeT3Url } from "./index.js";
 
 /**
@@ -415,9 +415,10 @@ export class T3Automation implements TaskAutomationPort {
     return { threadId: launched.threadId, threadUrl: await this.#threadUrl(url, launched.threadId) };
   }
 
-  async #uploadImage(url: string, image: TaskImageData): Promise<{ id: string; type: "image"; name: string; mimeType: string; sizeBytes: number }> {
+  async #uploadImage(url: string, image: TaskImageData): Promise<{ id: string; type: "image" | "file"; name: string; mimeType: string; sizeBytes: number }> {
     const { name, mimeType, sizeBytes, bytes } = image;
-    const upload = { type: "image" as const, name, mimeType, sizeBytes };
+    const type: "image" | "file" = isTaskImageAttachment(image) ? "image" : "file";
+    const upload = { type, name, mimeType, sizeBytes };
     const prepared = await this.#call("t3_attachment_prepare_upload", { upload });
     if (!object(prepared) || !text(prepared.attachmentId) || !text(prepared.relativeUrl) || !prepared.relativeUrl.startsWith("/")) invalidResponse();
     let uploadUrl: URL;
@@ -425,7 +426,7 @@ export class T3Automation implements TaskAutomationPort {
     if (uploadUrl.origin !== new URL(url).origin || uploadUrl.username || uploadUrl.password || uploadUrl.hash) invalidResponse();
     const response = await this.#fetch(uploadUrl, { method: "POST", headers: { "content-type": mimeType }, body: bytes }, 60_000);
     await response.body?.cancel();
-    if (!response.ok) throw new T3AutomationError("UNAVAILABLE", `TODO 图片未能上传到 T3（HTTP ${response.status}）。`);
+    if (!response.ok) throw new T3AutomationError("UNAVAILABLE", `TODO 附件未能上传到 T3（HTTP ${response.status}）。`);
     return { id: prepared.attachmentId, ...upload };
   }
 

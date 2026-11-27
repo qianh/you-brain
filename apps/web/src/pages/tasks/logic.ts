@@ -65,9 +65,15 @@ export function taskThreadUrl(value: string | null | undefined): string | null {
   }
 }
 
-export function taskThreadHref(value: string | null | undefined): string | null {
+export function taskThreadHref(value: string | null | undefined, deviceId?: string | null): string | null {
   const url = taskThreadUrl(value);
-  return url ? deckT3ThreadHref(url) : null;
+  return url ? deckT3ThreadHref(url, deviceId) : null;
+}
+
+export function formatAttachmentSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 /** 项目内未结束的任务：执行中优先，其次待核对，最后受阻。同一项目可并行多项。 */

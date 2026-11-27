@@ -1,6 +1,7 @@
 package ai.youbrain.mobile.net
 
 import android.content.Context
+import android.util.Base64
 import android.webkit.CookieManager
 import ai.youbrain.mobile.crypto.Base64Url
 import ai.youbrain.mobile.crypto.Ed25519Identity
@@ -22,6 +23,7 @@ import ai.youbrain.mobile.data.MobilePushItem
 import ai.youbrain.mobile.data.NoticeReplyResponse
 import ai.youbrain.mobile.data.OutboxEntry
 import ai.youbrain.mobile.data.PeerPinStore
+import ai.youbrain.mobile.data.PendingTodoAttachment
 import ai.youbrain.mobile.data.RdIceCandidate
 import ai.youbrain.mobile.data.RdIceEventPayload
 import ai.youbrain.mobile.data.RdIceServer
@@ -33,6 +35,7 @@ import ai.youbrain.mobile.data.RelayDevice
 import ai.youbrain.mobile.data.RelayState
 import ai.youbrain.mobile.data.T3StartResponse
 import ai.youbrain.mobile.data.TaskBoard
+import ai.youbrain.mobile.data.TaskImage
 import ai.youbrain.mobile.data.TaskReview
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -52,6 +55,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -117,7 +121,8 @@ data class AppUiState(
     val backgroundKeepAlive: Boolean = true,
     val pinnedPeers: Map<String, String> = emptyMap(),
     val agent: AgentUiState = AgentUiState(),
-    val selectedTodoDeviceId: String? = null,
+    /** 设备 T3 与设备 TODO 共用的当前选中设备 ID。 */
+    val selectedDeviceId: String? = null,
     val todoBoards: Map<String, DeviceTodoState> = emptyMap(),
     val navTarget: NavigationTarget? = null,
 ) {
@@ -263,7 +268,7 @@ class UBrainRepository(context: Context) {
         val cachedPushes = appStore.loadCachedPushes()
         val savedEnrollment = identityStore.getEnrollment()
         val initialMasterId = appStore.getSelectedMasterDeviceId()
-        val initialTodoDeviceId = appStore.getSelectedTodoDeviceId()
+        val initialSelectedDeviceId = appStore.getSelectedDeviceId()
         val cachedTodoBoards = appStore.loadCachedTodoBoards().mapValues { (_, board) ->
             DeviceTodoState(board = board)
         }
@@ -279,7 +284,7 @@ class UBrainRepository(context: Context) {
             backgroundKeepAlive = appStore.isBackgroundKeepAliveEnabled(),
             pinnedPeers = pinStore.listPins(),
             agent = hydratedAgentState(initialMasterId),
-            selectedTodoDeviceId = initialTodoDeviceId,
+            selectedDeviceId = initialSelectedDeviceId,
             todoBoards = cachedTodoBoards,
         )
         if (savedEnrollment != null) {
@@ -415,7 +420,7 @@ class UBrainRepository(context: Context) {
                 pushes = emptyList(),
                 unreadPushCount = 0,
                 agent = AgentUiState(),
-                selectedTodoDeviceId = null,
+                selectedDeviceId = null,
                 todoBoards = emptyMap(),
             )
         }
@@ -1142,12 +1147,19 @@ class UBrainRepository(context: Context) {
         }
     }
 
-    fun viewT3Devices(): List<RelayDevice> =
-        _uiState.value.relayState.devices.filter {
-            it.id != _uiState.value.deviceId &&
-                it.enrolled == true &&
-                (it.dispatch?.viewT3 == true || it.dispatch?.remoteDesktop == true)
-        }
+    /** 统一设备列表：所有同账号已入网远端设备，供「设备 T3」与「设备 TODO」共用，顺序保持一致。 */
+    fun managedDevices(): List<RelayDevice> =
+        _uiState.value.relayState.devices
+            .filter { it.id != _uiState.value.deviceId && it.enrolled == true }
+            .sortedWith(
+                compareByDescending<RelayDevice> {
+                    it.online && (it.dispatch?.viewT3 == true || it.dispatch?.enabled == true || it.dispatch?.remoteDesktop == true)
+                }
+                    .thenByDescending { it.online }
+                    .thenBy { _uiState.value.displayName(it).lowercase() },
+            )
+
+    fun viewT3Devices(): List<RelayDevice> = managedDevices()
 
     suspend fun fetchTurnIceServers(): List<RdIceServer> {
         val fallback = listOf(
@@ -1238,23 +1250,28 @@ class UBrainRepository(context: Context) {
         }
     }
 
-    fun todoDevices(): List<RelayDevice> =
-        _uiState.value.relayState.devices
-            .filter { it.id != _uiState.value.deviceId && it.enrolled == true }
-            .sortedWith(
-                compareByDescending<RelayDevice> { it.online && it.dispatch?.enabled == true }
-                    .thenByDescending { it.online }
-                    .thenBy { _uiState.value.displayName(it).lowercase() },
-            )
+    fun todoDevices(): List<RelayDevice> = managedDevices()
 
-    fun selectTodoDevice(deviceId: String) {
-        appStore.setSelectedTodoDeviceId(deviceId)
-        _uiState.update { it.copy(selectedTodoDeviceId = deviceId) }
+    /** 统一设备切换：同步更新设备 T3 与设备 TODO 的选中设备，在线时预拉 TODO 看板并预热 T3 隧道。 */
+    fun selectDevice(deviceId: String) {
+        if (deviceId.isBlank()) return
+        appStore.setSelectedDeviceId(deviceId)
+        _uiState.update { it.copy(selectedDeviceId = deviceId) }
         val dev = _uiState.value.relayState.devices.firstOrNull { it.id == deviceId }
         if (dev?.online == true && _uiState.value.connectionState == ConnectionState.OK) {
-            scope.launch { loadTodoBoard(deviceId, silent = false) }
+            val hasCache = _uiState.value.todoBoards[deviceId]?.board != null
+            scope.launch { loadTodoBoard(deviceId, silent = hasCache) }
+            if (dev.dispatch?.viewT3 == true) {
+                scope.launch {
+                    if (ensureT3Tunnel(deviceId).isSuccess) {
+                        getOrCreateT3ProxyImmediate(deviceId)
+                    }
+                }
+            }
         }
     }
+
+    fun selectTodoDevice(deviceId: String) = selectDevice(deviceId)
 
     private fun updateDeviceTodoState(deviceId: String, transform: (DeviceTodoState) -> DeviceTodoState) {
         _uiState.update { cur ->
@@ -1354,6 +1371,112 @@ class UBrainRepository(context: Context) {
         }
     }
 
+    private suspend fun uploadTodoAttachments(
+        deviceId: String,
+        attachments: List<PendingTodoAttachment>,
+    ): Result<List<String>> {
+        if (attachments.isEmpty()) return Result.success(emptyList())
+        if (attachments.size > MAX_TODO_ATTACHMENTS) {
+            return Result.failure(IllegalArgumentException("每个 TODO 最多可添加 4 个附件"))
+        }
+        if (!relayClient.awaitConnected(6_000L)) {
+            return Result.failure(IllegalStateException("连不上中转，请检查手机网络"))
+        }
+        val uploadIds = ArrayList<String>(attachments.size)
+        for (item in attachments) {
+            val bytes = item.bytes
+            if (bytes.isEmpty() || bytes.size > MAX_TODO_ATTACHMENT_BYTES) {
+                return Result.failure(IllegalArgumentException("附件「${item.name}」不能为空且单个不能超过 10 MB"))
+            }
+            val uploadId = UUID.randomUUID().toString()
+            var offset = 0
+            while (offset < bytes.size) {
+                val end = minOf(offset + TODO_BLOB_UPLOAD_CHUNK_BYTES, bytes.size)
+                val chunkB64 = Base64.encodeToString(bytes, offset, end - offset, Base64.NO_WRAP)
+                val isFinal = end >= bytes.size
+                val args = buildJsonObject {
+                    put("uploadId", uploadId)
+                    put("name", item.name)
+                    put("mimeType", item.mimeType.ifBlank { "application/octet-stream" })
+                    put("totalBytes", bytes.size)
+                    put("offset", offset)
+                    put("chunk", chunkB64)
+                    put("final", isFinal)
+                }
+                when (val outcome = relayClient.dispatchCommand(deviceId, "tasks.blob.put", args, timeoutMs = 25_000L)) {
+                    is CommandOutcome.Err -> return Result.failure(IllegalStateException(friendlyTodoError(outcome.error)))
+                    is CommandOutcome.Ok -> Unit
+                }
+                offset = end
+            }
+            uploadIds.add(uploadId)
+        }
+        return Result.success(uploadIds)
+    }
+
+    suspend fun downloadTodoAttachment(
+        deviceId: String,
+        taskId: String,
+        image: TaskImage,
+    ): Result<File> {
+        if (!relayClient.awaitConnected(6_000L)) {
+            return Result.failure(IllegalStateException("连不上中转，请检查手机网络"))
+        }
+        val dir = File(appContext.cacheDir, "todo-attachments").apply { mkdirs() }
+        val safeName = image.name.replace(Regex("[^A-Za-z0-9._\\-\\u4e00-\\u9fa5]"), "_").ifBlank { "attachment" }
+        val outFile = File(dir, "${image.id}_$safeName")
+        if (outFile.exists() && image.sizeBytes > 0L && outFile.length() == image.sizeBytes) {
+            return Result.success(outFile)
+        }
+        val tmpFile = File(dir, "${image.id}.part")
+        return try {
+            tmpFile.outputStream().buffered().use { out ->
+                var offset = 0
+                var total = 0
+                for (page in 0 until 128) {
+                    val outcome = relayClient.dispatchCommand(
+                        deviceId,
+                        "tasks.blob.get",
+                        buildJsonObject {
+                            put("taskId", taskId)
+                            put("imageId", image.id)
+                            put("offset", offset)
+                            put("length", TODO_BLOB_DOWNLOAD_CHUNK_BYTES)
+                        },
+                        timeoutMs = 25_000L,
+                    )
+                    when (outcome) {
+                        is CommandOutcome.Err -> return Result.failure(IllegalStateException(friendlyTodoError(outcome.error)))
+                        is CommandOutcome.Ok -> {
+                            val obj = outcome.result?.jsonObject
+                                ?: return Result.failure(IllegalStateException("对端返回的附件数据格式无效"))
+                            val chunkB64 = obj["chunk"]?.jsonPrimitive?.contentOrNull
+                                ?: return Result.failure(IllegalStateException("对端返回的附件数据格式无效"))
+                            val chunk = Base64.decode(chunkB64, Base64.DEFAULT)
+                            total += chunk.size
+                            if (total > MAX_TODO_ATTACHMENT_BYTES) {
+                                return Result.failure(IllegalStateException("附件超过 10 MB 限制"))
+                            }
+                            out.write(chunk)
+                            offset += chunk.size
+                            val eof = obj["eof"]?.jsonPrimitive?.booleanOrNull == true
+                            if (eof || chunk.isEmpty()) break
+                        }
+                    }
+                }
+            }
+            if (outFile.exists()) outFile.delete()
+            if (!tmpFile.renameTo(outFile)) {
+                tmpFile.copyTo(outFile, overwrite = true)
+                tmpFile.delete()
+            }
+            Result.success(outFile)
+        } catch (t: Throwable) {
+            runCatching { tmpFile.delete() }
+            Result.failure(t)
+        }
+    }
+
     suspend fun createTodo(
         deviceId: String,
         title: String,
@@ -1362,9 +1485,22 @@ class UBrainRepository(context: Context) {
         newProjectName: String? = null,
         newProjectCwd: String? = null,
         priority: Int = 2,
+        attachments: List<PendingTodoAttachment> = emptyList(),
     ): Result<TaskBoard> {
         val cleanTitle = title.trim()
         if (cleanTitle.isEmpty()) return Result.failure(IllegalArgumentException("请填写任务标题"))
+        updateDeviceTodoState(deviceId) { it.copy(mutating = true) }
+        val uploadIds = try {
+            val uploaded = uploadTodoAttachments(deviceId, attachments)
+            if (uploaded.isFailure) {
+                updateDeviceTodoState(deviceId) { it.copy(mutating = false) }
+                return Result.failure(uploaded.exceptionOrNull() ?: IllegalStateException("附件上传失败"))
+            }
+            uploaded.getOrThrow()
+        } catch (t: Throwable) {
+            updateDeviceTodoState(deviceId) { it.copy(mutating = false) }
+            return Result.failure(t)
+        }
         val args = buildJsonObject {
             put("title", cleanTitle)
             if (description.trim().isNotEmpty()) put("description", description.trim())
@@ -1384,6 +1520,9 @@ class UBrainRepository(context: Context) {
                 put("projectId", JsonNull)
             }
             put("priority", priority.coerceIn(0, 3))
+            if (uploadIds.isNotEmpty()) {
+                put("uploadIds", JsonArray(uploadIds.map { JsonPrimitive(it) }))
+            }
         }
         return mutateTodoBoard(deviceId, "tasks.create", args)
     }
@@ -1397,9 +1536,23 @@ class UBrainRepository(context: Context) {
         newProjectName: String? = null,
         newProjectCwd: String? = null,
         priority: Int = 2,
+        retainImageIds: List<String>? = null,
+        attachments: List<PendingTodoAttachment> = emptyList(),
     ): Result<TaskBoard> {
         val cleanTitle = title.trim()
         if (cleanTitle.isEmpty()) return Result.failure(IllegalArgumentException("请填写任务标题"))
+        updateDeviceTodoState(deviceId) { it.copy(mutating = true) }
+        val uploadIds = try {
+            val uploaded = uploadTodoAttachments(deviceId, attachments)
+            if (uploaded.isFailure) {
+                updateDeviceTodoState(deviceId) { it.copy(mutating = false) }
+                return Result.failure(uploaded.exceptionOrNull() ?: IllegalStateException("附件上传失败"))
+            }
+            uploaded.getOrThrow()
+        } catch (t: Throwable) {
+            updateDeviceTodoState(deviceId) { it.copy(mutating = false) }
+            return Result.failure(t)
+        }
         val args = buildJsonObject {
             put("id", id)
             put("title", cleanTitle)
@@ -1420,8 +1573,21 @@ class UBrainRepository(context: Context) {
                 put("projectId", JsonNull)
             }
             put("priority", priority.coerceIn(0, 3))
+            if (retainImageIds != null) {
+                put("retainImageIds", JsonArray(retainImageIds.map { JsonPrimitive(it) }))
+            }
+            if (uploadIds.isNotEmpty()) {
+                put("uploadIds", JsonArray(uploadIds.map { JsonPrimitive(it) }))
+            }
         }
         return mutateTodoBoard(deviceId, "tasks.update", args)
+    }
+
+    companion object {
+        private const val MAX_TODO_ATTACHMENTS = 4
+        private const val MAX_TODO_ATTACHMENT_BYTES = 10 * 1024 * 1024
+        private const val TODO_BLOB_UPLOAD_CHUNK_BYTES = 36 * 1024
+        private const val TODO_BLOB_DOWNLOAD_CHUNK_BYTES = 120 * 1024
     }
 
     suspend fun toggleTodoProject(deviceId: String, projectId: String, enabled: Boolean): Result<TaskBoard> =

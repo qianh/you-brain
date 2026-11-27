@@ -11,11 +11,12 @@ export type ProjectChoice = { projectId: string } | { newProject: TaskNewProject
 
 const sameFolder = (a: string, b: string): boolean => a.replace(/\/+$/u, "") === b.replace(/\/+$/u, "");
 
-export function ProjectPicker({ projects, value, onChange, disabled = false }: {
+export function ProjectPicker({ projects, value, onChange, disabled = false, allowPickFolder = true }: {
   projects: readonly TaskProject[];
   value: ProjectChoice;
   onChange: (value: ProjectChoice) => void;
   disabled?: boolean;
+  allowPickFolder?: boolean;
 }) {
   const { t } = useDaemon();
   const listId = useId();
@@ -24,7 +25,7 @@ export function ProjectPicker({ projects, value, onChange, disabled = false }: {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
-  const pickFolder = typeof window !== "undefined" ? window.__TAURI__?.dialog?.open : undefined;
+  const pickFolder = allowPickFolder && typeof window !== "undefined" ? window.__TAURI__?.dialog?.open : undefined;
   const rows = useMemo(() => projectPickerRows(projects, query, pickFolder !== undefined), [projects, query, pickFolder]);
 
   const selectedId = "projectId" in value ? value.projectId : null;

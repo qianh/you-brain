@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import {
   createVirtualDeviceRecord,
@@ -239,6 +239,30 @@ export async function handleApi(
 ): Promise<Response> {
   const path = url.pathname;
   if (path === "/api/tasks") {
+    const remoteDevice = await resolveRemoteTaskDevice(url, context);
+    if (remoteDevice !== null) {
+      const dispatch = dispatchPort(context);
+      if (request.method === "GET") {
+        return json(await sendRemoteTaskCommand(dispatch, remoteDevice, "tasks.board", {}));
+      }
+      if (request.method === "POST" || request.method === "PUT") {
+        const { task, images } = await readTaskMutation(request);
+        const parsed = request.method === "POST" ? TaskCreateSchema.parse(task) : TaskUpdateSchema.parse(task);
+        const uploadIds = images && images.length > 0
+          ? await uploadRemoteTaskFiles(dispatch, remoteDevice, images)
+          : undefined;
+        const payload = uploadIds && uploadIds.length > 0 ? { ...parsed, uploadIds } : parsed;
+        return json(
+          await sendRemoteTaskCommand(
+            dispatch,
+            remoteDevice,
+            request.method === "POST" ? "tasks.create" : "tasks.update",
+            payload,
+          ),
+        );
+      }
+      return methodNotAllowed("GET, POST, PUT");
+    }
     if (!context.deps.tasks) notSupported();
     const tasks = context.deps.tasks;
     if (request.method === "GET") return json(await tasks.board());
@@ -252,27 +276,41 @@ export async function handleApi(
   }
   if (path === "/api/tasks/image") {
     return method(request, "GET", async () => {
-      if (!context.deps.tasks) notSupported();
       const taskId = url.searchParams.get("task");
       if (!taskId || taskId.length > 200) throw new HttpError(400, "INVALID_INPUT", "缺少有效的 TODO 编号");
-      const image = await context.deps.tasks.image(taskId, TaskImageIdSchema.parse(url.searchParams.get("id")));
-      return new Response(image.bytes, { headers: {
-        "content-type": image.mimeType, "cache-control": "private, no-store",
-        "x-content-type-options": "nosniff", "content-security-policy": "sandbox",
-      } });
+      const imageId = TaskImageIdSchema.parse(url.searchParams.get("id"));
+      const download = url.searchParams.get("download") === "1";
+      const remoteDevice = await resolveRemoteTaskDevice(url, context);
+      if (remoteDevice !== null) {
+        const dispatch = dispatchPort(context);
+        const attachment = await downloadRemoteTaskAttachment(dispatch, remoteDevice, taskId, imageId);
+        return taskAttachmentResponse(attachment.bytes, attachment.mimeType, attachment.name, download);
+      }
+      if (!context.deps.tasks) notSupported();
+      const image = await context.deps.tasks.image(taskId, imageId);
+      return taskAttachmentResponse(image.bytes, image.mimeType, image.name, download);
     });
   }
   if (path === "/api/tasks/action") {
     return method(request, "POST", async () => {
+      const action = TaskActionSchema.parse(await readJson(request));
+      const remoteDevice = await resolveRemoteTaskDevice(url, context);
+      if (remoteDevice !== null) {
+        return json(await sendRemoteTaskCommand(dispatchPort(context), remoteDevice, "tasks.action", action));
+      }
       if (!context.deps.tasks) notSupported();
-      return json(await context.deps.tasks.action(TaskActionSchema.parse(await readJson(request))));
+      return json(await context.deps.tasks.action(action));
     });
   }
   if (path === "/api/tasks/review") {
     return method(request, "GET", async () => {
-      if (!context.deps.tasks) notSupported();
       const id = url.searchParams.get("id");
       if (!id || id.length > 200) throw new HttpError(400, "INVALID_INPUT", "缺少有效的 TODO 编号");
+      const remoteDevice = await resolveRemoteTaskDevice(url, context);
+      if (remoteDevice !== null) {
+        return json(await sendRemoteTaskCommand(dispatchPort(context), remoteDevice, "tasks.review", { id }));
+      }
+      if (!context.deps.tasks) notSupported();
       return json(await context.deps.tasks.review(id));
     });
   }
@@ -1845,7 +1883,7 @@ async function readTaskMutation(request: Request): Promise<{ task: unknown; imag
   const contentType = request.headers.get("content-type") ?? "";
   if (!/^multipart\/form-data\s*;/iu.test(contentType)) return { task: await readJson(request) };
   const maxBytes = TASK_IMAGE_MAX_BYTES * TASK_IMAGE_MAX_COUNT + 128 * 1024;
-  const tooLarge = new HttpError(413, "INVALID_INPUT", "TODO 图片附件超过大小限制");
+  const tooLarge = new HttpError(413, "INVALID_INPUT", "TODO 附件超过大小限制");
   if (Number(request.headers.get("content-length")) > maxBytes) throw tooLarge;
   let bytes = 0;
   const body = request.body?.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
@@ -1884,6 +1922,145 @@ async function readObject(request: Request): Promise<Record<string, unknown>> {
     throw new HttpError(400, "INVALID_INPUT", "请求体必须是 JSON 对象");
   }
   return value as Record<string, unknown>;
+}
+
+const REMOTE_TASK_UPLOAD_CHUNK_BYTES = 36 * 1024;
+const REMOTE_TASK_DOWNLOAD_CHUNK_BYTES = 120 * 1024;
+
+function taskAttachmentResponse(
+  bytes: Uint8Array<ArrayBuffer>,
+  mimeType: string,
+  name: string,
+  download: boolean,
+): Response {
+  const safeFallback = name.replace(/[^\x20-\x7e]/gu, "_").replace(/["\\]/gu, "_") || "attachment";
+  const encoded = encodeURIComponent(name);
+  const disposition = `${download ? "attachment" : "inline"}; filename="${safeFallback}"; filename*=UTF-8''${encoded}`;
+  return new Response(bytes, {
+    headers: {
+      "content-type": mimeType || "application/octet-stream",
+      "content-disposition": disposition,
+      "cache-control": "private, no-store",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "sandbox",
+    },
+  });
+}
+
+function friendlyRemoteTaskError(raw: string): string {
+  if (raw.includes("不支持的指令") || raw.includes("暂不支持远程")) {
+    return "该设备的 U-Brain 版本尚未支持远程管理 TODO 或附件，请升级该设备后再试。";
+  }
+  if (raw.includes("本机没有开启接收派活")) {
+    return "该设备未开启「接收派活」，请在该设备「设置 → 集成」中开启后再试。";
+  }
+  return raw;
+}
+
+async function resolveRemoteTaskDevice(url: URL, context: ApiContext): Promise<string | null> {
+  const raw = (url.searchParams.get("device") ?? "").trim();
+  if (raw === "" || raw === "local") return null;
+  if (raw.length > 64) throw new HttpError(400, "INVALID_INPUT", "设备编号不合法");
+  const dispatch = context.deps.dispatch;
+  if (!dispatch) {
+    throw new HttpError(501, "NOT_SUPPORTED", "当前未启用跨设备派活，无法管理远端设备 TODO");
+  }
+  const list = await dispatch.devices();
+  if (raw === list.self.deviceId) return null;
+  return raw;
+}
+
+async function sendRemoteTaskCommand(
+  dispatch: DispatchHttpPort,
+  deviceId: string,
+  kind: string,
+  args: Record<string, unknown>,
+): Promise<unknown> {
+  const outcome = await dispatch.send({ to: deviceId, kind, args });
+  if (!outcome.ok) {
+    throw new HttpError(502, "REMOTE_TASK_FAILED", friendlyRemoteTaskError(outcome.error));
+  }
+  return outcome.result;
+}
+
+async function uploadRemoteTaskFiles(
+  dispatch: DispatchHttpPort,
+  deviceId: string,
+  files: readonly File[],
+): Promise<string[]> {
+  if (files.length > TASK_IMAGE_MAX_COUNT) {
+    throw new HttpError(400, "INVALID_INPUT", "每个 TODO 最多可添加 4 个附件。");
+  }
+  const uploadIds: string[] = [];
+  for (const file of files) {
+    if (file.size === 0 || file.size > TASK_IMAGE_MAX_BYTES) {
+      throw new HttpError(400, "INVALID_INPUT", "附件不能为空且单个不能超过 10 MB。");
+    }
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const uploadId = randomUUID();
+    const name = file.name || "attachment";
+    const mimeType = file.type || "application/octet-stream";
+    for (let offset = 0; offset < bytes.byteLength; offset += REMOTE_TASK_UPLOAD_CHUNK_BYTES) {
+      const end = Math.min(offset + REMOTE_TASK_UPLOAD_CHUNK_BYTES, bytes.byteLength);
+      const chunk = Buffer.from(bytes.subarray(offset, end)).toString("base64");
+      const final = end >= bytes.byteLength;
+      await sendRemoteTaskCommand(dispatch, deviceId, "tasks.blob.put", {
+        uploadId,
+        name,
+        mimeType,
+        totalBytes: bytes.byteLength,
+        offset,
+        chunk,
+        final,
+      });
+    }
+    uploadIds.push(uploadId);
+  }
+  return uploadIds;
+}
+
+async function downloadRemoteTaskAttachment(
+  dispatch: DispatchHttpPort,
+  deviceId: string,
+  taskId: string,
+  imageId: string,
+): Promise<{ name: string; mimeType: string; bytes: Uint8Array<ArrayBuffer> }> {
+  const chunks: Buffer[] = [];
+  let offset = 0;
+  let totalBytes = 0;
+  let name = "attachment";
+  let mimeType = "application/octet-stream";
+  for (let page = 0; page < 128; page += 1) {
+    const raw = (await sendRemoteTaskCommand(dispatch, deviceId, "tasks.blob.get", {
+      taskId,
+      imageId,
+      offset,
+      length: REMOTE_TASK_DOWNLOAD_CHUNK_BYTES,
+    })) as {
+      name?: unknown;
+      mimeType?: unknown;
+      sizeBytes?: unknown;
+      chunk?: unknown;
+      eof?: unknown;
+    } | null;
+    if (!raw || typeof raw.chunk !== "string") {
+      throw new HttpError(502, "REMOTE_TASK_FAILED", "对端返回的附件数据格式无效");
+    }
+    if (typeof raw.name === "string" && raw.name !== "") name = raw.name;
+    if (typeof raw.mimeType === "string" && raw.mimeType !== "") mimeType = raw.mimeType;
+    const part = Buffer.from(raw.chunk, "base64");
+    totalBytes += part.byteLength;
+    if (totalBytes > TASK_IMAGE_MAX_BYTES) {
+      throw new HttpError(502, "REMOTE_TASK_FAILED", "对端返回的附件超过大小限制");
+    }
+    chunks.push(part);
+    offset += part.byteLength;
+    if (raw.eof === true || part.byteLength === 0) break;
+  }
+  const merged = Buffer.concat(chunks, totalBytes);
+  const copy = new Uint8Array(new ArrayBuffer(merged.byteLength));
+  copy.set(merged);
+  return { name, mimeType, bytes: copy };
 }
 
 function dispatchPort(context: ApiContext): DispatchHttpPort {

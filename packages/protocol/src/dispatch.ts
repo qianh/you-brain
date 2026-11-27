@@ -45,6 +45,8 @@ export const DISPATCH_KINDS = [
   "tasks.update",
   "tasks.action",
   "tasks.review",
+  "tasks.blob.put",
+  "tasks.blob.get",
   "rd.open",
   "rd.ice",
   "rd.close",
@@ -167,6 +169,7 @@ export const TasksCreateArgsSchema = z.strictObject({
   projectId: z.string().min(1).max(200).nullable().optional(),
   newProject: TaskNewProjectSchema.optional(),
   priority: TaskPrioritySchema.optional(),
+  uploadIds: z.array(z.uuid()).max(4).optional(),
 }).refine(taskOneProject, taskOneProjectMessage);
 
 export const TasksUpdateArgsSchema = z.strictObject({
@@ -174,10 +177,28 @@ export const TasksUpdateArgsSchema = z.strictObject({
   title: z.string().trim().min(1).max(200).optional(),
   description: z.string().max(20_000).optional(),
   retainImageIds: z.array(z.uuid()).max(4).optional(),
+  uploadIds: z.array(z.uuid()).max(4).optional(),
   projectId: z.string().min(1).max(200).nullable().optional(),
   newProject: TaskNewProjectSchema.optional(),
   priority: TaskPrioritySchema.optional(),
 }).refine(taskOneProject, taskOneProjectMessage);
+
+export const TasksBlobPutArgsSchema = z.strictObject({
+  uploadId: z.uuid(),
+  name: z.string().trim().min(1).max(255),
+  mimeType: z.string().trim().max(128).optional(),
+  totalBytes: z.number().int().positive().max(10 * 1024 * 1024),
+  offset: z.number().int().nonnegative(),
+  chunk: z.string().min(1).max(56 * 1024),
+  final: z.boolean(),
+});
+
+export const TasksBlobGetArgsSchema = z.strictObject({
+  taskId: z.string().min(1).max(200),
+  imageId: z.uuid(),
+  offset: z.number().int().nonnegative().optional(),
+  length: z.number().int().positive().max(140 * 1024).optional(),
+});
 
 export const TasksActionArgsSchema = z.discriminatedUnion("action", [
   z.strictObject({ action: z.literal("project"), projectId: z.string().min(1).max(200), enabled: z.boolean() }),
@@ -283,6 +304,8 @@ export const DispatchCommandSchema = z.discriminatedUnion("kind", [
   z.strictObject({ kind: z.literal("tasks.update"), args: TasksUpdateArgsSchema }),
   z.strictObject({ kind: z.literal("tasks.action"), args: TasksActionArgsSchema }),
   z.strictObject({ kind: z.literal("tasks.review"), args: TasksReviewArgsSchema }),
+  z.strictObject({ kind: z.literal("tasks.blob.put"), args: TasksBlobPutArgsSchema }),
+  z.strictObject({ kind: z.literal("tasks.blob.get"), args: TasksBlobGetArgsSchema }),
   z.strictObject({ kind: z.literal("rd.open"), args: RdOpenArgsSchema }),
   z.strictObject({ kind: z.literal("rd.ice"), args: RdIceArgsSchema }),
   z.strictObject({ kind: z.literal("rd.close"), args: RdCloseArgsSchema }),

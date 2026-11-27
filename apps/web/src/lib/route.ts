@@ -77,15 +77,24 @@ export function parseDeckPane(href: string): number | null {
   return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
-export function deckT3ThreadHref(threadUrl: string): string {
-  return `/deck?t3Thread=${encodeURIComponent(threadUrl)}`;
+export function deckT3ThreadHref(threadUrl: string, deviceId?: string | null): string {
+  const params = new URLSearchParams({ t3Thread: threadUrl });
+  if (deviceId) params.set("device", deviceId);
+  return `/deck?${params.toString()}`;
 }
 
-export function t3ThreadFrameUrl(baseUrl: string, threadUrl: string | null): string {
+export function t3ThreadFrameUrl(baseUrl: string, threadUrl: string | null, allowLoopbackRemap = false): string {
   if (!threadUrl) return baseUrl;
   try {
     const target = new URL(threadUrl);
-    if (target.origin === new URL(baseUrl).origin && !target.username && !target.password && !target.search && !target.hash && /^\/[^/]+\/[^/]+$/u.test(target.pathname)) return target.href;
+    if (target.username || target.password || target.search || target.hash || !/^\/[^/]+\/[^/]+$/u.test(target.pathname)) {
+      return baseUrl;
+    }
+    const base = new URL(baseUrl);
+    if (target.origin === base.origin) return target.href;
+    if (allowLoopbackRemap && ["127.0.0.1", "localhost", "[::1]"].includes(target.hostname)) {
+      return new URL(target.pathname, base).href;
+    }
   } catch { return baseUrl; }
   return baseUrl;
 }

@@ -219,7 +219,24 @@ data class TaskImage(
     val name: String,
     val mimeType: String = "",
     val sizeBytes: Long = 0L,
-)
+    val kind: String? = null,
+) {
+    val isImage: Boolean
+        get() = kind == "image" || (kind == null && mimeType in IMAGE_MIME_TYPES)
+
+    companion object {
+        private val IMAGE_MIME_TYPES = setOf("image/png", "image/jpeg", "image/gif", "image/webp")
+    }
+}
+
+data class PendingTodoAttachment(
+    val localId: String,
+    val name: String,
+    val mimeType: String,
+    val bytes: ByteArray,
+) {
+    val sizeBytes: Long get() = bytes.size.toLong()
+}
 
 @Serializable
 data class TaskWorktreeBlock(

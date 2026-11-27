@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
-import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT, TASK_IMAGE_TYPES, type DevelopmentTask, type TaskActionInput, type TaskBoard, type TaskCreateInput, type TaskImage, type TaskPriority, type TaskProject, type TaskReview } from "@you-brain/core/tasks/types.js";
+import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT, type DevelopmentTask, type TaskActionInput, type TaskBoard, type TaskCreateInput, type TaskImage, type TaskPriority, type TaskProject, type TaskReview } from "@you-brain/core/tasks/types.js";
 
+import { useActiveDevice } from "../active-device-context.js";
 import { Banner } from "../components/banner.js";
 import { Button, IconButton } from "../components/button.js";
 import { ConfirmDialog, Dialog } from "../components/dialog.js";
@@ -19,17 +20,17 @@ import { formatRelative } from "../lib/format.js";
 import { useRoute } from "../router.js";
 import { projectTasks, TASK_PRIORITY_KEYS, TASK_STATUS_KEYS, taskCounts, taskStatusKey, taskThreadHref, taskWorktreeHint, visibleTasks } from "./tasks/logic.js";
 import { ProjectPicker, type ProjectChoice } from "./tasks/project-picker.js";
-import { clipboardTaskImages, TaskImagePreview } from "./tasks/images.js";
+import { clipboardTaskImages, TaskAttachmentCard, TaskImagePreview } from "./tasks/images.js";
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const TASK_METRICS = [
   ["all", "tasksAll"], ["queued", "tasksQueued"], ["active", "tasksActive"], ["review", "tasksReview"], ["done", "tasksDone"],
 ] as const;
 
-function ThreadLink({ task, onOpen }: { task: DevelopmentTask; onOpen?: () => void }) {
+function ThreadLink({ task, deviceId, onOpen }: { task: DevelopmentTask; deviceId?: string | null; onOpen?: () => void }) {
   const { t } = useDaemon();
   const { navigate } = useRoute();
-  const href = taskThreadHref(task.run?.threadUrl);
+  const href = taskThreadHref(task.run?.threadUrl, deviceId);
   return href ? <a className="tasks-thread-link" href={href} onClick={(event) => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
@@ -42,11 +43,13 @@ function ThreadLink({ task, onOpen }: { task: DevelopmentTask; onOpen?: () => vo
 
 export function TasksPage() {
   const { client, t, language, timeZone } = useDaemon();
+  const { devices, activeDeviceId, activeDevice, manualT3Endpoint, selectDevice, reloadDevices } = useActiveDevice();
   const { navigate } = useRoute();
   const pageActive = usePageActive();
   const { push } = useToast();
-  const [board, setBoard] = useState<TaskBoard | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const deviceKey = activeDeviceId ?? "local";
+  const [boardsByDevice, setBoardsByDevice] = useState<Record<string, TaskBoard>>({});
+  const [errorByDevice, setErrorByDevice] = useState<Record<string, string | null>>({});
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [project, setProject] = useState("all");
@@ -62,30 +65,61 @@ export function TasksPage() {
   const mounted = useRef(false);
   const polling = useRef(false);
   const mutating = useRef(false);
+  const activeDeviceIdRef = useRef(activeDeviceId);
+  activeDeviceIdRef.current = activeDeviceId;
 
-  const acceptBoard = useCallback((next: TaskBoard): void => {
+  const board = boardsByDevice[deviceKey] ?? null;
+  const error = errorByDevice[deviceKey] ?? null;
+  const isRemote = activeDeviceId !== null;
+  const remoteOffline = isRemote && activeDevice !== null && !activeDevice.online;
+  const remoteNoDispatch = isRemote && activeDevice !== null && activeDevice.online && !activeDevice.canTodo;
+  const canWrite = !busy && !remoteOffline && !remoteNoDispatch;
+  const deviceTitle = activeDevice ? `${t("navTasks")} · ${activeDevice.name}` : t("navTasks");
+
+  const acceptBoard = useCallback((targetKey: string, next: TaskBoard): void => {
     version.current += 1;
-    setBoard(next);
-    setError(null);
+    setBoardsByDevice((current) => ({ ...current, [targetKey]: next }));
+    setErrorByDevice((current) => ({ ...current, [targetKey]: null }));
   }, []);
 
-  const load = useCallback(async (): Promise<void> => {
+  // 切换设备时立刻重置临时筛选与弹窗状态，防止跨设备误操作。
+  useEffect(() => {
+    version.current += 1;
+    polling.current = false;
+    setProject("all");
+    setEditor(null);
+    setReviewing(null);
+    setViewingImages(null);
+    setCompleting(null);
+    setStarting(null);
+    setLaunchingId(null);
+  }, [deviceKey]);
+
+  const load = useCallback(async (forceDeviceId?: string | null): Promise<void> => {
+    const targetDeviceId = forceDeviceId === undefined ? activeDeviceIdRef.current : forceDeviceId;
+    const targetKey = targetDeviceId ?? "local";
     if (polling.current || mutating.current) return;
+    if (targetDeviceId !== null && activeDevice?.id === targetDeviceId && !activeDevice.online) {
+      setLoading(false);
+      return;
+    }
     polling.current = true;
     const current = ++version.current;
     try {
-      const next = await client.taskBoard();
+      const next = await client.taskBoard(targetDeviceId);
       if (mounted.current && version.current === current) {
-        setBoard(next);
-        setError(null);
+        setBoardsByDevice((all) => ({ ...all, [targetKey]: next }));
+        setErrorByDevice((all) => ({ ...all, [targetKey]: null }));
       }
-    } catch (error) {
-      if (mounted.current && version.current === current) setError(errorMessage(error));
+    } catch (caught) {
+      if (mounted.current && version.current === current) {
+        setErrorByDevice((all) => ({ ...all, [targetKey]: errorMessage(caught) }));
+      }
     } finally {
       polling.current = false;
       if (mounted.current) setLoading(false);
     }
-  }, [client]);
+  }, [client, activeDevice]);
 
   useEffect(() => {
     mounted.current = true;
@@ -95,12 +129,13 @@ export function TasksPage() {
     };
   }, []);
 
-  // 页面切走（常驻但隐藏）时不轮询；切回或首次进入时立即拉一次。
+  // 页面切走（常驻但隐藏）时不轮询；切回、首次进入或切换设备时立即拉一次。
   useEffect(() => {
     if (!pageActive) return;
-    void load();
-    const visible = (): void => { if (document.visibilityState === "visible") void load(); };
-    const timer = window.setInterval(visible, 5_000);
+    if (boardsByDevice[deviceKey] === undefined && !remoteOffline) setLoading(true);
+    void load(activeDeviceId);
+    const visible = (): void => { if (document.visibilityState === "visible") void load(activeDeviceId); };
+    const timer = window.setInterval(visible, isRemote ? 10_000 : 5_000);
     window.addEventListener("you-brain-refresh", visible);
     document.addEventListener("visibilitychange", visible);
     return () => {
@@ -108,23 +143,24 @@ export function TasksPage() {
       window.removeEventListener("you-brain-refresh", visible);
       document.removeEventListener("visibilitychange", visible);
     };
-  }, [load, pageActive]);
+  }, [load, pageActive, activeDeviceId, deviceKey, isRemote, remoteOffline]);
 
-  const mutate = async (work: () => Promise<TaskBoard>, success?: string, after?: (board: TaskBoard) => void): Promise<boolean> => {
+  const mutate = async (work: () => Promise<TaskBoard>, success?: string, after?: (nextBoard: TaskBoard) => void): Promise<boolean> => {
     if (mutating.current) return false;
+    const targetKey = deviceKey;
     mutating.current = true;
     version.current += 1;
     setBusy(true);
     try {
       const next = await work();
       if (mounted.current) {
-        acceptBoard(next);
+        acceptBoard(targetKey, next);
         if (success) push({ message: success, tone: "success" });
         after?.(next);
       }
       return true;
-    } catch (error) {
-      if (mounted.current) push({ message: errorMessage(error), tone: "danger" });
+    } catch (caught) {
+      if (mounted.current) push({ message: errorMessage(caught), tone: "danger" });
       return false;
     } finally {
       mutating.current = false;
@@ -132,13 +168,14 @@ export function TasksPage() {
     }
   };
 
-  const act = (input: TaskActionInput): Promise<boolean> => mutate(() => client.taskAction(input));
+  const act = (input: TaskActionInput): Promise<boolean> => mutate(() => client.taskAction(input, activeDeviceId));
   const startTask = async (id: string): Promise<void> => {
     if (mutating.current) return;
+    const startedDeviceId = activeDeviceId;
     setLaunchingId(id);
     try {
-      await mutate(() => client.taskAction({ action: "start", id }), undefined, (next) => {
-        const href = taskThreadHref(next.tasks.find((task) => task.id === id)?.run?.threadUrl);
+      await mutate(() => client.taskAction({ action: "start", id }, startedDeviceId), undefined, (next) => {
+        const href = taskThreadHref(next.tasks.find((task) => task.id === id)?.run?.threadUrl, startedDeviceId);
         if (href && document.visibilityState !== "hidden" && window.location.pathname.replace(/\/$/u, "") === "/todos") navigate(href);
       });
     } finally {
@@ -153,16 +190,83 @@ export function TasksPage() {
   const pendingBoard = board === null;
   const shown = (value: number): string => (pendingBoard ? "—" : String(value));
 
+  const deviceBarItems = [
+    { id: null as string | null, key: "local", name: t("dshDeckT3Local"), online: true, isLocal: true },
+    ...devices.map((item) => ({ id: item.id, key: item.id, name: item.name, online: item.online, isLocal: false })),
+    ...(activeDevice && !devices.some((item) => item.id === activeDevice.id)
+      ? [{ id: activeDevice.id, key: activeDevice.id, name: activeDevice.name, online: activeDevice.online, isLocal: false }]
+      : []),
+  ];
+
+  const showDeviceEmptyCard = board === null && (remoteOffline || remoteNoDispatch);
+
   return <Page>
     <div className="tasks-page">
-      <PageHeader title={t("navTasks")} description={t("tasksLead")} actions={<>
+      <PageHeader title={deviceTitle} description={t("tasksLead")} actions={<>
         <Segmented label={t("tasksProjects")} value={tab} options={[{ value: "tasks", label: t("tasksTabTasks") }, { value: "projects", label: t("tasksTabProjects") }]} onChange={(value) => setTab(value === "projects" ? "projects" : "tasks")} />
-        <Button variant="ghost" onClick={() => void load()} disabled={busy} aria-label={t("tasksRefresh")} icon={<Icon name="refresh" />}>{t("reload")}</Button>
-        <Button variant="primary" onClick={() => setEditor({ task: null })} icon={<Icon name="plus" />}>{t("tasksNew")}</Button>
+        <Button variant="ghost" onClick={() => { void reloadDevices(); void load(activeDeviceId); }} disabled={busy} aria-label={t("tasksRefresh")} icon={<Icon name="refresh" />}>{t("reload")}</Button>
+        <Button variant="primary" disabled={!canWrite} onClick={() => setEditor({ task: null })} icon={<Icon name="plus" />}>{t("tasksNew")}</Button>
       </>} />
-      {error && <Banner tone="danger" action={<Button size="sm" onClick={() => void load()}>{t("retry")}</Button>}>{t("tasksLoadFailed")}: {error}</Banner>}
+
+      {deviceBarItems.length > 1 ? (
+        <div className="tasks-device-bar" role="tablist" aria-label={t("tasksDeviceSwitchLabel")}>
+          {deviceBarItems.map((item) => {
+            const selected = item.id === activeDeviceId;
+            const cached = boardsByDevice[item.key];
+            const reviewCount = cached ? cached.tasks.filter((task) => task.status === "review").length : 0;
+            return (
+              <button
+                key={item.key}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                className={[
+                  "tasks-device-tab",
+                  selected ? "is-active" : "",
+                  !item.online ? "is-offline" : "",
+                ].filter(Boolean).join(" ")}
+                onClick={() => selectDevice(item.id)}
+              >
+                <Icon name={item.isLocal ? "laptop" : "monitor"} size={14} />
+                {!item.isLocal ? <span className={`tasks-device-dot${item.online ? " is-online" : ""}`} aria-hidden="true" /> : null}
+                <span className="tasks-device-tab-name">{item.name}</span>
+                {reviewCount > 0 ? <span className="tasks-device-badge">{reviewCount}</span> : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+
+      {!isRemote && manualT3Endpoint !== null ? (
+        <Banner tone="info">{t("tasksManualT3Fallback", { name: manualT3Endpoint.name })}</Banner>
+      ) : null}
+      {remoteOffline && board !== null ? (
+        <Banner tone="warn" action={<Button size="sm" onClick={() => selectDevice(null)}>{t("tasksBackToLocal")}</Button>}>
+          {t("tasksDeviceOfflineCache", { name: activeDevice?.name ?? activeDeviceId })}
+        </Banner>
+      ) : null}
+      {remoteNoDispatch && board !== null ? (
+        <Banner tone="warn">{t("tasksDeviceNoDispatchHint")}</Banner>
+      ) : null}
+      {error && !remoteOffline && !remoteNoDispatch ? (
+        <Banner tone="danger" action={<Button size="sm" onClick={() => void load(activeDeviceId)}>{t("retry")}</Button>}>
+          {t("tasksLoadFailed")}: {error}
+        </Banner>
+      ) : null}
       {board?.connectionError && <Banner tone="warn">{t("tasksConnection", { detail: board.connectionError })}</Banner>}
-      {tab === "projects" ? <div className="tasks-projects-grid" aria-label={t("tasksProjects")}>
+
+      {showDeviceEmptyCard ? (
+        <EmptyState
+          title={t(remoteOffline ? "tasksDeviceOffline" : "tasksDeviceNoDispatch", { name: activeDevice?.name ?? activeDeviceId ?? "" })}
+          description={t(remoteOffline ? "tasksDeviceOfflineHint" : "tasksDeviceNoDispatchHint")}
+          action={
+            <div className="dsh-deck-actions">
+              <Button size="sm" onClick={() => { void reloadDevices(); void load(activeDeviceId); }}>{t("retry")}</Button>
+              <Button size="sm" variant="ghost" onClick={() => selectDevice(null)}>{t("tasksBackToLocal")}</Button>
+            </div>
+          }
+        />
+      ) : tab === "projects" ? <div className="tasks-projects-grid" aria-label={t("tasksProjects")}>
         {projects.map((item) => {
           const unfinished = projectTasks(tasks, item.id);
           const current = unfinished[0];
@@ -186,7 +290,7 @@ export function TasksPage() {
             </div>
             <div className="tasks-project-foot">
               <span className="tasks-project-state"><span className={`tasks-indicator${item.enabled ? " is-enabled" : ""}`} />{t(item.enabled ? "tasksEnabled" : "tasksPaused")}</span>
-              <Button size="sm" variant={item.enabled ? "ghost" : "secondary"} disabled={busy || (!item.enabled && !!board?.connectionError)} title={item.enabled ? t("tasksPauseHint") : undefined} onClick={() => {
+              <Button size="sm" variant={item.enabled ? "ghost" : "secondary"} disabled={!canWrite || (!item.enabled && !!board?.connectionError)} title={item.enabled ? t("tasksPauseHint") : undefined} onClick={() => {
                 if (item.enabled) void act({ action: "project", projectId: item.id, enabled: false });
                 else setStarting(item);
               }} icon={<Icon name={item.enabled ? "minus" : "play"} size={13} />}>{t(item.enabled ? "tasksPause" : "tasksStart")}</Button>
@@ -220,7 +324,7 @@ export function TasksPage() {
               ]} />
             </div>
           </div>
-          {loading && !board ? <div className="tasks-loading" role="status"><Spinner /><span>{t("tasksLoadingBoard")}</span></div> : filtered.length === 0 ? <EmptyState title={t(tasks.length === 0 ? "tasksNoTasks" : "tasksNoMatches")} {...(tasks.length === 0 ? { description: t("tasksNoTasksHint"), action: <Button onClick={() => setEditor({ task: null })}>{t("tasksNew")}</Button> } : {})} /> : <ul className="tasks-list">
+          {loading && !board ? <div className="tasks-loading" role="status"><Spinner /><span>{t("tasksLoadingBoard")}</span></div> : filtered.length === 0 ? <EmptyState title={t(tasks.length === 0 ? "tasksNoTasks" : "tasksNoMatches")} {...(tasks.length === 0 && canWrite ? { description: t("tasksNoTasksHint"), action: <Button onClick={() => setEditor({ task: null })}>{t("tasksNew")}</Button> } : {})} /> : <ul className="tasks-list">
             {filtered.map((task) => {
               const linked = projects.find((item) => item.id === task.projectId);
               const worktreeBlock = task.status === "failed" ? task.worktreeBlock : undefined;
@@ -236,12 +340,12 @@ export function TasksPage() {
                     : taskError && <p className="tasks-item-error" role="alert">{taskError}</p>}
                 </div>
                 <div className="tasks-item-actions">
-                  {task.status === "queued" && <Button size="sm" disabled={busy || !!board?.connectionError} loading={launchingId === task.id} onClick={() => void startTask(task.id)} icon={<Icon name="play" size={13} />}>{t("tasksStartOne")}</Button>}
-                  {task.status === "queued" && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setEditor({ task })} icon={<Icon name="pencil" size={13} />}>{t("tasksEdit")}</Button>}
-                  {task.status === "review" && <Button size="sm" variant="primary" disabled={busy} onClick={() => setReviewing(task)}>{t("tasksInspect")}</Button>}
-                  {task.status === "failed" && <Button size="sm" disabled={busy} onClick={() => void act({ action: "retry", id: task.id })}>{t("tasksRetry")}</Button>}
-                  {task.status !== "done" && task.status !== "merging" && <Button size="sm" variant="ghost" disabled={busy} onClick={() => setCompleting(task)} icon={<Icon name="check" size={13} />}>{t("tasksComplete")}</Button>}
-                  <ThreadLink task={task} />
+                  {task.status === "queued" && <Button size="sm" disabled={!canWrite || !!board?.connectionError} loading={launchingId === task.id} onClick={() => void startTask(task.id)} icon={<Icon name="play" size={13} />}>{t("tasksStartOne")}</Button>}
+                  {task.status === "queued" && <Button size="sm" variant="ghost" disabled={!canWrite} onClick={() => setEditor({ task })} icon={<Icon name="pencil" size={13} />}>{t("tasksEdit")}</Button>}
+                  {task.status === "review" && <Button size="sm" variant="primary" disabled={!canWrite} onClick={() => setReviewing(task)}>{t("tasksInspect")}</Button>}
+                  {task.status === "failed" && <Button size="sm" disabled={!canWrite} onClick={() => void act({ action: "retry", id: task.id })}>{t("tasksRetry")}</Button>}
+                  {task.status !== "done" && task.status !== "merging" && <Button size="sm" variant="ghost" disabled={!canWrite} onClick={() => setCompleting(task)} icon={<Icon name="check" size={13} />}>{t("tasksComplete")}</Button>}
+                  <ThreadLink task={task} deviceId={activeDeviceId} />
                 </div>
               </li>;
             })}
@@ -250,27 +354,64 @@ export function TasksPage() {
         </section>
       </>}
     </div>
-    {editor && <TaskEditor key={editor.task?.id ?? "new"} task={editor.task} projects={projects} initialProject={project} busy={busy} onClose={() => { if (!busy) setEditor(null); }} onSave={async (input, files, retainImageIds) => {
-      const ok = await mutate(() => editor.task ? client.updateTask({ id: editor.task.id, ...input, retainImageIds }, files) : client.createTask(input, files), t(editor.task ? "tasksSaved" : "tasksCreated"));
-      if (ok) setEditor(null);
-    }} />}
+    {editor && <TaskEditor
+      key={`${deviceKey}:${editor.task?.id ?? "new"}`}
+      task={editor.task}
+      projects={projects}
+      initialProject={project}
+      deviceId={activeDeviceId}
+      deviceName={activeDevice?.name ?? null}
+      busy={busy}
+      onClose={() => { if (!busy) setEditor(null); }}
+      onSave={async (input, files, retainImageIds) => {
+        const ok = await mutate(
+          () => editor.task
+            ? client.updateTask({ id: editor.task.id, ...input, retainImageIds }, files, activeDeviceId)
+            : client.createTask(input, files, activeDeviceId),
+          t(editor.task ? "tasksSaved" : "tasksCreated"),
+        );
+        if (ok) setEditor(null);
+      }}
+    />}
     {viewingImages && <Dialog open size="lg" title={viewingImages.title} onClose={() => setViewingImages(null)}>
-      <div className="tasks-image-gallery">{viewingImages.images?.map((image) => <figure key={image.id}><TaskImagePreview image={image} taskId={viewingImages.id} /><figcaption>{image.name}</figcaption></figure>)}</div>
+      <div className="tasks-image-gallery">
+        {viewingImages.images?.map((image) => (
+          <TaskAttachmentCard key={image.id} image={image} taskId={viewingImages.id} deviceId={activeDeviceId} />
+        ))}
+      </div>
     </Dialog>}
-    {reviewing && <TaskReviewDialog key={reviewing.id} task={reviewing} onClose={() => setReviewing(null)} onChanged={acceptBoard} />}
+    {reviewing && <TaskReviewDialog
+      key={`${deviceKey}:${reviewing.id}`}
+      task={reviewing}
+      deviceId={activeDeviceId}
+      deviceName={activeDevice?.name ?? null}
+      onClose={() => setReviewing(null)}
+      onChanged={(next) => acceptBoard(deviceKey, next)}
+    />}
     <ConfirmDialog open={completing !== null} title={completing ? `${t("tasksComplete")} · ${completing.title}` : t("tasksComplete")} description={t("tasksCompleteHint")} confirmLabel={t("tasksComplete")} cancelLabel={t("cancel")} loading={busy} onClose={() => { if (!busy) setCompleting(null); }} onConfirm={() => {
-      if (completing) void mutate(() => client.taskAction({ action: "complete", id: completing.id }), t("tasksCompleted")).then((ok) => { if (ok) setCompleting(null); });
+      if (completing) void mutate(() => client.taskAction({ action: "complete", id: completing.id }, activeDeviceId), t("tasksCompleted")).then((ok) => { if (ok) setCompleting(null); });
     }} />
-    <ConfirmDialog open={starting !== null} title={starting ? `${t("tasksStart")} · ${starting.name}` : t("tasksStart")} description={t("tasksStartHint")} confirmLabel={t("tasksStart")} cancelLabel={t("cancel")} loading={busy} onClose={() => { if (!busy) setStarting(null); }} onConfirm={() => {
-      if (starting) void act({ action: "project", projectId: starting.id, enabled: true }).then((ok) => { if (ok) setStarting(null); });
-    }} />
+    <ConfirmDialog
+      open={starting !== null}
+      title={starting ? `${t("tasksStart")} · ${activeDevice ? `${activeDevice.name} / ` : ""}${starting.name}` : t("tasksStart")}
+      description={t("tasksStartHint")}
+      confirmLabel={t("tasksStart")}
+      cancelLabel={t("cancel")}
+      loading={busy}
+      onClose={() => { if (!busy) setStarting(null); }}
+      onConfirm={() => {
+        if (starting) void act({ action: "project", projectId: starting.id, enabled: true }).then((ok) => { if (ok) setStarting(null); });
+      }}
+    />
   </Page>;
 }
 
-function TaskEditor({ task, projects, initialProject, busy, onClose, onSave }: {
+function TaskEditor({ task, projects, initialProject, deviceId, deviceName, busy, onClose, onSave }: {
   task: DevelopmentTask | null;
   projects: TaskProject[];
   initialProject: string;
+  deviceId: string | null;
+  deviceName: string | null;
   busy: boolean;
   onClose: () => void;
   onSave: (input: TaskCreateInput, images: File[], retainImageIds: string[]) => Promise<void>;
@@ -289,7 +430,7 @@ function TaskEditor({ task, projects, initialProject, busy, onClose, onSave }: {
   const addImages = (files: File[]): void => {
     if (busy || !files.length) return;
     if (imageCount + files.length > TASK_IMAGE_MAX_COUNT) { setImageError(t("tasksImageCountLimit")); return; }
-    if (files.some((file) => !TASK_IMAGE_TYPES.some((type) => type === file.type) || file.size === 0 || file.size > TASK_IMAGE_MAX_BYTES)) {
+    if (files.some((file) => file.size === 0 || file.size > TASK_IMAGE_MAX_BYTES)) {
       setImageError(t("tasksImageTypeLimit"));
       return;
     }
@@ -303,7 +444,8 @@ function TaskEditor({ task, projects, initialProject, busy, onClose, onSave }: {
     const linked = "newProject" in project ? { newProject: project.newProject } : { projectId: project.projectId || null };
     void onSave({ title: title.trim(), description: description.trim(), ...linked, priority }, newImages.map(({ file }) => file), savedImages.map(({ id }) => id));
   };
-  return <Dialog open className="tasks-editor-dialog" onClose={onClose} title={t(task ? "tasksEdit" : "tasksNew")} footer={<><Button variant="ghost" disabled={busy} onClick={onClose}>{t("cancel")}</Button><Button variant="primary" type="submit" form="task-editor" loading={busy} disabled={!title.trim()}>{t(task ? "tasksSave" : "tasksCreate")}</Button></>}>
+  const dialogTitle = deviceName ? `${t(task ? "tasksEdit" : "tasksNew")} · ${deviceName}` : t(task ? "tasksEdit" : "tasksNew");
+  return <Dialog open className="tasks-editor-dialog" onClose={onClose} title={dialogTitle} footer={<><Button variant="ghost" disabled={busy} onClick={onClose}>{t("cancel")}</Button><Button variant="primary" type="submit" form="task-editor" loading={busy} disabled={!title.trim()}>{t(task ? "tasksSave" : "tasksCreate")}</Button></>}>
     <form id="task-editor" className="tasks-form" onSubmit={submit}>
       <label><span>{t("tasksTitle")}</span><Input label={t("tasksTitle")} value={title} maxLength={200} required onChange={(event) => setTitle(event.target.value)} placeholder={t("tasksTitlePlaceholder")} disabled={busy} /></label>
       <div className="tasks-description-field">
@@ -312,22 +454,28 @@ function TaskEditor({ task, projects, initialProject, busy, onClose, onSave }: {
           if (images.length) { event.preventDefault(); addImages(images); }
         }} /></label>
         {!!imageCount && <ul className="tasks-image-previews">
-          {savedImages.map((image) => <li key={image.id}><TaskImagePreview image={image} {...(task ? { taskId: task.id } : {})} /><IconButton label={t("tasksRemoveImage", { name: image.name })} disabled={busy} onClick={() => { setSavedImages((items) => items.filter(({ id }) => id !== image.id)); setImageError(null); }}><Icon name="x" size={13} /></IconButton></li>)}
+          {savedImages.map((image) => <li key={image.id}><TaskImagePreview image={image} deviceId={deviceId} {...(task ? { taskId: task.id } : {})} /><IconButton label={t("tasksRemoveImage", { name: image.name })} disabled={busy} onClick={() => { setSavedImages((items) => items.filter(({ id }) => id !== image.id)); setImageError(null); }}><Icon name="x" size={13} /></IconButton></li>)}
           {newImages.map(({ id, file }) => <li key={id}><TaskImagePreview image={file} /><IconButton label={t("tasksRemoveImage", { name: file.name })} disabled={busy} onClick={() => { setNewImages((items) => items.filter((item) => item.id !== id)); setImageError(null); }}><Icon name="x" size={13} /></IconButton></li>)}
         </ul>}
         <div className="tasks-image-toolbar">
-          <input ref={fileInput} type="file" hidden multiple accept={TASK_IMAGE_TYPES.join(",")} onChange={(event) => { addImages([...event.currentTarget.files ?? []]); event.currentTarget.value = ""; }} />
+          <input ref={fileInput} type="file" hidden multiple onChange={(event) => { addImages([...event.currentTarget.files ?? []]); event.currentTarget.value = ""; }} />
           <Button size="sm" variant="ghost" disabled={busy || imageCount >= TASK_IMAGE_MAX_COUNT} icon={<Icon name="plus" size={13} />} onClick={() => fileInput.current?.click()}>{t("tasksAddImage")}</Button>
           {imageError && <small role="alert">{imageError}</small>}
         </div>
       </div>
-      <div className="tasks-form-pair"><div><label>{t("tasksProject")}</label><ProjectPicker projects={projects} value={project} onChange={setProject} disabled={busy} /></div><div><label>{t("tasksPriority")}</label><Select label={t("tasksPriority")} value={String(priority)} onChange={(value) => setPriority(Number(value) as TaskPriority)} disabled={busy} options={TASK_PRIORITY_KEYS.map((key, index) => ({ value: String(index), label: t(key) }))} /></div></div>
+      <div className="tasks-form-pair"><div><label>{t("tasksProject")}</label><ProjectPicker projects={projects} value={project} onChange={setProject} disabled={busy} allowPickFolder={deviceId === null} /></div><div><label>{t("tasksPriority")}</label><Select label={t("tasksPriority")} value={String(priority)} onChange={(value) => setPriority(Number(value) as TaskPriority)} disabled={busy} options={TASK_PRIORITY_KEYS.map((key, index) => ({ value: String(index), label: t(key) }))} /></div></div>
       {"newProject" in project && <p className="tasks-form-hint" role="status"><Icon name="info" size={13} />{t(project.newProject.cwd ? "tasksProjectWillAdd" : "tasksProjectWillCreate", { name: project.newProject.name })}</p>}
     </form>
   </Dialog>;
 }
 
-function TaskReviewDialog({ task, onClose, onChanged }: { task: DevelopmentTask; onClose: () => void; onChanged: (board: TaskBoard) => void }) {
+function TaskReviewDialog({ task, deviceId, deviceName, onClose, onChanged }: {
+  task: DevelopmentTask;
+  deviceId: string | null;
+  deviceName: string | null;
+  onClose: () => void;
+  onChanged: (board: TaskBoard) => void;
+}) {
   const { client, t } = useDaemon();
   const { push } = useToast();
   const [review, setReview] = useState<TaskReview | null>(null);
@@ -341,39 +489,45 @@ function TaskReviewDialog({ task, onClose, onChanged }: { task: DevelopmentTask;
     setReview(null);
     setError(null);
     setAcknowledged(false);
-    void client.taskReview(task.id).then((next) => { if (!cancelled) setReview(next); }, (error) => { if (!cancelled) setError(errorMessage(error)); });
+    void client.taskReview(task.id, deviceId).then((next) => { if (!cancelled) setReview(next); }, (caught) => { if (!cancelled) setError(errorMessage(caught)); });
     return () => { cancelled = true; };
-  }, [client, task.id, revision]);
+  }, [client, task.id, deviceId, revision]);
 
   const act = async (action: "approve" | "reject"): Promise<void> => {
     if (busy || !review || (action === "approve" && !acknowledged) || (action === "reject" && !feedback.trim())) return;
     setBusy(true);
     setError(null);
     try {
-      const next = await client.taskAction(action === "approve"
-        ? { action, id: task.id, reviewSha: review.headSha }
-        : { action, id: task.id, feedback: feedback.trim() });
+      const next = await client.taskAction(
+        action === "approve"
+          ? { action, id: task.id, reviewSha: review.headSha }
+          : { action, id: task.id, feedback: feedback.trim() },
+        deviceId,
+      );
       onChanged(next);
       const synced = action === "approve" && next.tasks.find((item) => item.id === task.id)?.status === "running";
       push({ message: t(action === "approve" ? (synced ? "tasksApproveSynced" : "tasksApproved") : "tasksRejected"), tone: synced ? "info" : "success" });
       onClose();
-    } catch (error) {
-      setError(errorMessage(error));
+    } catch (caught) {
+      setError(errorMessage(caught));
       setAcknowledged(false);
     } finally {
       setBusy(false);
     }
   };
 
-  return <Dialog open size="lg" className="tasks-review-dialog" title={t("tasksReviewTitle")} description={t("tasksReviewHint")} onClose={() => { if (!busy) onClose(); }} footer={<>
+  const reviewTitle = deviceName ? `${t("tasksReviewTitle")} · ${deviceName}` : t("tasksReviewTitle");
+  const approveLabel = deviceName ? t("tasksApproveDevice", { device: deviceName }) : t("tasksApprove");
+
+  return <Dialog open size="lg" className="tasks-review-dialog" title={reviewTitle} description={t("tasksReviewHint")} onClose={() => { if (!busy) onClose(); }} footer={<>
     <Button variant="ghost" disabled={busy} onClick={onClose}>{t("closeForm")}</Button>
     <Button disabled={busy || !review || !feedback.trim()} onClick={() => void act("reject")}>{t("tasksReject")}</Button>
-    <Button variant="primary" loading={busy} disabled={!review || !acknowledged} onClick={() => void act("approve")}>{t("tasksApprove")}</Button>
+    <Button variant="primary" loading={busy} disabled={!review || !acknowledged} onClick={() => void act("approve")}>{approveLabel}</Button>
   </>}>
     {error && <Banner tone="danger" action={<Button size="sm" disabled={busy} onClick={() => setRevision((value) => value + 1)}>{t(review ? "reload" : "retry")}</Button>}>{error}</Banner>}
     {!review && !error && <div className="tasks-loading" role="status"><Spinner />{t("tasksLoadingReview")}</div>}
     {review && <div className="tasks-review-content">
-      <header className="tasks-review-task"><h3>{review.task.title}</h3><ThreadLink task={review.task} onOpen={onClose} /></header>
+      <header className="tasks-review-task"><h3>{review.task.title}</h3><ThreadLink task={review.task} deviceId={deviceId} onOpen={onClose} /></header>
       <dl className="tasks-review-meta"><div><dt>{t("tasksBranch")}</dt><dd><code>{review.task.run?.branch}</code></dd></div><div><dt>{t("tasksCommit")}</dt><dd><code>{review.headSha}</code></dd></div><div><dt>{t("tasksBaseCommit")}</dt><dd><code>{review.baseSha}</code></dd></div><div><dt>{t("tasksWorktree")}</dt><dd><code>{review.task.run?.worktreePath}</code></dd></div></dl>
       <section><h4>{t("tasksSummary")}</h4><p className="tasks-review-summary">{review.task.run?.summary || t("tasksNoSummary")}</p></section>
       <section><h4>{t("tasksChanges")}</h4><pre className="tasks-review-stat">{review.stat}</pre></section>

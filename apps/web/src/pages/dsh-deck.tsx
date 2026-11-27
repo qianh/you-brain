@@ -137,15 +137,20 @@ export function DshDeckPage() {
     });
   }, [requestedPane, pageActive, activeTty7Device, client, navigate, reloadSessions, push, t]);
   const [t3Visited, setT3Visited] = useState(activePage === "t3");
-  const [t3Thread, setT3Thread] = useState<string | null>(null);
+  const [t3Thread, setT3Thread] = useState<{ deviceId: string | null; url: string; seq: number } | null>(null);
   const requestedT3Thread = readQuery(href, "t3Thread");
+  const requestedT3Device = readQuery(href, "device");
   useEffect(() => {
     if (!requestedT3Thread || !pageActive) return;
-    setT3Thread(requestedT3Thread);
+    setT3Thread((prev) => ({
+      deviceId: requestedT3Device && requestedT3Device !== "local" ? requestedT3Device : null,
+      url: requestedT3Thread,
+      seq: (prev?.seq ?? 0) + 1,
+    }));
     setT3Visited(true);
     setActivePage("t3");
     navigate("/deck", "replace");
-  }, [requestedT3Thread, pageActive, navigate]);
+  }, [requestedT3Thread, requestedT3Device, pageActive, navigate]);
   // 其他页面左侧快捷栏点进来时带着 ?view=，切到对应页面后把地址换回 /deck。
   const requestedView = readQuery(href, "view");
   useEffect(() => {
@@ -437,7 +442,8 @@ export function DshDeckPage() {
             {t3Visited ? (
               <DeckT3Panel
                 frameRef={t3Frame}
-                threadUrl={t3Thread}
+                threadUrl={t3Thread?.deviceId === null ? t3Thread.url : null}
+                threadTarget={t3Thread}
                 reloadVersion={t3ReloadVersion}
                 forceLocalVersion={t3ForceLocalVersion}
                 settingsOpen={t3SettingsOpen}
