@@ -27,6 +27,7 @@ import { UiPrefsLimitError, type UiPrefsPatch } from "../ui-prefs/store.js";
 import { MuseError } from "../deck/muse/sdk/errors.js";
 import { TelegramApiError } from "../deck/telegram/api.js";
 import { TaskError } from "../tasks/service.js";
+import { MeetingImportActionSchema } from "../tasks/meeting-import.js";
 import { TaskActionSchema, TaskCreateSchema, TaskImageIdSchema, TaskUpdateSchema } from "../tasks/schema.js";
 import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT } from "../tasks/types.js";
 import { probeT3Web } from "../deck/t3/probe.js";
@@ -237,6 +238,23 @@ export async function handleApi(
   context: ApiContext,
 ): Promise<Response> {
   const path = url.pathname;
+  if (path === "/api/tasks/meeting-import") {
+    const port = context.deps.meetingImport;
+    if (!port) notSupported();
+    let result: unknown;
+    if (request.method === "GET") {
+      result = await port.meetingImport();
+    } else if (request.method === "POST") {
+      const body = MeetingImportActionSchema.safeParse(await readMeetingImportJson(request));
+      if (!body.success) throw new HttpError(400, "INVALID_INPUT", "纪要请求无效；请使用不超过 64 KiB 的非空 UTF-8 Markdown 或纯文本文件。");
+      result = await port.meetingImportAction(body.data);
+    } else {
+      return methodNotAllowed("GET, POST");
+    }
+    return new Response(JSON.stringify(result), { headers: {
+      "content-type": "application/json; charset=utf-8", "cache-control": "private, no-store",
+    } });
+  }
   if (path === "/api/tasks") {
     if (!context.deps.tasks) notSupported();
     const tasks = context.deps.tasks;
@@ -1742,6 +1760,27 @@ function publish(hub: ChangeHub, kinds: readonly DaemonChangeKind[]): void {
 
 async function readJson(request: Request): Promise<unknown> {
   return parseJsonBody(await request.text());
+}
+
+async function readMeetingImportJson(request: Request): Promise<unknown> {
+  const maxBytes = 400 * 1024;
+  const tooLarge = new HttpError(413, "INVALID_INPUT", "纪要导入请求过大。");
+  if (Number(request.headers.get("content-length")) > maxBytes) throw tooLarge;
+  let bytes = 0;
+  const body = request.body?.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      bytes += chunk.byteLength;
+      if (bytes > maxBytes) throw tooLarge;
+      controller.enqueue(chunk);
+    },
+  }));
+  let text: string;
+  try { text = new TextDecoder("utf-8", { fatal: true }).decode(await new Response(body).arrayBuffer()); }
+  catch {
+    if (bytes > maxBytes) throw tooLarge;
+    throw new HttpError(400, "INVALID_INPUT", "纪要请求必须使用 UTF-8 编码。");
+  }
+  return parseJsonBody(text);
 }
 
 async function readTaskMutation(request: Request): Promise<{ task: unknown; images?: File[] }> {

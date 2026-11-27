@@ -184,6 +184,41 @@
 .tasks-review-ack { display: flex; align-items: flex-start; gap: var(--sp-2); padding: var(--sp-3); background: var(--success-soft); border-radius: var(--r-ctl); cursor: pointer; }
 .tasks-review-ack input { margin-top: 3px; accent-color: var(--accent); flex-shrink: 0; }
 .tasks-review-feedback > span { color: var(--text-2); }
+
+.dialog.tasks-meeting-dialog { width: min(1000px, calc(100vw - 2 * var(--sp-6))); max-height: calc(100dvh - 2 * var(--sp-6)); }
+.tasks-meeting-dialog .dialog-body { min-height: 0; overflow: auto; }
+.tasks-meeting-dialog .dialog-head, .tasks-meeting-dialog .dialog-foot { flex-shrink: 0; }
+.tasks-meeting-dialog .dialog-foot { flex-wrap: wrap; justify-content: space-between; }
+.tasks-meeting-footer { display: flex; gap: var(--sp-2); flex-wrap: wrap; margin-left: auto; }
+.tasks-meeting-queue-hint { flex-basis: 100%; text-align: end; }
+.tasks-meeting-content { display: grid; gap: var(--sp-3); overflow-wrap: anywhere; }
+.tasks-meeting-drop { display: grid; justify-items: center; gap: var(--sp-3); padding: var(--sp-5) var(--sp-3); border: 1px dashed var(--border-strong); border-radius: var(--r-ctl); background: var(--surface-2); text-align: center; }
+.tasks-meeting-file, .tasks-meeting-status { display: flex; align-items: center; gap: var(--sp-2); min-width: 0; }
+.tasks-meeting-file svg { flex: none; color: var(--text-3); }
+.tasks-meeting-muted, .tasks-meeting-drop > span { color: var(--text-2); font-size: var(--fs-sm); }
+.tasks-meeting-review { display: grid; grid-template-columns: minmax(0, 3fr) minmax(200px, 2fr); gap: var(--sp-4); }
+.tasks-meeting-heading, .tasks-meeting-bulk, .tasks-meeting-item-controls { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-2); }
+.tasks-meeting-heading { justify-content: space-between; }
+.tasks-meeting-heading h3, .tasks-meeting-questions h3 { font-size: var(--fs-base); }
+.tasks-meeting-heading span, .tasks-meeting-item-title small { color: var(--text-3); font: var(--fs-sm)/1.5 var(--mono); }
+.tasks-meeting-bulk { margin-top: var(--sp-2); }
+.tasks-meeting-items { padding: 0; margin: var(--sp-2) 0 0; list-style: none; }
+.tasks-meeting-items > li { display: grid; gap: var(--sp-2); padding: var(--sp-3) 0; border-top: 1px solid var(--border); }
+.tasks-meeting-item-title { display: grid; grid-template-columns: auto max-content minmax(0, 1fr); align-items: start; gap: var(--sp-2); cursor: pointer; }
+.tasks-meeting-item-title input { accent-color: var(--accent); margin-top: 3px; }
+.tasks-meeting-items > li > p { color: var(--text-2); white-space: pre-wrap; }
+.tasks-meeting-items details, .tasks-meeting-items > li > small { color: var(--text-3); font-size: var(--fs-sm); }
+.tasks-meeting-items summary { cursor: pointer; }
+.tasks-meeting-items blockquote { margin: var(--sp-2) 0 0; padding-inline-start: var(--sp-2); border-inline-start: 2px solid var(--border-strong); white-space: pre-wrap; }
+.tasks-meeting-feedback { display: grid; align-content: start; gap: var(--sp-3); min-width: 0; padding-inline-start: var(--sp-4); border-inline-start: 1px solid var(--border); }
+.tasks-meeting-feedback form, .tasks-meeting-feedback label { display: grid; gap: var(--sp-2); min-width: 0; }
+.tasks-meeting-feedback form > .button { justify-self: start; }
+.tasks-meeting-questions ul { margin: var(--sp-2) 0 0; padding-inline-start: var(--sp-4); color: var(--text-2); }
+
+@media (max-width: 680px) {
+  .tasks-meeting-review { grid-template-columns: minmax(0, 1fr); }
+  .tasks-meeting-feedback { padding: var(--sp-3) 0 0; border-inline-start: 0; border-top: 1px solid var(--border); }
+}
 @media (max-width: 900px) {
   .tasks-item { flex-wrap: wrap; }
   .tasks-item-actions { width: 100%; flex-wrap: wrap; padding-left: 40px; justify-content: flex-start; }

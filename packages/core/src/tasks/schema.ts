@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { StoredMeetingImportSchema } from "./meeting-import.js";
 import { TASK_IMAGE_MAX_BYTES, TASK_IMAGE_MAX_COUNT, TASK_IMAGE_TYPES } from "./types.js";
 
 const title = z.string().trim().min(1).max(200);
@@ -75,6 +76,8 @@ export const TaskStateSchema = z.object({
   version: z.literal(1),
   projects: z.array(z.object({ id, name: z.string(), cwd: z.string(), enabled: z.boolean() })),
   tasks: z.array(TaskRecordSchema),
+  meetingImport: StoredMeetingImportSchema.optional(),
+  lastMeetingImport: z.object({ id: z.uuid(), revision: z.number().int().nonnegative(), count: z.number().int().positive() }).optional(),
 });
 
 export type TaskState = z.infer<typeof TaskStateSchema>;

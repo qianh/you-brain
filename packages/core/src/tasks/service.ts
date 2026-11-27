@@ -1,13 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { LlmBackend } from "../llm/types.js";
 import { TaskActionSchema, TaskCreateSchema, TaskUpdateSchema, type TaskState } from "./schema.js";
 import { TaskAlreadyMergedError, TaskBehindDevelopError, TaskDirtyWorktreeError, TaskMergeBlockedError, TaskNoCommitError } from "./git.js";
 import { parseTaskImage, TaskImages } from "./images.js";
+import { analyseMeetingImport, meetingImportDraft, meetingImportModel, type StoredMeetingImport } from "./meeting-import.js";
 import { TaskStore } from "./store.js";
 import { TASK_IMAGE_MAX_COUNT } from "./types.js";
 import type {
-  DevelopmentTask, TaskActionInput, TaskAutomationPort, TaskBoard, TaskCreateInput,
+  DevelopmentTask, MeetingImportAction, MeetingImportHttpPort, MeetingImportResult, MeetingImportView,
+  TaskActionInput, TaskAutomationPort, TaskBoard, TaskCreateInput,
   TaskGitPort, TaskHttpPort, TaskImageData, TaskNewProject, TaskProject, TaskReview, TaskRun, TaskStatus, TaskUpdateInput, TaskWorktreeRun,
 } from "./types.js";
 
@@ -26,6 +29,7 @@ export interface TaskServiceOptions {
   onChange?: () => void;
   pollMs?: number;
   homeDir?: string;
+  meetingModel?: () => LlmBackend | null;
   /** 按项目 cwd 返回该仓库已锁定的项目决定摘要（< 3KB），供派发时注入。 */
   projectContext?: (cwd: string) => Promise<string | null> | string | null;
   /** 测试注入存储故障；生产使用原子文件写入。 */
@@ -55,7 +59,7 @@ export function nextProjectTask(tasks: DevelopmentTask[], projectId: string): De
 }
 
 /** 每次状态与外部操作按顺序持久化。人工确认是唯一能进入 merging 的入口。 */
-export class TaskService implements TaskHttpPort {
+export class TaskService implements TaskHttpPort, MeetingImportHttpPort {
   readonly #store: Pick<TaskStore, "read" | "write">;
   readonly #images: TaskImages;
   #state: TaskState | null = null;
@@ -65,6 +69,7 @@ export class TaskService implements TaskHttpPort {
   #stopped = false;
   #connectionError: string | null = null;
   #liveProjects = new Set<string>();
+  #meetingAnalysis: AbortController | null = null;
 
   constructor(private readonly options: TaskServiceOptions) {
     this.#store = options.store ?? new TaskStore(join(options.dataDir, "tasks", "board.json"));
@@ -80,6 +85,7 @@ export class TaskService implements TaskHttpPort {
 
   async stop(): Promise<void> {
     this.#stopped = true;
+    this.#meetingAnalysis?.abort();
     if (this.#timer !== null) clearInterval(this.#timer);
     this.#timer = null;
     await this.#queue;
@@ -144,12 +150,7 @@ export class TaskService implements TaskHttpPort {
       const state = await this.#load();
       const images = await this.#parseImages(files, 0);
       const projectId = await this.#taskProject(body);
-      const now = this.#now();
-      const task: DevelopmentTask = {
-        id: this.options.id?.() ?? randomUUID(), title: body.title,
-        description: body.description ?? "", projectId: projectId ?? null,
-        priority: body.priority ?? 2, status: "queued", createdAt: now, updatedAt: now, run: null,
-      };
+      const task = this.#queuedTask({ ...body, projectId });
       await this.#saveImages(images, async () => {
         if (images.length) task.images = images.map(({ bytes: _bytes, ...metadata }) => metadata);
         state.tasks.push(task);
@@ -158,6 +159,128 @@ export class TaskService implements TaskHttpPort {
       this.poke();
       return this.#board();
     });
+  }
+
+  meetingImport(): Promise<MeetingImportView> {
+    return this.#serial(async () => {
+      await this.#load();
+      return this.#meetingView();
+    });
+  }
+
+  meetingImportAction(input: MeetingImportAction): Promise<MeetingImportResult> {
+    if (input.action === "analyse" || input.action === "revise") return this.#analyseMeeting(input);
+    return this.#serial(async () => {
+      const state = await this.#load();
+      if (input.action === "import") {
+        if (state.meetingImport) throw new TaskError(409, "请先完成或放弃当前纪要草稿。");
+        state.meetingImport = {
+          id: randomUUID(), revision: 0, fileName: input.fileName, text: input.text,
+          analysed: false, items: [], questions: [], message: "", clarification: null, pendingFeedback: [],
+        };
+        await this.#save();
+        return this.#meetingView();
+      }
+      const receipt = state.lastMeetingImport;
+      if (input.action === "confirm" && receipt?.id === input.id && receipt.revision === input.revision) {
+        return { ...this.#meetingView(), created: { count: receipt.count, board: this.#board() } };
+      }
+      const draft = this.#meetingVersion(input);
+      if (input.action === "discard") {
+        delete state.meetingImport;
+        await this.#save();
+        this.#meetingAnalysis?.abort();
+        return this.#meetingView();
+      }
+      if (this.#meetingAnalysis) throw new TaskError(409, "正在分析纪要，请稍候。");
+      if (input.action === "select") {
+        const selection = new Map(input.items.map((item) => [item.id, item]));
+        if (!draft.analysed || selection.size !== draft.items.length || selection.size !== input.items.length || draft.items.some((item) => !selection.has(item.id))) {
+          throw new TaskError(409, "待确认条目已变化，请重新核对。");
+        }
+        const projects = new Set(state.projects.map((project) => project.id));
+        if (input.items.some((item) => item.projectId !== null && !projects.has(item.projectId) && draft.items.find((previous) => previous.id === item.id)?.projectId !== item.projectId)) {
+          throw new TaskError(409, "请选择列表中的已有项目。");
+        }
+        draft.items = draft.items.map((item) => ({ ...item, ...selection.get(item.id)! }));
+        draft.revision += 1;
+        await this.#save();
+        return this.#meetingView();
+      }
+      const selected = draft.items.filter((item) => item.selected);
+      if (!draft.analysed || !selected.length) throw new TaskError(400, "请先选择要新增的 TODO。");
+      if (selected.some((item) => item.projectId !== null)) {
+        if (!(await this.#refreshProjects())) throw new TaskError(503, "无法核对关联项目，请连接 T3 后重试，或取消项目关联。");
+        if (selected.some((item) => item.projectId !== null && !this.#liveProjects.has(item.projectId))) {
+          throw new TaskError(409, "关联的 T3 项目已不存在，请重新选择。");
+        }
+      }
+      const created = selected.map((item) => this.#queuedTask(item));
+      state.tasks.push(...created);
+      state.lastMeetingImport = { id: draft.id, revision: draft.revision, count: created.length };
+      delete state.meetingImport;
+      await this.#save();
+      this.poke();
+      return { ...this.#meetingView(), created: { count: created.length, board: this.#board() } };
+    });
+  }
+
+  #meetingView(): MeetingImportView {
+    const draft = this.#state?.meetingImport;
+    return {
+      draft: draft ? structuredClone(meetingImportDraft(draft)) : null,
+      model: meetingImportModel(this.options.meetingModel?.() ?? null),
+    };
+  }
+
+  #meetingVersion(version: { id: string; revision: number }): StoredMeetingImport {
+    const draft = this.#state?.meetingImport;
+    if (!draft || draft.id !== version.id || draft.revision !== version.revision) {
+      throw new TaskError(409, "草稿已变化，请刷新后重新核对。");
+    }
+    return draft;
+  }
+
+  async #analyseMeeting(input: Extract<MeetingImportAction, { action: "analyse" | "revise" }>): Promise<MeetingImportView> {
+    const controller = new AbortController();
+    try {
+      const snapshot = await this.#serial(async () => {
+        const state = await this.#load();
+        const draft = this.#meetingVersion(input);
+        if (draft.analysed !== (input.action === "revise")) throw new TaskError(409, "草稿状态已变化，请刷新后重试。");
+        if (this.#meetingAnalysis) throw new TaskError(409, "正在分析纪要，请稍候。");
+        const backend = this.options.meetingModel?.() ?? null;
+        const model = meetingImportModel(backend);
+        if (!backend || !model?.consentKey) throw new TaskError(503, "当前模型不可用或不支持安全的纪要分析，未发送内容。");
+        if (model.consentKey !== input.consentKey) throw new TaskError(409, "当前模型已变化，请重新核对后再发送。");
+        this.#meetingAnalysis = controller;
+        return {
+          backend, draft: structuredClone(draft),
+          projects: state.projects.map(({ id, name }) => ({ id, name })),
+        };
+      });
+      const result = await analyseMeetingImport({
+        ...snapshot, signal: controller.signal, instruction: input.action === "revise" ? input.feedback : undefined,
+      }).catch(() => { throw new TaskError(502, "纪要分析未完成，草稿未修改。请检查模型设置或重试。"); });
+      return await this.#serial(async () => {
+        await this.#load();
+        const draft = this.#meetingVersion(input);
+        Object.assign(draft, result, { analysed: true, revision: draft.revision + 1 });
+        await this.#save();
+        return this.#meetingView();
+      });
+    } finally {
+      if (this.#meetingAnalysis === controller) this.#meetingAnalysis = null;
+    }
+  }
+
+  #queuedTask(input: TaskCreateInput): DevelopmentTask {
+    const now = this.#now();
+    return {
+      id: this.options.id?.() ?? randomUUID(), title: input.title,
+      description: input.description ?? "", projectId: input.projectId ?? null,
+      priority: input.priority ?? 2, status: "queued", createdAt: now, updatedAt: now, run: null,
+    };
   }
 
   update(input: TaskUpdateInput, files: readonly File[] = []): Promise<TaskBoard> {

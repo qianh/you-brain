@@ -9,6 +9,53 @@ export interface TaskProject {
 export type TaskStatus = "queued" | "preparing" | "planning" | "running" | "review" | "merging" | "done" | "failed";
 export type TaskPriority = 0 | 1 | 2 | 3;
 
+export const MEETING_IMPORT_MAX_BYTES = 64 * 1024;
+
+export interface MeetingTodoDraft {
+  id: string;
+  title: string;
+  description: string;
+  source: "meeting" | "user";
+  quote: string | null;
+  projectId: string | null;
+  priority: TaskPriority;
+  selected: boolean;
+}
+
+export interface MeetingImportDraft {
+  id: string;
+  revision: number;
+  fileName: string;
+  analysed: boolean;
+  items: MeetingTodoDraft[];
+  questions: string[];
+  message: string;
+  clarification: string | null;
+}
+
+export interface MeetingImportView {
+  draft: MeetingImportDraft | null;
+  model: { name: string; consentKey: string | null } | null;
+}
+
+type MeetingDraftVersion = { id: string; revision: number };
+
+export type MeetingImportAction =
+  | { action: "import"; fileName: string; text: string }
+  | (MeetingDraftVersion & { action: "analyse"; consentKey: string })
+  | (MeetingDraftVersion & { action: "revise"; consentKey: string; feedback: string })
+  | (MeetingDraftVersion & { action: "select"; items: Array<Pick<MeetingTodoDraft, "id" | "selected" | "priority" | "projectId">> })
+  | (MeetingDraftVersion & { action: "discard" | "confirm" });
+
+export interface MeetingImportResult extends MeetingImportView {
+  created?: { count: number; board: TaskBoard };
+}
+
+export interface MeetingImportHttpPort {
+  meetingImport(): Promise<MeetingImportView>;
+  meetingImportAction(input: MeetingImportAction): Promise<MeetingImportResult>;
+}
+
 export const TASK_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
 export const TASK_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 export const TASK_IMAGE_MAX_COUNT = 4;

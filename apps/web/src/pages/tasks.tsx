@@ -20,6 +20,7 @@ import { useRoute } from "../router.js";
 import { projectTasks, TASK_PRIORITY_KEYS, TASK_STATUS_KEYS, taskCounts, taskStatusKey, taskThreadHref, taskWorktreeHint, visibleTasks } from "./tasks/logic.js";
 import { ProjectPicker, type ProjectChoice } from "./tasks/project-picker.js";
 import { clipboardTaskImages, TaskImagePreview } from "./tasks/images.js";
+import { MeetingImportDialog } from "./tasks/meeting-import.js";
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 const TASK_METRICS = [
@@ -53,6 +54,7 @@ export function TasksPage() {
   const [status, setStatus] = useState("all");
   const [tab, setTab] = useState<"tasks" | "projects">("tasks");
   const [editor, setEditor] = useState<{ task: DevelopmentTask | null } | null>(null);
+  const [meetingImport, setMeetingImport] = useState(false);
   const [reviewing, setReviewing] = useState<DevelopmentTask | null>(null);
   const [viewingImages, setViewingImages] = useState<DevelopmentTask | null>(null);
   const [completing, setCompleting] = useState<DevelopmentTask | null>(null);
@@ -158,6 +160,7 @@ export function TasksPage() {
       <PageHeader title={t("navTasks")} description={t("tasksLead")} actions={<>
         <Segmented label={t("tasksProjects")} value={tab} options={[{ value: "tasks", label: t("tasksTabTasks") }, { value: "projects", label: t("tasksTabProjects") }]} onChange={(value) => setTab(value === "projects" ? "projects" : "tasks")} />
         <Button variant="ghost" onClick={() => void load()} disabled={busy} aria-label={t("tasksRefresh")} icon={<Icon name="refresh" />}>{t("reload")}</Button>
+        <Button onClick={() => setMeetingImport(true)} icon={<Icon name="file" />}>{t("tasksMeetingImport")}</Button>
         <Button variant="primary" onClick={() => setEditor({ task: null })} icon={<Icon name="plus" />}>{t("tasksNew")}</Button>
       </>} />
       {error && <Banner tone="danger" action={<Button size="sm" onClick={() => void load()}>{t("retry")}</Button>}>{t("tasksLoadFailed")}: {error}</Banner>}
@@ -250,6 +253,14 @@ export function TasksPage() {
         </section>
       </>}
     </div>
+    {pageActive && meetingImport && <MeetingImportDialog projects={projects} onClose={() => setMeetingImport(false)} onCreated={(next, count) => {
+      acceptBoard(next);
+      setTab("tasks");
+      setProject("all");
+      setStatus("all");
+      setMeetingImport(false);
+      push({ message: t("tasksMeetingAdded", { count }), tone: "success" });
+    }} />}
     {editor && <TaskEditor key={editor.task?.id ?? "new"} task={editor.task} projects={projects} initialProject={project} busy={busy} onClose={() => { if (!busy) setEditor(null); }} onSave={async (input, files, retainImageIds) => {
       const ok = await mutate(() => editor.task ? client.updateTask({ id: editor.task.id, ...input, retainImageIds }, files) : client.createTask(input, files), t(editor.task ? "tasksSaved" : "tasksCreated"));
       if (ok) setEditor(null);
