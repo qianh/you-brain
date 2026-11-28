@@ -222,6 +222,8 @@ describe("TelegramBridge 中转模式", () => {
     mac.push(notice(1, 1, "mac 在等你"));
     await until(() => relay.sent.some((item) => item.text.startsWith("💻 MacBook\n⏳ mac 在等你")), "mac push");
     const macPush = relay.nextId - 1;
+    const storedPushes = (relay.store.get("pushes") as Array<{ kind?: string; threadId?: string }> | undefined) ?? [];
+    expect(storedPushes.some((item) => item.kind === "tty7" && item.threadId === "pane:1")).toBe(true);
     await mini.bridge.action({ action: "set-notifications", enabled: true });
     mini.push(notice(2, 1, "mini 在等你"));
     await until(() => relay.sent.some((item) => item.text.startsWith("💻 Mac mini\n⏳ mini 在等你")), "mini push");

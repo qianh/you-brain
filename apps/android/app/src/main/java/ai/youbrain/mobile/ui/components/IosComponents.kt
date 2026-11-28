@@ -15,14 +15,18 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -68,6 +72,7 @@ fun IosNavigationBar(
     title: String,
     connectionState: ConnectionState,
     onReconnect: () -> Unit,
+    centerContent: (@Composable () -> Unit)? = null,
 ) {
     val c = IosTheme.colors
     Column(
@@ -82,15 +87,21 @@ fun IosNavigationBar(
                 .height(44.dp)
                 .padding(horizontal = 16.dp),
         ) {
-            Text(
-                text = title,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = c.label,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.align(Alignment.Center),
-            )
+            if (centerContent != null) {
+                Box(modifier = Modifier.align(Alignment.Center)) {
+                    centerContent()
+                }
+            } else {
+                Text(
+                    text = title,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = c.label,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
 
             val dotColor = when (connectionState) {
                 ConnectionState.OK -> c.green
@@ -168,7 +179,7 @@ fun IosTabBar(
             IosTabItem(
                 selected = currentTab == AppTab.T3,
                 icon = IosIcons.TerminalWindow,
-                label = "T3",
+                label = "设备",
                 badgeCount = 0,
                 onClick = { onSelectTab(AppTab.T3) },
                 modifier = Modifier.weight(1f),
@@ -581,94 +592,119 @@ fun IosModalSheet(
     val c = IosTheme.colors
     Dialog(
         onDismissRequest = { if (dismissEnabled) onDismiss() },
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
     ) {
-        Surface(
-            shape = RoundedCornerShape(16.dp),
-            color = if (c.isDark) Color(0xFF1C1C1E) else Color(0xFFF9F9FB),
-            tonalElevation = 0.dp,
-            shadowElevation = 12.dp,
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 24.dp),
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .imePadding()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    enabled = dismissEnabled,
+                    onClick = onDismiss,
+                ),
+            contentAlignment = Alignment.Center,
         ) {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 18.dp, vertical = 18.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Text(
-                        text = title,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = c.label,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    content()
-                }
-                IosHairline()
-                if (secondaryText != null && onSecondary != null) {
-                    Box(
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = if (c.isDark) Color(0xFF1C1C1E) else Color(0xFFF9F9FB),
+                tonalElevation = 0.dp,
+                shadowElevation = 12.dp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp, vertical = 16.dp)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {},
+                    ),
+            ) {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(46.dp)
-                            .clickable(enabled = dismissEnabled, onClick = onSecondary),
-                        contentAlignment = Alignment.Center,
+                            .weight(1f, fill = false)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 18.dp, vertical = 18.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         Text(
-                            text = secondaryText,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = c.blue,
+                            text = title,
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = c.label,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth(),
                         )
+                        content()
                     }
                     IosHairline()
-                }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(46.dp),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(46.dp)
-                            .clickable(enabled = dismissEnabled, onClick = onDismiss),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text = dismissText,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Normal,
-                            color = if (dismissEnabled) c.blue else c.tertiaryLabel,
-                        )
+                    if (secondaryText != null && onSecondary != null) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(46.dp)
+                                .clickable(enabled = dismissEnabled, onClick = onSecondary),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = secondaryText,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = c.blue,
+                            )
+                        }
+                        IosHairline()
                     }
-                    Box(
+                    Row(
                         modifier = Modifier
-                            .width(0.5.dp)
-                            .height(46.dp)
-                            .background(c.separator.copy(alpha = 0.6f)),
-                    )
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(46.dp)
-                            .clickable(enabled = confirmEnabled, onClick = onConfirm),
-                        contentAlignment = Alignment.Center,
+                            .fillMaxWidth()
+                            .height(46.dp),
                     ) {
-                        Text(
-                            text = confirmText,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = when {
-                                !confirmEnabled -> c.tertiaryLabel
-                                confirmDestructive -> c.red
-                                else -> c.blue
-                            },
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(46.dp)
+                                .clickable(enabled = dismissEnabled, onClick = onDismiss),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = dismissText,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.Normal,
+                                color = if (dismissEnabled) c.blue else c.tertiaryLabel,
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .width(0.5.dp)
+                                .height(46.dp)
+                                .background(c.separator.copy(alpha = 0.6f)),
                         )
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(46.dp)
+                                .clickable(enabled = confirmEnabled, onClick = onConfirm),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = confirmText,
+                                fontSize = 16.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = when {
+                                    !confirmEnabled -> c.tertiaryLabel
+                                    confirmDestructive -> c.red
+                                    else -> c.blue
+                                },
+                            )
+                        }
                     }
                 }
             }

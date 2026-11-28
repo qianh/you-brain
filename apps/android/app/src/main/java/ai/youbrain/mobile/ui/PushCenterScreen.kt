@@ -72,6 +72,7 @@ fun PushCenterScreen(
     state: AppUiState,
     repository: UBrainRepository,
     onOpenDeviceT3: (deviceId: String, threadUrl: String?) -> Unit,
+    onOpenDeviceTerminal: (deviceId: String, pane: Int?, title: String) -> Unit = { _, _, _ -> },
 ) {
     val c = IosTheme.colors
     val scope = rememberCoroutineScope()
@@ -187,6 +188,13 @@ fun PushCenterScreen(
                         markdownMaxWidth = markdownMaxWidth,
                         repository = repository,
                         onOpenT3 = { onOpenDeviceT3(item.deviceId, item.link) },
+                        onOpenTerminal = {
+                            onOpenDeviceTerminal(
+                                item.deviceId,
+                                TerminalLogic.parsePaneFromPush(item),
+                                item.title.removePrefix("⏳ ").removePrefix("✅ ").trim(),
+                            )
+                        },
                     )
                 }
             }
@@ -204,6 +212,7 @@ private fun PushCard(
     markdownMaxWidth: Dp,
     repository: UBrainRepository,
     onOpenT3: () -> Unit,
+    onOpenTerminal: () -> Unit,
 ) {
     val c = IosTheme.colors
     val scope = rememberCoroutineScope()
@@ -401,14 +410,15 @@ private fun PushCard(
                     )
                 }
                 if (canViewT3) {
+                    val isTty7 = item.kind == "tty7"
                     Text(
-                        text = "打开设备 T3",
+                        text = if (isTty7) "打开终端" else "打开设备 T3",
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium,
                         color = c.blue,
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .clickable(onClick = onOpenT3)
+                            .clickable(onClick = if (isTty7) onOpenTerminal else onOpenT3)
                             .padding(horizontal = 4.dp, vertical = 2.dp),
                     )
                 }

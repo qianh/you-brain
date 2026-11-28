@@ -23,8 +23,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
@@ -1825,18 +1828,29 @@ private fun TodoReviewDialog(
 
     Dialog(
         onDismissRequest = { if (!submitting) onDismiss() },
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
+        ),
     ) {
-        Surface(
-            shape = RoundedCornerShape(16.dp),
-            color = if (c.isDark) Color(0xFF1C1C1E) else Color(0xFFF9F9FB),
-            tonalElevation = 0.dp,
-            shadowElevation = 12.dp,
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .fillMaxHeight(0.88f)
-                .padding(horizontal = 14.dp),
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .imePadding(),
+            contentAlignment = Alignment.Center,
         ) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = if (c.isDark) Color(0xFF1C1C1E) else Color(0xFFF9F9FB),
+                tonalElevation = 0.dp,
+                shadowElevation = 12.dp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.88f)
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+            ) {
             Column(modifier = Modifier.fillMaxSize()) {
                 // 标题栏
                 Row(
@@ -2192,6 +2206,7 @@ private fun TodoReviewDialog(
                     }
                 }
             }
+        }
         }
     }
 }

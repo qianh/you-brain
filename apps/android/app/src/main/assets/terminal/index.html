@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>U-Brain Terminal</title>
+  <link rel="stylesheet" href="/xterm.css" />
+  <style>
+    :root {
+      --term-bg: #111216;
+      --term-fg: #e4e4e7;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: var(--term-bg);
+      color: var(--term-fg);
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+    }
+    #terminal {
+      position: fixed;
+      inset: 0;
+      padding: 4px 6px;
+      box-sizing: border-box;
+      opacity: 0;
+      transition: opacity 90ms ease-out;
+    }
+    #terminal.revealed {
+      opacity: 1;
+    }
+    .xterm {
+      height: 100%;
+      width: 100%;
+    }
+    .xterm-viewport {
+      overflow-y: auto !important;
+      -webkit-overflow-scrolling: touch;
+    }
+  </style>
+</head>
+<body>
+  <div id="terminal"></div>
+  <script src="/xterm.js"></script>
+  <script src="/addon-fit.js"></script>
+  <script>
+    (function () {
+      const params = new URLSearchParams(window.location.search);
+      const pane = parseInt(params.get("pane") || "-1", 10);
+      const deviceId = params.get("deviceId") || "";
+      const initialFontSize = Math.max(9, Math.min(22, parseInt(params.get("fontSize") || "11", 10) || 11));
+      const initialTheme = params.get("theme") === "light" ? "light" : "dark";
+      const bridge = window.AndroidTerminalBridge || null;
+
+      function notifyStatus(status, detail) {
+        try {
+          if (bridge && bridge.onStatus) bridge.onStatus(String(status), detail ? String(detail) : "");
+        } catch (_) {}
+      }
+      function notifyWarning(msg) {
+        try {
+          if (bridge && bridge.onWarning) bridge.onWarning(String(msg || ""));
+        } catch (_) {}
+      }
+      function notifyLease(by) {
+        try {
+          if (bridge && bridge.onLease) bridge.onLease(by == null ? "" : String(by));
+        } catch (_) {}
+      }
+
+      const DARK_THEME = {
+        background: "#111216",
+        foreground: "#e4e4e7",
+        cursor: "#f4f4f5",
+        selectionBackground: "#53617f99",
+        black: "#18181b",
+        red: "#f87171",
+        green: "#4ade80",
+        yellow: "#facc15",
+        blue: "#60a5fa",
+        magenta: "#c084fc",
+        cyan: "#22d3ee",
+        white: "#e4e4e7",
+        brightBlack: "#71717a",
+        brightRed: "#fca5a5",
+        brightGreen: "#86efac",
+        brightYellow: "#fde047",
+        brightBlue: "#93c5fd",
+        brightMagenta: "#d8b4fe",
+        brightCyan: "#67e8f9",
+        brightWhite: "#fafafa",
+      };
+      const LIGHT_THEME = {
+        background: "#f8f9fb",
+        foreground: "#18181b",
+        cursor: "#0a84ff",
+        selectionBackground: "#0a84ff33",
+        black: "#18181b",
+        red: "#dc2626",
+        green: "#16a34a",
+        yellow: "#ca8a04",
+        blue: "#2563eb",
+        magenta: "#9333ea",
+        cyan: "#0891b2",
+        white: "#e4e4e7",
+        brightBlack: "#52525b",
+        brightRed: "#ef4444",
+        brightGreen: "#22c55e",
+        brightYellow: "#eab308",
+        brightBlue: "#3b82f6",
+        brightMagenta: "#a855f7",
+        brightCyan: "#06b6d4",
+        brightWhite: "#18181b",
+      };
+
+      const host = document.getElementById("terminal");
+      const term = new window.Terminal({
+        cursorBlink: true,
+        cursorStyle: "block",
+        cursorInactiveStyle: "outline",
+        fontFamily: 'ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace',
+        fontSize: initialFontSize,
+        lineHeight: 1.2,
+        scrollback: 5000,
+        convertEol: false,
+        disableStdin: true,
+        theme: initialTheme === "light" ? LIGHT_THEME : DARK_THEME,
+      });
+      const fitAddon = new window.FitAddon.FitAddon();
+      term.loadAddon(fitAddon);
+      term.open(host);
+
+      function applyTheme(mode) {
+        const isLight = mode === "light";
+        const t = isLight ? LIGHT_THEME : DARK_THEME;
+        document.documentElement.style.setProperty("--term-bg", t.background);
+        document.documentElement.style.setProperty("--term-fg", t.foreground);
+        term.options.theme = t;
+      }
+      applyTheme(initialTheme);
+
+      let ws = null;
+      let connected = false;
+      let hasLease = true;
+      let shown = false;
+      let replaying = true;
+      let disposed = false;
+      let lastServerSize = null;
+      let quietTimer = null;
+      let maxTimer = null;
+      let layoutFrame = 0;
+      let pendingClaimLease = false;
+      let holdReplay = true;
+      let heldChunks = [];
+      let writing = false;
+      let pendingChunks = [];
+
+      function canMeasure() {
+        return host.clientWidth > 0 && host.clientHeight > 0;
+      }
+
+      function measure() {
+        const proposed = canMeasure() ? fitAddon.proposeDimensions() : null;
+        const screen = host.querySelector(".xterm-screen");
+        const cols = Math.max(20, Math.min(400, (proposed && proposed.cols) || term.cols || 60));
+        const rows = Math.max(6, Math.min(200, (proposed && proposed.rows) || term.rows || 24));
+        const cellW = Math.max(1, Math.round(((screen && screen.clientWidth) || 0) / Math.max(1, term.cols || cols)));
+        const cellH = Math.max(1, Math.round(((screen && screen.clientHeight) || 0) / Math.max(1, term.rows || rows)));
+        return { cols: cols, rows: rows, cell_w: cellW, cell_h: cellH };
+      }
+
+      function sendControl(obj) {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(obj));
+        }
+      }
+
+      function relayout(claimLease) {
+        if (disposed || !canMeasure()) return;
+        if (claimLease && !hasLease) {
+          hasLease = true;
+          notifyLease("");
+        }
+        if (hasLease) {
+          try { fitAddon.fit(); } catch (_) {}
+          if (connected) {
+            const next = measure();
+            if (!lastServerSize || lastServerSize.cols !== next.cols || lastServerSize.rows !== next.rows || claimLease) {
+              lastServerSize = { cols: next.cols, rows: next.rows };
+              sendControl({ type: "resize", size: next });
+            }
+          }
+        }
+      }
+
+      function scheduleRelayout(claimLease) {
+        if (claimLease) pendingClaimLease = true;
+        cancelAnimationFrame(layoutFrame);
+        layoutFrame = requestAnimationFrame(function () {
+          const claim = pendingClaimLease;
+          pendingClaimLease = false;
+          relayout(claim);
+        });
+      }
+
+      function flushQueue() {
+        if (writing || pendingChunks.length === 0) return;
+        writing = true;
+        const batch = pendingChunks;
+        pendingChunks = [];
+        let total = 0;
+        for (let i = 0; i < batch.length; i++) total += batch[i].byteLength;
+        const merged = new Uint8Array(total);
+        let offset = 0;
+        for (let i = 0; i < batch.length; i++) {
+          merged.set(batch[i], offset);
+          offset += batch[i].byteLength;
+        }
+        term.write(merged, function () {
+          writing = false;
+          sendControl({ type: "ack", bytes: total });
+          if (pendingChunks.length > 0) flushQueue();
+        });
+      }
+
+      function enqueueOutput(bytes) {
+        if (holdReplay) {
+          heldChunks.push(bytes);
+          return;
+        }
+        pendingChunks.push(bytes);
+        flushQueue();
+      }
+
+      function reveal() {
+        if (shown || disposed) return;
+        shown = true;
+        clearTimeout(quietTimer);
+        clearTimeout(maxTimer);
+        holdReplay = false;
+        if (heldChunks.length > 0) {
+          const toFlush = heldChunks;
+          heldChunks = [];
+          for (let i = 0; i < toFlush.length; i++) pendingChunks.push(toFlush[i]);
+          flushQueue();
+        }
+        setTimeout(function () {
+          if (disposed) return;
+          if (hasLease && canMeasure()) {
+            try { fitAddon.fit(); } catch (_) {}
+          }
+          term.scrollToBottom();
+          host.classList.add("revealed");
+        }, 30);
+      }
+
+      function armQuiet() {
+        clearTimeout(quietTimer);
+        quietTimer = setTimeout(reveal, 160);
+      }
+
+      function sendBytes(bytes) {
+        if (!connected || !ws || ws.readyState !== WebSocket.OPEN || bytes.byteLength === 0) return;
+        if (!hasLease) relayout(true);
+        ws.send(bytes);
+      }
+
+      const encoder = new TextEncoder();
+      term.onData(function (text) {
+        if (replaying) return;
+        sendBytes(encoder.encode(text));
+      });
+      term.onBinary(function (text) {
+        if (replaying) return;
+        const out = new Uint8Array(text.length);
+        for (let i = 0; i < text.length; i++) out[i] = text.charCodeAt(i) & 0xff;
+        sendBytes(out);
+      });
+
+      function connect() {
+        if (ws) {
+          try { ws.close(); } catch (_) {}
+          ws = null;
+        }
+        connected = false;
+        hasLease = true;
+        shown = false;
+        replaying = true;
+        holdReplay = true;
+        heldChunks = [];
+        pendingChunks = [];
+        lastServerSize = null;
+        host.classList.remove("revealed");
+        term.reset();
+        term.options.disableStdin = true;
+        notifyStatus("connecting", "");
+        notifyWarning("");
+        notifyLease("");
+
+        if (canMeasure()) {
+          try { fitAddon.fit(); } catch (_) {}
+        }
+        const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const wsUrl = proto + "//" + window.location.host + "/ws?deviceId=" + encodeURIComponent(deviceId);
+        const socket = new WebSocket(wsUrl);
+        socket.binaryType = "arraybuffer";
+        ws = socket;
+
+        socket.onopen = function () {
+          if (ws !== socket) return;
+          const sz = measure();
+          lastServerSize = { cols: sz.cols, rows: sz.rows };
+          socket.send(JSON.stringify({ type: "connect", pane: pane, size: sz }));
+        };
+
+        socket.onmessage = function (ev) {
+          if (ws !== socket || disposed) return;
+          if (ev.data instanceof ArrayBuffer) {
+            const bytes = new Uint8Array(ev.data);
+            if (!shown) armQuiet();
+            enqueueOutput(bytes);
+            return;
+          }
+          let msg;
+          try {
+            msg = JSON.parse(ev.data);
+          } catch (_) {
+            notifyStatus("error", "对端终端返回格式无效");
+            return;
+          }
+          if (msg.type === "ready") {
+            connected = true;
+            term.options.disableStdin = false;
+            notifyStatus("ready", "");
+            scheduleRelayout(true);
+            armQuiet();
+            clearTimeout(maxTimer);
+            maxTimer = setTimeout(reveal, 1800);
+          } else if (msg.type === "live") {
+            replaying = false;
+            reveal();
+          } else if (msg.type === "size" && msg.size && typeof msg.size.cols === "number" && typeof msg.size.rows === "number") {
+            lastServerSize = { cols: msg.size.cols, rows: msg.size.rows };
+            if (!hasLease) {
+              try { term.resize(msg.size.cols, msg.size.rows); } catch (_) {}
+            }
+          } else if (msg.type === "lease") {
+            const by = msg.by;
+            hasLease = by === null || by === "U-Brain";
+            notifyLease(hasLease ? "" : String(by || "桌面窗口"));
+          } else if (msg.type === "warning" && typeof msg.message === "string") {
+            notifyWarning(msg.message);
+          } else if (msg.type === "exit") {
+            connected = false;
+            replaying = false;
+            reveal();
+            term.options.disableStdin = true;
+            notifyStatus("exited", msg.code == null ? "会话已结束" : ("会话已退出（退出码 " + msg.code + "）"));
+          } else if (msg.type === "error") {
+            connected = false;
+            reveal();
+            notifyStatus("error", msg.message || "终端连接出错");
+          }
+        };
+
+        socket.onerror = function () {
+          if (ws !== socket || disposed) return;
+          notifyStatus("error", "终端连接中断");
+        };
+
+        socket.onclose = function (ev) {
+          if (ws !== socket || disposed) return;
+          if (connected) {
+            connected = false;
+            term.options.disableStdin = true;
+            notifyStatus("disconnected", ev.reason || "连接已断开");
+          }
+        };
+      }
+
+      if (typeof ResizeObserver !== "undefined") {
+        const ro = new ResizeObserver(function () {
+          scheduleRelayout(false);
+        });
+        ro.observe(host);
+      }
+      window.addEventListener("resize", function () {
+        scheduleRelayout(false);
+      });
+
+      function decodeBase64Bytes(b64) {
+        const raw = atob(b64);
+        const out = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i) & 0xff;
+        return out;
+      }
+
+      window.__ubrainTerm = {
+        sendText: function (text, sendEnter) {
+          const str = String(text || "");
+          if (str.length > 0) {
+            const normalized = str.replace(/\r\n/g, "\r").replace(/\n/g, "\r");
+            sendBytes(encoder.encode(normalized));
+          }
+          if (sendEnter) {
+            setTimeout(function () {
+              sendBytes(new Uint8Array([13]));
+            }, str.length > 0 ? 120 : 0);
+          }
+          term.scrollToBottom();
+        },
+        sendRawBase64: function (b64) {
+          try {
+            sendBytes(decodeBase64Bytes(b64));
+          } catch (_) {}
+        },
+        setFontSize: function (size) {
+          const next = Math.max(9, Math.min(22, Number(size) || 11));
+          term.options.fontSize = next;
+          scheduleRelayout(true);
+        },
+        setTheme: function (mode) {
+          applyTheme(mode);
+        },
+        fitNow: function (claimLease) {
+          scheduleRelayout(!!claimLease);
+          term.scrollToBottom();
+        },
+        scrollToBottom: function () {
+          term.scrollToBottom();
+        },
+        reconnect: function () {
+          connect();
+        },
+        dispose: function () {
+          disposed = true;
+          clearTimeout(quietTimer);
+          clearTimeout(maxTimer);
+          if (ws) {
+            try { ws.close(); } catch (_) {}
+            ws = null;
+          }
+        },
+      };
+
+      connect();
+    })();
+  </script>
+</body>
+</html>

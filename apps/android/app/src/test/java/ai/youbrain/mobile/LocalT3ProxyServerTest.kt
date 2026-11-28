@@ -51,6 +51,7 @@ class LocalT3ProxyServerTest {
             method: String,
             headers: List<Pair<String, String>>,
             body: ByteArray?,
+            target: String?,
         ): TunnelHttpResponse {
             calls.add(RecordedCall(method, path, headers, body))
             return when {
@@ -102,6 +103,7 @@ class LocalT3ProxyServerTest {
             path: String,
             headers: List<Pair<String, String>>,
             listener: UpstreamWsListener,
+            target: String?,
         ): UpstreamWs {
             wsHeaders = headers
             listener.onOpen()

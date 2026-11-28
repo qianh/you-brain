@@ -1161,6 +1161,7 @@ export class TelegramBridge {
               status: notice.kind,
               title,
               body: notice.body.trim().slice(0, BODY_MAX),
+              threadId: `pane:${notice.pane}`,
               replyToken,
               ...(sendTg ? { telegramText: noticeText(notice.kind, notice.title, notice.body) } : {}),
             });

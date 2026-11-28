@@ -48,6 +48,7 @@ class RelayForegroundService : Service() {
         const val EXTRA_TAB = "extra_tab"
         const val EXTRA_DEVICE_ID = "extra_device_id"
         const val EXTRA_THREAD_URL = "extra_thread_url"
+        const val EXTRA_TERMINAL_PANE = "extra_terminal_pane"
 
         fun start(context: Context) {
             val intent = Intent(context, RelayForegroundService::class.java)
@@ -185,7 +186,12 @@ class RelayForegroundService : Service() {
 
     private fun postPushNotification(item: MobilePushItem) {
         val notificationId = (2000 + (item.seq % 10000)).toInt()
-        val targetTab = if (item.kind == "t3" || !item.threadId.isNullOrBlank()) "t3" else "pushes"
+        val terminalPane = ai.youbrain.mobile.ui.TerminalLogic.parsePaneFromPush(item)
+        val targetTab = when {
+            item.kind == "tty7" -> "terminal"
+            item.kind == "t3" || !item.threadId.isNullOrBlank() -> "t3"
+            else -> "pushes"
+        }
         val openIntent = PendingIntent.getActivity(
             this,
             notificationId,
@@ -194,6 +200,9 @@ class RelayForegroundService : Service() {
                 putExtra(EXTRA_TAB, targetTab)
                 putExtra(EXTRA_DEVICE_ID, item.deviceId)
                 putExtra(EXTRA_THREAD_URL, item.link)
+                if (terminalPane != null) {
+                    putExtra(EXTRA_TERMINAL_PANE, terminalPane)
+                }
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )

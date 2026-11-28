@@ -377,4 +377,77 @@ sealed interface RdPeerEvent {
     ) : RdPeerEvent
 }
 
+@Serializable
+data class Tty7Workspace(
+    val id: String,
+    val name: String,
+    val attached: Boolean = false,
+)
+
+@Serializable
+data class Tty7Harness(
+    val id: String,
+    val label: String,
+)
+
+@Serializable
+data class Tty7Appearance(
+    val fontFamily: String = "",
+    val fontSize: Int = 13,
+    val lineHeight: Double = 1.2,
+)
+
+@Serializable
+data class Tty7Session(
+    val pane: Int,
+    val workspaceId: String = "",
+    val workspaceName: String = "",
+    val tabId: String = "",
+    val tabLabel: String? = null,
+    val tabNamed: Boolean? = null,
+    val task: String? = null,
+    val agent: String? = null,
+    val cwd: String = "",
+    val hibernated: Boolean = false,
+    val status: String? = null,
+    val statusMessage: String? = null,
+    val model: String? = null,
+)
+
+@Serializable
+data class Tty7SessionsResponse(
+    val available: Boolean = false,
+    val detail: String = "",
+    val workspaces: List<Tty7Workspace> = emptyList(),
+    val sessions: List<Tty7Session> = emptyList(),
+    val harnesses: List<Tty7Harness> = emptyList(),
+    val appearance: Tty7Appearance? = null,
+)
+
+@Serializable
+data class Tty7StartResponse(
+    val pane: Int,
+    val workspaceId: String = "",
+    val tabId: String = "",
+)
+
+data class DeviceTty7State(
+    val data: Tty7SessionsResponse? = null,
+    val loading: Boolean = false,
+    val error: String? = null,
+    val lastLoadedAt: Long = 0L,
+)
+
+data class ActiveTerminalTarget(
+    val deviceId: String,
+    val pane: Int,
+    val title: String = "",
+)
+
+enum class DeckMode {
+    T3,
+    TERMINAL,
+}
+
+
 

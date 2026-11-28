@@ -39,6 +39,7 @@ class T3AssetCacheTest {
             method: String,
             headers: List<Pair<String, String>>,
             body: ByteArray?,
+            target: String?,
         ): TunnelHttpResponse {
             hits.computeIfAbsent(path) { AtomicInteger(0) }.incrementAndGet()
             if (delayMs > 0) delay(delayMs)
@@ -56,6 +57,7 @@ class T3AssetCacheTest {
             path: String,
             headers: List<Pair<String, String>>,
             listener: UpstreamWsListener,
+            target: String?,
         ): UpstreamWs = throw UnsupportedOperationException()
 
         override suspend fun pairCredential(): String? = null

@@ -39,6 +39,9 @@ import java.util.zip.GZIPInputStream
 import java.util.zip.GZIPOutputStream
 
 const val TUNNEL_WS_GZIP_CAP = "ws-gzip"
+const val TUNNEL_TARGET_T3 = "t3"
+const val TUNNEL_TARGET_TTY7 = "tty7"
+const val TUNNEL_TTY7_HEADER = "x-u-brain-tty7"
 
 private const val WS_GZIP_MIN_BYTES = 512
 private const val WS_CHUNK_BYTES = 48 * 1024
@@ -79,12 +82,14 @@ interface T3Upstream {
         method: String,
         headers: List<Pair<String, String>>,
         body: ByteArray?,
+        target: String? = null,
     ): TunnelHttpResponse
 
     suspend fun openSocket(
         path: String,
         headers: List<Pair<String, String>>,
         listener: UpstreamWsListener,
+        target: String? = null,
     ): UpstreamWs
 
     suspend fun pairCredential(): String?
@@ -469,6 +474,7 @@ class TunnelSession(
         method: String,
         headers: List<Pair<String, String>>,
         body: ByteArray?,
+        target: String?,
     ): TunnelHttpResponse {
         if (closed) throw IllegalStateException("隧道已关闭")
         val id = nextId.getAndIncrement().toString()
@@ -505,6 +511,7 @@ class TunnelSession(
                     put("headers", rawHeaders)
                     if (first != null) put("body", Base64Url.encodeStd(first))
                     put("end", chunks.size <= 1)
+                    if (target != null && target != TUNNEL_TARGET_T3) put("target", target)
                 },
             )
             for (i in 1 until chunks.size) {
@@ -531,7 +538,9 @@ class TunnelSession(
                 if (channel.lastReceived < sentAt) {
                     close(notify = false)
                 }
-                throw IllegalStateException("对端 T3 响应超时")
+                throw IllegalStateException(
+                    if (target == TUNNEL_TARGET_TTY7) "对端终端服务响应超时" else "对端 T3 响应超时",
+                )
             }
 
             stream.lastChunkAt = System.currentTimeMillis()
@@ -543,7 +552,9 @@ class TunnelSession(
                     if (channel.lastReceived < stream.lastChunkAt) {
                         close(notify = false)
                     }
-                    throw IllegalStateException("对端 T3 响应体传输超时")
+                    throw IllegalStateException(
+                        if (target == TUNNEL_TARGET_TTY7) "对端终端响应体传输超时" else "对端 T3 响应体传输超时",
+                    )
                 }
             }
         } catch (t: Throwable) {
@@ -556,6 +567,7 @@ class TunnelSession(
         path: String,
         headers: List<Pair<String, String>>,
         listener: UpstreamWsListener,
+        target: String?,
     ): UpstreamWs {
         if (closed) throw IllegalStateException("隧道已关闭")
         val id = nextId.getAndIncrement().toString()
@@ -574,6 +586,7 @@ class TunnelSession(
                     put("id", id)
                     put("path", path)
                     put("headers", rawHeaders)
+                    if (target != null && target != TUNNEL_TARGET_T3) put("target", target)
                 },
             )
             ws.startOpenWatchdog(sentAt)

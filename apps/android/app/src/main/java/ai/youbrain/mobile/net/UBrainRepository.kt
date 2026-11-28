@@ -13,7 +13,9 @@ import ai.youbrain.mobile.data.AgentSessionSummary
 import ai.youbrain.mobile.data.AppStore
 import ai.youbrain.mobile.data.CachedAgentSnapshot
 import ai.youbrain.mobile.data.ConnectionState
+import ai.youbrain.mobile.data.DeckMode
 import ai.youbrain.mobile.data.DeviceIdentityStore
+import ai.youbrain.mobile.data.DeviceTty7State
 import ai.youbrain.mobile.data.DispatchFollowupResponse
 import ai.youbrain.mobile.data.DispatchListResponse
 import ai.youbrain.mobile.data.DispatchProject
@@ -37,6 +39,11 @@ import ai.youbrain.mobile.data.T3StartResponse
 import ai.youbrain.mobile.data.TaskBoard
 import ai.youbrain.mobile.data.TaskImage
 import ai.youbrain.mobile.data.TaskReview
+import ai.youbrain.mobile.data.Tty7SessionsResponse
+import ai.youbrain.mobile.data.Tty7StartResponse
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -102,6 +109,8 @@ data class NavigationTarget(
     val tab: AppTab,
     val deviceId: String? = null,
     val threadUrl: String? = null,
+    val deckMode: DeckMode? = null,
+    val terminalPane: Int? = null,
     val seq: Long = 0L,
 )
 
@@ -124,6 +133,7 @@ data class AppUiState(
     /** 设备 T3 与设备 TODO 共用的当前选中设备 ID。 */
     val selectedDeviceId: String? = null,
     val todoBoards: Map<String, DeviceTodoState> = emptyMap(),
+    val tty7Boards: Map<String, DeviceTty7State> = emptyMap(),
     val navTarget: NavigationTarget? = null,
 ) {
     fun displayName(id: String, rawName: String): String {
@@ -156,6 +166,9 @@ class UBrainRepository(context: Context) {
 
     private val t3Proxies = ConcurrentHashMap<String, LocalT3ProxyServer>()
     private val prewarmedT3 = ConcurrentHashMap.newKeySet<String>()
+    private val terminalAssetCache = ConcurrentHashMap<String, ByteArray>()
+    @Volatile
+    private var terminalServer: LocalTty7TerminalServer? = null
     private val optimisticSeq = AtomicInteger(1_000_000)
 
     @Volatile
@@ -406,6 +419,8 @@ class UBrainRepository(context: Context) {
         tunnelClient.closeAll()
         for (proxy in t3Proxies.values) proxy.stop()
         t3Proxies.clear()
+        terminalServer?.stop()
+        terminalServer = null
         prewarmedT3.clear()
         loadedMasterKey = null
         identityStore.clearEnrollment()
@@ -422,6 +437,7 @@ class UBrainRepository(context: Context) {
                 agent = AgentUiState(),
                 selectedDeviceId = null,
                 todoBoards = emptyMap(),
+                tty7Boards = emptyMap(),
             )
         }
     }
@@ -441,7 +457,13 @@ class UBrainRepository(context: Context) {
         _uiState.update { it.copy(pinnedPeers = emptyMap()) }
     }
 
-    fun navigateTo(tab: AppTab, deviceId: String? = null, threadUrl: String? = null) {
+    fun navigateTo(
+        tab: AppTab,
+        deviceId: String? = null,
+        threadUrl: String? = null,
+        deckMode: DeckMode? = null,
+        terminalPane: Int? = null,
+    ) {
         _uiState.update {
             it.copy(
                 unreadPushCount = if (tab == AppTab.PUSHES) 0 else it.unreadPushCount,
@@ -449,6 +471,8 @@ class UBrainRepository(context: Context) {
                     tab = tab,
                     deviceId = deviceId,
                     threadUrl = threadUrl,
+                    deckMode = deckMode,
+                    terminalPane = terminalPane,
                     seq = System.nanoTime(),
                 ),
             )
@@ -949,10 +973,11 @@ class UBrainRepository(context: Context) {
                     method: String,
                     headers: List<Pair<String, String>>,
                     body: ByteArray?,
+                    target: String?,
                 ): TunnelHttpResponse {
                     val s1 = tunnelClient.session(deviceId)
                     return try {
-                        s1.fetch(path, method, headers, body)
+                        s1.fetch(path, method, headers, body, target)
                     } catch (t: Throwable) {
                         val canRetry = s1.closed && (
                             method.equals("GET", ignoreCase = true) ||
@@ -960,7 +985,7 @@ class UBrainRepository(context: Context) {
                                 path == "/api/auth/browser-session"
                             )
                         if (canRetry) {
-                            tunnelClient.session(deviceId).fetch(path, method, headers, body)
+                            tunnelClient.session(deviceId).fetch(path, method, headers, body, target)
                         } else {
                             throw t
                         }
@@ -971,13 +996,14 @@ class UBrainRepository(context: Context) {
                     path: String,
                     headers: List<Pair<String, String>>,
                     listener: UpstreamWsListener,
+                    target: String?,
                 ): UpstreamWs {
                     val s1 = tunnelClient.session(deviceId)
                     return try {
-                        s1.openSocket(path, headers, listener)
+                        s1.openSocket(path, headers, listener, target)
                     } catch (t: Throwable) {
                         if (s1.closed) {
-                            tunnelClient.session(deviceId).openSocket(path, headers, listener)
+                            tunnelClient.session(deviceId).openSocket(path, headers, listener, target)
                         } else {
                             throw t
                         }
@@ -1680,6 +1706,209 @@ class UBrainRepository(context: Context) {
                 if (parsed == null) Result.failure(IllegalStateException("无法解析变更内容"))
                 else Result.success(parsed)
             }
+        }
+    }
+
+    // ─── 跨设备 tty7 终端会话（复用加密隧道 target = "tty7"） ────────────────────
+
+    private fun getOrCreateTerminalServer(): LocalTty7TerminalServer {
+        terminalServer?.let { return it }
+        synchronized(this) {
+            terminalServer?.let { return it }
+            val created = LocalTty7TerminalServer(
+                scope = scope,
+                loadAsset = { name -> loadTerminalAsset(name) },
+                openRemoteTerminal = { devId, listener ->
+                    val s1 = tunnelClient.session(devId)
+                    try {
+                        s1.openSocket("/api/deck/tty7/terminal", emptyList(), listener, target = TUNNEL_TARGET_TTY7)
+                    } catch (t: Throwable) {
+                        if (s1.closed) {
+                            tunnelClient.session(devId)
+                                .openSocket("/api/deck/tty7/terminal", emptyList(), listener, target = TUNNEL_TARGET_TTY7)
+                        } else {
+                            throw t
+                        }
+                    }
+                },
+            )
+            terminalServer = created
+            return created
+        }
+    }
+
+    private fun loadTerminalAsset(name: String): ByteArray? {
+        terminalAssetCache[name]?.let { return it }
+        val bytes = runCatching {
+            appContext.assets.open("terminal/$name").use { it.readBytes() }
+        }.getOrNull() ?: return null
+        terminalAssetCache[name] = bytes
+        return bytes
+    }
+
+    fun terminalPageUrl(deviceId: String, pane: Int, fontSize: Int, isDark: Boolean): String =
+        getOrCreateTerminalServer().terminalPageUrl(deviceId, pane, fontSize, isDark)
+
+    private fun updateDeviceTty7State(deviceId: String, transform: (DeviceTty7State) -> DeviceTty7State) {
+        _uiState.update { cur ->
+            val existing = cur.tty7Boards[deviceId] ?: DeviceTty7State()
+            cur.copy(tty7Boards = cur.tty7Boards + (deviceId to transform(existing)))
+        }
+    }
+
+    private suspend fun fetchTty7Json(
+        deviceId: String,
+        method: String,
+        path: String,
+        body: JsonObject? = null,
+    ): Result<String> {
+        if (!_uiState.value.enrolled) {
+            return Result.failure(IllegalStateException("设备尚未入网"))
+        }
+        if (!relayClient.awaitConnected(6_000L)) {
+            return Result.failure(IllegalStateException("连不上中转，请检查手机网络"))
+        }
+        val dev = _uiState.value.relayState.devices.firstOrNull { it.id == deviceId }
+        if (dev != null && !dev.online) {
+            return Result.failure(IllegalStateException("该设备当前离线"))
+        }
+        if (dev != null && dev.dispatch?.viewT3 != true) {
+            return Result.failure(IllegalStateException("该设备尚未开启「允许远程查看 T3/终端」"))
+        }
+        val headers = if (body != null) listOf("content-type" to "application/json") else emptyList()
+        val bodyBytes = body?.let {
+            json.encodeToString(JsonObject.serializer(), it).toByteArray(Charsets.UTF_8)
+        }
+        return try {
+            val s1 = tunnelClient.session(deviceId)
+            val resp = try {
+                s1.fetch(path, method, headers, bodyBytes, target = TUNNEL_TARGET_TTY7)
+            } catch (t: Throwable) {
+                if (s1.closed && method.equals("GET", ignoreCase = true)) {
+                    tunnelClient.session(deviceId).fetch(path, method, headers, bodyBytes, target = TUNNEL_TARGET_TTY7)
+                } else {
+                    throw t
+                }
+            }
+            val hasMarker = resp.headers.any {
+                it.first.equals(TUNNEL_TTY7_HEADER, ignoreCase = true) && it.second.trim() == "1"
+            }
+            if (!hasMarker) {
+                return Result.failure(IllegalStateException("对端设备版本较旧，升级对端 U-Brain 后即可查看终端会话"))
+            }
+            val text = String(resp.body, Charsets.UTF_8)
+            if (resp.status !in 200..299) {
+                val errMsg = runCatching {
+                    json.parseToJsonElement(text).jsonObject["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull
+                }.getOrNull()
+                return Result.failure(IllegalStateException(errMsg ?: "对端终端操作失败（HTTP ${resp.status}）"))
+            }
+            Result.success(text)
+        } catch (t: Throwable) {
+            Result.failure(t)
+        }
+    }
+
+    suspend fun loadTty7Sessions(deviceId: String, silent: Boolean = false): Result<Tty7SessionsResponse> {
+        if (!silent) {
+            updateDeviceTty7State(deviceId) { it.copy(loading = true, error = null) }
+        }
+        val raw = fetchTty7Json(deviceId, "GET", "/api/deck/tty7/sessions")
+        return raw.fold(
+            onSuccess = { text ->
+                val parsed = runCatching { json.decodeFromString(Tty7SessionsResponse.serializer(), text) }.getOrNull()
+                if (parsed == null) {
+                    val msg = "对端终端数据格式无效"
+                    updateDeviceTty7State(deviceId) { it.copy(loading = false, error = msg) }
+                    Result.failure(IllegalStateException(msg))
+                } else {
+                    updateDeviceTty7State(deviceId) {
+                        it.copy(
+                            data = parsed,
+                            loading = false,
+                            error = null,
+                            lastLoadedAt = System.currentTimeMillis(),
+                        )
+                    }
+                    Result.success(parsed)
+                }
+            },
+            onFailure = { err ->
+                val msg = err.message ?: "无法读取终端会话"
+                updateDeviceTty7State(deviceId) { it.copy(loading = false, error = msg) }
+                Result.failure(err)
+            },
+        )
+    }
+
+    suspend fun refreshAllTty7Sessions(silent: Boolean = false) {
+        if (!_uiState.value.enrolled) return
+        if (!relayClient.awaitConnected(5_000L)) return
+        val targets = managedDevices().filter { it.online && it.dispatch?.viewT3 == true }
+        if (targets.isEmpty()) return
+        coroutineScope {
+            targets.map { dev ->
+                async {
+                    val hasData = _uiState.value.tty7Boards[dev.id]?.data != null
+                    loadTty7Sessions(dev.id, silent = silent || hasData)
+                }
+            }.awaitAll()
+        }
+    }
+
+    suspend fun startTty7Session(
+        deviceId: String,
+        cwd: String,
+        harness: String,
+        workspace: String? = null,
+    ): Result<Tty7StartResponse> {
+        val cleanCwd = cwd.trim()
+        if (cleanCwd.isEmpty()) return Result.failure(IllegalArgumentException("请填写工作目录"))
+        val body = buildJsonObject {
+            put("cwd", cleanCwd)
+            put("harness", harness)
+            if (!workspace.isNullOrBlank()) put("workspace", workspace.trim())
+        }
+        val raw = fetchTty7Json(deviceId, "POST", "/api/deck/tty7/start", body)
+        return raw.fold(
+            onSuccess = { text ->
+                val parsed = runCatching { json.decodeFromString(Tty7StartResponse.serializer(), text) }.getOrNull()
+                if (parsed == null) {
+                    Result.failure(IllegalStateException("新建会话返回格式无效"))
+                } else {
+                    scope.launch { loadTty7Sessions(deviceId, silent = true) }
+                    Result.success(parsed)
+                }
+            },
+            onFailure = { Result.failure(it) },
+        )
+    }
+
+    suspend fun renameTty7Session(deviceId: String, pane: Int, name: String): Result<Unit> {
+        val body = buildJsonObject {
+            put("pane", pane)
+            put("name", name.trim())
+        }
+        return fetchTty7Json(deviceId, "POST", "/api/deck/tty7/rename", body).map {
+            scope.launch { loadTty7Sessions(deviceId, silent = true) }
+        }
+    }
+
+    suspend fun deleteTty7Session(deviceId: String, pane: Int): Result<Unit> {
+        val body = buildJsonObject {
+            put("pane", pane)
+        }
+        return fetchTty7Json(deviceId, "POST", "/api/deck/tty7/delete", body).map {
+            scope.launch { loadTty7Sessions(deviceId, silent = true) }
+        }
+    }
+
+    fun setTty7ViewingAsync(deviceId: String, pane: Int?) {
+        scope.launch {
+            val body = buildJsonObject {
+                if (pane != null) put("pane", pane) else put("pane", JsonNull)
+            }
+            runCatching { fetchTty7Json(deviceId, "POST", "/api/deck/tty7/viewing", body) }
         }
     }
 }
