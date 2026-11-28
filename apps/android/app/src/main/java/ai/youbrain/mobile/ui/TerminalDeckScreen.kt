@@ -606,29 +606,35 @@ fun TerminalDeckScreen(
                                         .fillMaxWidth()
                                         .padding(horizontal = 4.dp),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 ) {
-                                    Text(
-                                        text = group.projectName,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = c.label,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.weight(1f, fill = false),
-                                    )
-                                    if (group.waitingCount > 0) {
-                                        StatusPill(text = "待回复 ${group.waitingCount}", color = c.orange)
+                                    Row(
+                                        modifier = Modifier.weight(1f),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        Text(
+                                            text = group.projectName,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = c.label,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false),
+                                        )
+                                        if (group.waitingCount > 0) {
+                                            StatusPill(text = "待回复 ${group.waitingCount}", color = c.orange)
+                                        }
+                                        if (group.workingCount > 0) {
+                                            StatusPill(text = "运行 ${group.workingCount}", color = c.blue)
+                                        }
                                     }
-                                    if (group.workingCount > 0) {
-                                        StatusPill(text = "运行 ${group.workingCount}", color = c.blue)
-                                    }
-                                    Spacer(modifier = Modifier.weight(1f))
                                     Text(
                                         text = "+ 新建",
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Medium,
                                         color = c.blue,
+                                        softWrap = false,
                                         modifier = Modifier
                                             .clip(RoundedCornerShape(6.dp))
                                             .clickable {
