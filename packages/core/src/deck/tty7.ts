@@ -294,8 +294,13 @@ export class Tty7 {
     this.#runner = options.runner ?? null;
   }
 
-  openTerminal(pane: number, size: TerminalSize, events: Tty7TerminalEvents): TerminalConnection {
-    return openTty7Terminal({ pane, size, events, env: this.#options.env });
+  openTerminal(
+    pane: number,
+    size: TerminalSize,
+    events: Tty7TerminalEvents,
+    options?: { maxReplayBytes?: number },
+  ): TerminalConnection {
+    return openTty7Terminal({ pane, size, events, maxReplayBytes: options?.maxReplayBytes, env: this.#options.env });
   }
 
   /**

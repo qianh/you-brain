@@ -404,9 +404,15 @@ export class DeckService {
     return { path: await this.tty7.saveImagePaste(data, contentType) };
   }
 
-  tty7Terminal(pane: number, size: TerminalSize, events: Tty7TerminalEvents, deviceId?: string): TerminalConnection {
+  tty7Terminal(
+    pane: number,
+    size: TerminalSize,
+    events: Tty7TerminalEvents,
+    deviceId?: string,
+    options?: { maxReplayBytes?: number },
+  ): TerminalConnection {
     if (deviceId) return openRemoteTty7Terminal(this.#deviceTunnel(deviceId), pane, size, events);
-    return this.tty7.openTerminal(pane, size, events);
+    return this.tty7.openTerminal(pane, size, events, options);
   }
 
   noticeList(): SessionNoticeList {

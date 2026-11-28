@@ -38,7 +38,13 @@ export interface Tty7HostPort {
   tty7Send(body: DeckTty7SendBody): Promise<{ ok: true }>;
   tty7Start(body: DeckTty7StartBody): Promise<DeckTty7StartResponse>;
   tty7PasteImage(data: Uint8Array, contentType: string): Promise<DeckTty7PasteImageResponse>;
-  tty7Terminal(pane: number, size: TerminalSize, events: Tty7TerminalEvents): TerminalConnection;
+  tty7Terminal(
+    pane: number,
+    size: TerminalSize,
+    events: Tty7TerminalEvents,
+    deviceId?: string,
+    options?: { maxReplayBytes?: number },
+  ): TerminalConnection;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -126,10 +132,10 @@ export function createTty7TunnelHostHandler(getPort: () => Tty7HostPort | null):
         return errorJson(500, "INTERNAL_ERROR", error instanceof Error ? error.message : "对端终端操作失败");
       }
     },
-    openTerminal(pane, size, events) {
+    openTerminal(pane, size, events, options) {
       const port = getPort();
       if (!port) throw new Error("对端没有提供实时终端服务");
-      return port.tty7Terminal(pane, size, events);
+      return port.tty7Terminal(pane, size, events, undefined, options);
     },
   };
 }

@@ -1,14 +1,9 @@
 package ai.youbrain.mobile.ui
 
-import android.annotation.SuppressLint
-import android.util.Base64
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.view.ViewGroup
-import android.webkit.JavascriptInterface
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebSettings
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -18,18 +13,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -43,16 +34,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -65,9 +57,17 @@ import ai.youbrain.mobile.data.ActiveTerminalTarget
 import ai.youbrain.mobile.net.UBrainRepository
 import ai.youbrain.mobile.ui.components.IosHairline
 import ai.youbrain.mobile.ui.components.IosIcons
+import ai.youbrain.mobile.ui.components.IosModalSheet
+import ai.youbrain.mobile.ui.terminal.NativeTerminalCanvasView
+import ai.youbrain.mobile.ui.terminal.NativeTerminalSession
+import ai.youbrain.mobile.ui.terminal.TerminalConnectionStatus
+import ai.youbrain.mobile.ui.terminal.TerminalGridSize
+import ai.youbrain.mobile.ui.terminal.TerminalSessionSnapshot
+import ai.youbrain.mobile.ui.terminal.TerminalWidthMode
 import ai.youbrain.mobile.ui.theme.IosTheme
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 private data class QuickTermKey(
     val label: String,
@@ -89,7 +89,6 @@ private val QUICK_TERM_KEYS = listOf(
     QuickTermKey("↵", byteArrayOf(0x0D)),
 )
 
-@SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun TerminalLiveScreen(
     target: ActiveTerminalTarget,
@@ -97,92 +96,133 @@ fun TerminalLiveScreen(
     repository: UBrainRepository,
     onClose: () -> Unit,
 ) {
+    val context = LocalContext.current
     val c = IosTheme.colors
-    var fontSize by remember { mutableIntStateOf(11) }
-    var status by remember { mutableStateOf("connecting") }
-    var statusDetail by remember { mutableStateOf("") }
-    var warning by remember { mutableStateOf("") }
-    var leaseHolder by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+
+    var fontSizeSp by remember { mutableFloatStateOf(10.5f) }
+    var widthMode by remember { mutableStateOf(TerminalWidthMode.FIT) }
+    var directKeyboard by remember { mutableStateOf(false) }
+    var isScrolledUp by remember { mutableStateOf(false) }
     var commandDraft by remember { mutableStateOf("") }
-    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var showCopyMenu by remember { mutableStateOf(false) }
+    var copyToast by remember { mutableStateOf<String?>(null) }
 
-    val pageUrl = remember(target.deviceId, target.pane) {
-        repository.terminalPageUrl(
-            deviceId = target.deviceId,
-            pane = target.pane,
-            fontSize = fontSize,
-            isDark = c.isDark,
-        )
+    var snapshot by remember(target.deviceId, target.pane) {
+        mutableStateOf(TerminalSessionSnapshot(isDark = c.isDark))
     }
+    var canvasViewRef by remember { mutableStateOf<NativeTerminalCanvasView?>(null) }
+    var sessionRef by remember { mutableStateOf<NativeTerminalSession?>(null) }
 
-    val imeBottom = WindowInsets.ime.getBottom(LocalDensity.current)
-    LaunchedEffect(imeBottom) {
-        webViewRef?.evaluateJavascript("window.__ubrainTerm && window.__ubrainTerm.fitNow(false);", null)
+    // 首次测得真实终端网格尺寸后再建连，确保初始 connect 尺寸与屏幕完全一致。
+    var startedSessionKey by remember(target.deviceId, target.pane) { mutableStateOf(false) }
+
+    fun ensureSessionStarted(grid: TerminalGridSize) {
+        val existing = sessionRef
+        if (existing != null && startedSessionKey) {
+            existing.updateSize(grid, claimLease = false)
+            return
+        }
+        startedSessionKey = true
+        val created = NativeTerminalSession(
+            scope = scope,
+            pane = target.pane,
+            initialSize = grid,
+            isDarkInitial = c.isDark,
+            openSocket = { listener ->
+                repository.openTty7TerminalSocket(target.deviceId, listener)
+            },
+            onStateChanged = { next ->
+                scope.launch(Dispatchers.Main.immediate) {
+                    snapshot = next
+                }
+            },
+            onScreenDirty = { resetBottom ->
+                canvasViewRef?.notifyContentChanged(resetBottom)
+            },
+        )
+        sessionRef = created
+        canvasViewRef?.session = created
+        created.start()
     }
 
     LaunchedEffect(c.isDark) {
-        val mode = if (c.isDark) "dark" else "light"
-        webViewRef?.evaluateJavascript("window.__ubrainTerm && window.__ubrainTerm.setTheme('$mode');", null)
+        sessionRef?.setTheme(c.isDark)
+        canvasViewRef?.setTheme(c.isDark)
+    }
+
+    LaunchedEffect(copyToast) {
+        if (copyToast != null) {
+            delay(1_800L)
+            copyToast = null
+        }
     }
 
     DisposableEffect(target.deviceId, target.pane) {
         repository.setTty7ViewingAsync(target.deviceId, target.pane)
         onDispose {
             repository.setTty7ViewingAsync(target.deviceId, null)
-            webViewRef?.let { wv ->
-                runCatching { wv.evaluateJavascript("window.__ubrainTerm && window.__ubrainTerm.dispose();", null) }
-                runCatching { wv.destroy() }
-            }
-            webViewRef = null
+            canvasViewRef?.setDirectKeyboardEnabled(false)
+            canvasViewRef?.session = null
+            canvasViewRef = null
+            sessionRef?.close()
+            sessionRef = null
         }
     }
 
     BackHandler(onBack = onClose)
 
-    fun sendQuickKey(bytes: ByteArray) {
-        val b64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
-        webViewRef?.evaluateJavascript(
-            "window.__ubrainTerm && window.__ubrainTerm.sendRawBase64('$b64');",
-            null,
-        )
+    fun copyToClipboard(label: String, text: String) {
+        val clean = text.trimEnd()
+        if (clean.isEmpty()) {
+            copyToast = "当前没有可复制的内容"
+            return
+        }
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        cm?.setPrimaryClip(ClipData.newPlainText(label, clean))
+        copyToast = "已复制$label"
     }
 
     fun sendDraftLine(sendEnter: Boolean = true) {
         val text = commandDraft
         if (text.isEmpty() && !sendEnter) return
         commandDraft = ""
-        val quoted = Json.encodeToString(JsonPrimitive.serializer(), JsonPrimitive(text))
-        webViewRef?.evaluateJavascript(
-            "window.__ubrainTerm && window.__ubrainTerm.sendText($quoted, $sendEnter);",
-            null,
-        )
+        sessionRef?.sendText(text, sendEnter)
+        canvasViewRef?.scrollToBottom()
     }
 
-    fun adjustFont(delta: Int) {
-        val next = (fontSize + delta).coerceIn(9, 20)
-        if (next == fontSize) return
-        fontSize = next
-        webViewRef?.evaluateJavascript("window.__ubrainTerm && window.__ubrainTerm.setFontSize($next);", null)
+    fun adjustFont(delta: Float) {
+        val next = (fontSizeSp + delta).coerceIn(8.5f, 20f)
+        if (kotlin.math.abs(next - fontSizeSp) < 0.05f) return
+        fontSizeSp = next
+        canvasViewRef?.setFontSizeSp(next, notify = false)
     }
 
-    val statusColor = when (status) {
-        "ready" -> c.green
-        "connecting" -> c.orange
-        "exited" -> c.secondaryLabel
-        else -> c.red
+    fun cycleWidthMode() {
+        val modes = TerminalWidthMode.entries
+        val next = modes[(modes.indexOf(widthMode) + 1) % modes.size]
+        widthMode = next
+        canvasViewRef?.setWidthMode(next)
     }
-    val statusLabel = when (status) {
-        "ready" -> "已连接"
-        "connecting" -> "连接中"
-        "exited" -> "已退出"
-        "disconnected" -> "已断开"
-        else -> "异常"
+
+    val statusColor = when (snapshot.status) {
+        TerminalConnectionStatus.READY -> c.green
+        TerminalConnectionStatus.CONNECTING -> c.orange
+        TerminalConnectionStatus.EXITED -> c.secondaryLabel
+        TerminalConnectionStatus.DISCONNECTED, TerminalConnectionStatus.ERROR -> c.red
+    }
+    val statusLabel = when (snapshot.status) {
+        TerminalConnectionStatus.READY -> if (snapshot.revealed) "已连接" else "同步中"
+        TerminalConnectionStatus.CONNECTING -> "连接中"
+        TerminalConnectionStatus.EXITED -> "已退出"
+        TerminalConnectionStatus.DISCONNECTED -> "已断开"
+        TerminalConnectionStatus.ERROR -> "异常"
     }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(if (c.isDark) Color(0xFF111216) else Color(0xFFF8F9FB))
+            .background(if (c.isDark) Color(NativeTerminalSession.DARK_BG) else Color(NativeTerminalSession.LIGHT_BG))
             .navigationBarsPadding()
             .imePadding(),
     ) {
@@ -195,11 +235,11 @@ fun TerminalLiveScreen(
                     .height(46.dp)
                     .padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 Box(
                     modifier = Modifier
-                        .size(32.dp)
+                        .size(30.dp)
                         .clip(CircleShape)
                         .background(c.tertiaryFill)
                         .clickable(onClick = onClose),
@@ -209,14 +249,14 @@ fun TerminalLiveScreen(
                         imageVector = IosIcons.Close,
                         contentDescription = "返回列表",
                         tint = c.label,
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier.size(15.dp),
                     )
                 }
 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = target.title.ifBlank { "终端 #%d".format(target.pane) },
-                        fontSize = 14.5.sp,
+                        fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = c.label,
                         maxLines = 1,
@@ -234,7 +274,7 @@ fun TerminalLiveScreen(
                         )
                         Text(
                             text = "$deviceDisplayName · %${target.pane} · $statusLabel",
-                            fontSize = 11.5.sp,
+                            fontSize = 11.sp,
                             color = c.secondaryLabel,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
@@ -242,64 +282,77 @@ fun TerminalLiveScreen(
                     }
                 }
 
+                // 列宽模式切换（适屏 / 80列 / 100列）
+                Box(
+                    modifier = Modifier
+                        .height(26.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (widthMode == TerminalWidthMode.FIT) c.tertiaryFill else c.blue.copy(alpha = 0.16f))
+                        .clickable { cycleWidthMode() }
+                        .padding(horizontal = 8.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = widthMode.label,
+                        fontSize = 11.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (widthMode == TerminalWidthMode.FIT) c.label else c.blue,
+                        softWrap = false,
+                    )
+                }
+
                 // 字号缩小 / 放大
                 Row(
                     modifier = Modifier
+                        .height(26.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(c.tertiaryFill)
-                        .padding(horizontal = 2.dp, vertical = 2.dp),
+                        .padding(horizontal = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .clickable(enabled = fontSize > 9) { adjustFont(-1) }
-                            .padding(horizontal = 7.dp, vertical = 4.dp),
+                            .clickable(enabled = fontSizeSp > 8.6f) { adjustFont(-1f) }
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
                             text = "A-",
-                            fontSize = 11.5.sp,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = if (fontSize > 9) c.label else c.tertiaryLabel,
+                            color = if (fontSizeSp > 8.6f) c.label else c.tertiaryLabel,
                         )
                     }
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .clickable(enabled = fontSize < 20) { adjustFont(1) }
-                            .padding(horizontal = 7.dp, vertical = 4.dp),
+                            .clickable(enabled = fontSizeSp < 19.9f) { adjustFont(1f) }
+                            .padding(horizontal = 6.dp, vertical = 3.dp),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
                             text = "A+",
-                            fontSize = 11.5.sp,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = if (fontSize < 20) c.label else c.tertiaryLabel,
+                            color = if (fontSizeSp < 19.9f) c.label else c.tertiaryLabel,
                         )
                     }
                 }
 
                 Box(
                     modifier = Modifier
-                        .size(30.dp)
+                        .size(28.dp)
                         .clip(CircleShape)
                         .background(c.tertiaryFill)
-                        .clickable {
-                            status = "connecting"
-                            statusDetail = ""
-                            webViewRef?.evaluateJavascript(
-                                "window.__ubrainTerm && window.__ubrainTerm.reconnect();",
-                                null,
-                            )
-                        },
+                        .clickable { sessionRef?.reconnect() },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
                         imageVector = IosIcons.Refresh,
                         contentDescription = "重新连接",
                         tint = c.blue,
-                        modifier = Modifier.size(15.dp),
+                        modifier = Modifier.size(14.dp),
                     )
                 }
             }
@@ -307,24 +360,18 @@ fun TerminalLiveScreen(
         }
 
         // 租约被桌面窗口接管时的提示条
-        if (leaseHolder.isNotBlank()) {
+        if (snapshot.leaseHolder.isNotBlank()) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(c.blue.copy(alpha = 0.14f))
-                    .clickable {
-                        leaseHolder = ""
-                        webViewRef?.evaluateJavascript(
-                            "window.__ubrainTerm && window.__ubrainTerm.fitNow(true);",
-                            null,
-                        )
-                    }
+                    .clickable { sessionRef?.reclaimLease() }
                     .padding(horizontal = 12.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
-                    text = "尺寸正由 $leaseHolder 控制",
+                    text = "尺寸正由 ${snapshot.leaseHolder} 控制",
                     fontSize = 12.sp,
                     color = c.blue,
                     modifier = Modifier.weight(1f),
@@ -338,7 +385,7 @@ fun TerminalLiveScreen(
             }
         }
 
-        if (warning.isNotBlank()) {
+        if (snapshot.warning.isNotBlank()) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -348,7 +395,7 @@ fun TerminalLiveScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
-                    text = warning,
+                    text = snapshot.warning,
                     fontSize = 12.sp,
                     color = c.orange,
                     modifier = Modifier.weight(1f),
@@ -358,27 +405,31 @@ fun TerminalLiveScreen(
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
                     color = c.orange,
-                    modifier = Modifier.clickable { warning = "" }.padding(start = 8.dp),
+                    modifier = Modifier.clickable { sessionRef?.dismissWarning() }.padding(start = 8.dp),
                 )
             }
         }
 
-        if (status == "error" || status == "disconnected" || status == "exited") {
+        if (snapshot.status == TerminalConnectionStatus.ERROR ||
+            snapshot.status == TerminalConnectionStatus.DISCONNECTED ||
+            snapshot.status == TerminalConnectionStatus.EXITED
+        ) {
+            val isExited = snapshot.status == TerminalConnectionStatus.EXITED
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background((if (status == "exited") c.secondaryLabel else c.red).copy(alpha = 0.14f))
+                    .background((if (isExited) c.secondaryLabel else c.red).copy(alpha = 0.14f))
                     .padding(horizontal = 12.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Text(
-                    text = statusDetail.ifBlank { statusLabel },
+                    text = snapshot.detail.ifBlank { statusLabel },
                     fontSize = 12.5.sp,
-                    color = if (status == "exited") c.secondaryLabel else c.red,
+                    color = if (isExited) c.secondaryLabel else c.red,
                     modifier = Modifier.weight(1f),
                 )
-                if (status != "exited") {
+                if (!isExited) {
                     Text(
                         text = "重连",
                         fontSize = 12.5.sp,
@@ -386,21 +437,14 @@ fun TerminalLiveScreen(
                         color = c.blue,
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
-                            .clickable {
-                                status = "connecting"
-                                statusDetail = ""
-                                webViewRef?.evaluateJavascript(
-                                    "window.__ubrainTerm && window.__ubrainTerm.reconnect();",
-                                    null,
-                                )
-                            }
+                            .clickable { sessionRef?.reconnect() }
                             .padding(horizontal = 8.dp, vertical = 2.dp),
                     )
                 }
             }
         }
 
-        // 中间整屏实时 xterm.js WebView
+        // 中间整屏原生 Canvas 终端视图
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -409,63 +453,42 @@ fun TerminalLiveScreen(
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { ctx ->
-                    WebView(ctx).apply {
+                    NativeTerminalCanvasView(ctx).apply {
                         layoutParams = ViewGroup.LayoutParams(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT,
                         )
-                        setBackgroundColor(if (c.isDark) 0xFF111216.toInt() else 0xFFF8F9FB.toInt())
-                        settings.javaScriptEnabled = true
-                        settings.domStorageEnabled = false
-                        settings.cacheMode = WebSettings.LOAD_NO_CACHE
-                        settings.builtInZoomControls = false
-                        settings.displayZoomControls = false
-                        settings.setSupportZoom(false)
-                        addJavascriptInterface(
-                            object {
-                                @JavascriptInterface
-                                fun onStatus(nextStatus: String, detail: String) {
-                                    post {
-                                        status = nextStatus
-                                        statusDetail = detail
-                                    }
-                                }
-
-                                @JavascriptInterface
-                                fun onWarning(msg: String) {
-                                    post { warning = msg }
-                                }
-
-                                @JavascriptInterface
-                                fun onLease(by: String) {
-                                    post { leaseHolder = by }
-                                }
-                            },
-                            "AndroidTerminalBridge",
-                        )
-                        webViewClient = object : WebViewClient() {
-                            override fun onReceivedError(
-                                view: WebView?,
-                                request: WebResourceRequest?,
-                                error: WebResourceError?,
-                            ) {
-                                if (request?.isForMainFrame == true) {
-                                    status = "error"
-                                    statusDetail = error?.description?.toString() ?: "终端页面加载失败"
-                                }
-                            }
+                        setTheme(c.isDark)
+                        setFontSizeSp(fontSizeSp, notify = false)
+                        setWidthMode(widthMode)
+                        setDirectKeyboardEnabled(directKeyboard)
+                        onGridSizeMeasured = { grid ->
+                            ensureSessionStarted(grid)
                         }
-                        loadUrl(pageUrl)
-                        webViewRef = this
+                        onFontSizeSpChanged = { nextSp ->
+                            fontSizeSp = nextSp
+                        }
+                        onScrolledUpChanged = { scrolledUp ->
+                            isScrolledUp = scrolledUp
+                        }
+                        onLongPressMenu = {
+                            showCopyMenu = true
+                        }
+                        canvasViewRef = this
+                        session = sessionRef
                     }
+                },
+                update = { view ->
+                    view.setTheme(c.isDark)
                 },
             )
 
-            if (status == "connecting") {
+            // 后台静默解析初始回放期间保持遮罩，直到解析完成并停在最新行才一次性显示。
+            if (!snapshot.revealed) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background((if (c.isDark) Color(0xFF111216) else Color(0xFFF8F9FB)).copy(alpha = 0.72f)),
+                        .background(if (c.isDark) Color(NativeTerminalSession.DARK_BG) else Color(NativeTerminalSession.LIGHT_BG)),
                     contentAlignment = Alignment.Center,
                 ) {
                     Column(
@@ -478,16 +501,59 @@ fun TerminalLiveScreen(
                             color = c.blue,
                         )
                         Text(
-                            text = "正在连接 $deviceDisplayName 终端流…",
+                            text = if (snapshot.status == TerminalConnectionStatus.READY) {
+                                "正在渲染 $deviceDisplayName 最新终端画面…"
+                            } else {
+                                "正在连接 $deviceDisplayName 终端流…"
+                            },
                             fontSize = 13.sp,
                             color = c.secondaryLabel,
                         )
                     }
                 }
             }
+
+            // 上滑翻历史时显示悬浮「回到底部」胶囊
+            if (snapshot.revealed && isScrolledUp) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 12.dp, bottom = 12.dp)
+                        .clip(CircleShape)
+                        .background(c.blue.copy(alpha = 0.92f))
+                        .clickable { canvasViewRef?.scrollToBottom() }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                ) {
+                    Text(
+                        text = "↓ 回到底部",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color.White,
+                    )
+                }
+            }
+
+            // 复制成功轻提示
+            copyToast?.let { tip ->
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 10.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.78f))
+                        .padding(horizontal = 14.dp, vertical = 6.dp),
+                ) {
+                    Text(
+                        text = tip,
+                        fontSize = 12.5.sp,
+                        color = Color.White,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+            }
         }
 
-        // 底部双轨输入区：常用触屏快捷键条 + 原生中文友好指令输入框
+        // 底部双轨输入区：直输键盘开关 + 触屏快捷键条 + 原生中文友好指令输入框
         Column(modifier = Modifier.fillMaxWidth().background(c.chromeBg)) {
             IosHairline()
             Row(
@@ -498,14 +564,43 @@ fun TerminalLiveScreen(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // 按需直输键盘切换按钮（默认关，防止滑屏误触）
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(if (directKeyboard) c.blue else c.tertiaryFill)
+                        .clickable {
+                            directKeyboard = !directKeyboard
+                            canvasViewRef?.setDirectKeyboardEnabled(directKeyboard)
+                        }
+                        .padding(horizontal = 9.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Icon(
+                        imageVector = IosIcons.Keyboard,
+                        contentDescription = "直输键盘",
+                        tint = if (directKeyboard) Color.White else c.label,
+                        modifier = Modifier.size(13.dp),
+                    )
+                    Text(
+                        text = if (directKeyboard) "直输开" else "直输",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = if (directKeyboard) Color.White else c.label,
+                        softWrap = false,
+                    )
+                }
+
                 QUICK_TERM_KEYS.forEach { key ->
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(7.dp))
-                            .background(
-                                if (key.accent) c.red.copy(alpha = 0.14f) else c.tertiaryFill,
-                            )
-                            .clickable { sendQuickKey(key.bytes) }
+                            .background(if (key.accent) c.red.copy(alpha = 0.14f) else c.tertiaryFill)
+                            .clickable {
+                                sessionRef?.sendBytes(key.bytes)
+                                canvasViewRef?.scrollToBottom()
+                            }
                             .padding(horizontal = 10.dp, vertical = 5.dp),
                         contentAlignment = Alignment.Center,
                     ) {
@@ -519,21 +614,17 @@ fun TerminalLiveScreen(
                         )
                     }
                 }
+
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(7.dp))
                         .background(c.tertiaryFill)
-                        .clickable {
-                            webViewRef?.evaluateJavascript(
-                                "window.__ubrainTerm && window.__ubrainTerm.scrollToBottom();",
-                                null,
-                            )
-                        }
+                        .clickable { showCopyMenu = true }
                         .padding(horizontal = 10.dp, vertical = 5.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = "到底",
+                        text = "复制",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
                         color = c.blue,
@@ -595,6 +686,30 @@ fun TerminalLiveScreen(
                     )
                 }
             }
+        }
+    }
+
+    if (showCopyMenu) {
+        IosModalSheet(
+            title = "复制终端输出",
+            onDismiss = { showCopyMenu = false },
+            confirmText = "复制当前屏幕",
+            onConfirm = {
+                showCopyMenu = false
+                copyToClipboard("当前终端屏幕", sessionRef?.copyVisibleScreen().orEmpty())
+            },
+            secondaryText = "复制最近 200 行输出",
+            onSecondary = {
+                showCopyMenu = false
+                copyToClipboard("最近终端输出", sessionRef?.copyRecentOutput(200).orEmpty())
+            },
+        ) {
+            Text(
+                text = "长按终端画布或点击底部「复制」按钮可随时复制当前屏幕或最近历史输出。",
+                fontSize = 13.5.sp,
+                lineHeight = 19.sp,
+                color = c.secondaryLabel,
+            )
         }
     }
 }

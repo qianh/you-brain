@@ -27,3 +27,12 @@
     @android.webkit.JavascriptInterface <methods>;
 }
 
+# Termux terminal-emulator: pure Java VT100 engine (do not warn on unused JNI helper)
+-dontwarn com.termux.terminal.JNI
+-keep class com.termux.terminal.TerminalEmulator { *; }
+-keep class com.termux.terminal.TerminalBuffer { *; }
+-keep class com.termux.terminal.TerminalRow { *; }
+-keep class com.termux.terminal.TextStyle { *; }
+-keep class com.termux.terminal.TerminalColors { *; }
+-keep class com.termux.terminal.WcWidth { *; }
+

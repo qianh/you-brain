@@ -166,9 +166,6 @@ class UBrainRepository(context: Context) {
 
     private val t3Proxies = ConcurrentHashMap<String, LocalT3ProxyServer>()
     private val prewarmedT3 = ConcurrentHashMap.newKeySet<String>()
-    private val terminalAssetCache = ConcurrentHashMap<String, ByteArray>()
-    @Volatile
-    private var terminalServer: LocalTty7TerminalServer? = null
     private val optimisticSeq = AtomicInteger(1_000_000)
 
     @Volatile
@@ -419,8 +416,6 @@ class UBrainRepository(context: Context) {
         tunnelClient.closeAll()
         for (proxy in t3Proxies.values) proxy.stop()
         t3Proxies.clear()
-        terminalServer?.stop()
-        terminalServer = null
         prewarmedT3.clear()
         loadedMasterKey = null
         identityStore.clearEnrollment()
@@ -1711,43 +1706,35 @@ class UBrainRepository(context: Context) {
 
     // ─── 跨设备 tty7 终端会话（复用加密隧道 target = "tty7"） ────────────────────
 
-    private fun getOrCreateTerminalServer(): LocalTty7TerminalServer {
-        terminalServer?.let { return it }
-        synchronized(this) {
-            terminalServer?.let { return it }
-            val created = LocalTty7TerminalServer(
-                scope = scope,
-                loadAsset = { name -> loadTerminalAsset(name) },
-                openRemoteTerminal = { devId, listener ->
-                    val s1 = tunnelClient.session(devId)
-                    try {
-                        s1.openSocket("/api/deck/tty7/terminal", emptyList(), listener, target = TUNNEL_TARGET_TTY7)
-                    } catch (t: Throwable) {
-                        if (s1.closed) {
-                            tunnelClient.session(devId)
-                                .openSocket("/api/deck/tty7/terminal", emptyList(), listener, target = TUNNEL_TARGET_TTY7)
-                        } else {
-                            throw t
-                        }
-                    }
-                },
-            )
-            terminalServer = created
-            return created
+    suspend fun openTty7TerminalSocket(
+        deviceId: String,
+        listener: UpstreamWsListener,
+    ): UpstreamWs {
+        if (!_uiState.value.enrolled) {
+            throw IllegalStateException("设备尚未入网")
+        }
+        if (!relayClient.awaitConnected(6_000L)) {
+            throw IllegalStateException("连不上中转，请检查手机网络")
+        }
+        val dev = _uiState.value.relayState.devices.firstOrNull { it.id == deviceId }
+        if (dev != null && !dev.online) {
+            throw IllegalStateException("该设备当前离线")
+        }
+        if (dev != null && dev.dispatch?.viewT3 != true) {
+            throw IllegalStateException("该设备尚未开启「允许远程查看 T3/终端」")
+        }
+        val s1 = tunnelClient.session(deviceId)
+        return try {
+            s1.openSocket("/api/deck/tty7/terminal", emptyList(), listener, target = TUNNEL_TARGET_TTY7)
+        } catch (t: Throwable) {
+            if (s1.closed) {
+                tunnelClient.session(deviceId)
+                    .openSocket("/api/deck/tty7/terminal", emptyList(), listener, target = TUNNEL_TARGET_TTY7)
+            } else {
+                throw t
+            }
         }
     }
-
-    private fun loadTerminalAsset(name: String): ByteArray? {
-        terminalAssetCache[name]?.let { return it }
-        val bytes = runCatching {
-            appContext.assets.open("terminal/$name").use { it.readBytes() }
-        }.getOrNull() ?: return null
-        terminalAssetCache[name] = bytes
-        return bytes
-    }
-
-    fun terminalPageUrl(deviceId: String, pane: Int, fontSize: Int, isDark: Boolean): String =
-        getOrCreateTerminalServer().terminalPageUrl(deviceId, pane, fontSize, isDark)
 
     private fun updateDeviceTty7State(deviceId: String, transform: (DeviceTty7State) -> DeviceTty7State) {
         _uiState.update { cur ->

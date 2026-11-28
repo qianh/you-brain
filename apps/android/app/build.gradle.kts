@@ -84,6 +84,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     // 仅直接使用纯轻量 Ed25519/X25519 原语类，绝不调用 Security.addProvider，方便 R8 彻底裁剪无用算法。
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
+    // 原生终端模拟引擎（仅使用纯 Java VT100/ANSI 状态机 TerminalEmulator + WcWidth，不启动本地 PTY 子进程）。
+    implementation("com.github.termux.termux-app:terminal-emulator:v0.118.1")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")

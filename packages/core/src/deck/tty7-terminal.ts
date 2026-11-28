@@ -38,6 +38,8 @@ const MAX_INPUT = 1024 * 1024;
 const TIMEOUT_MS = 8_000;
 /** 小于此阈值的回放原样透传，不做任何裁剪。 */
 const REPLAY_PASSTHROUGH_BYTES = 64 * 1024;
+/** 客户端可指定的最小回放裁剪上限（避免过小丢失当前屏幕）。 */
+const MIN_REPLAY_BYTES = 16 * 1024;
 /** 单次历史回放的最大保留字节数（普通缓冲滚回或无清屏的大体积屏显）。 */
 const MAX_REPLAY_BYTES = 512 * 1024;
 /** 备用屏会话前最多保留的主屏尾部上下文（退出 TUI 时仍能看到之前的终端提示符）。 */
@@ -160,20 +162,28 @@ function buildActiveDecModes(modes: ReadonlyMap<number, boolean>, includeAltMode
  *    仅保留必要的终端私有模式（备用屏、焦点上报、括号粘贴、鼠标、光标显隐）与最后一屏有效输出；
  * 3. 普通滚回缓冲超出 512 KB 时按换行/UTF-8 安全边界保留尾部，避免 8 MB 历史阻塞隧道与阻塞浏览器主线程。
  */
-export function compactTerminalReplay(raw: Buffer): Buffer {
-  if (raw.length <= REPLAY_PASSTHROUGH_BYTES) return raw;
+export function normalizeMaxReplayBytes(value?: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return MAX_REPLAY_BYTES;
+  return Math.max(MIN_REPLAY_BYTES, Math.min(MAX_REPLAY_BYTES, Math.floor(value)));
+}
+
+export function compactTerminalReplay(raw: Buffer, maxReplayBytes?: number): Buffer {
+  const limit = normalizeMaxReplayBytes(maxReplayBytes);
+  const passthrough = Math.min(REPLAY_PASSTHROUGH_BYTES, limit);
+  if (raw.length <= passthrough) return raw;
   const fullScan = scanReplayBuffer(raw);
 
   if (fullScan.inAltScreen && fullScan.lastAltEnter >= 0) {
+    const normalContextLimit = Math.min(ALT_NORMAL_CONTEXT_BYTES, Math.floor(limit / 2));
     const normalPrefix =
       fullScan.lastAltEnter > 0
-        ? sliceTailFromLine(raw.subarray(0, fullScan.lastAltEnter), ALT_NORMAL_CONTEXT_BYTES)
+        ? sliceTailFromLine(raw.subarray(0, fullScan.lastAltEnter), normalContextLimit)
         : Buffer.alloc(0);
 
     if (fullScan.lastEraseAll > fullScan.lastAltEnter) {
       const cut = fullScan.lastEraseAll;
       const tailLen = raw.length - cut;
-      if (tailLen <= MAX_REPLAY_BYTES) {
+      if (tailLen <= limit) {
         const beforeCut = scanReplayBuffer(raw, cut);
         const modeHeader = buildActiveDecModes(beforeCut.modesAtCut, fullScan.altMode);
         return Buffer.concat([normalPrefix, modeHeader, Buffer.from("\x1b[0m", "ascii"), raw.subarray(cut)]);
@@ -181,15 +191,15 @@ export function compactTerminalReplay(raw: Buffer): Buffer {
     }
 
     // 备用屏没有出现 2J 或最后一屏仍超上限：对齐到尾部上限并补清屏与模式头。
-    const rawCut = Math.max(fullScan.lastAltEnter, raw.length - MAX_REPLAY_BYTES);
+    const rawCut = Math.max(fullScan.lastAltEnter, raw.length - limit);
     const safeCut = alignSafeUtf8Start(raw, rawCut);
     const beforeCut = scanReplayBuffer(raw, safeCut);
     const modeHeader = buildActiveDecModes(beforeCut.modesAtCut, fullScan.altMode);
     return Buffer.concat([normalPrefix, modeHeader, Buffer.from("\x1b[0m\x1b[2J\x1b[H", "ascii"), raw.subarray(safeCut)]);
   }
 
-  if (raw.length <= MAX_REPLAY_BYTES) return raw;
-  const tail = sliceTailFromLine(raw, MAX_REPLAY_BYTES);
+  if (raw.length <= limit) return raw;
+  const tail = sliceTailFromLine(raw, limit);
   const cutOffset = raw.length - tail.length;
   const beforeCut = scanReplayBuffer(raw, cutOffset);
   const modeHeader = buildActiveDecModes(beforeCut.modesAtCut);
@@ -255,6 +265,7 @@ export function openTty7Terminal(options: {
   pane: number;
   size: TerminalSize;
   events: Tty7TerminalEvents;
+  maxReplayBytes?: number | undefined;
   env?: NodeJS.ProcessEnv | undefined;
   socketPath?: string;
 }): TerminalConnection {
@@ -294,7 +305,7 @@ export function openTty7Terminal(options: {
     if (replayChunks.length > 0) {
       const combined = replayChunks.length === 1 ? replayChunks[0]! : Buffer.concat(replayChunks);
       replayChunks = [];
-      const compacted = compactTerminalReplay(combined);
+      const compacted = compactTerminalReplay(combined, options.maxReplayBytes);
       if (compacted.length > 0) events.output(compacted);
     }
   };

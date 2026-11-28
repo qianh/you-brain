@@ -240,7 +240,12 @@ export interface TunnelTty7Handler {
   /** 处理来自远端的 tty7 HTTP 请求（仅允许 /api/deck/tty7/*）。 */
   fetch(method: string, path: string, headers: Headers, body: Uint8Array): Promise<Response>;
   /** 打开到本机 tty7 某 pane 的实时终端连接。 */
-  openTerminal(pane: number, size: TerminalSize, events: Tty7TerminalEvents): TerminalConnection;
+  openTerminal(
+    pane: number,
+    size: TerminalSize,
+    events: Tty7TerminalEvents,
+    options?: { maxReplayBytes?: number },
+  ): TerminalConnection;
 }
 
 export interface TunnelHostOptions {
@@ -699,45 +704,54 @@ export class TunnelHost {
           reject("请先发送终端连接参数");
           return;
         }
-        const request = JSON.parse(decoded.text) as { type?: unknown; pane?: unknown; size?: unknown };
+        const request = JSON.parse(decoded.text) as { type?: unknown; pane?: unknown; size?: unknown; maxReplayBytes?: unknown };
         if (request.type !== "connect" || !Number.isSafeInteger(request.pane) || (request.pane as number) < 0 || !validTerminalSize(request.size)) {
           reject("终端会话或尺寸不正确");
           return;
         }
+        const maxReplayBytes =
+          typeof request.maxReplayBytes === "number" && Number.isFinite(request.maxReplayBytes) && request.maxReplayBytes > 0
+            ? Math.floor(request.maxReplayBytes)
+            : undefined;
         const handler = this.#options.tty7;
         if (!handler) {
           reject("对端没有提供实时终端服务");
           return;
         }
-        terminal.connection = handler.openTerminal(request.pane as number, request.size, {
-          ready: () => sendControl({ type: "ready" }),
-          live: () => sendControl({ type: "live" }),
-          output(bytes) {
-            if (terminal.closed || session.closed || bytes.length === 0) return;
-            const copy = Buffer.from(bytes);
-            terminal.inFlight += copy.length;
-            if (terminal.inFlight >= 512 * 1024) terminal.connection?.pause();
-            terminal.pendingOut.push(copy);
-            terminal.pendingOutBytes += copy.length;
-            if (terminal.pendingOutBytes >= TTY7_GZIP_RAW_BLOCK_BYTES) {
+        terminal.connection = handler.openTerminal(
+          request.pane as number,
+          request.size,
+          {
+            ready: () => sendControl({ type: "ready" }),
+            live: () => sendControl({ type: "live" }),
+            output(bytes) {
+              if (terminal.closed || session.closed || bytes.length === 0) return;
+              const copy = Buffer.from(bytes);
+              terminal.inFlight += copy.length;
+              if (terminal.inFlight >= 512 * 1024) terminal.connection?.pause();
+              terminal.pendingOut.push(copy);
+              terminal.pendingOutBytes += copy.length;
+              if (terminal.pendingOutBytes >= TTY7_GZIP_RAW_BLOCK_BYTES) {
+                flushPendingOut();
+              } else if (terminal.flushTimer === null) {
+                terminal.flushTimer = setTimeout(flushPendingOut, TERMINAL_COALESCE_MS);
+              }
+            },
+            size: (size) => sendControl({ type: "size", size }),
+            lease: (by) => sendControl({ type: "lease", by }),
+            warning: (text) => sendControl({ type: "warning", message: text }),
+            exit: (code) => sendControl({ type: "exit", code }),
+            error: (text) => sendControl({ type: "error", message: text }),
+            close: () => {
+              if (terminal.closed) return;
               flushPendingOut();
-            } else if (terminal.flushTimer === null) {
-              terminal.flushTimer = setTimeout(flushPendingOut, TERMINAL_COALESCE_MS);
-            }
+              terminal.closed = true;
+              session.terminals.delete(id);
+              sendFrame({ k: "ws-close", id, code: 1000, reason: "Terminal stream closed" });
+            },
           },
-          size: (size) => sendControl({ type: "size", size }),
-          lease: (by) => sendControl({ type: "lease", by }),
-          warning: (text) => sendControl({ type: "warning", message: text }),
-          exit: (code) => sendControl({ type: "exit", code }),
-          error: (text) => sendControl({ type: "error", message: text }),
-          close: () => {
-            if (terminal.closed) return;
-            flushPendingOut();
-            terminal.closed = true;
-            session.terminals.delete(id);
-            sendFrame({ k: "ws-close", id, code: 1000, reason: "Terminal stream closed" });
-          },
-        });
+          maxReplayBytes === undefined ? undefined : { maxReplayBytes },
+        );
         return;
       }
 
@@ -754,6 +768,8 @@ export class TunnelHost {
       } else if (request.type === "resume") {
         terminal.peerPaused = false;
         if (terminal.inFlight < 128 * 1024) terminal.connection.resume();
+      } else if (request.type === "ack") {
+        // 兼容旧客户端发送的 ack 帧：隧道层已按 inFlight 自动背压，静默忽略不报错。
       } else {
         reject("终端控制消息不正确");
       }

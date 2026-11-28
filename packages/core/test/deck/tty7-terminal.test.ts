@@ -196,6 +196,11 @@ describe("tty7 real terminal transport", () => {
     expect(decoded).not.toContain("\ufffd");
     expect(decoded).toContain("\x1b[?2004h");
     expect(decoded.endsWith("最后一行完整输出\r\n")).toBe(true);
+
+    // 客户端请求精简尾部回放（如手机端 96 KB）时按指定上限裁剪。
+    const mobileCompacted = compactTerminalReplay(raw, 96 * 1024);
+    expect(mobileCompacted.byteLength).toBeLessThanOrEqual(96 * 1024 + 64);
+    expect(mobileCompacted.toString("utf8").endsWith("最后一行完整输出\r\n")).toBe(true);
   });
 
   it("refuses incompatible daemons before observing or sending any input", async () => {
