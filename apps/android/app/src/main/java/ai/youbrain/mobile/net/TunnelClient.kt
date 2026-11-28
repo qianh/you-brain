@@ -41,7 +41,7 @@ import java.util.zip.GZIPOutputStream
 const val TUNNEL_WS_GZIP_CAP = "ws-gzip"
 const val TUNNEL_TARGET_T3 = "t3"
 const val TUNNEL_TARGET_TTY7 = "tty7"
-const val TUNNEL_TTY7_HEADER = "x-u-brain-tty7"
+const val TUNNEL_TTY7_HEADER = "x-ubrain-tty7"
 
 private const val WS_GZIP_MIN_BYTES = 512
 private const val WS_CHUNK_BYTES = 48 * 1024

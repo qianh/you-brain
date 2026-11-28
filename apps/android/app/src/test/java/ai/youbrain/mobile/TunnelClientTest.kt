@@ -5,6 +5,7 @@ import ai.youbrain.mobile.crypto.TunnelCrypto
 import ai.youbrain.mobile.data.PeerPinStore
 import ai.youbrain.mobile.net.CommandOutcome
 import ai.youbrain.mobile.net.DecodedWsMessage
+import ai.youbrain.mobile.net.TUNNEL_TTY7_HEADER
 import ai.youbrain.mobile.net.TUNNEL_WS_GZIP_CAP
 import ai.youbrain.mobile.net.TunnelClient
 import ai.youbrain.mobile.net.WsReassembler
@@ -161,5 +162,11 @@ class TunnelClientTest {
             scope.cancel()
             dir.deleteRecursively()
         }
+    }
+
+    @Test
+    fun tty7MarkerHeaderMatchesDaemonContract() {
+        // 与 packages/core/src/dispatch/tunnel.ts 中的 TUNNEL_TTY7_HEADER 保持严格一致
+        assertEquals("x-ubrain-tty7", TUNNEL_TTY7_HEADER)
     }
 }
