@@ -5,7 +5,9 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Typeface
+import android.text.Editable
 import android.text.InputType
 import android.util.TypedValue
 import android.view.GestureDetector
@@ -20,6 +22,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.OverScroller
 import com.termux.terminal.KeyHandler
 import com.termux.terminal.TerminalEmulator
+import com.termux.terminal.TerminalRow
 import com.termux.terminal.TextStyle
 import com.termux.terminal.WcWidth
 import kotlin.math.ceil
@@ -36,9 +39,10 @@ enum class TerminalWidthMode(val fixedCols: Int?, val label: String) {
 
 /**
  * 原生 Android Canvas 终端渲染控件：
- * - 严格按等宽单元格网格绘制，结合 Termux WcWidth 与超出格宽微缩保护，杜绝中英文/Emoji/框线错位。
- * - 原生 OverScroller 60/120fps 惯性纵横滚动 + 双指捏合缩放字号。
- * - 默认单击不弹软键盘（防滑屏误触），按需开启直输键盘模式；长按触发复制菜单。
+ * - 背景按字符真实占列宽（WcWidth）延伸合批，杜绝双宽中文字符右半格出现底色断裂。
+ * - 常见 TUI 技术符号与框线矢量自绘 + Sans-Serif 字体回退，消除系统等宽字体缺字方框。
+ * - 支持标准中文 IME InputConnection，直接在终端原本的光标/输入框里输入中英文，无需外部独立输入框。
+ * - 原生 OverScroller 60/120fps 惯性纵横滚动 + 双指捏合缩放字号 + 长按复制菜单。
  */
 @SuppressLint("ViewConstructor")
 class NativeTerminalCanvasView(
@@ -60,13 +64,17 @@ class NativeTerminalCanvasView(
 
     private var fontSizeSp: Float = 10.5f
     private var widthMode: TerminalWidthMode = TerminalWidthMode.FIT
-    private var directKeyboard: Boolean = false
     private var isDark: Boolean = true
 
     private val bgPaint = Paint()
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
         typeface = Typeface.MONOSPACE
     }
+    private val fallbackPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
+        typeface = Typeface.SANS_SERIF
+    }
+    private val symbolPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val symbolPath = Path()
     private val cursorPaint = Paint()
     private val scrollIndicatorPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
@@ -132,9 +140,8 @@ class NativeTerminalCanvasView(
             }
 
             override fun onSingleTapUp(e: MotionEvent): Boolean {
-                if (directKeyboard) {
-                    showSoftKeyboard()
-                }
+                // 仅在纯单击（无滑动/缩放/长按）时唤起软键盘，直接在终端原输入框输入。
+                showSoftKeyboard()
                 return true
             }
 
@@ -228,13 +235,16 @@ class NativeTerminalCanvasView(
         invalidate()
     }
 
-    fun setDirectKeyboardEnabled(enabled: Boolean) {
-        directKeyboard = enabled
-        if (enabled) {
-            showSoftKeyboard()
-        } else {
-            hideSoftKeyboard()
-        }
+    fun showSoftKeyboard() {
+        requestFocus()
+        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+    }
+
+    fun hideSoftKeyboard() {
+        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.hideSoftInputFromWindow(windowToken, 0)
+        clearFocus()
     }
 
     fun scrollToBottom() {
@@ -260,30 +270,21 @@ class NativeTerminalCanvasView(
         }
     }
 
-    private fun showSoftKeyboard() {
-        requestFocus()
-        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-        imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
-    }
-
-    private fun hideSoftKeyboard() {
-        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-        imm?.hideSoftInputFromWindow(windowToken, 0)
-        clearFocus()
-    }
-
     private fun updateMetrics() {
-        textPaint.textSize = TypedValue.applyDimension(
+        val px = TypedValue.applyDimension(
             TypedValue.COMPLEX_UNIT_SP,
             fontSizeSp,
             resources.displayMetrics,
         )
+        textPaint.textSize = px
         textPaint.typeface = Typeface.MONOSPACE
+        fallbackPaint.textSize = px
+        fallbackPaint.typeface = Typeface.SANS_SERIF
         val measuredM = textPaint.measureText("M")
-        fontWidth = if (measuredM > 1f) measuredM else textPaint.textSize * 0.6f
+        fontWidth = if (measuredM > 1f) measuredM else px * 0.6f
         val fm = textPaint.fontMetrics
         val rawHeight = fm.descent - fm.ascent
-        fontLineSpacing = max(8, ceil(rawHeight * 1.16f).toInt())
+        fontLineSpacing = max(8, ceil(rawHeight * 1.18f).toInt())
         fontAscent = -fm.ascent + (fontLineSpacing - rawHeight) * 0.5f
     }
 
@@ -348,30 +349,62 @@ class NativeTerminalCanvasView(
         return true
     }
 
-    override fun onCheckIsTextEditor(): Boolean = directKeyboard
+    override fun onCheckIsTextEditor(): Boolean = true
 
-    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
-        if (!directKeyboard) return null
-        outAttrs.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-        outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_FLAG_NO_EXTRACT_UI
-        return object : BaseInputConnection(this, false) {
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
+        // 标准 TYPE_CLASS_TEXT 允许中文拼音/五笔/手写/语音输入法正常工作，
+        // 组合态由内部 Editable 托管，选词上屏后直发终端原输入框。
+        outAttrs.inputType = InputType.TYPE_CLASS_TEXT
+        outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_ACTION_NONE
+        return object : BaseInputConnection(this, true) {
+            private fun flushEditableToTerminal(ed: Editable) {
+                if (ed.isEmpty()) return
+                val text = ed.toString()
+                ed.clear()
+                sendCommittedText(text)
+            }
+
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                val str = text?.toString().orEmpty()
-                if (str.isNotEmpty()) {
-                    session?.sendBytes(str.replace("\n", "\r").toByteArray(Charsets.UTF_8))
+                val ed = editable
+                // 先应用到内部 editable（自动替换当前正在拼写的 composing 拼音），再一次性发给终端。
+                val ok = super.commitText(text, newCursorPosition)
+                if (ed != null && ed.isNotEmpty()) {
+                    flushEditableToTerminal(ed)
                 }
-                return true
+                return ok
+            }
+
+            override fun finishComposingText(): Boolean {
+                val ok = super.finishComposingText()
+                editable?.let { ed ->
+                    if (ed.isNotEmpty()) flushEditableToTerminal(ed)
+                }
+                return ok
             }
 
             override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+                val ed = editable
+                if (ed != null && ed.isNotEmpty()) {
+                    return super.deleteSurroundingText(beforeLength, afterLength)
+                }
                 if (beforeLength > 0) {
-                    val dels = ByteArray(beforeLength) { 0x7F }
-                    session?.sendBytes(dels)
+                    session?.sendBytes(ByteArray(beforeLength) { 0x7F })
+                    scrollToBottom()
                 }
                 return true
             }
 
             override fun sendKeyEvent(event: KeyEvent): Boolean {
+                val ed = editable
+                if (ed != null && ed.isNotEmpty()) {
+                    if (event.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_ENTER) {
+                        flushEditableToTerminal(ed)
+                        session?.sendBytes(byteArrayOf(0x0D))
+                        scrollToBottom()
+                        return true
+                    }
+                    return super.sendKeyEvent(event)
+                }
                 if (event.action == KeyEvent.ACTION_DOWN) {
                     return handleDirectKeyDown(event.keyCode, event)
                 }
@@ -380,8 +413,15 @@ class NativeTerminalCanvasView(
         }
     }
 
+    private fun sendCommittedText(raw: String) {
+        if (raw.isEmpty()) return
+        val normalized = raw.replace("\r\n", "\r").replace("\n", "\r")
+        session?.sendBytes(normalized.toByteArray(Charsets.UTF_8))
+        scrollToBottom()
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        if (directKeyboard && handleDirectKeyDown(keyCode, event)) return true
+        if (handleDirectKeyDown(keyCode, event)) return true
         return super.onKeyDown(keyCode, event)
     }
 
@@ -397,15 +437,27 @@ class NativeTerminalCanvasView(
         val mapped = KeyHandler.getCode(keyCode, keyMod, appCursor, appKeypad)
         if (mapped != null) {
             s.sendBytes(mapped.toByteArray(Charsets.UTF_8))
+            scrollToBottom()
             return true
         }
         val unicode = event.unicodeChar
         if (unicode != 0) {
             val str = String(Character.toChars(unicode))
             s.sendBytes(str.toByteArray(Charsets.UTF_8))
+            scrollToBottom()
             return true
         }
         return false
+    }
+
+    private fun alignToCellStart(lineObj: TerminalRow, startCol: Int): Int {
+        if (startCol <= 0) return 0
+        // 若 startCol 落在前一个宽字符的第 2 列，两者 findStartOfColumn 指向同一字符起点，退回左半格。
+        return if (lineObj.findStartOfColumn(startCol) == lineObj.findStartOfColumn(startCol - 1)) {
+            startCol - 1
+        } else {
+            startCol
+        }
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -451,12 +503,29 @@ class NativeTerminalCanvasView(
                 val rowTopY = (screenRow * fontLineSpacing).toFloat()
                 val rowBottomY = rowTopY + fontLineSpacing
                 val baselineY = rowTopY + fontAscent
+                val rowStartCol = alignToCellStart(lineObj, viewVisibleColsStart)
 
-                // Pass 1: 合并连续相同背景色并绘制。
+                // Pass 1: 按真实字符列宽（charCols = 1 或 2）步进绘制背景，
+                // 避免 TerminalRow.setChar 未写双宽字符右半格 mStyle[col+1] 导致的黑白斑马缝。
                 var bgRunStart = -1
+                var bgRunEnd = -1
                 var bgRunColor = 0
-                for (col in viewVisibleColsStart until viewVisibleColsEnd) {
-                    val style = lineObj.getStyle(col)
+                var bgCol = rowStartCol
+                while (bgCol < viewVisibleColsEnd) {
+                    val startIdx = lineObj.findStartOfColumn(bgCol)
+                    val charCols = if (startIdx < spaceUsed) {
+                        val fc = lineChars[startIdx]
+                        val cp = if (Character.isHighSurrogate(fc) && startIdx + 1 < spaceUsed) {
+                            Character.toCodePoint(fc, lineChars[startIdx + 1])
+                        } else {
+                            fc.code
+                        }
+                        max(1, WcWidth.width(cp))
+                    } else {
+                        1
+                    }
+                    val cellEndCol = min(viewVisibleColsEnd, bgCol + charCols)
+                    val style = lineObj.getStyle(bgCol)
                     val effect = TextStyle.decodeEffect(style)
                     var fg = resolveColor(TextStyle.decodeForeColor(style), palette)
                     var bg = resolveColor(TextStyle.decodeBackColor(style), palette)
@@ -469,23 +538,29 @@ class NativeTerminalCanvasView(
                     val needsBg = bg != baseBgColor
                     if (needsBg) {
                         if (bgRunStart == -1) {
-                            bgRunStart = col
+                            bgRunStart = bgCol
+                            bgRunEnd = cellEndCol
                             bgRunColor = bg
-                        } else if (bg != bgRunColor) {
+                        } else if (bg == bgRunColor && bgCol == bgRunEnd) {
+                            bgRunEnd = cellEndCol
+                        } else {
                             bgPaint.color = bgRunColor
-                            canvas.drawRect(bgRunStart * fontWidth, rowTopY, col * fontWidth, rowBottomY, bgPaint)
-                            bgRunStart = col
+                            canvas.drawRect(bgRunStart * fontWidth, rowTopY, bgRunEnd * fontWidth, rowBottomY, bgPaint)
+                            bgRunStart = bgCol
+                            bgRunEnd = cellEndCol
                             bgRunColor = bg
                         }
                     } else if (bgRunStart != -1) {
                         bgPaint.color = bgRunColor
-                        canvas.drawRect(bgRunStart * fontWidth, rowTopY, col * fontWidth, rowBottomY, bgPaint)
+                        canvas.drawRect(bgRunStart * fontWidth, rowTopY, bgRunEnd * fontWidth, rowBottomY, bgPaint)
                         bgRunStart = -1
+                        bgRunEnd = -1
                     }
+                    bgCol = cellEndCol
                 }
                 if (bgRunStart != -1) {
                     bgPaint.color = bgRunColor
-                    canvas.drawRect(bgRunStart * fontWidth, rowTopY, viewVisibleColsEnd * fontWidth, rowBottomY, bgPaint)
+                    canvas.drawRect(bgRunStart * fontWidth, rowTopY, bgRunEnd * fontWidth, rowBottomY, bgPaint)
                 }
 
                 // 光标绘制（Block / Underline / Bar）。
@@ -508,8 +583,8 @@ class NativeTerminalCanvasView(
                     }
                 }
 
-                // Pass 2: 绘制字符（纯 ASCII 连续 run 合批 + 宽字符/非 ASCII 严格按列锚定防错位）。
-                var col = viewVisibleColsStart
+                // Pass 2: 绘制字符（纯 ASCII 合批 + TUI 符号矢量自绘 + 非 ASCII 严密按列锚定与字体回退）。
+                var col = rowStartCol
                 while (col < viewVisibleColsEnd) {
                     val startIdx = lineObj.findStartOfColumn(col)
                     if (startIdx >= spaceUsed) break
@@ -525,7 +600,6 @@ class NativeTerminalCanvasView(
                     }
                     val charCols = max(1, WcWidth.width(codePoint))
 
-                    // 计算当前单元格包含的所有 char（含代理对与后续零宽组合字符）。
                     var cellEnd = startIdx + if (highSurrogate) 2 else 1
                     while (cellEnd < spaceUsed) {
                         val nc = lineChars[cellEnd]
@@ -546,11 +620,10 @@ class NativeTerminalCanvasView(
                     val isBlockCursorHere = rowHasCursor && col == cursorCol &&
                         cursorStyle == TerminalEmulator.TERMINAL_CURSOR_STYLE_BLOCK
                     val fgColor = resolveFinalForeground(style, effect, reverseVideo, isBlockCursorHere, baseFgColor, baseBgColor, palette)
-                    applyTextPaintStyle(effect, fgColor)
+                    applyTextPaintStyle(textPaint, effect, fgColor)
 
                     val isSimpleAscii = codePoint in 32..126 && charCols == 1 && cellEnd == startIdx + 1 && !isBlockCursorHere
                     if (isSimpleAscii) {
-                        // 向右合并同样式、无光标、纯 ASCII 单宽字符，减少 drawText 调用次数。
                         var runEndCol = col + 1
                         var runEndIdx = cellEnd
                         while (runEndCol < viewVisibleColsEnd && runEndIdx < spaceUsed) {
@@ -560,7 +633,6 @@ class NativeTerminalCanvasView(
                             if (nextIdx != runEndIdx || nextIdx >= spaceUsed) break
                             val c = lineChars[nextIdx]
                             if (c.code !in 32..126) break
-                            // 确保后面没有零宽组合字符。
                             if (nextIdx + 1 < spaceUsed) {
                                 val peek = lineChars[nextIdx + 1]
                                 val pHigh = Character.isHighSurrogate(peek) && nextIdx + 2 < spaceUsed
@@ -575,19 +647,36 @@ class NativeTerminalCanvasView(
                         drawDecorations(canvas, effect, x, (runEndCol - col) * fontWidth, rowTopY, rowBottomY, baselineY)
                         col = runEndCol
                     } else {
-                        // 非 ASCII / 中文 / Emoji / 框线符号：严格锚定在 col * fontWidth，必要时水平适配目标格宽。
                         val x = col * fontWidth
                         val targetWidth = charCols * fontWidth
                         val len = cellEnd - startIdx
-                        val actualWidth = textPaint.measureText(lineChars, startIdx, len)
-                        if (actualWidth > targetWidth * 1.03f && actualWidth > 0f) {
-                            val scaleX = targetWidth / actualWidth
-                            canvas.save()
-                            canvas.scale(scaleX, 1f, x, baselineY)
-                            canvas.drawText(lineChars, startIdx, len, x, baselineY, textPaint)
-                            canvas.restore()
-                        } else {
-                            canvas.drawText(lineChars, startIdx, len, x, baselineY, textPaint)
+                        val drewVector = (len == 1) && drawVectorSymbolIfSupported(
+                            canvas = canvas,
+                            codePoint = codePoint,
+                            x = x,
+                            rowTopY = rowTopY,
+                            targetWidth = targetWidth,
+                            rowHeight = fontLineSpacing.toFloat(),
+                            color = fgColor,
+                        )
+                        if (!drewVector) {
+                            val cellText = String(lineChars, startIdx, len)
+                            val paintToUse = if (textPaint.hasGlyph(cellText)) {
+                                textPaint
+                            } else {
+                                applyTextPaintStyle(fallbackPaint, effect, fgColor)
+                                fallbackPaint
+                            }
+                            val actualWidth = paintToUse.measureText(lineChars, startIdx, len)
+                            if (actualWidth > targetWidth * 1.03f && actualWidth > 0f) {
+                                val scaleX = targetWidth / actualWidth
+                                canvas.save()
+                                canvas.scale(scaleX, 1f, x, baselineY)
+                                canvas.drawText(lineChars, startIdx, len, x, baselineY, paintToUse)
+                                canvas.restore()
+                            } else {
+                                canvas.drawText(lineChars, startIdx, len, x, baselineY, paintToUse)
+                            }
                         }
                         drawDecorations(canvas, effect, x, targetWidth, rowTopY, rowBottomY, baselineY)
                         col += charCols
@@ -617,6 +706,185 @@ class NativeTerminalCanvasView(
                     scrollIndicatorPaint,
                 )
             }
+        }
+    }
+
+    /**
+     * 对 Claude Code / Codex / 现代 TUI 高频使用但 Android 默认等宽字体常缺失的技术符号与框线做矢量自绘。
+     */
+    private fun drawVectorSymbolIfSupported(
+        canvas: Canvas,
+        codePoint: Int,
+        x: Float,
+        rowTopY: Float,
+        targetWidth: Float,
+        rowHeight: Float,
+        color: Int,
+    ): Boolean {
+        val cx = x + targetWidth * 0.5f
+        val cy = rowTopY + rowHeight * 0.5f
+        val strokeThin = max(1.2f, fontWidth * 0.12f)
+        val strokeHeavy = max(2f, fontWidth * 0.22f)
+
+        symbolPaint.color = color
+        symbolPaint.strokeCap = Paint.Cap.SQUARE
+
+        when (codePoint) {
+            // 实心圆点（⏺ U+23FA / ● U+25CF / • U+2022）
+            0x23FA, 0x25CF, 0x2022 -> {
+                symbolPaint.style = Paint.Style.FILL
+                val r = if (codePoint == 0x2022) min(targetWidth, rowHeight) * 0.18f else min(targetWidth, rowHeight) * 0.28f
+                canvas.drawCircle(cx, cy, r, symbolPaint)
+                return true
+            }
+            // 空心圆（○ U+25CB / ◯ U+25EF）
+            0x25CB, 0x25EF -> {
+                symbolPaint.style = Paint.Style.STROKE
+                symbolPaint.strokeWidth = strokeThin
+                canvas.drawCircle(cx, cy, min(targetWidth, rowHeight) * 0.28f, symbolPaint)
+                return true
+            }
+            // 右三角（⏵ U+23F5 / ▶ U+25B6 / ▸ U+25B8）
+            0x23F5, 0x25B6, 0x25B8 -> {
+                symbolPaint.style = Paint.Style.FILL
+                val r = min(targetWidth, rowHeight) * 0.28f
+                symbolPath.reset()
+                symbolPath.moveTo(cx - r * 0.65f, cy - r)
+                symbolPath.lineTo(cx + r * 0.95f, cy)
+                symbolPath.lineTo(cx - r * 0.65f, cy + r)
+                symbolPath.close()
+                canvas.drawPath(symbolPath, symbolPaint)
+                return true
+            }
+            // 左三角（⏴ U+23F4 / ◀ U+25C0 / ◂ U+25C2）
+            0x23F4, 0x25C0, 0x25C2 -> {
+                symbolPaint.style = Paint.Style.FILL
+                val r = min(targetWidth, rowHeight) * 0.28f
+                symbolPath.reset()
+                symbolPath.moveTo(cx + r * 0.65f, cy - r)
+                symbolPath.lineTo(cx - r * 0.95f, cy)
+                symbolPath.lineTo(cx + r * 0.65f, cy + r)
+                symbolPath.close()
+                canvas.drawPath(symbolPath, symbolPaint)
+                return true
+            }
+            // 上三角（⏶ U+23F6 / ▲ U+25B2 / ▴ U+25B4）
+            0x23F6, 0x25B2, 0x25B4 -> {
+                symbolPaint.style = Paint.Style.FILL
+                val r = min(targetWidth, rowHeight) * 0.28f
+                symbolPath.reset()
+                symbolPath.moveTo(cx, cy - r * 0.85f)
+                symbolPath.lineTo(cx + r, cy + r * 0.7f)
+                symbolPath.lineTo(cx - r, cy + r * 0.7f)
+                symbolPath.close()
+                canvas.drawPath(symbolPath, symbolPaint)
+                return true
+            }
+            // 下三角（⏷ U+23F7 / ▼ U+25BC / ▾ U+25BE）
+            0x23F7, 0x25BC, 0x25BE -> {
+                symbolPaint.style = Paint.Style.FILL
+                val r = min(targetWidth, rowHeight) * 0.28f
+                symbolPath.reset()
+                symbolPath.moveTo(cx - r, cy - r * 0.7f)
+                symbolPath.lineTo(cx + r, cy - r * 0.7f)
+                symbolPath.lineTo(cx, cy + r * 0.85f)
+                symbolPath.close()
+                canvas.drawPath(symbolPath, symbolPaint)
+                return true
+            }
+            // 左下折角（⎿ U+23BF / └ U+2514 / ╰ U+2570）
+            0x23BF, 0x2514, 0x2570 -> {
+                symbolPaint.style = Paint.Style.STROKE
+                symbolPaint.strokeWidth = strokeThin
+                canvas.drawLine(cx, rowTopY, cx, cy, symbolPaint)
+                canvas.drawLine(cx, cy, x + targetWidth, cy, symbolPaint)
+                return true
+            }
+            // 横线（─ U+2500 / ━ U+2501）
+            0x2500, 0x2501 -> {
+                symbolPaint.style = Paint.Style.STROKE
+                symbolPaint.strokeWidth = if (codePoint == 0x2501) strokeHeavy else strokeThin
+                canvas.drawLine(x, cy, x + targetWidth, cy, symbolPaint)
+                return true
+            }
+            // 竖线（│ U+2502 / ┃ U+2503）
+            0x2502, 0x2503 -> {
+                symbolPaint.style = Paint.Style.STROKE
+                symbolPaint.strokeWidth = if (codePoint == 0x2503) strokeHeavy else strokeThin
+                canvas.drawLine(cx, rowTopY, cx, rowTopY + rowHeight, symbolPaint)
+                return true
+            }
+            // 其余常用框线拐角与十字
+            0x250C, 0x256D -> { // ┌ ╭
+                symbolPaint.style = Paint.Style.STROKE
+                symbolPaint.strokeWidth = strokeThin
+                canvas.drawLine(cx, cy, x + targetWidth, cy, symbolPaint)
+                canvas.drawLine(cx, cy, cx, rowTopY + rowHeight, symbolPaint)
+                return true
+            }
+            0x2510, 0x256E -> { // ┐ ╮
+                symbolPaint.style = Paint.Style.STROKE
+                symbolPaint.strokeWidth = strokeThin
+                canvas.drawLine(x, cy, cx, cy, symbolPaint)
+                canvas.drawLine(cx, cy, cx, rowTopY + rowHeight, symbolPaint)
+                return true
+            }
+            0x2518, 0x256F -> { // ┘ ╯
+                symbolPaint.style = Paint.Style.STROKE
+                symbolPaint.strokeWidth = strokeThin
+                canvas.drawLine(x, cy, cx, cy, symbolPaint)
+                canvas.drawLine(cx, rowTopY, cx, cy, symbolPaint)
+                return true
+            }
+            0x251C -> { // ├
+                symbolPaint.style = Paint.Style.STROKE
+                symbolPaint.strokeWidth = strokeThin
+                canvas.drawLine(cx, rowTopY, cx, rowTopY + rowHeight, symbolPaint)
+                canvas.drawLine(cx, cy, x + targetWidth, cy, symbolPaint)
+                return true
+            }
+            0x2524 -> { // ┤
+                symbolPaint.style = Paint.Style.STROKE
+                symbolPaint.strokeWidth = strokeThin
+                canvas.drawLine(cx, rowTopY, cx, rowTopY + rowHeight, symbolPaint)
+                canvas.drawLine(x, cy, cx, cy, symbolPaint)
+                return true
+            }
+            0x252C -> { // ┬
+                symbolPaint.style = Paint.Style.STROKE
+                symbolPaint.strokeWidth = strokeThin
+                canvas.drawLine(x, cy, x + targetWidth, cy, symbolPaint)
+                canvas.drawLine(cx, cy, cx, rowTopY + rowHeight, symbolPaint)
+                return true
+            }
+            0x2534 -> { // ┴
+                symbolPaint.style = Paint.Style.STROKE
+                symbolPaint.strokeWidth = strokeThin
+                canvas.drawLine(x, cy, x + targetWidth, cy, symbolPaint)
+                canvas.drawLine(cx, rowTopY, cx, cy, symbolPaint)
+                return true
+            }
+            0x253C -> { // ┼
+                symbolPaint.style = Paint.Style.STROKE
+                symbolPaint.strokeWidth = strokeThin
+                canvas.drawLine(x, cy, x + targetWidth, cy, symbolPaint)
+                canvas.drawLine(cx, rowTopY, cx, rowTopY + rowHeight, symbolPaint)
+                return true
+            }
+            // 进度块（█ ▓ ▒ ░）
+            0x2588, 0x2593, 0x2592, 0x2591 -> {
+                symbolPaint.style = Paint.Style.FILL
+                val alpha = when (codePoint) {
+                    0x2588 -> 255
+                    0x2593 -> 195
+                    0x2592 -> 130
+                    else -> 72
+                }
+                symbolPaint.color = Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color))
+                canvas.drawRect(x, rowTopY + rowHeight * 0.1f, x + targetWidth, rowTopY + rowHeight * 0.9f, symbolPaint)
+                return true
+            }
+            else -> return false
         }
     }
 
@@ -651,10 +919,10 @@ class NativeTerminalCanvasView(
         return if (fg == 0) baseFg else fg
     }
 
-    private fun applyTextPaintStyle(effect: Int, fgColor: Int) {
-        textPaint.color = fgColor
-        textPaint.isFakeBoldText = (effect and TextStyle.CHARACTER_ATTRIBUTE_BOLD) != 0
-        textPaint.textSkewX = if ((effect and TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0) -0.22f else 0f
+    private fun applyTextPaintStyle(paint: Paint, effect: Int, fgColor: Int) {
+        paint.color = fgColor
+        paint.isFakeBoldText = (effect and TextStyle.CHARACTER_ATTRIBUTE_BOLD) != 0
+        paint.textSkewX = if ((effect and TextStyle.CHARACTER_ATTRIBUTE_ITALIC) != 0) -0.22f else 0f
     }
 
     private fun drawDecorations(

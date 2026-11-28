@@ -1,21 +1,23 @@
 package ai.youbrain.mobile.ui
 
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.view.ViewGroup
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -24,10 +26,8 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -43,19 +43,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowCompat
 import ai.youbrain.mobile.data.ActiveTerminalTarget
 import ai.youbrain.mobile.net.UBrainRepository
-import ai.youbrain.mobile.ui.components.IosHairline
 import ai.youbrain.mobile.ui.components.IosIcons
 import ai.youbrain.mobile.ui.components.IosModalSheet
 import ai.youbrain.mobile.ui.terminal.NativeTerminalCanvasView
@@ -89,6 +89,19 @@ private val QUICK_TERM_KEYS = listOf(
     QuickTermKey("↵", byteArrayOf(0x0D)),
 )
 
+// 终端界面与桌面端 tty7 对齐，始终保持深色终端外观，避免电脑端深色 TrueColor 输出在白底上错乱。
+private val TermCanvasBg = Color(NativeTerminalSession.DARK_BG)
+private val TermChromeBg = Color(0xFF181A20)
+private val TermPillBg = Color(0xFF282B34)
+private val TermHairline = Color(0xFF2C303A)
+private val TermPrimaryText = Color(0xFFF2F4F8)
+private val TermSecondaryText = Color(0xFF9CA3AF)
+private val TermMutedText = Color(0xFF6B7280)
+private val TermBlue = Color(0xFF0A84FF)
+private val TermGreen = Color(0xFF30D158)
+private val TermOrange = Color(0xFFFF9F0A)
+private val TermRed = Color(0xFFFF453A)
+
 @Composable
 fun TerminalLiveScreen(
     target: ActiveTerminalTarget,
@@ -97,25 +110,48 @@ fun TerminalLiveScreen(
     onClose: () -> Unit,
 ) {
     val context = LocalContext.current
-    val c = IosTheme.colors
+    val view = LocalView.current
+    val iosColors = IosTheme.colors
     val scope = rememberCoroutineScope()
 
     var fontSizeSp by remember { mutableFloatStateOf(10.5f) }
     var widthMode by remember { mutableStateOf(TerminalWidthMode.FIT) }
-    var directKeyboard by remember { mutableStateOf(false) }
     var isScrolledUp by remember { mutableStateOf(false) }
-    var commandDraft by remember { mutableStateOf("") }
     var showCopyMenu by remember { mutableStateOf(false) }
     var copyToast by remember { mutableStateOf<String?>(null) }
 
     var snapshot by remember(target.deviceId, target.pane) {
-        mutableStateOf(TerminalSessionSnapshot(isDark = c.isDark))
+        mutableStateOf(TerminalSessionSnapshot(isDark = true))
     }
     var canvasViewRef by remember { mutableStateOf<NativeTerminalCanvasView?>(null) }
     var sessionRef by remember { mutableStateOf<NativeTerminalSession?>(null) }
-
-    // 首次测得真实终端网格尺寸后再建连，确保初始 connect 尺寸与屏幕完全一致。
     var startedSessionKey by remember(target.deviceId, target.pane) { mutableStateOf(false) }
+
+    val isImeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+
+    // 进入深色全屏终端时切换状态栏与导航栏为深色样式，离开时恢复主界面配色。
+    DisposableEffect(view, iosColors.isDark) {
+        val window = (context as? Activity)?.window
+        val controller = if (window != null) WindowCompat.getInsetsController(window, view) else null
+        if (window != null && controller != null) {
+            @Suppress("DEPRECATION")
+            window.statusBarColor = TermChromeBg.toArgb()
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = TermChromeBg.toArgb()
+            controller.isAppearanceLightStatusBars = false
+            controller.isAppearanceLightNavigationBars = false
+        }
+        onDispose {
+            if (window != null && controller != null) {
+                @Suppress("DEPRECATION")
+                window.statusBarColor = iosColors.chromeBg.toArgb()
+                @Suppress("DEPRECATION")
+                window.navigationBarColor = iosColors.chromeBg.toArgb()
+                controller.isAppearanceLightStatusBars = !iosColors.isDark
+                controller.isAppearanceLightNavigationBars = !iosColors.isDark
+            }
+        }
+    }
 
     fun ensureSessionStarted(grid: TerminalGridSize) {
         val existing = sessionRef
@@ -128,7 +164,7 @@ fun TerminalLiveScreen(
             scope = scope,
             pane = target.pane,
             initialSize = grid,
-            isDarkInitial = c.isDark,
+            isDarkInitial = true,
             openSocket = { listener ->
                 repository.openTty7TerminalSocket(target.deviceId, listener)
             },
@@ -146,11 +182,6 @@ fun TerminalLiveScreen(
         created.start()
     }
 
-    LaunchedEffect(c.isDark) {
-        sessionRef?.setTheme(c.isDark)
-        canvasViewRef?.setTheme(c.isDark)
-    }
-
     LaunchedEffect(copyToast) {
         if (copyToast != null) {
             delay(1_800L)
@@ -162,7 +193,7 @@ fun TerminalLiveScreen(
         repository.setTty7ViewingAsync(target.deviceId, target.pane)
         onDispose {
             repository.setTty7ViewingAsync(target.deviceId, null)
-            canvasViewRef?.setDirectKeyboardEnabled(false)
+            canvasViewRef?.hideSoftKeyboard()
             canvasViewRef?.session = null
             canvasViewRef = null
             sessionRef?.close()
@@ -183,14 +214,6 @@ fun TerminalLiveScreen(
         copyToast = "已复制$label"
     }
 
-    fun sendDraftLine(sendEnter: Boolean = true) {
-        val text = commandDraft
-        if (text.isEmpty() && !sendEnter) return
-        commandDraft = ""
-        sessionRef?.sendText(text, sendEnter)
-        canvasViewRef?.scrollToBottom()
-    }
-
     fun adjustFont(delta: Float) {
         val next = (fontSizeSp + delta).coerceIn(8.5f, 20f)
         if (kotlin.math.abs(next - fontSizeSp) < 0.05f) return
@@ -206,10 +229,10 @@ fun TerminalLiveScreen(
     }
 
     val statusColor = when (snapshot.status) {
-        TerminalConnectionStatus.READY -> c.green
-        TerminalConnectionStatus.CONNECTING -> c.orange
-        TerminalConnectionStatus.EXITED -> c.secondaryLabel
-        TerminalConnectionStatus.DISCONNECTED, TerminalConnectionStatus.ERROR -> c.red
+        TerminalConnectionStatus.READY -> TermGreen
+        TerminalConnectionStatus.CONNECTING -> TermOrange
+        TerminalConnectionStatus.EXITED -> TermSecondaryText
+        TerminalConnectionStatus.DISCONNECTED, TerminalConnectionStatus.ERROR -> TermRed
     }
     val statusLabel = when (snapshot.status) {
         TerminalConnectionStatus.READY -> if (snapshot.revealed) "已连接" else "同步中"
@@ -222,16 +245,20 @@ fun TerminalLiveScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(if (c.isDark) Color(NativeTerminalSession.DARK_BG) else Color(NativeTerminalSession.LIGHT_BG))
+            .background(TermCanvasBg)
             .navigationBarsPadding()
             .imePadding(),
     ) {
-        // 顶部终端标题与控制栏
-        Column(modifier = Modifier.fillMaxWidth().background(c.chromeBg)) {
+        // 顶部深色终端控制栏（statusBarsPadding 在外层 Column，保证内层 Row 完整 46dp）
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(TermChromeBg)
+                .statusBarsPadding(),
+        ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .statusBarsPadding()
                     .height(46.dp)
                     .padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -241,14 +268,14 @@ fun TerminalLiveScreen(
                     modifier = Modifier
                         .size(30.dp)
                         .clip(CircleShape)
-                        .background(c.tertiaryFill)
+                        .background(TermPillBg)
                         .clickable(onClick = onClose),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
                         imageVector = IosIcons.Close,
                         contentDescription = "返回列表",
-                        tint = c.label,
+                        tint = TermPrimaryText,
                         modifier = Modifier.size(15.dp),
                     )
                 }
@@ -258,7 +285,7 @@ fun TerminalLiveScreen(
                         text = target.title.ifBlank { "终端 #%d".format(target.pane) },
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = c.label,
+                        color = TermPrimaryText,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -275,7 +302,7 @@ fun TerminalLiveScreen(
                         Text(
                             text = "$deviceDisplayName · %${target.pane} · $statusLabel",
                             fontSize = 11.sp,
-                            color = c.secondaryLabel,
+                            color = TermSecondaryText,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -287,7 +314,7 @@ fun TerminalLiveScreen(
                     modifier = Modifier
                         .height(26.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(if (widthMode == TerminalWidthMode.FIT) c.tertiaryFill else c.blue.copy(alpha = 0.16f))
+                        .background(if (widthMode == TerminalWidthMode.FIT) TermPillBg else TermBlue.copy(alpha = 0.22f))
                         .clickable { cycleWidthMode() }
                         .padding(horizontal = 8.dp),
                     contentAlignment = Alignment.Center,
@@ -296,7 +323,7 @@ fun TerminalLiveScreen(
                         text = widthMode.label,
                         fontSize = 11.5.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = if (widthMode == TerminalWidthMode.FIT) c.label else c.blue,
+                        color = if (widthMode == TerminalWidthMode.FIT) TermPrimaryText else TermBlue,
                         softWrap = false,
                     )
                 }
@@ -306,7 +333,7 @@ fun TerminalLiveScreen(
                     modifier = Modifier
                         .height(26.dp)
                         .clip(RoundedCornerShape(8.dp))
-                        .background(c.tertiaryFill)
+                        .background(TermPillBg)
                         .padding(horizontal = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -321,7 +348,7 @@ fun TerminalLiveScreen(
                             text = "A-",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = if (fontSizeSp > 8.6f) c.label else c.tertiaryLabel,
+                            color = if (fontSizeSp > 8.6f) TermPrimaryText else TermMutedText,
                         )
                     }
                     Box(
@@ -335,7 +362,7 @@ fun TerminalLiveScreen(
                             text = "A+",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = if (fontSizeSp < 19.9f) c.label else c.tertiaryLabel,
+                            color = if (fontSizeSp < 19.9f) TermPrimaryText else TermMutedText,
                         )
                     }
                 }
@@ -344,19 +371,19 @@ fun TerminalLiveScreen(
                     modifier = Modifier
                         .size(28.dp)
                         .clip(CircleShape)
-                        .background(c.tertiaryFill)
+                        .background(TermPillBg)
                         .clickable { sessionRef?.reconnect() },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
                         imageVector = IosIcons.Refresh,
                         contentDescription = "重新连接",
-                        tint = c.blue,
+                        tint = TermBlue,
                         modifier = Modifier.size(14.dp),
                     )
                 }
             }
-            IosHairline()
+            HorizontalDivider(thickness = 0.5.dp, color = TermHairline)
         }
 
         // 租约被桌面窗口接管时的提示条
@@ -364,7 +391,7 @@ fun TerminalLiveScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(c.blue.copy(alpha = 0.14f))
+                    .background(TermBlue.copy(alpha = 0.16f))
                     .clickable { sessionRef?.reclaimLease() }
                     .padding(horizontal = 12.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -373,14 +400,14 @@ fun TerminalLiveScreen(
                 Text(
                     text = "尺寸正由 ${snapshot.leaseHolder} 控制",
                     fontSize = 12.sp,
-                    color = c.blue,
+                    color = TermBlue,
                     modifier = Modifier.weight(1f),
                 )
                 Text(
                     text = "适配手机宽度",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = c.blue,
+                    color = TermBlue,
                 )
             }
         }
@@ -389,7 +416,7 @@ fun TerminalLiveScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background(c.orange.copy(alpha = 0.15f))
+                    .background(TermOrange.copy(alpha = 0.16f))
                     .padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -397,14 +424,14 @@ fun TerminalLiveScreen(
                 Text(
                     text = snapshot.warning,
                     fontSize = 12.sp,
-                    color = c.orange,
+                    color = TermOrange,
                     modifier = Modifier.weight(1f),
                 )
                 Text(
                     text = "关闭",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
-                    color = c.orange,
+                    color = TermOrange,
                     modifier = Modifier.clickable { sessionRef?.dismissWarning() }.padding(start = 8.dp),
                 )
             }
@@ -418,7 +445,7 @@ fun TerminalLiveScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .background((if (isExited) c.secondaryLabel else c.red).copy(alpha = 0.14f))
+                    .background((if (isExited) TermSecondaryText else TermRed).copy(alpha = 0.16f))
                     .padding(horizontal = 12.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -426,7 +453,7 @@ fun TerminalLiveScreen(
                 Text(
                     text = snapshot.detail.ifBlank { statusLabel },
                     fontSize = 12.5.sp,
-                    color = if (isExited) c.secondaryLabel else c.red,
+                    color = if (isExited) TermSecondaryText else TermRed,
                     modifier = Modifier.weight(1f),
                 )
                 if (!isExited) {
@@ -434,7 +461,7 @@ fun TerminalLiveScreen(
                         text = "重连",
                         fontSize = 12.5.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = c.blue,
+                        color = TermBlue,
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
                             .clickable { sessionRef?.reconnect() }
@@ -444,7 +471,7 @@ fun TerminalLiveScreen(
             }
         }
 
-        // 中间整屏原生 Canvas 终端视图
+        // 中间整屏原生深色 Canvas 终端视图（单击即可直接弹起中英文软键盘在终端光标处输入）
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -458,10 +485,9 @@ fun TerminalLiveScreen(
                             ViewGroup.LayoutParams.MATCH_PARENT,
                             ViewGroup.LayoutParams.MATCH_PARENT,
                         )
-                        setTheme(c.isDark)
+                        setTheme(true)
                         setFontSizeSp(fontSizeSp, notify = false)
                         setWidthMode(widthMode)
-                        setDirectKeyboardEnabled(directKeyboard)
                         onGridSizeMeasured = { grid ->
                             ensureSessionStarted(grid)
                         }
@@ -478,17 +504,14 @@ fun TerminalLiveScreen(
                         session = sessionRef
                     }
                 },
-                update = { view ->
-                    view.setTheme(c.isDark)
-                },
             )
 
-            // 后台静默解析初始回放期间保持遮罩，直到解析完成并停在最新行才一次性显示。
+            // 后台静默解析初始回放期间保持遮罩，直到解析完成并停在最新行才一次性亮屏。
             if (!snapshot.revealed) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(if (c.isDark) Color(NativeTerminalSession.DARK_BG) else Color(NativeTerminalSession.LIGHT_BG)),
+                        .background(TermCanvasBg),
                     contentAlignment = Alignment.Center,
                 ) {
                     Column(
@@ -498,7 +521,7 @@ fun TerminalLiveScreen(
                         CircularProgressIndicator(
                             modifier = Modifier.size(26.dp),
                             strokeWidth = 2.4.dp,
-                            color = c.blue,
+                            color = TermBlue,
                         )
                         Text(
                             text = if (snapshot.status == TerminalConnectionStatus.READY) {
@@ -507,20 +530,19 @@ fun TerminalLiveScreen(
                                 "正在连接 $deviceDisplayName 终端流…"
                             },
                             fontSize = 13.sp,
-                            color = c.secondaryLabel,
+                            color = TermSecondaryText,
                         )
                     }
                 }
             }
 
-            // 上滑翻历史时显示悬浮「回到底部」胶囊
             if (snapshot.revealed && isScrolledUp) {
                 Box(
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
                         .padding(end = 12.dp, bottom = 12.dp)
                         .clip(CircleShape)
-                        .background(c.blue.copy(alpha = 0.92f))
+                        .background(TermBlue.copy(alpha = 0.92f))
                         .clickable { canvasViewRef?.scrollToBottom() }
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                 ) {
@@ -533,14 +555,13 @@ fun TerminalLiveScreen(
                 }
             }
 
-            // 复制成功轻提示
             copyToast?.let { tip ->
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .padding(top = 10.dp)
                         .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.78f))
+                        .background(Color.Black.copy(alpha = 0.82f))
                         .padding(horizontal = 14.dp, vertical = 6.dp),
                 ) {
                     Text(
@@ -553,25 +574,27 @@ fun TerminalLiveScreen(
             }
         }
 
-        // 底部双轨输入区：直输键盘开关 + 触屏快捷键条 + 原生中文友好指令输入框
-        Column(modifier = Modifier.fillMaxWidth().background(c.chromeBg)) {
-            IosHairline()
+        // 底部紧凑快捷按键栏（移除独立输入框，直接点击终端或「键盘」按钮在原终端输入框中英文输入）
+        Column(modifier = Modifier.fillMaxWidth().background(TermChromeBg)) {
+            HorizontalDivider(thickness = 0.5.dp, color = TermHairline)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                    .padding(horizontal = 10.dp, vertical = 7.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // 按需直输键盘切换按钮（默认关，防止滑屏误触）
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(7.dp))
-                        .background(if (directKeyboard) c.blue else c.tertiaryFill)
+                        .background(if (isImeVisible) TermBlue else TermPillBg)
                         .clickable {
-                            directKeyboard = !directKeyboard
-                            canvasViewRef?.setDirectKeyboardEnabled(directKeyboard)
+                            if (isImeVisible) {
+                                canvasViewRef?.hideSoftKeyboard()
+                            } else {
+                                canvasViewRef?.showSoftKeyboard()
+                            }
                         }
                         .padding(horizontal = 9.dp, vertical = 5.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -579,15 +602,15 @@ fun TerminalLiveScreen(
                 ) {
                     Icon(
                         imageVector = IosIcons.Keyboard,
-                        contentDescription = "直输键盘",
-                        tint = if (directKeyboard) Color.White else c.label,
+                        contentDescription = "切换键盘",
+                        tint = if (isImeVisible) Color.White else TermPrimaryText,
                         modifier = Modifier.size(13.dp),
                     )
                     Text(
-                        text = if (directKeyboard) "直输开" else "直输",
+                        text = if (isImeVisible) "收起" else "键盘",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
-                        color = if (directKeyboard) Color.White else c.label,
+                        color = if (isImeVisible) Color.White else TermPrimaryText,
                         softWrap = false,
                     )
                 }
@@ -596,7 +619,7 @@ fun TerminalLiveScreen(
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(7.dp))
-                            .background(if (key.accent) c.red.copy(alpha = 0.14f) else c.tertiaryFill)
+                            .background(if (key.accent) TermRed.copy(alpha = 0.2f) else TermPillBg)
                             .clickable {
                                 sessionRef?.sendBytes(key.bytes)
                                 canvasViewRef?.scrollToBottom()
@@ -609,7 +632,7 @@ fun TerminalLiveScreen(
                             fontSize = 12.sp,
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Medium,
-                            color = if (key.accent) c.red else c.label,
+                            color = if (key.accent) TermRed else TermPrimaryText,
                             softWrap = false,
                         )
                     }
@@ -618,7 +641,7 @@ fun TerminalLiveScreen(
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(7.dp))
-                        .background(c.tertiaryFill)
+                        .background(TermPillBg)
                         .clickable { showCopyMenu = true }
                         .padding(horizontal = 10.dp, vertical = 5.dp),
                     contentAlignment = Alignment.Center,
@@ -627,62 +650,8 @@ fun TerminalLiveScreen(
                         text = "复制",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Medium,
-                        color = c.blue,
+                        color = TermBlue,
                         softWrap = false,
-                    )
-                }
-            }
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 10.dp, end = 10.dp, bottom = 8.dp),
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(c.cardBg)
-                        .border(0.5.dp, c.separator.copy(alpha = 0.6f), RoundedCornerShape(18.dp))
-                        .padding(horizontal = 13.dp, vertical = 8.dp),
-                ) {
-                    if (commandDraft.isEmpty()) {
-                        Text(
-                            text = "输入指令或回复内容（支持中文）…",
-                            fontSize = 14.sp,
-                            color = c.secondaryLabel,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    }
-                    BasicTextField(
-                        value = commandDraft,
-                        onValueChange = { commandDraft = it },
-                        maxLines = 4,
-                        textStyle = TextStyle(fontSize = 14.5.sp, lineHeight = 19.sp, color = c.label),
-                        cursorBrush = SolidColor(c.blue),
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(onSend = { sendDraftLine(true) }),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-
-                val hasText = commandDraft.isNotEmpty()
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .clip(CircleShape)
-                        .background(if (hasText) c.blue else c.tertiaryFill)
-                        .clickable { sendDraftLine(true) },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = IosIcons.ArrowUp,
-                        contentDescription = "发送并回车",
-                        tint = if (hasText) Color.White else c.secondaryLabel,
-                        modifier = Modifier.size(16.dp),
                     )
                 }
             }
@@ -708,7 +677,7 @@ fun TerminalLiveScreen(
                 text = "长按终端画布或点击底部「复制」按钮可随时复制当前屏幕或最近历史输出。",
                 fontSize = 13.5.sp,
                 lineHeight = 19.sp,
-                color = c.secondaryLabel,
+                color = iosColors.secondaryLabel,
             )
         }
     }
