@@ -42,6 +42,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
@@ -53,6 +54,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.zIndex
 import androidx.core.view.WindowCompat
 import ai.youbrain.mobile.data.ActiveTerminalTarget
 import ai.youbrain.mobile.net.UBrainRepository
@@ -201,7 +203,13 @@ fun TerminalLiveScreen(
         }
     }
 
-    BackHandler(onBack = onClose)
+    BackHandler(onBack = {
+        if (isImeVisible) {
+            canvasViewRef?.hideSoftKeyboard()
+        } else {
+            onClose()
+        }
+    })
 
     fun copyToClipboard(label: String, text: String) {
         val clean = text.trimEnd()
@@ -212,6 +220,17 @@ fun TerminalLiveScreen(
         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
         cm?.setPrimaryClip(ClipData.newPlainText(label, clean))
         copyToast = "已复制$label"
+    }
+
+    fun pasteFromClipboard() {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        val text = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+        if (text.isEmpty()) {
+            copyToast = "剪贴板为空"
+            return
+        }
+        sessionRef?.sendText(text, sendEnter = false)
+        canvasViewRef?.scrollToBottom()
     }
 
     fun adjustFont(delta: Float) {
@@ -249,34 +268,38 @@ fun TerminalLiveScreen(
             .navigationBarsPadding()
             .imePadding(),
     ) {
-        // 顶部深色终端控制栏（statusBarsPadding 在外层 Column，保证内层 Row 完整 46dp）
+        // 顶部深色终端控制栏（zIndex + clipToBounds 保证永远清晰可见，左上角醒目「← 返回」）
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .zIndex(2f)
                 .background(TermChromeBg)
                 .statusBarsPadding(),
         ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(46.dp)
+                    .height(48.dp)
                     .padding(horizontal = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Box(
+                Row(
                     modifier = Modifier
-                        .size(30.dp)
-                        .clip(CircleShape)
+                        .height(30.dp)
+                        .clip(RoundedCornerShape(9.dp))
                         .background(TermPillBg)
-                        .clickable(onClick = onClose),
-                    contentAlignment = Alignment.Center,
+                        .clickable(onClick = onClose)
+                        .padding(horizontal = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
-                    Icon(
-                        imageVector = IosIcons.Close,
-                        contentDescription = "返回列表",
-                        tint = TermPrimaryText,
-                        modifier = Modifier.size(15.dp),
+                    Text(
+                        text = "← 返回",
+                        fontSize = 12.5.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TermPrimaryText,
+                        softWrap = false,
                     )
                 }
 
@@ -312,7 +335,7 @@ fun TerminalLiveScreen(
                 // 列宽模式切换（适屏 / 80列 / 100列）
                 Box(
                     modifier = Modifier
-                        .height(26.dp)
+                        .height(28.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(if (widthMode == TerminalWidthMode.FIT) TermPillBg else TermBlue.copy(alpha = 0.22f))
                         .clickable { cycleWidthMode() }
@@ -331,7 +354,7 @@ fun TerminalLiveScreen(
                 // 字号缩小 / 放大
                 Row(
                     modifier = Modifier
-                        .height(26.dp)
+                        .height(28.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(TermPillBg)
                         .padding(horizontal = 2.dp),
@@ -341,7 +364,7 @@ fun TerminalLiveScreen(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
                             .clickable(enabled = fontSizeSp > 8.6f) { adjustFont(-1f) }
-                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
@@ -355,7 +378,7 @@ fun TerminalLiveScreen(
                         modifier = Modifier
                             .clip(RoundedCornerShape(6.dp))
                             .clickable(enabled = fontSizeSp < 19.9f) { adjustFont(1f) }
-                            .padding(horizontal = 6.dp, vertical = 3.dp),
+                            .padding(horizontal = 6.dp, vertical = 4.dp),
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
@@ -391,6 +414,7 @@ fun TerminalLiveScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .zIndex(2f)
                     .background(TermBlue.copy(alpha = 0.16f))
                     .clickable { sessionRef?.reclaimLease() }
                     .padding(horizontal = 12.dp, vertical = 7.dp),
@@ -416,6 +440,7 @@ fun TerminalLiveScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .zIndex(2f)
                     .background(TermOrange.copy(alpha = 0.16f))
                     .padding(horizontal = 12.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -445,6 +470,7 @@ fun TerminalLiveScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .zIndex(2f)
                     .background((if (isExited) TermSecondaryText else TermRed).copy(alpha = 0.16f))
                     .padding(horizontal = 12.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -471,14 +497,17 @@ fun TerminalLiveScreen(
             }
         }
 
-        // 中间整屏原生深色 Canvas 终端视图（单击即可直接弹起中英文软键盘在终端光标处输入）
+        // 中间整屏原生深色 Canvas 终端视图（clipToBounds 严控绘制边界，绝不越界覆盖顶栏）
         Box(
             modifier = Modifier
                 .weight(1f)
-                .fillMaxWidth(),
+                .fillMaxWidth()
+                .clipToBounds(),
         ) {
             AndroidView(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clipToBounds(),
                 factory = { ctx ->
                     NativeTerminalCanvasView(ctx).apply {
                         layoutParams = ViewGroup.LayoutParams(
@@ -506,7 +535,7 @@ fun TerminalLiveScreen(
                 },
             )
 
-            // 后台静默解析初始回放期间保持遮罩，直到解析完成并停在最新行才一次性亮屏。
+            // 后台静默接收并解析完完整回放之前保持遮罩，彻底消除“从头滚到尾”。
             if (!snapshot.revealed) {
                 Box(
                     modifier = Modifier
@@ -523,12 +552,16 @@ fun TerminalLiveScreen(
                             strokeWidth = 2.4.dp,
                             color = TermBlue,
                         )
-                        Text(
-                            text = if (snapshot.status == TerminalConnectionStatus.READY) {
-                                "正在渲染 $deviceDisplayName 最新终端画面…"
-                            } else {
+                        val progressText = when {
+                            snapshot.status != TerminalConnectionStatus.READY ->
                                 "正在连接 $deviceDisplayName 终端流…"
-                            },
+                            snapshot.replayBytesReceived > 0 ->
+                                "正在同步最新终端画面（${maxOf(1, snapshot.replayBytesReceived / 1024)} KB）…"
+                            else ->
+                                "正在读取 $deviceDisplayName 最新终端画面…"
+                        }
+                        Text(
+                            text = progressText,
                             fontSize = 13.sp,
                             color = TermSecondaryText,
                         )
@@ -574,8 +607,13 @@ fun TerminalLiveScreen(
             }
         }
 
-        // 底部紧凑快捷按键栏（移除独立输入框，直接点击终端或「键盘」按钮在原终端输入框中英文输入）
-        Column(modifier = Modifier.fillMaxWidth().background(TermChromeBg)) {
+        // 底部单行终端快捷键条（不仿造输入框；点击终端画面或「键盘」按钮直接调起系统输入法写入终端原始输入框）
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .zIndex(2f)
+                .background(TermChromeBg),
+        ) {
             HorizontalDivider(thickness = 0.5.dp, color = TermHairline)
             Row(
                 modifier = Modifier
@@ -588,7 +626,7 @@ fun TerminalLiveScreen(
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(7.dp))
-                        .background(if (isImeVisible) TermBlue else TermPillBg)
+                        .background(if (isImeVisible) TermBlue else TermBlue.copy(alpha = 0.22f))
                         .clickable {
                             if (isImeVisible) {
                                 canvasViewRef?.hideSoftKeyboard()
@@ -596,21 +634,21 @@ fun TerminalLiveScreen(
                                 canvasViewRef?.showSoftKeyboard()
                             }
                         }
-                        .padding(horizontal = 9.dp, vertical = 5.dp),
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
                     Icon(
                         imageVector = IosIcons.Keyboard,
-                        contentDescription = "切换键盘",
-                        tint = if (isImeVisible) Color.White else TermPrimaryText,
+                        contentDescription = if (isImeVisible) "收起键盘" else "打开键盘",
+                        tint = if (isImeVisible) Color.White else TermBlue,
                         modifier = Modifier.size(13.dp),
                     )
                     Text(
-                        text = if (isImeVisible) "收起" else "键盘",
+                        text = if (isImeVisible) "收键盘" else "键盘",
                         fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = if (isImeVisible) Color.White else TermPrimaryText,
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (isImeVisible) Color.White else TermBlue,
                         softWrap = false,
                     )
                 }
@@ -636,6 +674,23 @@ fun TerminalLiveScreen(
                             softWrap = false,
                         )
                     }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(TermPillBg)
+                        .clickable { pasteFromClipboard() }
+                        .padding(horizontal = 10.dp, vertical = 5.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "粘贴",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = TermPrimaryText,
+                        softWrap = false,
+                    )
                 }
 
                 Box(

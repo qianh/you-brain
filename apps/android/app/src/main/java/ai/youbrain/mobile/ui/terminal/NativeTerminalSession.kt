@@ -42,6 +42,7 @@ data class TerminalSessionSnapshot(
     val warning: String = "",
     val leaseHolder: String = "",
     val revealed: Boolean = false,
+    val replayBytesReceived: Int = 0,
     val isDark: Boolean = true,
 )
 
@@ -64,8 +65,10 @@ class NativeTerminalSession(
     companion object {
         const val MOBILE_MAX_REPLAY_BYTES = 96 * 1024
         private const val TRANSCRIPT_ROWS = 2_000
-        private const val REPLAY_QUIET_MS = 280L
-        private const val REPLAY_MAX_WAIT_MS = 2_400L
+        // 等待完整回放流到达：严禁因弱网短暂停顿（如 280ms）提前揭幕导致从头滚到尾与错位。
+        private const val REPLAY_QUIET_MS = 1_200L
+        private const val REPLAY_EMPTY_WAIT_MS = 1_500L
+        private const val REPLAY_MAX_WAIT_MS = 12_000L
 
         private val DARK_ANSI_16 = intArrayOf(
             0xFF18181B.toInt(), // 0 black
@@ -395,17 +398,25 @@ class NativeTerminalSession(
         if (bytes.isEmpty()) return
         var notifyUi = false
         var shouldArmQuiet = false
+        var emitProgress = false
         synchronized(lock) {
             if (closed) return
             if (!revealed) {
+                val prevKb = replayBuffer.size() / 8192
                 replayBuffer.write(bytes)
+                val nextSize = replayBuffer.size()
+                if (nextSize / 8192 != prevKb || prevKb == 0) {
+                    snapshot = snapshot.copy(replayBytesReceived = nextSize)
+                    emitProgress = true
+                }
                 shouldArmQuiet = true
             } else {
                 emulator.append(bytes, bytes.size)
                 notifyUi = true
             }
         }
-        if (shouldArmQuiet) armQuietReveal()
+        if (emitProgress) emitState()
+        if (shouldArmQuiet) armQuietReveal(REPLAY_QUIET_MS)
         if (notifyUi) onScreenDirty(false)
     }
 
@@ -524,7 +535,7 @@ class NativeTerminalSession(
 
         if (cancelTimers) cancelRevealTimers()
         if (startTimers) {
-            armQuietReveal()
+            armQuietReveal(REPLAY_EMPTY_WAIT_MS)
             maxRevealJob?.cancel()
             maxRevealJob = scope.launch(Dispatchers.IO) {
                 delay(REPLAY_MAX_WAIT_MS)
@@ -574,10 +585,10 @@ class NativeTerminalSession(
         return resizeToSend
     }
 
-    private fun armQuietReveal() {
+    private fun armQuietReveal(delayMs: Long = REPLAY_QUIET_MS) {
         quietRevealJob?.cancel()
         quietRevealJob = scope.launch(Dispatchers.IO) {
-            delay(REPLAY_QUIET_MS)
+            delay(delayMs)
             triggerRevealNow()
         }
     }

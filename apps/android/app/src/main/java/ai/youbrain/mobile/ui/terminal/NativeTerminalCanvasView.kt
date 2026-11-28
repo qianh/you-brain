@@ -1,7 +1,9 @@
 package ai.youbrain.mobile.ui.terminal
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -9,17 +11,21 @@ import android.graphics.Path
 import android.graphics.Typeface
 import android.text.Editable
 import android.text.InputType
+import android.text.Selection
 import android.util.TypedValue
 import android.view.GestureDetector
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import android.view.Window
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.OverScroller
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import com.termux.terminal.KeyHandler
 import com.termux.terminal.TerminalEmulator
 import com.termux.terminal.TerminalRow
@@ -93,6 +99,8 @@ class NativeTerminalCanvasView(
     private var scrollXPx: Float = 0f
     private var lastReportedScrolledUp: Boolean = false
     private var lastMeasuredGrid: TerminalGridSize? = null
+    /** 中文输入法组合态（尚未选词上屏的拼音/笔画），就地绘制在终端原始光标处。 */
+    private var composingPreview: String = ""
 
     private val scroller = OverScroller(context)
 
@@ -235,13 +243,38 @@ class NativeTerminalCanvasView(
         invalidate()
     }
 
+    private fun findActivityWindow(): Window? {
+        var ctx: Context? = context
+        while (ctx is ContextWrapper) {
+            if (ctx is Activity) return ctx.window
+            ctx = ctx.baseContext
+        }
+        return (ctx as? Activity)?.window
+    }
+
     fun showSoftKeyboard() {
+        isFocusable = true
+        isFocusableInTouchMode = true
+        scrollToBottom()
         requestFocus()
-        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-        imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+        post {
+            requestFocus()
+            findActivityWindow()?.let { win ->
+                WindowCompat.getInsetsController(win, this).show(WindowInsetsCompat.Type.ime())
+            }
+            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            imm?.showSoftInput(this, 0)
+        }
     }
 
     fun hideSoftKeyboard() {
+        if (composingPreview.isNotEmpty()) {
+            composingPreview = ""
+            invalidate()
+        }
+        findActivityWindow()?.let { win ->
+            WindowCompat.getInsetsController(win, this).hide(WindowInsetsCompat.Type.ime())
+        }
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
         imm?.hideSoftInputFromWindow(windowToken, 0)
         clearFocus()
@@ -335,6 +368,12 @@ class NativeTerminalCanvasView(
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
+        // 软键盘弹出导致高度缩小时，若原本在底部附近则保持贴底，确保终端原始输入框始终可见。
+        if (oldh > 0 && h < oldh && scrollRowOffset <= 2) {
+            scrollRowOffset = 0
+            verticalRemainderPx = 0f
+            reportScrollUpState()
+        }
         remeasureGridAndNotify()
         scrollXPx = scrollXPx.coerceIn(0f, maxHorizontalScrollPx())
         invalidate()
@@ -353,39 +392,94 @@ class NativeTerminalCanvasView(
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
         // 标准 TYPE_CLASS_TEXT 允许中文拼音/五笔/手写/语音输入法正常工作，
-        // 组合态由内部 Editable 托管，选词上屏后直发终端原输入框。
+        // 组合态由内部 Editable 托管并就地显示在终端原始光标处，选词上屏后直发终端原始输入框。
         outAttrs.inputType = InputType.TYPE_CLASS_TEXT
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN or EditorInfo.IME_ACTION_NONE
         return object : BaseInputConnection(this, true) {
+            private fun updateComposingPreview(ed: Editable?) {
+                val next = ed?.toString().orEmpty()
+                if (next != composingPreview) {
+                    composingPreview = next
+                    invalidate()
+                }
+            }
+
+            private fun syncEmptyEditable(ed: Editable) {
+                ed.clear()
+                Selection.setSelection(ed, 0)
+                if (composingPreview.isNotEmpty()) {
+                    composingPreview = ""
+                    invalidate()
+                }
+                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                imm?.updateSelection(this@NativeTerminalCanvasView, 0, 0, -1, -1)
+            }
+
             private fun flushEditableToTerminal(ed: Editable) {
                 if (ed.isEmpty()) return
                 val text = ed.toString()
-                ed.clear()
+                syncEmptyEditable(ed)
                 sendCommittedText(text)
+            }
+
+            override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                val ok = super.setComposingText(text, newCursorPosition)
+                updateComposingPreview(editable)
+                return ok
             }
 
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
                 val ed = editable
-                // 先应用到内部 editable（自动替换当前正在拼写的 composing 拼音），再一次性发给终端。
+                // 先应用到内部 editable（自动替换当前正在拼写的 composing 拼音），再一次性发给终端并同步归零选区。
                 val ok = super.commitText(text, newCursorPosition)
                 if (ed != null && ed.isNotEmpty()) {
                     flushEditableToTerminal(ed)
+                } else {
+                    updateComposingPreview(ed)
                 }
                 return ok
             }
 
             override fun finishComposingText(): Boolean {
                 val ok = super.finishComposingText()
+                val ed = editable
+                if (ed != null && ed.isNotEmpty()) {
+                    flushEditableToTerminal(ed)
+                } else {
+                    updateComposingPreview(ed)
+                }
+                return ok
+            }
+
+            override fun performEditorAction(actionCode: Int): Boolean {
                 editable?.let { ed ->
                     if (ed.isNotEmpty()) flushEditableToTerminal(ed)
                 }
-                return ok
+                session?.sendBytes(byteArrayOf(0x0D))
+                scrollToBottom()
+                return true
             }
 
             override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
                 val ed = editable
                 if (ed != null && ed.isNotEmpty()) {
-                    return super.deleteSurroundingText(beforeLength, afterLength)
+                    val ok = super.deleteSurroundingText(beforeLength, afterLength)
+                    updateComposingPreview(ed)
+                    return ok
+                }
+                if (beforeLength > 0) {
+                    session?.sendBytes(ByteArray(beforeLength) { 0x7F })
+                    scrollToBottom()
+                }
+                return true
+            }
+
+            override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean {
+                val ed = editable
+                if (ed != null && ed.isNotEmpty()) {
+                    val ok = super.deleteSurroundingTextInCodePoints(beforeLength, afterLength)
+                    updateComposingPreview(ed)
+                    return ok
                 }
                 if (beforeLength > 0) {
                     session?.sendBytes(ByteArray(beforeLength) { 0x7F })
@@ -403,7 +497,9 @@ class NativeTerminalCanvasView(
                         scrollToBottom()
                         return true
                     }
-                    return super.sendKeyEvent(event)
+                    val ok = super.sendKeyEvent(event)
+                    updateComposingPreview(ed)
+                    return ok
                 }
                 if (event.action == KeyEvent.ACTION_DOWN) {
                     return handleDirectKeyDown(event.keyCode, event)
@@ -461,10 +557,22 @@ class NativeTerminalCanvasView(
     }
 
     override fun onDraw(canvas: Canvas) {
-        val defaultBg = if (isDark) NativeTerminalSession.DARK_BG else NativeTerminalSession.LIGHT_BG
-        canvas.drawColor(defaultBg)
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
 
-        val s = session ?: return
+        // 严禁使用 canvas.drawColor()：在 Compose AndroidView 硬件画布中 drawColor 会越界覆盖父容器顶部导航栏！
+        canvas.save()
+        canvas.clipRect(0f, 0f, w, h)
+        val defaultBg = if (isDark) NativeTerminalSession.DARK_BG else NativeTerminalSession.LIGHT_BG
+        bgPaint.color = defaultBg
+        canvas.drawRect(0f, 0f, w, h, bgPaint)
+
+        val s = session
+        if (s == null) {
+            canvas.restore()
+            return
+        }
         s.withEmulator { em ->
             val screen = em.screen
             val palette = em.mColors.mCurrentColors
@@ -684,6 +792,25 @@ class NativeTerminalCanvasView(
                 }
             }
 
+            // 输入法正在拼写中文（composing）时，就地绘制在终端原始光标处，选词后直接落入终端原输入框。
+            val composing = composingPreview
+            if (composing.isNotEmpty() && clampedOffset == 0 && cursorRow in 0 until rows && cursorCol in 0 until cols) {
+                val cx = cursorCol * fontWidth
+                val cyTop = (cursorRow * fontLineSpacing).toFloat()
+                val cyBottom = cyTop + fontLineSpacing
+                val cBaseline = cyTop + fontAscent
+                fallbackPaint.color = baseFgColor
+                fallbackPaint.isFakeBoldText = false
+                fallbackPaint.textSkewX = 0f
+                val previewW = max(fontWidth, fallbackPaint.measureText(composing))
+                bgPaint.color = 0xEE22252E.toInt()
+                canvas.drawRect(cx, cyTop, cx + previewW + dp(4f), cyBottom, bgPaint)
+                canvas.drawText(composing, cx + dp(2f), cBaseline, fallbackPaint)
+                cursorPaint.color = 0xFF0A84FF.toInt()
+                val ulH = max(2f, fontLineSpacing * 0.1f)
+                canvas.drawRect(cx, cyBottom - ulH, cx + previewW + dp(4f), cyBottom, cursorPaint)
+            }
+
             canvas.restore()
 
             // 宽屏模式下底部绘制柔和水平滚动进度条。
@@ -707,6 +834,7 @@ class NativeTerminalCanvasView(
                 )
             }
         }
+        canvas.restore()
     }
 
     /**
